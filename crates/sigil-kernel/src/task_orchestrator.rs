@@ -82,9 +82,16 @@ pub use changeset_only::{
     validate_isolated_parent_snapshot_unchanged_for_task,
 };
 pub use child_session::TaskChildSessionRunner;
-pub use runner::{SequentialTaskOrchestrator, reconcile_task_final_answer_prefix};
+pub use runner::{
+    RecoverableTaskGuidance, RecoverableTaskGuidanceReview, RecoverableTaskGuidanceReviewAuthority,
+    SequentialTaskOrchestrator, reconcile_task_final_answer_prefix, recoverable_task_guidance,
+    recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
+};
 #[cfg(test)]
-use runner::{append_integration_run_output, participant_result_entry};
+use runner::{
+    append_integration_run_output, participant_result_entry,
+    task_guidance_review_settlement_controls,
+};
 pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
     TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,

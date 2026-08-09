@@ -948,6 +948,20 @@ pub struct AgentInvocationGrantRecord {
     pub expires_at_ms: u64,
 }
 
+impl AgentInvocationGrantRecord {
+    /// Returns whether this durable grant audit belongs to the supplied root logical run.
+    ///
+    /// The raw root identity is intentionally not persisted. Callers can still scope projections
+    /// to the active run by comparing against the same domain-separated fingerprint used when the
+    /// grant was minted.
+    #[must_use]
+    pub fn matches_root_logical_run_id(&self, logical_run_id: &str) -> bool {
+        !logical_run_id.trim().is_empty()
+            && self.root_run_fingerprint
+                == fingerprint_text(b"sigil-agent-grant-root-run-v1\0", logical_run_id)
+    }
+}
+
 fn validate_invocation_grant_binding(
     binding: &AgentInvocationGrantBinding,
     now_ms: u64,

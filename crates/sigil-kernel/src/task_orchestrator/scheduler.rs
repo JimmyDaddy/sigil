@@ -268,7 +268,13 @@ pub(super) fn step_status_from_outcome(output: &StepRunOutput) -> TaskStepStatus
         || !output.outcome.interrupted_tool_calls.is_empty()
     {
         TaskStepStatus::Interrupted
-    } else if output.outcome.approval_denials > 0 || has_blocking_tool_error(&output.outcome) {
+    } else if output
+        .outcome
+        .terminal_reason
+        .blocks_successful_completion()
+        || output.outcome.approval_denials > 0
+        || has_blocking_tool_error(&output.outcome)
+    {
         TaskStepStatus::Blocked
     } else if !output.outcome.tool_errors.is_empty() && output.final_text.trim().is_empty() {
         TaskStepStatus::Failed

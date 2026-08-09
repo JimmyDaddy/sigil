@@ -4,8 +4,9 @@ use crate::{
     AgentRole, CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion,
     CheckSpecRecordedEntry, ControlEntry, EvidenceScope, ReadinessEvaluatedEntry,
     ReadinessEvaluation, RequiredAction, RunStatus, SessionLogEntry, SessionRef, TaskId,
-    TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolEffect, VerificationCheckRunEntry,
+    TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, ToolEffect, VerificationCheckRunEntry,
     VerificationCheckRunStatus, VerificationFailureLocatorRecorded, VerificationProductAction,
     VerificationReceiptLinkRecorded, VerificationVerdict, VisibleCompletionState,
     verification_product_view,
@@ -238,5 +239,102 @@ fn product_view_keeps_approval_as_review_only() -> Result<()> {
             check_spec_id: CHECK_ID.to_owned(),
         })
     );
+    Ok(())
+}
+
+#[test]
+fn product_view_keeps_current_task_when_historical_progress_arrives_late() -> Result<()> {
+    let mut entries = task_entries()?;
+    let current_task_id = TaskId::new(TASK_ID)?;
+    entries.extend([
+        SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(
+            TaskRunCancellationScopeBoundEntry {
+                task_id: current_task_id.clone(),
+                run_scope_id: "scope-current-verification".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(
+            TaskRunTargetSelectedEntry::new(
+                current_task_id,
+                "scope-current-verification",
+                TaskRunStatus::Started,
+                Some(1),
+                Some(TaskPlanStatus::Accepted),
+            ),
+        )),
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(trusted_check_entry())),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness(
+            RequiredAction::RunCheck {
+                check_spec_id: CHECK_ID.to_owned(),
+            },
+            VerificationVerdict::Missing,
+        ))),
+    ]);
+
+    let historical_task_id = TaskId::new("task_historical")?;
+    let historical_step_id = TaskStepId::new("verify_historical")?;
+    let historical_scope = EvidenceScope::Step(format!(
+        "{}:{}",
+        historical_task_id.as_str(),
+        historical_step_id.as_str()
+    ));
+    let mut historical_check = trusted_check_entry();
+    historical_check.scope = historical_scope.clone();
+    let mut historical_readiness = readiness(
+        RequiredAction::RunCheck {
+            check_spec_id: CHECK_ID.to_owned(),
+        },
+        VerificationVerdict::Missing,
+    );
+    historical_readiness.scope = historical_scope;
+    entries.extend([
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: historical_task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "historical verification".to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: historical_task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: historical_step_id.clone(),
+                title: "Verify historical task".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: Some(TaskStepMode::Verify),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: historical_task_id,
+            plan_version: 1,
+            step_id: historical_step_id,
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Running,
+            title: Some("Verify historical task".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(historical_check)),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(historical_readiness)),
+    ]);
+
+    let view = verification_product_view(&entries).expect("current verification card");
+    assert_eq!(view.task_id, TASK_ID);
+    assert_eq!(view.step_id, STEP_ID);
+    let VerificationProductAction::Rerun(request) = view.action.expect("current rerun action")
+    else {
+        panic!("expected an exact rerun action");
+    };
+    assert_eq!(request.task_id.as_str(), TASK_ID);
+    assert_eq!(request.step_id.as_str(), STEP_ID);
     Ok(())
 }

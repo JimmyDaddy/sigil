@@ -1912,6 +1912,9 @@ fn invocation_grant_record_is_non_replayable_and_redacts_runtime_authority() -> 
     assert!(!encoded.contains("private-policy-tool"));
     assert!(encoded.contains(first.fingerprint()));
     assert_eq!(record.authority, DelegationAuthorityRecord::ModelProactive);
+    assert!(record.matches_root_logical_run_id("root-run-1"));
+    assert!(!record.matches_root_logical_run_id("root-run-2"));
+    assert!(!record.matches_root_logical_run_id(""));
     Ok(())
 }
 

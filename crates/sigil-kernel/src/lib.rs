@@ -63,10 +63,12 @@ pub use agent::{
     Agent, AgentDelegationRequirement, AgentHostedTurn, AgentHostedTurnPreparer,
     AgentRunDisposition, AgentRunInput, AgentRunInputPreparer, AgentRunOptions, AgentRunOutcome,
     AgentRunOutput, AgentRunPurpose, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate,
-    ConversationPurposeContext, FinalAnswerContext, PendingConversationInputProvider,
-    PlanReviewDraftSubmittedAction, PlanReviewPurposeContext, StartDurableTaskAction,
-    StartPlanReviewAction, TaskParticipantContext, TaskPlannerContext, TaskSynthesisContext,
-    durable_tool_execution_entry, projected_agent_run_readiness, route_surface_tool_specs,
+    ContinueDurableTaskAction, ConversationPurposeContext, FinalAnswerContext,
+    PendingConversationInputProvider, PlanReviewDraftSubmittedAction, PlanReviewPurposeContext,
+    StartDurableTaskAction, StartPlanReviewAction, TaskParticipantContext, TaskPlannerContext,
+    TaskSynthesisContext, durable_tool_execution_entry, projected_agent_run_readiness,
+    route_surface_tool_specs, route_surface_tool_specs_for_context,
+    route_surface_tool_specs_with_memory,
 };
 pub use agent_thread::{
     AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId,
@@ -381,7 +383,11 @@ pub use intent_operation::{
     IntentOperationProjectionV1, IntentOperationStateV1, IntentOperationSummaryV1,
     cancel_intent_operation, execute_intent_drop, preview_intent_drop, reconcile_intent_operations,
 };
-pub use memory::{MemoryLoadReport, inspect_memory_documents};
+pub use memory::{
+    MEMORY_STATEMENT_MAX_BYTES, MemoryLoadReport, REMEMBER_PROJECT_FACT_TOOL_NAME,
+    REMEMBER_USER_PREFERENCE_TOOL_NAME, inspect_memory_documents, is_writable_memory_route_tool,
+    remember_memory_tool_spec, writable_memory_route_tool_specs,
+};
 pub use model_route::{
     ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute, RouteEgressTrustBinding,
 };
@@ -687,16 +693,16 @@ pub use task::{
     TASK_SEMANTIC_TITLE_MAX_CHARS, TaskApprovalRouteBinding, TaskChildSessionDisplayNameEntry,
     TaskChildSessionEntry, TaskChildSessionStatus, TaskFinalAnswerCommittedEntry,
     TaskGraphProjection, TaskGraphStepProjection, TaskGuidanceAppliedEntry,
-    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode,
-    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanEntry, TaskPlanProjection,
-    TaskPlanStatus, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
+    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskGuidanceMaterializedEntry, TaskId,
+    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
+    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanEntry,
+    TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
     TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue, TaskReadyQueueOptions,
     TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
-    TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepAttemptId, TaskStepEntry,
-    TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus,
-    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
+    TaskRunProjection, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStateProjection,
+    TaskStepAttemptId, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
+    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
     bounded_task_participant_summary, child_session_ref, normalize_task_agent_display_name,
     stale_task_approval_routes_for_restore, task_final_message_id, task_guidance_applied_entry,
     task_guidance_apply_result_content, task_guidance_apply_tool_spec, task_participant_attempt_id,
@@ -705,12 +711,15 @@ pub use task::{
     task_planner_logical_run_id, task_semantic_title, validate_task_plan_graph_steps,
 };
 pub use task_handoff::{
-    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ConversationTurnRef, MAX_TASK_ADMISSION_REASON_CODES,
-    REQUEST_TASK_PLANNING_TOOL_NAME, TaskAdmissionReason, TaskAdmissionTrigger,
-    TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection, TaskHandoffProjectionEntry,
-    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskPlanningHandoffBinding,
+    CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+    ConversationTurnRef, MAX_TASK_ADMISSION_REASON_CODES, REQUEST_TASK_PLANNING_TOOL_NAME,
+    TaskAdmissionReason, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
+    TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection,
+    TaskHandoffProjectionEntry, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskPlanningHandoffBinding, continue_existing_task_tool_spec,
     continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
-    task_planning_reason_codes, validate_continue_without_task_planning_call,
+    task_planning_reason_codes, validate_continue_existing_task_call,
+    validate_continue_without_task_planning_call,
 };
 pub use task_memory::{
     AttemptRef, BranchId, CommandReceiptId, FileChangeRef, ModelAssistedMemoryDecision,
@@ -719,6 +728,7 @@ pub use task_memory::{
     extract_task_memory_from_stream_records, task_memory_context_items,
 };
 pub use task_orchestrator::{
+    RecoverableTaskGuidance, RecoverableTaskGuidanceReview, RecoverableTaskGuidanceReviewAuthority,
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
     SequentialTaskStepOutput, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
     TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchFuture,
@@ -729,11 +739,12 @@ pub use task_orchestrator::{
     TaskVerificationRerunOutput, TaskVerificationRerunRequest,
     changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
     changeset_only_child_tool_scope, decode_changeset_only_child_output,
-    reconcile_task_final_answer_prefix, rerun_task_verification_check,
-    task_participant_finalization_prompt_contract_material, task_participant_input_hash,
-    task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
-    task_planner_system_prompt_contract_material, task_step_owner_agent_id,
-    validate_isolated_parent_snapshot_unchanged_for_task,
+    reconcile_task_final_answer_prefix, recoverable_task_guidance,
+    recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
+    rerun_task_verification_check, task_participant_finalization_prompt_contract_material,
+    task_participant_input_hash, task_participant_system_prompt_contract_material,
+    task_planner_prompt_contract_material, task_planner_system_prompt_contract_material,
+    task_step_owner_agent_id, validate_isolated_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{
     MAX_DURABLE_TERMINAL_TASK_BYTES, MAX_TERMINAL_CWD_LABEL_BYTES, MAX_TERMINAL_LOG_REF_BYTES,

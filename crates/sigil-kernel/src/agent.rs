@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -26,6 +27,7 @@ use crate::{
         submit_plan_draft_tool_spec,
     },
     event::{EventHandler, RunEvent},
+    memory::{is_writable_memory_route_tool, writable_memory_route_tool_specs},
     permission::{
         ApprovalMode, InteractionMode, PathTrustZone, PermissionConfig,
         PermissionEvaluationContext, PermissionPolicyChain, ToolApprovalSessionGrantFacet,
@@ -39,12 +41,13 @@ use crate::{
     },
     task::{
         TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceAssessmentContext,
-        TaskId, TaskParticipantAttemptId, TaskPlanUpdateContext, TaskStepId,
-        task_guidance_apply_tool_spec, task_plan_update_tool_spec_for_worktree,
+        TaskId, TaskParticipantAttemptId, TaskPlanStatus, TaskPlanUpdateContext, TaskRunStatus,
+        TaskStepId, task_guidance_apply_tool_spec, task_plan_update_tool_spec_for_worktree,
     },
     task_handoff::{
-        CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ConversationTurnRef,
-        REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId, TaskPlanningHandoffBinding,
+        CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+        ConversationTurnRef, REQUEST_TASK_PLANNING_TOOL_NAME, TaskContinuationHandoffBinding,
+        TaskHandoffId, TaskPlanningHandoffBinding, continue_existing_task_tool_spec,
         continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
     },
     task_orchestrator::{
@@ -107,7 +110,8 @@ use task_guidance::{
 };
 use task_handoff::{
     append_tool_ignored_after_routing_decision, append_tool_ignored_after_task_handoff,
-    append_tool_rejected_during_task_routing, continue_without_task_planning_call_is_accepted,
+    append_tool_rejected_during_task_routing, continue_existing_task_call_is_accepted,
+    continue_without_task_planning_call_is_accepted, handle_continue_existing_task_call,
     handle_continue_without_task_planning_call, handle_task_planning_request_call,
     task_planning_request_call_is_accepted,
 };
@@ -136,17 +140,18 @@ use tool_results::{
 };
 
 const TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT: usize = 6;
+const MAX_FINAL_ANSWER_BLOCKER_RETRIES: usize = 3;
 
 struct RoutingMicroturnEventFilter<'a, H> {
     inner: &'a mut H,
-    suppress_model_surface: bool,
+    suppress_narrative: bool,
 }
 
 impl<'a, H> RoutingMicroturnEventFilter<'a, H> {
-    fn new(inner: &'a mut H, suppress_model_surface: bool) -> Self {
+    fn new(inner: &'a mut H, suppress_narrative: bool) -> Self {
         Self {
             inner,
-            suppress_model_surface,
+            suppress_narrative,
         }
     }
 }
@@ -156,16 +161,11 @@ where
     H: EventHandler,
 {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
-        if self.suppress_model_surface
+        if self.suppress_narrative
             && matches!(
                 event,
                 RunEvent::TextDelta(_)
                     | RunEvent::ReasoningDelta(_)
-                    | RunEvent::ToolCallStarted(_)
-                    | RunEvent::ToolCallArgsDelta { .. }
-                    | RunEvent::ToolCallCompleted(_)
-                    | RunEvent::ToolProgress(_)
-                    | RunEvent::ToolResult(_)
                     | RunEvent::AssistantMessage(_)
             )
         {
@@ -255,10 +255,15 @@ pub struct ConversationPurposeContext {
     pub routing_policy: TaskRoutingPolicy,
     /// Effective automatic route capability derived from exact provider/model/build evidence.
     pub route_capability: AutomaticRouteCapability,
+    /// Effective writable-memory routing capability derived after the host assembles the exact
+    /// tool registry for this run.
+    pub writable_memory_routing: bool,
     /// Direct durable task handoff binding; present only when the capability allows DirectTask.
     pub task_handoff: Option<TaskPlanningHandoffBinding>,
     /// Plan review handoff binding; present whenever automatic routing may choose PlanReview.
     pub plan_review: Option<PlanReviewHandoffBinding>,
+    /// Exact current resumable Task that may be selected by the routing microturn.
+    pub task_continuation: Option<TaskContinuationHandoffBinding>,
 }
 
 /// Purpose binding for one read-only plan review run.
@@ -305,6 +310,7 @@ pub enum AgentRunDisposition {
     StartPlanReview(StartPlanReviewAction),
     PlanReviewDraftSubmitted(PlanReviewDraftSubmittedAction),
     StartDurableTask(StartDurableTaskAction),
+    ContinueDurableTask(Box<ContinueDurableTaskAction>),
     TaskPlanAccepted,
     Interrupted,
     Blocked,
@@ -339,6 +345,21 @@ pub struct StartDurableTaskAction {
     pub handoff_id: TaskHandoffId,
     pub task_id: TaskId,
     pub source_turn: ConversationTurnRef,
+}
+
+/// Stable action emitted after semantic routing selected one exact existing durable Task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinueDurableTaskAction {
+    pub task_id: TaskId,
+    pub source_turn: ConversationTurnRef,
+    pub plan_version: Option<u32>,
+    pub task_status: TaskRunStatus,
+    pub plan_status: Option<TaskPlanStatus>,
+    pub route_contract_fingerprint: String,
+    /// Exact source prompt retained only in process memory for Task guidance review.
+    pub guidance: crate::SecretString,
+    /// Durable safe receipt that the adapter revalidates before dispatch.
+    pub guidance_receipt: crate::TaskContinuationSelectedEntry,
 }
 
 /// Input contract for one agent run.
@@ -583,6 +604,29 @@ impl AgentRunInput {
             None,
         )
         .map(|projection| Some(projection.durable_message))
+    }
+
+    /// Returns the exact process-local prompt material for one bound source turn.
+    ///
+    /// Direct inputs retain it in the pending persisted message; queued inputs retain it in the
+    /// caller-frozen provider request. The value is never serialized by this accessor.
+    #[must_use]
+    pub fn exact_user_prompt_for_source(&self, message_id: &str) -> Option<&str> {
+        if self.persisted_user_message_id.as_deref() == Some(message_id) {
+            return self.persisted_user_message.as_deref();
+        }
+        self.initial_frozen_provider_request
+            .as_ref()
+            .and_then(|frozen| {
+                frozen
+                    .request()
+                    .messages
+                    .iter()
+                    .find(|message| {
+                        message.id == message_id && message.role == crate::MessageRole::User
+                    })
+                    .and_then(|message| message.content.as_deref())
+            })
     }
 
     pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
@@ -831,13 +875,19 @@ fn validate_initial_frozen_task_routing_request(
     max_output_tokens: Option<u32>,
     transient_context: &[ModelMessage],
     runtime_context: RuntimeContextCandidates,
+    writable_memory_routing: bool,
+    task_continuation_available: bool,
 ) -> Result<()> {
     validate_initial_frozen_routing_request(
         session,
         frozen_request,
         &binding.source_turn,
         &binding.objective,
-        route_surface_tool_specs(route_capability),
+        route_surface_tool_specs_for_context(
+            route_capability,
+            writable_memory_routing,
+            task_continuation_available,
+        ),
         options,
         max_output_tokens,
         transient_context,
@@ -854,13 +904,19 @@ fn validate_initial_frozen_plan_review_routing_request(
     max_output_tokens: Option<u32>,
     transient_context: &[ModelMessage],
     runtime_context: RuntimeContextCandidates,
+    writable_memory_routing: bool,
+    task_continuation_available: bool,
 ) -> Result<()> {
     validate_initial_frozen_routing_request(
         session,
         frozen_request,
         &binding.source_turn,
         &binding.objective,
-        route_surface_tool_specs(route_capability),
+        route_surface_tool_specs_for_context(
+            route_capability,
+            writable_memory_routing,
+            task_continuation_available,
+        ),
         options,
         max_output_tokens,
         transient_context,
@@ -977,6 +1033,54 @@ pub fn route_surface_tool_specs(capability: AutomaticRouteCapability) -> Vec<Too
             continue_without_task_planning_tool_spec(),
         ],
     }
+}
+
+/// Frozen automatic-routing surface, optionally including durable-memory write tools.
+///
+/// Memory calls remain ordinary previewed/approved tool executions. They may accompany exactly
+/// one typed route decision so an explicit persistence request is not lost when the same user
+/// turn is handed to plan review or durable task planning.
+#[must_use]
+pub fn route_surface_tool_specs_with_memory(
+    capability: AutomaticRouteCapability,
+    writable_memory: bool,
+) -> Vec<ToolSpec> {
+    route_surface_tool_specs_for_context(capability, writable_memory, false)
+}
+
+/// Frozen automatic-routing surface for exact host-bound route context.
+#[must_use]
+pub fn route_surface_tool_specs_for_context(
+    capability: AutomaticRouteCapability,
+    writable_memory: bool,
+    task_continuation_available: bool,
+) -> Vec<ToolSpec> {
+    let mut specs = route_surface_tool_specs(capability);
+    if task_continuation_available && capability.routes_automatically() {
+        specs.push(continue_existing_task_tool_spec());
+    }
+    if writable_memory && capability.routes_automatically() {
+        specs.extend(writable_memory_route_tool_specs());
+    }
+    specs
+}
+
+fn validate_writable_memory_route_registry(tools: &ToolRegistry) -> Result<()> {
+    for expected in writable_memory_route_tool_specs() {
+        let actual = tools.spec_for(&expected.name).ok_or_else(|| {
+            anyhow!(
+                "writable memory routing requires registered tool {}",
+                expected.name
+            )
+        })?;
+        if serde_json::to_value(&actual)? != serde_json::to_value(&expected)? {
+            return Err(anyhow!(
+                "writable memory routing tool contract drifted for {}",
+                expected.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn normalize_routing_system_message_id(request: &mut crate::CompletionRequest) -> Result<()> {
@@ -1121,6 +1225,12 @@ where
                 .as_ref()
                 .map(|binding| binding.route_contract_fingerprint.clone())
         })
+        .or_else(|| {
+            conversation
+                .task_continuation
+                .as_ref()
+                .map(|binding| binding.route_contract_fingerprint.clone())
+        })
         .ok_or_else(|| anyhow!("fallback chat decision requires a route contract fingerprint"))?;
     let decided_at_ms = conversation
         .plan_review
@@ -1129,6 +1239,12 @@ where
         .or_else(|| {
             conversation
                 .task_handoff
+                .as_ref()
+                .map(|binding| binding.decided_at_ms)
+        })
+        .or_else(|| {
+            conversation
+                .task_continuation
                 .as_ref()
                 .map(|binding| binding.decided_at_ms)
         })
@@ -1198,6 +1314,7 @@ pub enum AgentRunTerminalReason {
     FinalAnswer,
     MaxTurns,
     DelegationUnsatisfied,
+    FinalAnswerBlocked,
     TaskRoutingUnsatisfied,
     RoutingFreeTextFallback,
     TaskHandoff,
@@ -1205,11 +1322,21 @@ pub enum AgentRunTerminalReason {
 }
 
 impl AgentRunTerminalReason {
+    /// Returns true when the kernel deliberately refused to accept a model final answer.
+    #[must_use]
+    pub fn blocks_successful_completion(self) -> bool {
+        matches!(
+            self,
+            Self::DelegationUnsatisfied | Self::FinalAnswerBlocked | Self::TaskRoutingUnsatisfied
+        )
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::FinalAnswer => "final_answer",
             Self::MaxTurns => "max_turns",
             Self::DelegationUnsatisfied => "delegation_unsatisfied",
+            Self::FinalAnswerBlocked => "final_answer_blocked",
             Self::TaskRoutingUnsatisfied => "task_routing_unsatisfied",
             Self::RoutingFreeTextFallback => "routing_free_text_fallback",
             Self::TaskHandoff => "task_handoff",
@@ -1734,36 +1861,45 @@ where
         let user_url_capability_registrar =
             user_url_capability_registrar.or_else(|| session.user_url_capability_registrar());
 
-        let (task_handoff_binding, plan_review_binding) = match purpose.as_ref() {
-            Some(AgentRunPurpose::Conversation(context))
-                if context.routing_policy == TaskRoutingPolicy::Auto =>
-            {
-                if !context.route_capability.routes_automatically() {
-                    return Err(anyhow!(
-                        "automatic routing cannot carry handoff bindings with capability {}",
-                        context.route_capability.as_str()
-                    ));
+        let (task_handoff_binding, plan_review_binding, task_continuation_binding) =
+            match purpose.as_ref() {
+                Some(AgentRunPurpose::Conversation(context))
+                    if context.routing_policy == TaskRoutingPolicy::Auto =>
+                {
+                    if !context.route_capability.routes_automatically() {
+                        return Err(anyhow!(
+                            "automatic routing cannot carry handoff bindings with capability {}",
+                            context.route_capability.as_str()
+                        ));
+                    }
+                    (
+                        context.task_handoff.clone(),
+                        context.plan_review.clone(),
+                        context.task_continuation.clone(),
+                    )
                 }
-                (context.task_handoff.clone(), context.plan_review.clone())
-            }
-            Some(AgentRunPurpose::Conversation(context)) => {
-                if context.task_handoff.is_some() || context.plan_review.is_some() {
-                    return Err(anyhow!(
-                        "manual task routing cannot carry an automatic handoff binding"
-                    ));
+                Some(AgentRunPurpose::Conversation(context)) => {
+                    if context.task_handoff.is_some()
+                        || context.plan_review.is_some()
+                        || context.task_continuation.is_some()
+                    {
+                        return Err(anyhow!(
+                            "manual task routing cannot carry an automatic handoff binding"
+                        ));
+                    }
+                    (None, None, None)
                 }
-                (None, None)
-            }
-            Some(
-                AgentRunPurpose::PlanReview(_)
-                | AgentRunPurpose::TaskPlanner(_)
-                | AgentRunPurpose::TaskParticipant(_)
-                | AgentRunPurpose::TaskSynthesis(_),
-            )
-            | None => (None, None),
-        };
-        let routing_decision_pending =
-            task_handoff_binding.is_some() || plan_review_binding.is_some();
+                Some(
+                    AgentRunPurpose::PlanReview(_)
+                    | AgentRunPurpose::TaskPlanner(_)
+                    | AgentRunPurpose::TaskParticipant(_)
+                    | AgentRunPurpose::TaskSynthesis(_),
+                )
+                | None => (None, None, None),
+            };
+        let routing_decision_pending = task_handoff_binding.is_some()
+            || plan_review_binding.is_some()
+            || task_continuation_binding.is_some();
         if let Some(context) = purpose.as_ref().and_then(|purpose| match purpose {
             AgentRunPurpose::Conversation(context) => Some(context.as_ref()),
             _ => None,
@@ -1776,6 +1912,13 @@ where
             if plan_review_binding.is_some() && !context.route_capability.routes_automatically() {
                 return Err(anyhow!(
                     "plan review binding requires an automatic route capability"
+                ));
+            }
+            if task_continuation_binding.is_some()
+                && !context.route_capability.routes_automatically()
+            {
+                return Err(anyhow!(
+                    "task continuation binding requires an automatic route capability"
                 ));
             }
         }
@@ -1813,6 +1956,7 @@ where
             for reserved in [
                 REQUEST_TASK_PLANNING_TOOL_NAME,
                 REQUEST_PLAN_REVIEW_TOOL_NAME,
+                CONTINUE_EXISTING_TASK_TOOL_NAME,
             ] {
                 if tools.spec_for(reserved).is_some() {
                     return Err(anyhow!(
@@ -1853,6 +1997,26 @@ where
                 _ => None,
             })
             .unwrap_or(AutomaticRouteCapability::Unsupported);
+        let writable_memory_routing = purpose
+            .as_ref()
+            .and_then(|purpose| match purpose {
+                AgentRunPurpose::Conversation(context) => Some(context.writable_memory_routing),
+                _ => None,
+            })
+            .unwrap_or(false);
+        if writable_memory_routing && !route_capability.routes_automatically() {
+            return Err(anyhow!(
+                "writable memory routing requires automatic conversation routing"
+            ));
+        }
+        if writable_memory_routing && !options.memory_config.writable {
+            return Err(anyhow!(
+                "writable memory routing conflicts with disabled writable memory configuration"
+            ));
+        }
+        if writable_memory_routing {
+            validate_writable_memory_route_registry(tools)?;
+        }
         if let (Some(binding), Some(frozen_request)) = (
             task_handoff_binding.as_ref(),
             initial_frozen_provider_request.as_ref(),
@@ -1866,6 +2030,8 @@ where
                 max_output_tokens,
                 &transient_context,
                 runtime_context.clone(),
+                writable_memory_routing,
+                task_continuation_binding.is_some(),
             )?;
         }
         if let (Some(binding), Some(frozen_request)) = (
@@ -1881,6 +2047,8 @@ where
                 max_output_tokens,
                 &transient_context,
                 runtime_context.clone(),
+                writable_memory_routing,
+                task_continuation_binding.is_some(),
             )?;
         }
         match purpose.as_ref() {
@@ -2017,6 +2185,9 @@ where
         if logical_run_id.trim().is_empty() {
             return Err(anyhow!("agent logical run id is empty"));
         }
+        if let Some(delegate) = agent_delegate.as_deref_mut() {
+            delegate.set_root_logical_run_id(Some(&logical_run_id));
+        }
         let has_initial_frozen_provider_request = initial_frozen_provider_request.is_some();
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
@@ -2032,6 +2203,10 @@ where
         let mut task_routing_decision_pending = routing_decision_pending;
         let mut task_routing_retry_used = false;
         let mut final_answer_context_key: Option<String> = None;
+        let mut final_answer_context_message_index: Option<usize> = None;
+        let mut final_answer_blocker_prompt: Option<String> = None;
+        let mut final_answer_blocker_message_index: Option<usize> = None;
+        let mut final_answer_blocker_retries = 0usize;
         let mut pending_join_context_keys: Vec<String> = Vec::new();
         let mut participant_post_mutation_read_calls = 0usize;
         let mut participant_finalization_pending = false;
@@ -2103,15 +2278,34 @@ where
                 });
             }
             if initial_frozen_provider_request.is_none()
-                && let Some(context) = agent_delegate
-                    .as_deref_mut()
-                    .map(|delegate| delegate.final_answer_context(session, &options, &outcome))
-                    .transpose()?
-                    .flatten()
-                && final_answer_context_key.as_deref() != Some(context.key.as_str())
+                && let Some(delegate) = agent_delegate.as_deref_mut()
             {
-                final_answer_context_key = Some(context.key);
-                transient_context.push(ModelMessage::user(context.prompt));
+                match delegate.final_answer_context(session, &options, &outcome)? {
+                    Some(context)
+                        if final_answer_context_key.as_deref() != Some(context.key.as_str()) =>
+                    {
+                        final_answer_context_key = Some(context.key);
+                        let message = ModelMessage::user(context.prompt);
+                        if let Some(index) = final_answer_context_message_index {
+                            transient_context[index] = message;
+                        } else {
+                            final_answer_context_message_index = Some(transient_context.len());
+                            transient_context.push(message);
+                        }
+                    }
+                    None => {
+                        if let Some(index) = final_answer_context_message_index.take() {
+                            transient_context.remove(index);
+                            if let Some(blocker_index) = final_answer_blocker_message_index.as_mut()
+                                && *blocker_index > index
+                            {
+                                *blocker_index = blocker_index.saturating_sub(1);
+                            }
+                        }
+                        final_answer_context_key = None;
+                    }
+                    Some(_) => {}
+                }
             }
             model_turns = model_turns.saturating_add(1);
 
@@ -2138,7 +2332,11 @@ where
             let mut tool_specs = if participant_finalization_turn {
                 Vec::new()
             } else if task_routing_decision_pending {
-                route_surface_tool_specs(route_capability)
+                route_surface_tool_specs_for_context(
+                    route_capability,
+                    writable_memory_routing,
+                    task_continuation_binding.is_some(),
+                )
             } else {
                 tools
                     .specs()
@@ -2257,7 +2455,8 @@ where
                     }
                 };
             let provider_turn_result = {
-                let mut provider_event_handler = RoutingMicroturnEventFilter::new(handler, false);
+                let mut provider_event_handler =
+                    RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending);
                 match initial_frozen_request {
                     Some(frozen_request) => {
                         provider_stream::collect_frozen_provider_turn(
@@ -2342,6 +2541,12 @@ where
 
             if !completed_calls.is_empty() {
                 let changed_files_before_batch = outcome.changed_files.len();
+                let tool_call_ids_before_batch = outcome.tool_call_ids.len();
+                let declaration_order = completed_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, call)| (call.id.clone(), ordinal))
+                    .collect::<BTreeMap<_, _>>();
                 let participant_read_calls_in_batch = if is_task_participant {
                     completed_calls
                         .iter()
@@ -2417,7 +2622,13 @@ where
                             submit_plan_draft_call_is_accepted(context, call)
                         })
                     });
+                let accepted_task_continuation_in_batch = task_routing_decision_pending
+                    && task_continuation_binding.is_some()
+                    && completed_calls
+                        .iter()
+                        .any(continue_existing_task_call_is_accepted);
                 let accepted_task_handoff_in_batch = task_routing_decision_pending
+                    && !accepted_task_continuation_in_batch
                     && task_handoff_binding.is_some()
                     && completed_calls
                         .iter()
@@ -2449,14 +2660,37 @@ where
                 let mut accepted_task_plan = false;
                 let mut accepted_plan_draft = false;
                 let mut accepted_task_handoff = None;
+                let mut accepted_task_continuation = None;
                 let mut accepted_plan_review = None;
                 let mut accepted_direct_conversation = false;
                 let mut accepted_task_guidance = false;
                 let mut assistant_batch_results: Vec<(crate::ToolCall, ToolResult)> = Vec::new();
-                for call in completed_calls {
+                let mut execution_calls = completed_calls;
+                if task_routing_decision_pending && writable_memory_routing {
+                    // A route decision hands this turn to another runtime immediately after the
+                    // batch settles. Execute approved memory writes first even when the provider
+                    // emitted the route call first, so a crash during handoff cannot durably
+                    // record the route while silently losing the user's explicit memory intent.
+                    execution_calls.sort_by_key(|call| !is_writable_memory_route_tool(&call.name));
+                }
+                for call in execution_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
+                    if accepted_task_continuation_in_batch
+                        && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
+                        && (call.name != CONTINUE_EXISTING_TASK_TOOL_NAME
+                            || accepted_task_continuation.is_some())
+                    {
+                        append_tool_ignored_after_task_handoff(
+                            session,
+                            &mut outcome,
+                            &call,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
                     if accepted_task_handoff_in_batch
+                        && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
                         && (call.name != REQUEST_TASK_PLANNING_TOOL_NAME
                             || accepted_task_handoff.is_some())
                     {
@@ -2469,6 +2703,7 @@ where
                         continue;
                     }
                     if accepted_plan_review_in_batch
+                        && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
                         && (call.name != REQUEST_PLAN_REVIEW_TOOL_NAME
                             || accepted_plan_review.is_some())
                     {
@@ -2481,6 +2716,7 @@ where
                         continue;
                     }
                     if accepted_direct_conversation_in_batch
+                        && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
                         && (call.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
                             || accepted_direct_conversation)
                     {
@@ -2517,6 +2753,56 @@ where
                             session,
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
+                    if call.name == CONTINUE_EXISTING_TASK_TOOL_NAME {
+                        if !task_routing_decision_pending {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "continue_existing_task is not available after the routing microturn",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            assistant_batch_results.push((call.clone(), result));
+                            continue;
+                        }
+                        let Some(binding) = task_continuation_binding.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "continue_existing_task is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            assistant_batch_results.push((call.clone(), result));
+                            continue;
+                        };
+                        accepted_task_continuation = handle_continue_existing_task_call(
+                            session,
+                            &mut RoutingMicroturnEventFilter::new(handler, false),
+                            &mut outcome,
+                            &call,
+                            binding,
+                            cancellation.as_ref().map(RunCancellationHandle::scope_id),
                             &mut assistant_batch_results,
                         )?;
                         continue;
@@ -2662,7 +2948,9 @@ where
                         )?;
                         continue;
                     }
-                    if task_routing_decision_pending {
+                    if task_routing_decision_pending
+                        && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
+                    {
                         append_tool_rejected_during_task_routing(
                             session,
                             &mut outcome,
@@ -2818,6 +3106,18 @@ where
                         }
                     }
                 }
+                assistant_batch_results.sort_by_key(|(call, _)| {
+                    declaration_order
+                        .get(&call.id)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+                outcome.tool_call_ids[tool_call_ids_before_batch..].sort_by_key(|call_id| {
+                    declaration_order
+                        .get(call_id)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
                 // RFC-0062 11.2/11.5: settle the whole assistant tool-call batch with the
                 // deterministic two-phase preview allocator before the next provider request.
                 // A settlement failure keeps the same cleanup contract as a per-tool emit
@@ -2860,6 +3160,19 @@ where
                         },
                         outcome,
                         disposition: AgentRunDisposition::StartDurableTask(action),
+                    });
+                }
+                if let Some(action) = accepted_task_continuation {
+                    outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;
+                    outcome.tool_calls = total_tool_calls;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::ContinueDurableTask(Box::new(action)),
                     });
                 }
                 if let Some(action) = accepted_plan_review {
@@ -3093,18 +3406,65 @@ where
                 });
             }
 
-            if let Some(blocker_prompt) = agent_delegate
+            let blocker_prompt = agent_delegate
                 .as_deref_mut()
                 .map(|delegate| delegate.final_answer_blocker(session))
                 .transpose()?
-                .flatten()
-            {
+                .flatten();
+            if let Some(blocker_prompt) = blocker_prompt {
+                if final_answer_blocker_retries >= MAX_FINAL_ANSWER_BLOCKER_RETRIES {
+                    handler.handle(RunEvent::Notice(
+                        "pending agent state still blocks final answer; ending this run without another provider retry"
+                            .to_owned(),
+                    ))?;
+                    outcome.terminal_reason = AgentRunTerminalReason::FinalAnswerBlocked;
+                    outcome.tool_calls = total_tool_calls;
+                    claim_natural_run_terminal(
+                        cancellation.as_ref(),
+                        cancellation_terminal_authority,
+                    )?;
+                    append_run_lifecycle_events(
+                        session,
+                        "blocked",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::Blocked,
+                    });
+                }
+                final_answer_blocker_retries = final_answer_blocker_retries.saturating_add(1);
                 handler.handle(RunEvent::Notice(
                     "pending agent state blocks final answer; continuing".to_owned(),
                 ))?;
-                transient_context.push(ModelMessage::user(blocker_prompt));
+                if final_answer_blocker_prompt.as_deref() != Some(blocker_prompt.as_str()) {
+                    let message = ModelMessage::user(blocker_prompt.clone());
+                    if let Some(index) = final_answer_blocker_message_index {
+                        transient_context[index] = message;
+                    } else {
+                        final_answer_blocker_message_index = Some(transient_context.len());
+                        transient_context.push(message);
+                    }
+                    final_answer_blocker_prompt = Some(blocker_prompt);
+                }
                 continue;
             }
+            if let Some(index) = final_answer_blocker_message_index.take() {
+                transient_context.remove(index);
+                if let Some(context_index) = final_answer_context_message_index.as_mut()
+                    && *context_index > index
+                {
+                    *context_index = context_index.saturating_sub(1);
+                }
+            }
+            final_answer_blocker_prompt = None;
             if participant_finalization_dispatched && assistant_text.trim().is_empty() {
                 handler.handle(RunEvent::Notice(
                     "task participant finalization returned no bounded result".to_owned(),

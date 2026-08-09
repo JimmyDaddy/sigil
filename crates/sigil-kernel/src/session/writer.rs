@@ -268,6 +268,21 @@ impl SharedSessionCoordinator {
             let frontier = writer
                 .frontier_from_tail()
                 .or_else(|_| writer.current_frontier())?;
+            {
+                let state = self
+                    .projection
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+                if matches!(
+                    &*state,
+                    ActiveProjectionState::Ready(current) if current.frontier == frontier
+                ) {
+                    // Another handle for this canonical path already owns an exact projection.
+                    // Loading the same durable prefix is observational and must not manufacture
+                    // an all-family source-change wake (notably ToolOutputPressure -> artifact GC).
+                    return Ok(());
+                }
+            }
             let projection = ActiveSessionProjection::from_records(records, frontier.clone())?;
             // Session loading already paid for the canonical replay. Reuse the same validated
             // prefix for preallocated event-id uniqueness instead of rereading the JSONL on the
@@ -489,6 +504,7 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
         match event.event_kind() {
             Some(DurableEventType::ConversationInputPromoted) => {
                 families.insert(ActiveProjectionFamily::Queue);
+                families.insert(ActiveProjectionFamily::Task);
             }
             Some(
                 DurableEventType::CompactionStarted
@@ -508,6 +524,9 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
                 | DurableEventType::ToolOutputAgingActivated,
             ) => {
                 families.insert(ActiveProjectionFamily::ToolOutputPressure);
+                if event.event_kind() == Some(DurableEventType::UserMessageRecorded) {
+                    families.insert(ActiveProjectionFamily::Task);
+                }
             }
             Some(_) | None => {}
         }
@@ -524,15 +543,37 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
             | ControlEntry::ConversationInputQueueControl(_)
             | ControlEntry::ConversationInputEdited(_)
             | ControlEntry::ConversationInputReordered(_)
-            | ControlEntry::ConversationInputStatusChanged(_)
-            | ControlEntry::ConversationInputPromoted(_) => {
+            | ControlEntry::ConversationInputStatusChanged(_) => {
                 families.insert(ActiveProjectionFamily::Queue);
+            }
+            ControlEntry::ConversationInputPromoted(_) => {
+                families.insert(ActiveProjectionFamily::Queue);
+                families.insert(ActiveProjectionFamily::Task);
             }
             ControlEntry::TaskGuidancePromoted(_) => {
                 families.insert(ActiveProjectionFamily::Queue);
                 families.insert(ActiveProjectionFamily::Task);
             }
-            ControlEntry::TaskRun(_) | ControlEntry::TaskPlan(_) => {
+            ControlEntry::PlanDraftCreated(_)
+            | ControlEntry::ConversationRouteDecisionRecorded(_)
+            | ControlEntry::PlanReviewAttempt(_)
+            | ControlEntry::TaskHandoffResolved(_)
+            | ControlEntry::TaskCreatedFromPlan(_)
+            | ControlEntry::TaskContinuationSelected(_)
+            | ControlEntry::TaskRunCancellationScopeBound(_)
+            | ControlEntry::TaskRunTargetSelected(_)
+            | ControlEntry::TaskRun(_)
+            | ControlEntry::TaskPlan(_)
+            | ControlEntry::TaskGuidanceMaterialized(_)
+            | ControlEntry::TaskStep(_)
+            | ControlEntry::TaskParticipantAttempt(_)
+            | ControlEntry::TaskParticipantRetryScheduled(_)
+            | ControlEntry::TaskParticipantResult(_)
+            | ControlEntry::TaskFinalAnswerCommitted(_)
+            | ControlEntry::TaskChildSession(_)
+            | ControlEntry::TaskChildSessionDisplayName(_)
+            | ControlEntry::TaskSubagentApprovalRoute(_)
+            | ControlEntry::TaskSubagentElicitationRoute(_) => {
                 families.insert(ActiveProjectionFamily::Task);
             }
             ControlEntry::AgentResultContinuation(_) => {

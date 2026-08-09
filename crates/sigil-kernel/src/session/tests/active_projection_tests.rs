@@ -9,7 +9,7 @@ use crate::{
     AgentResultContinuationStatus, ConversationInputKind, ConversationInputQueueId,
     ConversationInputStatus, ConversationInputTarget, ConversationQueueMutation,
     ConversationQueueMutationCommand, ConversationQueueRevision, ConversationTurnRef, SessionRef,
-    TaskGuidancePromotedEntry,
+    TaskGuidancePromotedEntry, TaskRunTargetSelectedEntry,
 };
 
 #[derive(Default)]
@@ -139,6 +139,44 @@ fn session_startup_reuses_the_single_reconciled_full_replay() -> Result<()> {
             .writer_full_scan_count()?
             .saturating_sub(scans_before_load),
         1
+    );
+    Ok(())
+}
+
+#[test]
+fn loading_an_already_current_canonical_session_does_not_publish_a_false_change() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("already-current.jsonl"))?;
+    append_current_test_session_identity(&store)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::Note {
+        kind: "already_current_fixture".to_owned(),
+        data: serde_json::Value::Null,
+    }))?;
+    store.active_projection_snapshot()?;
+    let recorder = Arc::new(NoticeRecorder::default());
+    let _subscription = store.register_active_projection_observer(recorder.clone());
+    let publications_before = store.active_projection_metrics().publication_total;
+
+    let loaded = Session::load_from_store("mock", "model", store.clone())?;
+
+    assert!(loaded.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::Note { kind, .. })
+                if kind == "already_current_fixture"
+        )
+    }));
+    assert!(
+        recorder
+            .notices
+            .lock()
+            .expect("notice recorder lock is available")
+            .is_empty(),
+        "replaying an unchanged canonical prefix must not wake projection observers"
+    );
+    assert_eq!(
+        store.active_projection_metrics().publication_total,
+        publications_before
     );
     Ok(())
 }
@@ -776,6 +814,146 @@ fn task_guidance_snapshot_exposes_minimal_plan_state() -> Result<()> {
     assert_eq!(task.status(), TaskRunStatus::Paused);
     assert_eq!(task.latest_plan_version(), Some(7));
     assert_eq!(task.accepted_plan_version(), Some(7));
+    Ok(())
+}
+
+#[test]
+fn durable_task_projection_clears_current_focus_on_user_like_canonical_replay() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("task-focus-user.jsonl"))?;
+    let mut session = Session::new("mock", "model").with_store(store.clone());
+    let task_id = TaskId::new("task_focus_before_unrelated_chat")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "retain as resumable history".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: Vec::new(),
+        reason: None,
+    }))?;
+    assert_eq!(
+        session
+            .task_state_projection()
+            .current_task()
+            .map(|task| &task.task_id),
+        Some(&task_id)
+    );
+    let recorder = Arc::new(NoticeRecorder::default());
+    let _subscription = store.register_active_projection_observer(recorder.clone());
+
+    session.append_user_message(ModelMessage::user("an unrelated chat question"))?;
+
+    let canonical = session.task_state_projection();
+    let durable = session
+        .try_task_state_projection_from_durable()?
+        .expect("store-backed session has a durable task projection");
+    assert_eq!(durable, canonical);
+    assert!(canonical.current_task().is_none());
+    assert!(canonical.tasks.contains_key(&task_id));
+    session.append_control(ControlEntry::TaskRunCancellationScopeBound(
+        TaskRunCancellationScopeBoundEntry {
+            task_id: task_id.clone(),
+            run_scope_id: "explicit-focus-scope".to_owned(),
+        },
+    ))?;
+    session.append_control(ControlEntry::TaskRunTargetSelected(
+        TaskRunTargetSelectedEntry::new(
+            task_id.clone(),
+            "explicit-focus-scope",
+            TaskRunStatus::Started,
+            Some(1),
+            Some(TaskPlanStatus::Accepted),
+        ),
+    ))?;
+    let refocused_canonical = session.task_state_projection();
+    let refocused_durable = session
+        .try_task_state_projection_from_durable()?
+        .expect("store-backed session has a durable task projection");
+    assert_eq!(refocused_durable, refocused_canonical);
+    assert_eq!(
+        refocused_canonical.current_task().map(|task| &task.task_id),
+        Some(&task_id)
+    );
+    let notices = recorder
+        .notices
+        .lock()
+        .expect("notice recorder lock is available");
+    assert!(
+        notices.last().is_some_and(|notice| notice
+            .changed_families
+            .contains(&ActiveProjectionFamily::Task)),
+        "a durable User entry must wake task-focus consumers"
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_task_projection_clears_current_focus_on_explicit_plan_draft() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("task-focus-plan.jsonl"))?;
+    let mut session = Session::new("mock", "model").with_store(store.clone());
+    let task_id = TaskId::new("task_focus_before_explicit_plan")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "retain as resumable history".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: Vec::new(),
+        reason: None,
+    }))?;
+    let recorder = Arc::new(NoticeRecorder::default());
+    let _subscription = store.register_active_projection_observer(recorder.clone());
+
+    session.append_control(ControlEntry::PlanDraftCreated(
+        crate::PlanDraftCreatedEntry {
+            plan_id: crate::PlanId::new("plan-explicit-after-task")?,
+            schema_version: 2,
+            source: crate::PlanSourceRef::default(),
+            plan_hash: "sha256:explicit-plan-after-task".to_owned(),
+            summary: "Review an unrelated implementation plan".to_owned(),
+            inline_text: None,
+            steps: Vec::new(),
+            intent_proposal: None,
+            target_paths: Vec::new(),
+            suggested_checks: Vec::new(),
+            risk: None,
+            notes: Vec::new(),
+            workspace_snapshot_id: None,
+            created_at_ms: 42,
+        },
+    ))?;
+
+    let canonical = session.task_state_projection();
+    let durable = session
+        .try_task_state_projection_from_durable()?
+        .expect("store-backed session has a durable task projection");
+    assert_eq!(durable, canonical);
+    assert!(canonical.current_task().is_none());
+    assert!(canonical.tasks.contains_key(&task_id));
+    let notices = recorder
+        .notices
+        .lock()
+        .expect("notice recorder lock is available");
+    assert!(
+        notices.last().is_some_and(|notice| notice
+            .changed_families
+            .contains(&ActiveProjectionFamily::Task)),
+        "a durable PlanDraftCreated entry must wake task-focus consumers"
+    );
     Ok(())
 }
 

@@ -1458,22 +1458,54 @@ fn empty_result_publishes_a_complete_zero_byte_artifact() -> Result<()> {
         descriptor.completeness,
         ToolArtifactCompleteness::Complete
     ));
-    assert!(
-        store.read_all(&descriptor).is_err(),
-        "a zero-byte artifact has nothing to retrieve and must fail closed"
-    );
-    assert!(
-        store
-            .read_page(
-                &descriptor.artifact_ref,
-                ToolArtifactSelectorV1::ByteSlice {
-                    offset: 0,
-                    limit: 1,
-                },
-            )
-            .is_err(),
-        "a zero-byte artifact has nothing to retrieve and must fail closed"
-    );
+    assert!(descriptor.retrieval_available());
+    assert_eq!(store.manifest_inventory()?.len(), 1);
+    assert!(store.read_all(&descriptor)?.is_empty());
+    let page = store.read_page(
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::ByteSlice {
+            offset: 0,
+            limit: 1,
+        },
+    )?;
+    assert!(page.body.is_empty());
+    assert_eq!(page.returned_bytes, 0);
+    assert!(page.eof);
+    assert!(page.next_selector.is_none());
+
+    let modified_at = store.manifest_inventory()?[0].manifest_modified_at_unix_ms;
+    let report = store.garbage_collect(
+        &ToolArtifactGcRootsV1::default(),
+        modified_at.saturating_add(TOOL_ARTIFACT_ORPHAN_GRACE_MS),
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+    assert_eq!(report.tombstoned_manifests, 1);
+    Ok(())
+}
+
+#[test]
+fn manifest_inventory_validates_identity_without_granting_retrieval_policy() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let available = store.capture_text(
+        "call-policy",
+        "shell",
+        "policy-bound body",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let mut unavailable = available.clone();
+    unavailable.artifact_ref = ToolArtifactRefV1::random();
+    unavailable.retrieval_policy = ToolArtifactRetrievalPolicyV1::Unavailable;
+    unavailable.validate()?;
+    store.publish_descriptor_manifest(&unavailable)?;
+
+    let inventory = store.manifest_inventory()?;
+    assert_eq!(inventory.len(), 2);
+    assert!(inventory.iter().any(|entry| {
+        entry.descriptor.artifact_ref == unavailable.artifact_ref
+            && !entry.descriptor.retrieval_available()
+    }));
+    assert!(store.resolve(&unavailable.artifact_ref).is_err());
+    assert!(store.read_all(&unavailable).is_err());
     Ok(())
 }
 

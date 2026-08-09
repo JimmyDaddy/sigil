@@ -271,8 +271,7 @@ impl ToolArtifactDescriptorV1 {
 
     #[must_use]
     pub fn retrieval_available(&self) -> bool {
-        self.persisted_bytes > 0
-            && self.retrieval_policy != ToolArtifactRetrievalPolicyV1::Unavailable
+        self.retrieval_policy != ToolArtifactRetrievalPolicyV1::Unavailable
     }
 }
 
@@ -2661,7 +2660,7 @@ impl ToolArtifactStore {
         source_store: &ToolArtifactStore,
         source: &ToolArtifactDescriptorV1,
     ) -> Result<ToolArtifactDescriptorV1> {
-        source_store.validate_session_descriptor(source)?;
+        source_store.validate_retrievable_session_descriptor(source)?;
         if source_store.session_scope_id_hash == self.session_scope_id_hash {
             bail!("tool artifact fork requires a distinct destination session scope");
         }
@@ -2782,7 +2781,7 @@ impl ToolArtifactStore {
     }
 
     pub fn read_all(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<Vec<u8>> {
-        self.validate_session_descriptor(descriptor)?;
+        self.validate_retrievable_session_descriptor(descriptor)?;
         let read_lock = self.open_ref_lock(&descriptor.artifact_ref)?;
         read_lock
             .try_lock_shared()
@@ -2829,7 +2828,7 @@ impl ToolArtifactStore {
         })?;
         let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&bytes)
             .context("failed to decode tool artifact ref manifest")?;
-        self.validate_session_descriptor(&descriptor)?;
+        self.validate_retrievable_session_descriptor(&descriptor)?;
         if descriptor.artifact_ref != *artifact_ref {
             bail!("tool artifact ref manifest identity mismatch");
         }
@@ -2873,7 +2872,7 @@ impl ToolArtifactStore {
                 fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
             let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&bytes)
                 .context("failed to decode tool artifact inventory manifest")?;
-            self.validate_session_descriptor(&descriptor)?;
+            self.validate_session_descriptor_identity(&descriptor)?;
             let expected_path = self.ref_path(&descriptor.artifact_ref)?;
             if expected_path != path {
                 bail!("tool artifact inventory manifest path does not match its identity");
@@ -3282,11 +3281,22 @@ impl ToolArtifactStore {
         }
     }
 
-    fn validate_session_descriptor(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()> {
+    fn validate_session_descriptor_identity(
+        &self,
+        descriptor: &ToolArtifactDescriptorV1,
+    ) -> Result<()> {
         descriptor.validate()?;
         if descriptor.session_scope_id_hash != self.session_scope_id_hash {
             bail!("tool artifact belongs to a different session scope");
         }
+        Ok(())
+    }
+
+    fn validate_retrievable_session_descriptor(
+        &self,
+        descriptor: &ToolArtifactDescriptorV1,
+    ) -> Result<()> {
+        self.validate_session_descriptor_identity(descriptor)?;
         if !descriptor.retrieval_available() {
             bail!("tool artifact is unavailable for retrieval");
         }

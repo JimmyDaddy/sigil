@@ -4,20 +4,23 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentFinalAnswerRef, AgentRole, AgentThreadId, ControlEntry, ConversationInputQueueId, Session,
-    SessionLogEntry, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    AgentFinalAnswerRef, AgentRole, AgentThreadId, ControlEntry, ConversationInputQueueId,
+    ConversationTurnRef, ModelMessage, Session, SessionLogEntry, SessionRef,
+    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_GUIDANCE_APPLY_TOOL_NAME,
     TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PLAN_UPDATE_TOOL_NAME,
     TaskApprovalRouteBinding, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskFinalAnswerCommittedEntry, TaskGraphProjection,
-    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode,
-    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskReadyDeferredReason,
-    TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
+    TaskChildSessionStatus, TaskContinuationSelectedEntry, TaskFinalAnswerCommittedEntry,
+    TaskGraphProjection, TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId,
+    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
+    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanEntry,
+    TaskPlanStatus, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
+    TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry,
     TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
     TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall,
-    child_session_ref, normalize_task_agent_display_name, stale_task_approval_routes_for_restore,
+    child_session_ref, normalize_task_agent_display_name,
+    project_conversation_prompt_for_persistence, stale_task_approval_routes_for_restore,
     task_final_message_id, task_guidance_applied_entry, task_guidance_apply_tool_spec,
     task_participant_attempt_id, task_participant_session_ref, task_plan_update_entry,
     task_plan_update_result_content, task_plan_update_tool_spec, validate_task_plan_graph_steps,
@@ -2247,5 +2250,208 @@ fn task_projection_rejects_non_deterministic_parent_final_message_id() -> Result
 
     assert!(task.final_answer.is_none());
     assert_eq!(task.participant_conflicts, 1);
+    Ok(())
+}
+
+fn resumable_task_entries() -> Result<Vec<SessionLogEntry>> {
+    Ok(vec![
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![read_step("step_1", Vec::new())?],
+            reason: Some("accepted v1".to_owned()),
+        })),
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Paused)?),
+    ])
+}
+
+fn continuation_selection(
+    session_scope_id: &str,
+    message_id: &str,
+    plan_version: u32,
+) -> Result<TaskContinuationSelectedEntry> {
+    let guidance = "continue with the revised requirement";
+    let prompt = project_conversation_prompt_for_persistence(guidance);
+    Ok(TaskContinuationSelectedEntry {
+        task_id: task_id("task_1")?,
+        source_turn: ConversationTurnRef::new(session_scope_id, message_id, "continuation-run-1")?,
+        plan_version: Some(plan_version),
+        task_status: TaskRunStatus::Paused,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        route_contract_fingerprint: "sha256:continuation-route".to_owned(),
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: prompt.exact_prompt_required,
+        guidance: prompt.safe_prompt,
+        selected_at_ms: 42,
+    })
+}
+
+#[test]
+fn unrelated_chat_clears_task_focus_and_late_task_activity_does_not_reclaim_it() -> Result<()> {
+    let mut entries = resumable_task_entries()?;
+    let initial = TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        initial.current_task().map(|task| task.task_id.as_str()),
+        Some("task_1")
+    );
+
+    entries.push(SessionLogEntry::User(ModelMessage::user(
+        "explain an unrelated module",
+    )));
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+        TaskStepEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 1,
+            step_id: step_id("step_1")?,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Interrupted,
+            title: Some("late task update".to_owned()),
+            summary: None,
+            reason: Some("arrived after chat admission".to_owned()),
+        },
+    )));
+    entries.push(SessionLogEntry::Control(run_entry(TaskRunStatus::Paused)?));
+
+    let projection = TaskStateProjection::from_entries(&entries);
+    assert!(projection.current_task().is_none());
+    assert_eq!(
+        projection.latest_task().map(|task| task.task_id.as_str()),
+        Some("task_1")
+    );
+    assert_eq!(projection.focus_conflicts, 0);
+    Ok(())
+}
+
+#[test]
+fn explicit_plan_draft_clears_task_focus_and_late_task_activity_does_not_reclaim_it() -> Result<()>
+{
+    let mut entries = resumable_task_entries()?;
+    entries.push(SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+        crate::PlanDraftCreatedEntry {
+            plan_id: crate::PlanId::new("plan-explicit-after-task")?,
+            schema_version: 2,
+            source: crate::PlanSourceRef::default(),
+            plan_hash: "sha256:explicit-plan-after-task".to_owned(),
+            summary: "Review an unrelated implementation plan".to_owned(),
+            inline_text: None,
+            steps: Vec::new(),
+            intent_proposal: None,
+            target_paths: Vec::new(),
+            suggested_checks: Vec::new(),
+            risk: None,
+            notes: Vec::new(),
+            workspace_snapshot_id: None,
+            created_at_ms: 42,
+        },
+    )));
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+        TaskStepEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 1,
+            step_id: step_id("step_1")?,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Interrupted,
+            title: Some("late task update".to_owned()),
+            summary: None,
+            reason: Some("arrived after explicit plan draft".to_owned()),
+        },
+    )));
+
+    let projection = TaskStateProjection::from_entries(&entries);
+    assert!(projection.current_task().is_none());
+    assert_eq!(
+        projection.latest_task().map(|task| task.task_id.as_str()),
+        Some("task_1")
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_continuation_selection_restores_focus_but_stale_plan_fails_closed() -> Result<()> {
+    let mut entries = resumable_task_entries()?;
+    let mut user = ModelMessage::user("continue with the revised requirement");
+    user.id = "continuation-message-1".to_owned();
+    entries.push(SessionLogEntry::User(user));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskContinuationSelected(continuation_selection(
+            "session-1",
+            "continuation-message-1",
+            1,
+        )?),
+    ));
+
+    let selected = TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        selected.current_task().map(|task| task.task_id.as_str()),
+        Some("task_1")
+    );
+    assert_eq!(selected.focus_conflicts, 0);
+
+    entries.push(SessionLogEntry::User(ModelMessage::user(
+        "another unrelated request",
+    )));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskContinuationSelected(continuation_selection(
+            "session-1",
+            "continuation-message-1",
+            2,
+        )?),
+    ));
+    let stale = TaskStateProjection::from_entries(&entries);
+    assert!(stale.current_task().is_none());
+    assert_eq!(stale.focus_conflicts, 1);
+    Ok(())
+}
+
+#[test]
+fn explicit_run_target_selection_restores_focus_but_stale_plan_fails_closed() -> Result<()> {
+    let mut entries = resumable_task_entries()?;
+    entries.push(SessionLogEntry::User(ModelMessage::user(
+        "continue the exact paused task",
+    )));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {
+            task_id: task_id("task_1")?,
+            run_scope_id: "explicit-run-scope-1".to_owned(),
+        }),
+    ));
+    let selected = TaskRunTargetSelectedEntry::new(
+        task_id("task_1")?,
+        "explicit-run-scope-1",
+        TaskRunStatus::Paused,
+        Some(1),
+        Some(TaskPlanStatus::Accepted),
+    );
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskRunTargetSelected(selected.clone()),
+    ));
+
+    let focused = TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        focused.current_task().map(|task| task.task_id.as_str()),
+        Some("task_1")
+    );
+    assert_eq!(focused.focus_conflicts, 0);
+
+    entries.push(SessionLogEntry::User(ModelMessage::user(
+        "switch back to unrelated chat",
+    )));
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskPlan(
+        TaskPlanEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 2,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![read_step("step_2", Vec::new())?],
+            reason: Some("accepted v2".to_owned()),
+        },
+    )));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskRunTargetSelected(selected),
+    ));
+    let stale = TaskStateProjection::from_entries(&entries);
+    assert!(stale.current_task().is_none());
+    assert_eq!(stale.focus_conflicts, 1);
     Ok(())
 }

@@ -37,6 +37,8 @@ pub const MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS: u64 = 120_000;
 const TASK_PARTICIPANT_ATTEMPT_ID_DOMAIN: &str = "sigil-task-participant-attempt-v1";
 const TASK_PARTICIPANT_CHILD_ID_DOMAIN: &str = "sigil-task-participant-child-v1";
 const TASK_FINAL_MESSAGE_ID_DOMAIN: &str = "sigil-task-final-message-v1";
+const TASK_RUN_TARGET_SELECTION_DOMAIN: &str = "sigil-task-run-target-selection-v1";
+const TASK_GUIDANCE_MATERIALIZATION_DOMAIN: &str = "sigil-task-guidance-materialization-v1";
 
 /// Stable logical-run correlation for the planner attempt owned by one durable task.
 #[must_use]
@@ -707,6 +709,133 @@ impl TaskGuidanceAppliedEntry {
     }
 }
 
+/// Recovery-critical safe materialization of one accepted guidance supplement.
+///
+/// This record is appended atomically with the parent `TaskGuidanceApplied` decision after the
+/// planner attempt is durably terminal. Non-sensitive guidance can therefore resume without
+/// rerunning the planner. Sensitive guidance records only its safe projection and is explicitly
+/// stale after process loss because the exact prompt is intentionally not persisted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskGuidanceMaterializedEntry {
+    pub materialization_id: String,
+    pub queue_id: crate::ConversationInputQueueId,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub dispatch_run_id: String,
+    pub prompt_hash: String,
+    pub exact_prompt_required: bool,
+    pub guidance: String,
+    pub target_step_ids: Vec<TaskStepId>,
+}
+
+impl TaskGuidanceMaterializedEntry {
+    pub fn new(
+        applied: &TaskGuidanceAppliedEntry,
+        prompt_hash: String,
+        exact_prompt_required: bool,
+        guidance: String,
+    ) -> Result<Self> {
+        let materialization_id = task_guidance_materialization_id(
+            &applied.queue_id,
+            &applied.task_id,
+            applied.plan_version,
+            &applied.dispatch_run_id,
+        );
+        let entry = Self {
+            materialization_id,
+            queue_id: applied.queue_id.clone(),
+            task_id: applied.task_id.clone(),
+            plan_version: applied.plan_version,
+            dispatch_run_id: applied.dispatch_run_id.clone(),
+            prompt_hash,
+            exact_prompt_required,
+            guidance,
+            target_step_ids: applied.target_step_ids.clone(),
+        };
+        entry.validate_against(applied)?;
+        Ok(entry)
+    }
+
+    pub fn validate_shape(&self) -> Result<()> {
+        TaskId::new(self.task_id.as_str())?;
+        if self.plan_version == 0 || self.dispatch_run_id.trim().is_empty() {
+            bail!("task guidance materialization binding is incomplete");
+        }
+        if self.materialization_id
+            != task_guidance_materialization_id(
+                &self.queue_id,
+                &self.task_id,
+                self.plan_version,
+                &self.dispatch_run_id,
+            )
+        {
+            bail!("task guidance materialization identity does not match its binding");
+        }
+        if self.target_step_ids.is_empty() {
+            bail!("task guidance materialization has no target steps");
+        }
+        let mut targets = BTreeSet::new();
+        if self
+            .target_step_ids
+            .iter()
+            .any(|step_id| !targets.insert(step_id))
+        {
+            bail!("task guidance materialization repeats a target step");
+        }
+        let projected = crate::project_conversation_prompt_for_persistence(&self.guidance);
+        if projected.exact_prompt_required || projected.safe_prompt != self.guidance {
+            bail!("task guidance materialization is not a safe durable projection");
+        }
+        let safe_hash = projected
+            .prompt_hash
+            .strip_prefix("safe:")
+            .ok_or_else(|| anyhow!("task guidance materialization hash projection is invalid"))?;
+        let expected_prompt_hash = if self.exact_prompt_required {
+            format!(
+                "{}{}",
+                crate::CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX,
+                safe_hash
+            )
+        } else {
+            format!("safe:{safe_hash}")
+        };
+        if self.prompt_hash != expected_prompt_hash {
+            bail!("task guidance materialization does not match its prompt hash");
+        }
+        Ok(())
+    }
+
+    pub fn validate_against(&self, applied: &TaskGuidanceAppliedEntry) -> Result<()> {
+        self.validate_shape()?;
+        if self.queue_id != applied.queue_id
+            || self.task_id != applied.task_id
+            || self.plan_version != applied.plan_version
+            || self.dispatch_run_id != applied.dispatch_run_id
+            || self.target_step_ids != applied.target_step_ids
+        {
+            bail!("task guidance materialization does not match its applied decision");
+        }
+        Ok(())
+    }
+}
+
+fn task_guidance_materialization_id(
+    queue_id: &crate::ConversationInputQueueId,
+    task_id: &TaskId,
+    plan_version: u32,
+    dispatch_run_id: &str,
+) -> String {
+    crate::stable_event_uuid(
+        TASK_GUIDANCE_MATERIALIZATION_DOMAIN,
+        &format!(
+            "{}\n{}\n{plan_version}\n{dispatch_run_id}",
+            queue_id.as_str(),
+            task_id.as_str()
+        ),
+    )
+}
+
 /// Model-visible tool for guidance that does not require a plan or scope change.
 pub fn task_guidance_apply_tool_spec() -> ToolSpec {
     ToolSpec {
@@ -1221,6 +1350,85 @@ pub struct TaskRunCancellationScopeBoundEntry {
     pub run_scope_id: String,
 }
 
+/// Recovery-critical exact Task focus selected by one explicit continuation invocation.
+///
+/// Ordinary Task activity never changes conversation focus. This receipt binds the explicit
+/// continuation to the root cancellation scope plus the exact pre-dispatch Task/plan facts, so a
+/// replay can restore focus without treating a late `TaskRun(Running)` as user intent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskRunTargetSelectedEntry {
+    pub selection_id: String,
+    pub task_id: TaskId,
+    pub run_scope_id: String,
+    pub task_status: TaskRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_status: Option<TaskPlanStatus>,
+}
+
+impl TaskRunTargetSelectedEntry {
+    #[must_use]
+    pub fn new(
+        task_id: TaskId,
+        run_scope_id: impl Into<String>,
+        task_status: TaskRunStatus,
+        plan_version: Option<u32>,
+        plan_status: Option<TaskPlanStatus>,
+    ) -> Self {
+        let run_scope_id = run_scope_id.into();
+        let selection_id = task_run_target_selection_id(&task_id, &run_scope_id);
+        Self {
+            selection_id,
+            task_id,
+            run_scope_id,
+            task_status,
+            plan_version,
+            plan_status,
+        }
+    }
+
+    /// Validates the stable invocation identity and exact pre-dispatch Task facts.
+    pub fn validate_shape(&self) -> Result<()> {
+        TaskId::new(self.task_id.as_str())?;
+        if self.run_scope_id.is_empty()
+            || self.run_scope_id.len() > 256
+            || self.run_scope_id.chars().any(char::is_whitespace)
+        {
+            bail!("task run target selection has an invalid run scope");
+        }
+        if self.selection_id != task_run_target_selection_id(&self.task_id, &self.run_scope_id) {
+            bail!("task run target selection identity does not match its binding");
+        }
+        if !matches!(
+            self.task_status,
+            TaskRunStatus::Started
+                | TaskRunStatus::Running
+                | TaskRunStatus::Paused
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Interrupted
+        ) {
+            bail!("task run target selection is not resumable");
+        }
+        if self.plan_version.is_some_and(|version| version == 0) {
+            bail!("task run target selection plan version must be non-zero");
+        }
+        if self.plan_version.is_none() != self.plan_status.is_none() {
+            bail!("task run target selection plan version and status must be present together");
+        }
+        Ok(())
+    }
+}
+
+#[must_use]
+fn task_run_target_selection_id(task_id: &TaskId, run_scope_id: &str) -> String {
+    crate::stable_event_uuid(
+        TASK_RUN_TARGET_SELECTION_DOMAIN,
+        &format!("{}\n{run_scope_id}", task_id.as_str()),
+    )
+}
+
 /// Exact user action that pauses one accepted task-plan incarnation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1674,7 +1882,13 @@ pub struct TaskSubagentElicitationRouteEntry {
 pub struct TaskStateProjection {
     pub tasks: BTreeMap<TaskId, TaskRunProjection>,
     pub latest_task_id: Option<TaskId>,
+    /// Task owned by the latest durable conversation/run focus, if that focus is a Task.
+    pub current_task_id: Option<TaskId>,
     pub task_replay_order: Vec<TaskId>,
+    /// Exact continuation-focus receipts that conflicted with the task facts visible at replay.
+    pub focus_conflicts: usize,
+    focus_explicitly_selected: bool,
+    task_run_scopes: BTreeMap<TaskId, String>,
 }
 
 impl TaskStateProjection {
@@ -1682,16 +1896,28 @@ impl TaskStateProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            let SessionLogEntry::Control(control) = entry else {
-                continue;
-            };
-            projection.apply_control_entry(control);
+            projection.apply_session_entry(entry);
         }
         projection
     }
 
+    pub(crate) fn apply_session_entry(&mut self, entry: &SessionLogEntry) {
+        match entry {
+            SessionLogEntry::User(_) => self.clear_current_task(),
+            SessionLogEntry::Control(control) => self.apply_control_entry(control),
+            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResultV3(_) => {}
+        }
+    }
+
     pub fn latest_task(&self) -> Option<&TaskRunProjection> {
         self.latest_task_id
+            .as_ref()
+            .and_then(|task_id| self.tasks.get(task_id))
+    }
+
+    /// Returns the Task selected by the latest durable run focus.
+    pub fn current_task(&self) -> Option<&TaskRunProjection> {
+        self.current_task_id
             .as_ref()
             .and_then(|task_id| self.tasks.get(task_id))
     }
@@ -1713,6 +1939,44 @@ impl TaskStateProjection {
 
     pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
         match control {
+            ControlEntry::ConversationInputPromoted(_) => self.clear_current_task(),
+            ControlEntry::PlanDraftCreated(_) => self.clear_current_task(),
+            ControlEntry::ConversationRouteDecisionRecorded(entry)
+                if matches!(
+                    entry.route,
+                    crate::ConversationRoute::Chat | crate::ConversationRoute::PlanReview
+                ) =>
+            {
+                self.clear_current_task();
+            }
+            ControlEntry::PlanReviewAttempt(entry)
+                if entry.status == crate::PlanReviewAttemptStatus::Started =>
+            {
+                self.clear_current_task();
+            }
+            ControlEntry::TaskHandoffResolved(entry)
+                if entry.decision == crate::TaskHandoffDecision::Accepted =>
+            {
+                if let Some(task_id) = entry.task_id.as_ref() {
+                    self.select_current_task(task_id);
+                }
+            }
+            ControlEntry::TaskCreatedFromPlan(entry) if entry.stale_reason.is_none() => {
+                self.select_current_task(&entry.task_id);
+            }
+            ControlEntry::TaskContinuationSelected(entry) => {
+                self.apply_continuation_focus(entry);
+            }
+            ControlEntry::TaskGuidancePromoted(entry) => {
+                self.apply_guidance_focus(entry);
+            }
+            ControlEntry::TaskRunCancellationScopeBound(entry) => {
+                self.task_run_scopes
+                    .insert(entry.task_id.clone(), entry.run_scope_id.clone());
+            }
+            ControlEntry::TaskRunTargetSelected(entry) => {
+                self.apply_run_target_focus(entry);
+            }
             ControlEntry::TaskRun(entry) => self.apply_run(entry),
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),
             ControlEntry::TaskStep(entry) => self.apply_step(entry),
@@ -1734,8 +1998,81 @@ impl TaskStateProjection {
         }
     }
 
+    fn apply_continuation_focus(&mut self, entry: &crate::TaskContinuationSelectedEntry) {
+        if entry.validate_shape().is_err() {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        }
+        let Some(task) = self.tasks.get(&entry.task_id) else {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        };
+        let plan_status = entry
+            .plan_version
+            .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
+        if task.status != entry.task_status
+            || task.latest_plan_version != entry.plan_version
+            || plan_status != entry.plan_status
+        {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        }
+        self.select_current_task(&entry.task_id);
+    }
+
+    fn apply_guidance_focus(&mut self, entry: &crate::TaskGuidancePromotedEntry) {
+        if entry.validate_shape().is_err() {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        }
+        let Some(task) = self.tasks.get(&entry.task_id) else {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        };
+        if matches!(
+            task.status,
+            TaskRunStatus::Completed | TaskRunStatus::Cancelled
+        ) || task
+            .plans
+            .get(&entry.plan_version)
+            .is_none_or(|plan| plan.status != TaskPlanStatus::Accepted)
+        {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        }
+        self.select_current_task(&entry.task_id);
+    }
+
+    fn apply_run_target_focus(&mut self, entry: &TaskRunTargetSelectedEntry) {
+        if entry.validate_shape().is_err()
+            || self.task_run_scopes.get(&entry.task_id) != Some(&entry.run_scope_id)
+        {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        }
+        let Some(task) = self.tasks.get(&entry.task_id) else {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        };
+        let plan_status = entry
+            .plan_version
+            .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
+        if task.status != entry.task_status
+            || task.latest_plan_version != entry.plan_version
+            || plan_status != entry.plan_status
+        {
+            self.focus_conflicts = self.focus_conflicts.saturating_add(1);
+            return;
+        }
+        self.select_current_task(&entry.task_id);
+    }
+
     fn apply_run(&mut self, entry: &TaskRunEntry) {
-        self.record_task_replay(&entry.task_id);
+        let task_is_new = !self.tasks.contains_key(&entry.task_id);
+        self.record_task_replay(
+            &entry.task_id,
+            task_is_new && entry.status == TaskRunStatus::Started,
+        );
         let task = self
             .tasks
             .entry(entry.task_id.clone())
@@ -1755,7 +2092,7 @@ impl TaskStateProjection {
     }
 
     fn apply_plan(&mut self, entry: &TaskPlanEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         if entry.status != TaskPlanStatus::Superseded {
             task.latest_plan_version = Some(entry.plan_version);
@@ -1796,7 +2133,7 @@ impl TaskStateProjection {
     }
 
     fn apply_step(&mut self, entry: &TaskStepEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         let step = task
             .steps
@@ -1817,7 +2154,7 @@ impl TaskStateProjection {
     }
 
     fn apply_participant_attempt(&mut self, entry: &TaskParticipantAttemptEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         if entry.validate_shape().is_err() {
             task.participant_conflicts = task.participant_conflicts.saturating_add(1);
@@ -1856,7 +2193,7 @@ impl TaskStateProjection {
     }
 
     fn apply_participant_retry_scheduled(&mut self, entry: &TaskParticipantRetryScheduledEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         let failed = task.participant_attempts.get(&entry.failed_attempt_id);
         if entry.validate_shape().is_err()
@@ -1892,7 +2229,7 @@ impl TaskStateProjection {
     }
 
     fn apply_participant_result(&mut self, entry: &TaskParticipantResultEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         let attempt = task.participant_attempts.get(&entry.attempt_id);
         if entry.validate_shape().is_err()
@@ -1924,7 +2261,7 @@ impl TaskStateProjection {
     }
 
     fn apply_final_answer(&mut self, entry: &TaskFinalAnswerCommittedEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         if task
             .participant_attempts
@@ -1954,7 +2291,7 @@ impl TaskStateProjection {
     }
 
     fn apply_child_session(&mut self, entry: &TaskChildSessionEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         if entry.status == TaskChildSessionStatus::Unavailable {
             task.child_unavailable = true;
@@ -1970,7 +2307,7 @@ impl TaskStateProjection {
     }
 
     fn apply_child_display_name(&mut self, entry: &TaskChildSessionDisplayNameEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         if let Ok(display_name) = normalize_task_agent_display_name(&entry.display_name) {
             task.child_display_names.insert(
@@ -1985,7 +2322,7 @@ impl TaskStateProjection {
     }
 
     fn apply_approval_route(&mut self, entry: &TaskSubagentApprovalRouteEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         let child_matches = task.child_sessions.values().any(|child| {
             child.plan_version == entry.plan_version
@@ -2012,7 +2349,7 @@ impl TaskStateProjection {
     }
 
     fn apply_elicitation_route(&mut self, entry: &TaskSubagentElicitationRouteEntry) {
-        self.record_task_replay(&entry.task_id);
+        self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
         let child_matches = task.child_sessions.values().any(|child| {
             child.plan_version == entry.plan_version
@@ -2032,8 +2369,24 @@ impl TaskStateProjection {
             .or_insert_with(|| TaskRunProjection::placeholder(task_id.clone()))
     }
 
-    fn record_task_replay(&mut self, task_id: &TaskId) {
+    fn clear_current_task(&mut self) {
+        self.current_task_id = None;
+        self.focus_explicitly_selected = true;
+    }
+
+    fn select_current_task(&mut self, task_id: &TaskId) {
+        self.current_task_id = Some(task_id.clone());
+        self.focus_explicitly_selected = true;
+    }
+
+    fn record_task_replay(&mut self, task_id: &TaskId, admit_new_task: bool) {
         self.latest_task_id = Some(task_id.clone());
+        if !self.focus_explicitly_selected
+            || admit_new_task
+            || self.current_task_id.as_ref() == Some(task_id)
+        {
+            self.current_task_id = Some(task_id.clone());
+        }
         self.task_replay_order.push(task_id.clone());
     }
 }

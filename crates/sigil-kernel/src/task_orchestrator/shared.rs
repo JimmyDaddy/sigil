@@ -20,7 +20,10 @@ pub(super) fn append_task_controls<H>(
 where
     H: EventHandler + Send,
 {
-    session.append_durable_events_with_controls(Vec::new(), controls.clone())?;
+    // A multi-control task transition is one recovery contract. `append_controls` uses the
+    // writer's crash-safe bundle intent, whereas the mixed direct-event API intentionally does
+    // not. Never weaken an all-control transition by routing it through the mixed API.
+    session.append_controls(controls.clone())?;
     for control in controls {
         handler.handle(RunEvent::Control(control))?;
     }

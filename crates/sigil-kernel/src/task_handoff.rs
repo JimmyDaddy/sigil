@@ -5,11 +5,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    ControlEntry, SessionLogEntry, SessionRef, TaskId, ToolAccess, ToolCall, ToolCategory,
-    ToolPreviewCapability, ToolSpec,
+    AutomaticRouteCapability, ControlEntry, SecretString, SessionLogEntry, SessionRef, TaskId,
+    TaskPlanStatus, TaskRunStatus, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability,
+    ToolSpec,
 };
 
 pub const REQUEST_TASK_PLANNING_TOOL_NAME: &str = "request_task_planning";
+pub const CONTINUE_EXISTING_TASK_TOOL_NAME: &str = "continue_existing_task";
 pub const CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME: &str = "continue_without_task_planning";
 pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
 
@@ -155,6 +157,145 @@ pub struct TaskPlanningHandoffBinding {
     pub decided_at_ms: u64,
 }
 
+/// Host-frozen identity of the one current durable Task that a conversation turn may continue.
+///
+/// The model never selects a task id or a plan version. The host derives this binding before the
+/// routing request is assembled, and both the kernel and the adapter revalidate it before Task
+/// execution begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskContinuationHandoffBinding {
+    pub task_id: TaskId,
+    pub source_turn: ConversationTurnRef,
+    pub plan_version: Option<u32>,
+    pub task_status: TaskRunStatus,
+    pub plan_status: Option<TaskPlanStatus>,
+    pub effective_capability: AutomaticRouteCapability,
+    pub policy_snapshot_hash: String,
+    pub route_contract_fingerprint: String,
+    pub decided_at_ms: u64,
+    /// Exact source prompt retained in process memory only for planner guidance review.
+    pub exact_guidance: SecretString,
+    pub prompt_hash: String,
+    pub exact_prompt_required: bool,
+    pub safe_guidance: String,
+}
+
+/// Recovery-critical receipt selecting one exact existing Task as the current run target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskContinuationSelectedEntry {
+    pub task_id: TaskId,
+    pub source_turn: ConversationTurnRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_version: Option<u32>,
+    pub task_status: TaskRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_status: Option<TaskPlanStatus>,
+    pub route_contract_fingerprint: String,
+    pub prompt_hash: String,
+    pub exact_prompt_required: bool,
+    pub guidance: String,
+    pub selected_at_ms: u64,
+}
+
+impl TaskContinuationSelectedEntry {
+    /// Validates the secret-free continuation receipt before append or replay.
+    ///
+    /// Exact prompt material is intentionally unavailable here. For sensitive prompts the
+    /// receipt therefore proves only the hash of the safe durable projection; the adapter must
+    /// still supply and revalidate the process-local exact text before execution.
+    pub fn validate_shape(&self) -> Result<()> {
+        TaskId::new(self.task_id.as_str())?;
+        ConversationTurnRef::new(
+            self.source_turn.session_scope_id.clone(),
+            self.source_turn.message_id.clone(),
+            self.source_turn.logical_run_id.clone(),
+        )?;
+        if self.plan_version.is_some_and(|version| version == 0) {
+            bail!("task continuation plan version must be non-zero");
+        }
+        if !matches!(
+            self.task_status,
+            TaskRunStatus::Started
+                | TaskRunStatus::Paused
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Interrupted
+        ) {
+            bail!("task continuation status is not resumable");
+        }
+        if self.plan_version.is_none() != self.plan_status.is_none() {
+            bail!("task continuation plan version and status must be present together");
+        }
+        if self
+            .plan_status
+            .is_some_and(|status| status != TaskPlanStatus::Accepted)
+        {
+            bail!("task continuation plan must be accepted");
+        }
+        if self.route_contract_fingerprint.trim().is_empty() {
+            bail!("task continuation route contract fingerprint is empty");
+        }
+        let projected = crate::project_conversation_prompt_for_persistence(&self.guidance);
+        if projected.exact_prompt_required || projected.safe_prompt != self.guidance {
+            bail!("task continuation guidance projection is not safe");
+        }
+        let safe_hash = projected
+            .prompt_hash
+            .strip_prefix("safe:")
+            .ok_or_else(|| anyhow!("task continuation guidance hash projection is invalid"))?;
+        let expected_prompt_hash = if self.exact_prompt_required {
+            format!(
+                "{}{}",
+                crate::CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX,
+                safe_hash
+            )
+        } else {
+            format!("safe:{safe_hash}")
+        };
+        if self.prompt_hash != expected_prompt_hash {
+            bail!("task continuation guidance does not match its prompt hash");
+        }
+        if self.selected_at_ms == 0 {
+            bail!("task continuation selection timestamp must be non-zero");
+        }
+        Ok(())
+    }
+
+    /// Validates that the receipt belongs to the durable session stream.
+    pub fn validate_for_session(&self, session_id: &str) -> Result<()> {
+        self.validate_shape()?;
+        if self.source_turn.session_scope_id != session_id {
+            bail!("task continuation source turn belongs to a different session");
+        }
+        Ok(())
+    }
+}
+
+/// Model-visible typed decision for continuing the host-selected current Task.
+#[must_use]
+pub fn continue_existing_task_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
+        description: "Continue the exact current resumable durable Task selected by the host when the user's request semantically resumes, finishes, adjusts, or follows up on that Task. The host owns the task id, current status, plan version, permissions, and execution authority; do not use this for an unrelated request or to create a new Task."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "enum": ["continue_current_task"]
+                }
+            },
+            "required": ["reason"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
 /// Model-visible schema for the internal conversation-to-task handoff tool.
 #[must_use]
 pub fn request_task_planning_tool_spec() -> ToolSpec {
@@ -259,6 +400,24 @@ pub fn validate_continue_without_task_planning_call(call: &ToolCall) -> Result<(
     Ok(())
 }
 
+/// Validates the model-owned decision to continue the host-frozen current Task.
+///
+/// # Errors
+///
+/// Returns an error when the call uses another tool, includes unknown fields, or carries an
+/// unsupported reason. Task identity is deliberately absent from model arguments.
+pub fn validate_continue_existing_task_call(call: &ToolCall) -> Result<()> {
+    if call.name != CONTINUE_EXISTING_TASK_TOOL_NAME {
+        bail!("unexpected internal task continuation tool {}", call.name);
+    }
+    let args: RawContinueExistingTaskArgs = serde_json::from_str(&call.args_json)
+        .map_err(|error| anyhow!("invalid task continuation routing arguments: {error}"))?;
+    if args.reason != ExistingTaskContinuationReason::ContinueCurrentTask {
+        bail!("task continuation routing reason is unsupported");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 struct RawTaskPlanningArgs {
@@ -271,10 +430,22 @@ struct RawContinueWithoutTaskPlanningArgs {
     reason: DirectConversationReason,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct RawContinueExistingTaskArgs {
+    reason: ExistingTaskContinuationReason,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum DirectConversationReason {
     DoesNotMeetTaskPlanningCriteria,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ExistingTaskContinuationReason {
+    ContinueCurrentTask,
 }
 
 /// Latest durable state for one handoff identity.

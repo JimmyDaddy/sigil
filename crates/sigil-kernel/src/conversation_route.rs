@@ -634,6 +634,8 @@ pub fn conversation_route_routing_contract_material() -> &'static str {
 
 Classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned plans, tasks, or commits. Judge the structure of the requested outcome, not its estimated effort or the number of files that may need to be read. Call exactly one of the routing tools advertised in this request and then stop.
 
+When remember_user_preference or remember_project_fact is also advertised and the same user turn explicitly intends a stable preference or project convention to persist beyond this session, call the appropriate remember tool in the same response in addition to the one routing decision. Memory intent is semantic: do not infer it merely from a word or from an ordinary instruction. The remember call still requires host preview and approval, and it must not replace the routing decision.
+
 Call request_plan_review when the user should see and approve a plan before anything executes:
 - the user explicitly wants a plan, design, RFC, impact analysis, or execution boundary first;
 - the goal contains significant architectural trade-offs, multiple viable directions that materially change the result, uncertain scope, high-impact effects, or migration strategy that must be confirmed;
@@ -647,11 +649,16 @@ Call request_task_planning (when available) when the goal is clear and directly 
 - a user request to finish, land, or deliver a set of existing workspace changes in reviewed batches, even when the words plan, task, or commit do not appear;
 - high-risk execution that benefits from a durable reviewed plan but does not require a pre-execution direction choice.
 
+Call continue_existing_task (when available) only when the user is semantically resuming,
+finishing, correcting, or following up on the exact current durable Task selected by the host.
+The tool has no task-id argument: never use it for an unrelated request or when a new Task or plan
+review is required.
+
 Call continue_without_task_planning for one bounded outcome: an explanation, one symbol lookup, one linear call-flow trace or summary of connected code, one narrow read-only query about a single concern, or a small single-file edit that does not meet any planning criterion. Reading multiple files as evidence for that one result is still ordinary.
 
 Multiple files alone do not require planning. A single bounded explanation, trace, or summary remains an ordinary conversation when every file read is only supporting evidence for that one result. Conversely, read-only work requires planning or review when the requested product contains separate component investigations, a comparison across those investigations, or a synthesis of independently useful results. A request that only analyzes how to batch or split work, without executing or committing, must go to plan review rather than a durable task. When the user explicitly refuses execution or asks for analysis only, never route to a durable task.
 
-Do not produce free text in this routing microturn. The host will start the plan review lifecycle, the durable planner, or an ordinary conversation turn after your typed decision."#
+Do not produce free text in this routing microturn. The host will execute any approved memory side effect, then start the plan review lifecycle, the durable planner, or an ordinary conversation turn after your typed decision."#
 }
 
 /// Stable host-owned transition contract after the model selects ordinary conversation.

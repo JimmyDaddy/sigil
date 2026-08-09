@@ -6,7 +6,7 @@ use crate::{MemoryConfig, PrefixSnapshot};
 
 use super::{
     apply_memory_report, inspect_memory_documents, materialize_memory, parse_memory_file,
-    resolve_import_path, stable_memory_message_id,
+    resolve_import_path, stable_memory_message_id, writable_memory_route_tool_specs,
 };
 
 #[test]
@@ -251,4 +251,29 @@ fn stable_memory_message_id_changes_with_path_or_content() {
     assert_ne!(original, changed_path);
     assert_ne!(original, changed_content);
     assert!(original.starts_with("memory:"));
+}
+
+#[test]
+fn writable_memory_route_specs_are_canonical_previewed_writes() {
+    let specs = writable_memory_route_tool_specs();
+    assert_eq!(specs.len(), 2);
+    assert_eq!(
+        specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            crate::REMEMBER_USER_PREFERENCE_TOOL_NAME,
+            crate::REMEMBER_PROJECT_FACT_TOOL_NAME,
+        ]
+    );
+    for spec in specs {
+        assert_eq!(spec.access, crate::ToolAccess::Write);
+        assert_eq!(spec.preview, crate::ToolPreviewCapability::Required);
+        assert_eq!(spec.network_effect, None);
+        assert_eq!(
+            spec.input_schema["properties"]["statement"]["maxLength"],
+            crate::MEMORY_STATEMENT_MAX_BYTES
+        );
+    }
 }

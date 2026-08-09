@@ -27,22 +27,24 @@ use crate::{
     ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent,
     SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
     SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME, TERMINAL_TASK_SCHEMA_VERSION,
-    TaskChildSessionStatus, TaskGuidancePromotedEntry, TaskId, TaskIsolationMode,
-    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryError,
-    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus,
-    TaskPlannerWorktreeAvailability, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest,
-    TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
-    ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceSnapshotId, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
-    WriteLeaseReleaseStatus, WriteLeaseScope, project_conversation_prompt_for_persistence,
-    stable_workspace_id, task_participant_attempt_id, task_participant_input_hash,
-    task_participant_session_ref, write_file_with_mutation,
+    TaskChildSessionStatus, TaskContinuationSelectedEntry, TaskGuidanceAppliedEntry,
+    TaskGuidanceApplyReason, TaskGuidanceMaterializedEntry, TaskGuidancePromotedEntry, TaskId,
+    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
+    TaskPlanEntry, TaskPlanStatus, TaskPlannerWorktreeAvailability, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
+    TaskVerificationRerunRequest, TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle,
+    TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceSnapshotId,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired,
+    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
+    project_conversation_prompt_for_persistence, stable_event_uuid, stable_workspace_id,
+    task_participant_attempt_id, task_participant_input_hash, task_participant_session_ref,
+    write_file_with_mutation,
 };
 
 use super::{
@@ -54,10 +56,11 @@ use super::{
     record_isolated_child_output, relevant_verification_receipts, rerun_task_verification_check,
     route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
     step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
-    subagent_step_prompt, task_participant_system_prompt_contract_material,
-    task_planner_prompt_contract_material, task_planner_system_prompt_contract_material,
-    task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
-    task_step_dependency_result_context, task_step_readiness,
+    subagent_step_prompt, task_guidance_review_settlement_controls,
+    task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
+    task_planner_system_prompt_contract_material, task_status_from_step_status,
+    task_step_auto_run_policy, task_step_default_policy, task_step_dependency_result_context,
+    task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -3627,6 +3630,750 @@ async fn guidance_review_replans_and_carries_completed_steps_forward() -> Result
 }
 
 #[tokio::test]
+async fn conversation_continuation_guidance_replans_v1_to_v2() -> Result<()> {
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let subagent_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = test_orchestrator(
+        boxed_agent(GuidanceReplanProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&executor_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&subagent_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, true)?;
+    let exact_guidance = "新增一个独立安全审查步骤";
+    let projected = project_conversation_prompt_for_persistence(exact_guidance);
+    let mut source = ModelMessage::user(exact_guidance);
+    source.id = "conversation_guidance_message_1".to_owned();
+    session.append_user_message(source)?;
+    let selection = TaskContinuationSelectedEntry {
+        task_id: TaskId::new("task_1")?,
+        plan_version: Some(1),
+        task_status: TaskRunStatus::Paused,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        source_turn: ConversationTurnRef::new(
+            session.session_scope_id(),
+            "conversation_guidance_message_1",
+            "conversation_guidance_run_1",
+        )?,
+        route_contract_fingerprint: "sha256:conversation-guidance-route".to_owned(),
+        prompt_hash: projected.prompt_hash,
+        exact_prompt_required: projected.exact_prompt_required,
+        guidance: projected.safe_prompt,
+        selected_at_ms: 1,
+    };
+    session.append_control(ControlEntry::TaskContinuationSelected(selection.clone()))?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run_with_conversation_guidance_review(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "inspect implementation".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            options(),
+            5,
+            exact_guidance.to_owned(),
+            selection,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.plan_version, 2);
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&TaskId::new("task_1")?)
+        .expect("continued task should remain projected");
+    assert_eq!(
+        task.plans.get(&1).map(|plan| plan.status),
+        Some(TaskPlanStatus::Superseded)
+    );
+    assert_eq!(
+        task.plans.get(&2).map(|plan| plan.status),
+        Some(TaskPlanStatus::Accepted)
+    );
+    assert_eq!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .len(),
+        1
+    );
+    assert_eq!(
+        subagent_requests
+            .lock()
+            .expect("subagent request lock should not be poisoned")
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn pending_guidance_review_rejects_a_second_typed_selection_after_reload() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp
+        .path()
+        .join("pending-guidance-selection-conflict.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, false)?;
+    let guidance = "prioritize the second pending step";
+    let projected = project_conversation_prompt_for_persistence(guidance);
+
+    for ordinal in 1..=2 {
+        let message_id = format!("pending-guidance-selection-message-{ordinal}");
+        let mut source = ModelMessage::user(guidance);
+        source.id = message_id.clone();
+        session.append_user_message(source)?;
+        session.append_control(ControlEntry::TaskContinuationSelected(
+            TaskContinuationSelectedEntry {
+                task_id: TaskId::new("task_1")?,
+                plan_version: Some(1),
+                task_status: TaskRunStatus::Paused,
+                plan_status: Some(TaskPlanStatus::Accepted),
+                source_turn: ConversationTurnRef::new(
+                    session.session_scope_id(),
+                    message_id,
+                    format!("pending-guidance-selection-run-{ordinal}"),
+                )?,
+                route_contract_fingerprint: format!("sha256:pending-guidance-selection-{ordinal}"),
+                prompt_hash: projected.prompt_hash.clone(),
+                exact_prompt_required: projected.exact_prompt_required,
+                guidance: projected.safe_prompt.clone(),
+                selected_at_ms: ordinal,
+            },
+        ))?;
+    }
+    drop(session);
+    let session =
+        Session::load_from_store("test", "model", JsonlSessionStore::new(&session_path)?)?;
+
+    let error =
+        crate::recoverable_task_guidance_review(&session, &TaskId::new("task_1")?, Some(guidance))
+            .expect_err("a second typed selection must not fork the pending planner review");
+
+    assert!(
+        error
+            .to_string()
+            .contains("multiple pending guidance-review authorities")
+    );
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(_))
+    )));
+    Ok(())
+}
+
+#[test]
+fn pending_selection_survives_controlled_uncertain_attempt_pause_after_reload() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("pending-selection-controlled-pause.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    seed_two_step_task(&mut session, TaskRunStatus::Started, false)?;
+    let task_id = TaskId::new("task_1")?;
+    let guidance = "prioritize the second pending step";
+    let projected = project_conversation_prompt_for_persistence(guidance);
+    let mut source = ModelMessage::user(guidance);
+    source.id = "pending-selection-controlled-pause-message".to_owned();
+    session.append_user_message(source)?;
+    let selection = TaskContinuationSelectedEntry {
+        task_id: task_id.clone(),
+        plan_version: Some(1),
+        task_status: TaskRunStatus::Started,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        source_turn: ConversationTurnRef::new(
+            session.session_scope_id(),
+            "pending-selection-controlled-pause-message",
+            "pending-selection-controlled-pause-run",
+        )?,
+        route_contract_fingerprint: "sha256:pending-selection-controlled-pause".to_owned(),
+        prompt_hash: projected.prompt_hash,
+        exact_prompt_required: projected.exact_prompt_required,
+        guidance: projected.safe_prompt,
+        selected_at_ms: 1,
+    };
+    session.append_control(ControlEntry::TaskContinuationSelected(selection))?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let mut attempt = TaskParticipantAttemptEntry {
+        child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+        attempt_id,
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Planner,
+        ordinal: 1,
+        plan_version: None,
+        step_id: None,
+        role: crate::AgentRole::Planner,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+    attempt.status = TaskParticipantAttemptStatus::Interrupted;
+    attempt.reason = Some("interrupted during crash recovery".to_owned());
+    session.append_controls(vec![
+        ControlEntry::TaskParticipantAttempt(attempt),
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "inspect implementation".to_owned(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: Some("explicit continuation required".to_owned()),
+        }),
+    ])?;
+    drop(session);
+    let session =
+        Session::load_from_store("test", "model", JsonlSessionStore::new(&session_path)?)?;
+
+    let review = crate::recoverable_task_guidance_review(&session, &task_id, None)?
+        .expect("controlled recovery pause must preserve the pending selection authority");
+    assert!(
+        crate::recoverable_task_guidance_review_retry_controls(&session, &review)?.is_empty(),
+        "startup already terminalized the uncertain attempt"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovered_guidance_decision_without_materialization_requires_reentry() -> Result<()> {
+    let orchestrator = test_orchestrator(
+        boxed_agent(GuidanceApplyProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("recovered-conversation-guidance.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, false)?;
+    let exact_guidance = "第二步请优先检查恢复边界";
+    let projected = project_conversation_prompt_for_persistence(exact_guidance);
+    let mut source = ModelMessage::user(exact_guidance);
+    source.id = "conversation_guidance_message_recovered".to_owned();
+    session.append_user_message(source)?;
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        "conversation_guidance_message_recovered",
+        "conversation_guidance_run_recovered",
+    )?;
+    let route_contract_fingerprint = "sha256:conversation-guidance-recovered".to_owned();
+    let selection = TaskContinuationSelectedEntry {
+        task_id: TaskId::new("task_1")?,
+        plan_version: Some(1),
+        task_status: TaskRunStatus::Paused,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        source_turn: source_turn.clone(),
+        route_contract_fingerprint: route_contract_fingerprint.clone(),
+        prompt_hash: projected.prompt_hash,
+        exact_prompt_required: projected.exact_prompt_required,
+        guidance: projected.safe_prompt,
+        selected_at_ms: 1,
+    };
+    session.append_control(ControlEntry::TaskContinuationSelected(selection.clone()))?;
+    let seed = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        source_turn.session_scope_id,
+        source_turn.message_id,
+        source_turn.logical_run_id,
+        selection.task_id.as_str(),
+        1,
+        route_contract_fingerprint,
+    );
+    session.append_control(ControlEntry::TaskGuidanceApplied(
+        TaskGuidanceAppliedEntry {
+            queue_id: ConversationInputQueueId::new(stable_event_uuid(
+                "sigil-task-continuation-guidance",
+                &seed,
+            ))?,
+            task_id: selection.task_id.clone(),
+            plan_version: 1,
+            dispatch_run_id: stable_event_uuid("sigil-task-continuation-dispatch", &seed),
+            reason: TaskGuidanceApplyReason::PrioritizesPendingStep,
+            target_step_ids: vec![TaskStepId::new("step_2")?],
+        },
+    ))?;
+    drop(session);
+    let mut session =
+        Session::load_from_store("test", "model", JsonlSessionStore::new(&session_path)?)?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = orchestrator
+        .continue_run_with_conversation_guidance_review(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "inspect implementation".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            options(),
+            4,
+            exact_guidance.to_owned(),
+            selection,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await
+        .expect_err("incomplete durable guidance must fail closed after recovery");
+    assert!(
+        error
+            .to_string()
+            .contains("no unique durable materialization")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn crashed_safe_guidance_settlement_recovers_into_plain_continue_once() -> Result<()> {
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = test_orchestrator(
+        boxed_agent(FailingProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&executor_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("safe-guidance-settlement-crash.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, false)?;
+
+    let task_id = TaskId::new("task_1")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let attempt = TaskParticipantAttemptEntry {
+        child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+        attempt_id,
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Planner,
+        ordinal: 1,
+        plan_version: None,
+        step_id: None,
+        role: crate::AgentRole::Planner,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+    let guidance = "第二步请优先检查恢复边界";
+    let projected = project_conversation_prompt_for_persistence(guidance);
+    let applied = TaskGuidanceAppliedEntry {
+        queue_id: ConversationInputQueueId::new("queue_safe_crash")?,
+        task_id: task_id.clone(),
+        plan_version: 1,
+        dispatch_run_id: "dispatch_safe_crash".to_owned(),
+        reason: TaskGuidanceApplyReason::PrioritizesPendingStep,
+        target_step_ids: vec![TaskStepId::new("step_2")?],
+    };
+    let materialized = TaskGuidanceMaterializedEntry::new(
+        &applied,
+        projected.prompt_hash,
+        projected.exact_prompt_required,
+        projected.safe_prompt,
+    )?;
+    let result = participant_result_entry(
+        &attempt,
+        "guidance applied",
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let settlement = task_guidance_review_settlement_controls(
+        Vec::new(),
+        &attempt,
+        result,
+        vec![
+            ControlEntry::TaskGuidanceApplied(applied.clone()),
+            ControlEntry::TaskGuidanceMaterialized(materialized.clone()),
+        ],
+    )?;
+
+    store.inject_writer_fault(crate::session::SessionWriterFault::PartialSecondRecord)?;
+    assert!(session.append_controls(settlement).is_err());
+    drop(session);
+
+    let mut session =
+        Session::load_from_store("test", "model", JsonlSessionStore::new(&session_path)?)?;
+    let materialized_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceMaterialized(recorded))
+                    if recorded == &materialized
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "redo recovery should restore the whole guidance settlement: {:?}",
+                session.entries()
+            )
+        });
+    assert!(matches!(
+        session.entries().get(materialized_index.wrapping_sub(1)),
+        Some(SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(recorded)))
+            if recorded == &applied
+    ));
+    assert!(matches!(
+        session.entries().get(materialized_index.wrapping_sub(2)),
+        Some(SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(recorded)))
+            if recorded.attempt_id == attempt.attempt_id
+                && recorded.status == TaskParticipantAttemptStatus::Completed
+    ));
+
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "inspect implementation".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    let requests = executor_requests
+        .lock()
+        .expect("executor request lock should not be poisoned");
+    assert_eq!(requests.len(), 2);
+    let first_prompt = requests[0]
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let second_prompt = requests[1]
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(first_prompt.contains("Step: step_1"));
+    assert!(!first_prompt.contains(guidance));
+    assert!(second_prompt.contains("Step: step_2"));
+    assert!(second_prompt.contains(guidance));
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(_))
+            ))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovered_exact_guidance_requires_matching_reentry_and_keeps_target_scope() -> Result<()> {
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = test_orchestrator(
+        boxed_agent(FailingProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&executor_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("exact-guidance-reentry.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, false)?;
+    let guidance = "第二步检查 https://example.com/private?token=raw-guidance-secret";
+    let projected = project_conversation_prompt_for_persistence(guidance);
+    assert!(projected.exact_prompt_required);
+    let applied = TaskGuidanceAppliedEntry {
+        queue_id: ConversationInputQueueId::new("queue_exact_reentry")?,
+        task_id: TaskId::new("task_1")?,
+        plan_version: 1,
+        dispatch_run_id: "dispatch_exact_reentry".to_owned(),
+        reason: TaskGuidanceApplyReason::AddsExecutionConstraint,
+        target_step_ids: vec![TaskStepId::new("step_2")?],
+    };
+    let materialized = TaskGuidanceMaterializedEntry::new(
+        &applied,
+        projected.prompt_hash,
+        projected.exact_prompt_required,
+        projected.safe_prompt,
+    )?;
+    session.append_controls(vec![
+        ControlEntry::TaskGuidanceApplied(applied),
+        ControlEntry::TaskGuidanceMaterialized(materialized),
+    ])?;
+    drop(session);
+    let mut session =
+        Session::load_from_store("test", "model", JsonlSessionStore::new(&session_path)?)?;
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect implementation".to_owned(),
+    };
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = orchestrator
+        .continue_run(
+            &mut session,
+            request.clone(),
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await
+        .expect_err("exact guidance must not be reconstructed from its safe projection");
+    assert!(error.to_string().contains("requires exact prompt material"));
+    assert!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .is_empty()
+    );
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            request,
+            options(),
+            options(),
+            options(),
+            Some(guidance.to_owned()),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    let requests = executor_requests
+        .lock()
+        .expect("executor request lock should not be poisoned");
+    assert_eq!(requests.len(), 2);
+    let prompts = requests
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>();
+    assert!(prompts[0].contains("Step: step_1"));
+    assert!(!prompts[0].contains(guidance));
+    assert!(prompts[1].contains("Step: step_2"));
+    assert!(prompts[1].contains(guidance));
+    Ok(())
+}
+
+#[test]
+fn crashed_guidance_replan_settlement_recovers_carried_steps_atomically() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("guidance-replan-settlement-crash.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, true)?;
+    let task_id = TaskId::new("task_1")?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let attempt = TaskParticipantAttemptEntry {
+        child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+        attempt_id,
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Planner,
+        ordinal: 1,
+        plan_version: None,
+        step_id: None,
+        role: crate::AgentRole::Planner,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+    let plan = TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 2,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            TaskStepSpec {
+                step_id: TaskStepId::new("step_1")?,
+                title: "already done".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: None,
+                isolation: None,
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("step_2")?,
+                title: "remaining".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: None,
+                isolation: None,
+            },
+        ],
+        reason: Some("accepted guidance replan".to_owned()),
+    };
+    let carried = TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 2,
+        step_id: TaskStepId::new("step_1")?,
+        role: crate::AgentRole::Executor,
+        status: TaskStepStatus::Completed,
+        title: Some("already done".to_owned()),
+        summary: Some("done".to_owned()),
+        reason: Some("carried from accepted plan v1".to_owned()),
+    };
+    let result = participant_result_entry(
+        &attempt,
+        "accepted guidance replan v2",
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let settlement = task_guidance_review_settlement_controls(
+        vec![
+            ControlEntry::TaskPlan(plan.clone()),
+            ControlEntry::TaskStep(carried.clone()),
+        ],
+        &attempt,
+        result,
+        Vec::new(),
+    )?;
+
+    store.inject_writer_fault(crate::session::SessionWriterFault::PartialSecondRecord)?;
+    assert!(session.append_controls(settlement).is_err());
+    drop(session);
+    let recovered =
+        Session::load_from_store("test", "model", JsonlSessionStore::new(&session_path)?)?;
+    let task = recovered
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("recovered task");
+    assert_eq!(task.latest_plan_version, Some(2));
+    assert_eq!(
+        task.plans.get(&2).map(|projected| projected.status),
+        Some(TaskPlanStatus::Accepted)
+    );
+    assert_eq!(
+        task.steps
+            .get(&(2, TaskStepId::new("step_1")?))
+            .map(|step| step.status),
+        Some(TaskStepStatus::Completed)
+    );
+    assert!(recovered.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(recorded))
+                if recorded.attempt_id == attempt.attempt_id
+                    && recorded.status == TaskParticipantAttemptStatus::Completed
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn continue_run_pauses_when_active_workspace_write_lease_defers_ready_step() -> Result<()> {
     let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
@@ -6118,6 +6865,13 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
             ..crate::AgentRunOutcome::default()
         })),
         TaskStepStatus::Interrupted
+    );
+    assert_eq!(
+        step_status_from_outcome(&output(crate::AgentRunOutcome {
+            terminal_reason: crate::AgentRunTerminalReason::FinalAnswerBlocked,
+            ..crate::AgentRunOutcome::default()
+        })),
+        TaskStepStatus::Blocked
     );
     assert_eq!(
         step_status_from_outcome(&output(crate::AgentRunOutcome {

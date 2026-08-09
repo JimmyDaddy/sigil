@@ -69,10 +69,9 @@ pub(super) fn apply_task_projection_record(
         ProjectionApplyDecision::Apply => {}
     }
     if let Some(domain_record) = record.domain_event_record()?
-        && let Some(SessionLogEntry::Control(control)) =
-            session_entry_from_domain_event(&domain_record.event)?
+        && let Some(entry) = session_entry_from_domain_event(&domain_record.event)?
     {
-        projection.apply_control_entry(&control);
+        projection.apply_session_entry(&entry);
     }
     *cursor = Some(next_cursor);
     Ok(())

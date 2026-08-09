@@ -59,7 +59,7 @@ pub struct VerificationProductView {
 pub fn verification_product_view(entries: &[SessionLogEntry]) -> Option<VerificationProductView> {
     let tasks = TaskStateProjection::from_entries(entries);
     let verification = VerificationStateProjection::from_entries(entries);
-    let task = tasks.latest_task()?;
+    let task = tasks.current_task()?;
     let (plan_version, step, _) = focus_step(task)?;
     let scope = step_scope(task, &step.step_id);
     let readiness = verification.latest_readiness(&scope)?;

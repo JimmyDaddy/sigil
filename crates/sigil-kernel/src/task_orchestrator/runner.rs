@@ -1,5 +1,5 @@
 use super::*;
-use crate::{RunCancellationHandle, RunEffectClass, RunEffectKind};
+use crate::{RunCancellationHandle, RunEffectClass, RunEffectKind, TaskGuidanceMaterializedEntry};
 use anyhow::Context;
 
 /// Sequential planner/executor task orchestrator.
@@ -10,6 +10,546 @@ pub struct SequentialTaskOrchestrator<R> {
     tool_artifact_read_budget: Option<crate::ToolArtifactReadBudgetV1>,
     max_parallel_read_steps: usize,
     max_parallel_changeset_steps: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TaskGuidanceReviewBinding {
+    queue_id: crate::ConversationInputQueueId,
+    task_id: TaskId,
+    plan_version: u32,
+    dispatch_run_id: String,
+    prompt_hash: String,
+    exact_prompt_required: bool,
+    guidance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoverableTaskGuidanceReviewAuthority {
+    Promoted(Box<TaskGuidancePromotedEntry>),
+    ContinuationSelected(Box<crate::TaskContinuationSelectedEntry>),
+}
+
+/// A durable guidance-review authority that was selected/promoted but has not yet reached a
+/// planner-owned Apply decision or accepted replan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableTaskGuidanceReview {
+    pub guidance: String,
+    pub authority: RecoverableTaskGuidanceReviewAuthority,
+}
+
+/// Guidance recovered from a durable materialization that still has at least one unfinished
+/// target in the current accepted plan.
+///
+/// The planner-owned apply decision and its host-owned materialization are one append-only
+/// recovery contract. A normal explicit Task continuation uses this value after restart instead
+/// of silently dropping already-accepted guidance or asking the planner to consume it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableTaskGuidance {
+    pub guidance: String,
+    pub target_step_ids: BTreeSet<TaskStepId>,
+    queue_id: crate::ConversationInputQueueId,
+    dispatch_run_id: String,
+}
+
+impl RecoverableTaskGuidance {
+    /// Returns whether `promotion` owns this already-materialized planner decision.
+    pub fn matches_promotion(&self, promotion: &TaskGuidancePromotedEntry) -> bool {
+        self.queue_id == promotion.queue_id && self.dispatch_run_id == promotion.dispatch_run_id
+    }
+
+    /// Returns whether `selection` owns this already-materialized planner decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the continuation selection is not bound to an accepted plan.
+    pub fn matches_continuation_selection(
+        &self,
+        selection: &crate::TaskContinuationSelectedEntry,
+    ) -> Result<bool> {
+        let binding = task_continuation_guidance_binding(selection)?;
+        Ok(self.queue_id == binding.queue_id && self.dispatch_run_id == binding.dispatch_run_id)
+    }
+}
+
+/// Resolves the one unfinished guidance materialization for `task_id`.
+///
+/// Sensitive materializations fail closed unless the caller re-enters exact prompt text matching
+/// the durable safe projection and hash. Incomplete, orphaned, duplicate, or concurrent
+/// materializations also fail closed so a generic `/task continue` cannot guess which durable
+/// authority to consume.
+///
+/// # Errors
+///
+/// Returns an error when the current accepted plan or its guidance materialization history is
+/// inconsistent, or when exact prompt material must be entered again after process loss.
+pub fn recoverable_task_guidance(
+    session: &Session,
+    task_id: &TaskId,
+    exact_guidance: Option<&str>,
+) -> Result<Option<RecoverableTaskGuidance>> {
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| anyhow!("task {} is not present in session", task_id.as_str()))?;
+    let (plan_version, plan_steps) = latest_executable_plan(task)?;
+    let plan_step_ids = plan_steps
+        .iter()
+        .map(|step| step.step_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    let target_is_unfinished = |step_id: &TaskStepId| {
+        task.steps
+            .get(&(plan_version, step_id.clone()))
+            .is_none_or(|step| step.status != TaskStepStatus::Completed)
+    };
+    let mut recoverable = Vec::new();
+    let mut matched_materialization_ids = BTreeSet::new();
+
+    for applied in session.entries().iter().filter_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+            if &applied.task_id == task_id && applied.plan_version == plan_version =>
+        {
+            Some(applied)
+        }
+        _ => None,
+    }) {
+        if applied
+            .target_step_ids
+            .iter()
+            .any(|step_id| !plan_step_ids.contains(step_id))
+        {
+            bail!("durable task guidance targets a step absent from accepted plan v{plan_version}");
+        }
+        if !applied.target_step_ids.iter().any(target_is_unfinished) {
+            continue;
+        }
+        let materializations = session
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceMaterialized(materialized))
+                    if materialized.queue_id == applied.queue_id
+                        && materialized.dispatch_run_id == applied.dispatch_run_id =>
+                {
+                    Some(materialized)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [materialized] = materializations.as_slice() else {
+            bail!(
+                "accepted task guidance has no unique durable materialization; re-enter the guidance"
+            );
+        };
+        materialized.validate_against(applied)?;
+        matched_materialization_ids.insert(materialized.materialization_id.clone());
+        let recovered_guidance = match exact_guidance {
+            Some(exact_guidance) => {
+                let projected = crate::project_conversation_prompt_for_persistence(exact_guidance);
+                if projected.prompt_hash != materialized.prompt_hash
+                    || projected.safe_prompt != materialized.guidance
+                    || projected.exact_prompt_required != materialized.exact_prompt_required
+                {
+                    bail!(
+                        "explicit guidance conflicts with unfinished durable task guidance; re-enter the exact accepted guidance"
+                    );
+                }
+                exact_guidance.to_owned()
+            }
+            None if materialized.exact_prompt_required => {
+                bail!(
+                    "accepted task guidance requires exact prompt material after recovery; re-enter the guidance"
+                );
+            }
+            None => materialized.guidance.clone(),
+        };
+        recoverable.push(RecoverableTaskGuidance {
+            guidance: recovered_guidance,
+            target_step_ids: materialized
+                .target_step_ids
+                .iter()
+                .filter(|step_id| target_is_unfinished(step_id))
+                .cloned()
+                .collect(),
+            queue_id: materialized.queue_id.clone(),
+            dispatch_run_id: materialized.dispatch_run_id.clone(),
+        });
+    }
+
+    for materialized in session.entries().iter().filter_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::TaskGuidanceMaterialized(materialized))
+            if &materialized.task_id == task_id && materialized.plan_version == plan_version =>
+        {
+            Some(materialized)
+        }
+        _ => None,
+    }) {
+        if materialized
+            .target_step_ids
+            .iter()
+            .any(target_is_unfinished)
+            && !matched_materialization_ids.contains(&materialized.materialization_id)
+        {
+            bail!("task guidance materialization has no matching applied decision");
+        }
+    }
+
+    match recoverable.as_slice() {
+        [] => Ok(None),
+        [guidance] => Ok(Some(guidance.clone())),
+        _ => bail!(
+            "task has multiple unfinished durable guidance materializations; explicit recovery is required"
+        ),
+    }
+}
+
+/// Resolves one unconsumed guidance selection/promotion for the current accepted Task plan.
+///
+/// This covers the crash boundary after routing/queue promotion is durable but before planner
+/// dispatch. Safe guidance can be reconstructed from the authority. Sensitive guidance requires
+/// matching process-local text to be supplied again.
+///
+/// # Errors
+///
+/// Returns an error for stale status bindings, conflicting exact text, or multiple pending review
+/// authorities.
+pub fn recoverable_task_guidance_review(
+    session: &Session,
+    task_id: &TaskId,
+    exact_guidance: Option<&str>,
+) -> Result<Option<RecoverableTaskGuidanceReview>> {
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| anyhow!("task {} is not present in session", task_id.as_str()))?;
+    let (plan_version, _) = latest_executable_plan(task)?;
+    let applied_bindings = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied)) => {
+                Some((applied.queue_id.clone(), applied.dispatch_run_id.clone()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut candidates = BTreeMap::<String, RecoverableTaskGuidanceReview>::new();
+
+    for entry in session.entries() {
+        let (candidate_id, candidate) = match entry {
+            SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selection))
+                if &selection.task_id == task_id
+                    && selection.plan_version == Some(plan_version)
+                    && selection.plan_status == Some(TaskPlanStatus::Accepted) =>
+            {
+                selection.validate_for_session(session.session_scope_id())?;
+                if !selection_status_matches_recovered_attempt(session, selection, task) {
+                    bail!(
+                        "pending task continuation selection is stale against current task status"
+                    );
+                }
+                let binding = task_continuation_guidance_binding(selection)?;
+                if applied_bindings
+                    .contains(&(binding.queue_id.clone(), binding.dispatch_run_id.clone()))
+                {
+                    continue;
+                }
+                let guidance = recover_guidance_review_text(
+                    &selection.prompt_hash,
+                    &selection.guidance,
+                    selection.exact_prompt_required,
+                    exact_guidance,
+                )?;
+                (
+                    format!(
+                        "selection:{}:{}:{}:{}",
+                        selection.source_turn.session_scope_id,
+                        selection.source_turn.message_id,
+                        selection.source_turn.logical_run_id,
+                        selection.route_contract_fingerprint
+                    ),
+                    RecoverableTaskGuidanceReview {
+                        guidance,
+                        authority: RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(
+                            Box::new(selection.clone()),
+                        ),
+                    },
+                )
+            }
+            SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(promotion))
+                if &promotion.task_id == task_id && promotion.plan_version == plan_version =>
+            {
+                promotion.validate_for_session(session.session_scope_id())?;
+                if applied_bindings.contains(&(
+                    promotion.queue_id.clone(),
+                    promotion.dispatch_run_id.clone(),
+                )) {
+                    continue;
+                }
+                let guidance = recover_guidance_review_text(
+                    &promotion.prompt_hash,
+                    &promotion.guidance,
+                    promotion.exact_prompt_required,
+                    exact_guidance,
+                )?;
+                (
+                    format!(
+                        "promotion:{}:{}",
+                        promotion.queue_id.as_str(),
+                        promotion.dispatch_run_id
+                    ),
+                    RecoverableTaskGuidanceReview {
+                        guidance,
+                        authority: RecoverableTaskGuidanceReviewAuthority::Promoted(Box::new(
+                            promotion.clone(),
+                        )),
+                    },
+                )
+            }
+            _ => continue,
+        };
+        if let Some(existing) = candidates.insert(candidate_id, candidate.clone())
+            && existing != candidate
+        {
+            bail!("pending task guidance authority has conflicting durable facts");
+        }
+    }
+
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(candidates.into_values().next()),
+        _ => bail!(
+            "task has multiple pending guidance-review authorities; explicit recovery is required"
+        ),
+    }
+}
+
+fn selection_status_matches_recovered_attempt(
+    session: &Session,
+    selection: &crate::TaskContinuationSelectedEntry,
+    task: &TaskRunProjection,
+) -> bool {
+    if selection.task_status == task.status {
+        return true;
+    }
+    if task.status != TaskRunStatus::Paused
+        || !matches!(
+            selection.task_status,
+            TaskRunStatus::Started | TaskRunStatus::Running
+        )
+    {
+        return false;
+    }
+    let Some(authority_index) = session.entries().iter().position(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(recorded))
+                if recorded == selection
+        )
+    }) else {
+        return false;
+    };
+    let candidate_ids =
+        guidance_review_attempt_ids_after(session, &selection.task_id, authority_index);
+    let interrupted_attempt = candidate_ids.iter().any(|attempt_id| {
+        task.participant_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.status == TaskParticipantAttemptStatus::Interrupted)
+    });
+    let paused_after_authority = session
+        .entries()
+        .iter()
+        .skip(authority_index.saturating_add(1))
+        .any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                    if run.task_id == selection.task_id && run.status == TaskRunStatus::Paused
+            )
+        });
+    interrupted_attempt && paused_after_authority
+}
+
+/// Builds the crash-recovery controls required before explicitly retrying a pending guidance
+/// review.
+///
+/// A planner `Started` attempt appended after the durable selection/promotion is an uncertain
+/// provider boundary: startup never retries it automatically. An explicit continuation first
+/// marks that exact attempt interrupted (and pauses an active Task) in one append batch, then a
+/// later orchestration step may admit a fresh ordinal. A completed-but-unsettled attempt fails
+/// closed because its provider result cannot be safely regenerated.
+///
+/// # Errors
+///
+/// Returns an error when the authority is absent, multiple uncertain attempts exist, or a
+/// completed planner attempt lacks its atomic guidance settlement.
+pub fn recoverable_task_guidance_review_retry_controls(
+    session: &Session,
+    review: &RecoverableTaskGuidanceReview,
+) -> Result<Vec<ControlEntry>> {
+    let (task_id, authority_index) = recoverable_review_authority_position(session, review)?;
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow!("pending guidance review task is absent"))?;
+    let candidate_ids = guidance_review_attempt_ids_after(session, &task_id, authority_index);
+    let mut uncertain = candidate_ids
+        .iter()
+        .filter_map(|attempt_id| task.participant_attempts.get(attempt_id))
+        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
+        .cloned()
+        .collect::<Vec<_>>();
+    if uncertain.len() > 1 {
+        bail!("pending guidance review has multiple uncertain planner attempts");
+    }
+    if candidate_ids.iter().any(|attempt_id| {
+        task.participant_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.status == TaskParticipantAttemptStatus::Completed)
+    }) {
+        bail!("pending guidance review has a completed planner attempt without durable settlement");
+    }
+    let Some(mut attempt) = uncertain.pop() else {
+        return Ok(Vec::new());
+    };
+    attempt.status = TaskParticipantAttemptStatus::Interrupted;
+    attempt.reason = Some(
+        "uncertain guidance-review provider attempt interrupted by explicit continuation"
+            .to_owned(),
+    );
+    let mut controls = vec![ControlEntry::TaskParticipantAttempt(attempt)];
+    if matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
+        controls.push(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task.task_id.clone(),
+            parent_session_ref: task.parent_session_ref.clone(),
+            objective: task.objective.clone(),
+            title: Some(crate::task_semantic_title(&task.objective)),
+            status: TaskRunStatus::Paused,
+            reason: Some(
+                "uncertain guidance-review provider attempt requires explicit retry".to_owned(),
+            ),
+        }));
+    }
+    Ok(controls)
+}
+
+fn recoverable_review_authority_position(
+    session: &Session,
+    review: &RecoverableTaskGuidanceReview,
+) -> Result<(TaskId, usize)> {
+    match &review.authority {
+        RecoverableTaskGuidanceReviewAuthority::Promoted(promotion) => session
+            .entries()
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(recorded))
+                        if recorded == promotion.as_ref()
+                )
+            })
+            .map(|index| (promotion.task_id.clone(), index))
+            .ok_or_else(|| anyhow!("pending task guidance promotion is absent from the session")),
+        RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selection) => session
+            .entries()
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(recorded))
+                        if recorded == selection.as_ref()
+                )
+            })
+            .map(|index| (selection.task_id.clone(), index))
+            .ok_or_else(|| {
+                anyhow!("pending task continuation selection is absent from the session")
+            }),
+    }
+}
+
+fn guidance_review_attempt_ids_after(
+    session: &Session,
+    task_id: &TaskId,
+    authority_index: usize,
+) -> BTreeSet<TaskParticipantAttemptId> {
+    session
+        .entries()
+        .iter()
+        .skip(authority_index.saturating_add(1))
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(attempt))
+                if &attempt.task_id == task_id
+                    && attempt.purpose == TaskParticipantPurpose::Planner
+                    && attempt.plan_version.is_none()
+                    && attempt.step_id.is_none()
+                    && attempt.status == TaskParticipantAttemptStatus::Started =>
+            {
+                Some(attempt.attempt_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn recover_guidance_review_text(
+    prompt_hash: &str,
+    safe_guidance: &str,
+    exact_prompt_required: bool,
+    exact_guidance: Option<&str>,
+) -> Result<String> {
+    match exact_guidance {
+        Some(exact_guidance) => {
+            let projected = crate::project_conversation_prompt_for_persistence(exact_guidance);
+            if projected.prompt_hash != prompt_hash
+                || projected.safe_prompt != safe_guidance
+                || projected.exact_prompt_required != exact_prompt_required
+            {
+                bail!(
+                    "explicit guidance conflicts with pending durable task guidance; re-enter the exact selected guidance"
+                );
+            }
+            Ok(exact_guidance.to_owned())
+        }
+        None if exact_prompt_required => bail!(
+            "pending task guidance requires exact prompt material after recovery; re-enter the guidance"
+        ),
+        None => Ok(safe_guidance.to_owned()),
+    }
+}
+
+fn task_continuation_guidance_binding(
+    selection: &crate::TaskContinuationSelectedEntry,
+) -> Result<TaskGuidanceReviewBinding> {
+    let plan_version = selection
+        .plan_version
+        .ok_or_else(|| anyhow!("task continuation guidance requires an accepted task plan"))?;
+    if selection.plan_status != Some(TaskPlanStatus::Accepted) {
+        bail!("task continuation guidance is not bound to an accepted task plan");
+    }
+    let seed = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        selection.source_turn.session_scope_id,
+        selection.source_turn.message_id,
+        selection.source_turn.logical_run_id,
+        selection.task_id.as_str(),
+        plan_version,
+        selection.route_contract_fingerprint,
+    );
+    Ok(TaskGuidanceReviewBinding {
+        queue_id: crate::ConversationInputQueueId::new(stable_event_uuid(
+            "sigil-task-continuation-guidance",
+            &seed,
+        ))?,
+        task_id: selection.task_id.clone(),
+        plan_version,
+        dispatch_run_id: stable_event_uuid("sigil-task-continuation-dispatch", &seed),
+        prompt_hash: selection.prompt_hash.clone(),
+        exact_prompt_required: selection.exact_prompt_required,
+        guidance: selection.guidance.clone(),
+    })
 }
 
 impl<R> SequentialTaskOrchestrator<R>
@@ -315,18 +855,126 @@ where
         }) {
             bail!("task guidance review requires its exact durable promotion record");
         }
+        let binding = TaskGuidanceReviewBinding {
+            queue_id: promotion.queue_id,
+            task_id: promotion.task_id,
+            plan_version: promotion.plan_version,
+            dispatch_run_id: promotion.dispatch_run_id,
+            prompt_hash: promotion.prompt_hash,
+            exact_prompt_required: promotion.exact_prompt_required,
+            guidance: promotion.guidance,
+        };
+        self.continue_run_with_bound_guidance_review(
+            session,
+            request,
+            planner_options,
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+            max_plan_steps,
+            guidance,
+            binding,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    /// Reviews guidance owned by a typed conversation-to-current-Task route.
+    ///
+    /// The selection receipt is the append-only single-use authority. Exact prompt material stays
+    /// process-local and must still match that receipt at this final orchestration boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selection is absent, already consumed, stale, or does not match
+    /// the exact prompt material and current accepted plan.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn continue_run_with_conversation_guidance_review<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        planner_options: AgentRunOptions,
+        executor_options: AgentRunOptions,
+        subagent_read_options: AgentRunOptions,
+        subagent_write_options: AgentRunOptions,
+        max_plan_steps: usize,
+        guidance: String,
+        selection: crate::TaskContinuationSelectedEntry,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        selection.validate_for_session(session.session_scope_id())?;
+        if !session.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(recorded))
+                    if recorded == &selection
+            )
+        }) {
+            bail!("task guidance review requires its exact durable continuation selection");
+        }
+        let binding = task_continuation_guidance_binding(&selection)?;
+        self.continue_run_with_bound_guidance_review(
+            session,
+            request,
+            planner_options,
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+            max_plan_steps,
+            guidance,
+            binding,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn continue_run_with_bound_guidance_review<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        planner_options: AgentRunOptions,
+        executor_options: AgentRunOptions,
+        subagent_read_options: AgentRunOptions,
+        subagent_write_options: AgentRunOptions,
+        max_plan_steps: usize,
+        guidance: String,
+        binding: TaskGuidanceReviewBinding,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
         let guidance = normalize_task_guidance(Some(guidance))
-            .ok_or_else(|| anyhow!("promoted task guidance is empty"))?;
+            .ok_or_else(|| anyhow!("bound task guidance is empty"))?;
         let prompt_projection = crate::project_conversation_prompt_for_persistence(&guidance);
-        if prompt_projection.prompt_hash != promotion.prompt_hash
-            || prompt_projection.safe_prompt != promotion.guidance
-            || prompt_projection.exact_prompt_required != promotion.exact_prompt_required
+        if prompt_projection.prompt_hash != binding.prompt_hash
+            || prompt_projection.safe_prompt != binding.guidance
+            || prompt_projection.exact_prompt_required != binding.exact_prompt_required
         {
-            bail!("promoted task guidance no longer matches its exact prompt material");
+            bail!("bound task guidance no longer matches its exact prompt material");
         }
-        if promotion.task_id != request.task_id {
-            bail!("promoted task guidance targets a different task");
+        if binding.task_id != request.task_id {
+            bail!("bound task guidance targets a different task");
         }
+        let existing_applied = session.entries().iter().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+                if applied.queue_id == binding.queue_id
+                    && applied.dispatch_run_id == binding.dispatch_run_id =>
+            {
+                Some(applied.clone())
+            }
+            _ => None,
+        });
 
         let projection = session.task_state_projection();
         let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
@@ -339,13 +987,13 @@ where
             task.status,
             TaskRunStatus::Completed | TaskRunStatus::Cancelled
         ) {
-            bail!("promoted task guidance cannot revive a completed or cancelled task");
+            bail!("bound task guidance cannot revive a completed or cancelled task");
         }
         let (plan_version, steps) = latest_executable_plan(task)?;
-        if promotion.plan_version != plan_version {
+        if binding.plan_version != plan_version {
             bail!(
-                "promoted task guidance plan v{} is stale against accepted plan v{}",
-                promotion.plan_version,
+                "bound task guidance plan v{} is stale against accepted plan v{}",
+                binding.plan_version,
                 plan_version
             );
         }
@@ -353,6 +1001,60 @@ where
             .plans
             .get(&plan_version)
             .ok_or_else(|| anyhow!("accepted task plan v{plan_version} disappeared"))?;
+        if let Some(recovered) =
+            recoverable_task_guidance(session, &request.task_id, Some(&guidance))?
+        {
+            return self
+                .continue_run_scoped(
+                    session,
+                    request,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    Some(recovered.guidance),
+                    Some(recovered.target_step_ids),
+                    handler,
+                    approval_handler,
+                )
+                .await;
+        }
+        if let Some(applied) = existing_applied {
+            let materializations = session
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    SessionLogEntry::Control(ControlEntry::TaskGuidanceMaterialized(entry))
+                        if entry.queue_id == binding.queue_id
+                            && entry.dispatch_run_id == binding.dispatch_run_id =>
+                    {
+                        Some(entry)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [materialized] = materializations.as_slice() else {
+                bail!(
+                    "bound task guidance has no unique durable materialization; re-enter the guidance"
+                );
+            };
+            materialized.validate_against(&applied)?;
+            // The global resolver returned `None`, so every target of this exact already-applied
+            // binding is completed. Continue the remaining plan without rerunning the planner or
+            // injecting the consumed guidance into unrelated steps.
+            return self
+                .continue_run_scoped(
+                    session,
+                    request,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    None,
+                    None,
+                    handler,
+                    approval_handler,
+                )
+                .await;
+        }
         let accepted_plan = TaskPlanEntry {
             task_id: request.task_id.clone(),
             plan_version,
@@ -370,10 +1072,10 @@ where
             .map(|step| step.step_id.clone())
             .collect::<Vec<_>>();
         let assessment = TaskGuidanceAssessmentContext {
-            queue_id: promotion.queue_id.clone(),
+            queue_id: binding.queue_id.clone(),
             task_id: request.task_id.clone(),
             plan_version,
-            dispatch_run_id: promotion.dispatch_run_id.clone(),
+            dispatch_run_id: binding.dispatch_run_id.clone(),
             accepted_plan: accepted_plan.clone(),
             eligible_pending_step_ids: eligible_pending_step_ids.clone(),
         };
@@ -498,17 +1200,22 @@ where
             };
             validate_isolated_planner_output(&request, &attempt, &output)?;
 
-            let (continued_guidance, target_step_ids, summary) = if let Some(applied) =
-                output.guidance_applied.as_ref()
-            {
+            let (
+                continued_guidance,
+                target_step_ids,
+                summary,
+                controls_before_participant_terminal,
+                controls_after_participant_terminal,
+            ) = if let Some(applied) = output.guidance_applied.as_ref() {
                 applied.validate_against(&assessment)?;
                 if output.accepted_plan != accepted_plan {
                     bail!("guidance supplement decision returned a different accepted task plan");
                 }
-                append_task_control(
-                    session,
-                    handler,
-                    ControlEntry::TaskGuidanceApplied(applied.clone()),
+                let materialized = TaskGuidanceMaterializedEntry::new(
+                    applied,
+                    binding.prompt_hash.clone(),
+                    binding.exact_prompt_required,
+                    binding.guidance.clone(),
                 )?;
                 (
                     Some(guidance.clone()),
@@ -518,6 +1225,11 @@ where
                         applied.target_step_ids.len(),
                         plan_version
                     ),
+                    Vec::new(),
+                    vec![
+                        ControlEntry::TaskGuidanceApplied(applied.clone()),
+                        ControlEntry::TaskGuidanceMaterialized(materialized),
+                    ],
                 )
             } else {
                 validate_guidance_replan(
@@ -532,14 +1244,9 @@ where
                     &accepted_plan,
                     &output.accepted_plan,
                 )?;
-                append_task_control(
-                    session,
-                    handler,
-                    ControlEntry::TaskPlan(output.accepted_plan.clone()),
-                )?;
-                for step in carried_steps {
-                    append_task_control(session, handler, ControlEntry::TaskStep(step))?;
-                }
+                let mut replan_controls =
+                    vec![ControlEntry::TaskPlan(output.accepted_plan.clone())];
+                replan_controls.extend(carried_steps.into_iter().map(ControlEntry::TaskStep));
                 (
                     None,
                     None,
@@ -548,6 +1255,8 @@ where
                         output.accepted_plan.plan_version,
                         output.accepted_plan.steps.len()
                     ),
+                    replan_controls,
+                    Vec::new(),
                 )
             };
             let result = participant_result_entry(
@@ -558,13 +1267,15 @@ where
                 Vec::new(),
                 Vec::new(),
             )?;
-            append_participant_result_and_terminal(
+            append_task_controls(
                 session,
                 handler,
-                &attempt,
-                result,
-                TaskParticipantAttemptStatus::Completed,
-                None,
+                task_guidance_review_settlement_controls(
+                    controls_before_participant_terminal,
+                    &attempt,
+                    result,
+                    controls_after_participant_terminal,
+                )?,
             )?;
             return self
                 .continue_run_scoped(
@@ -606,6 +1317,11 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let recovered = recoverable_task_guidance(session, &request.task_id, guidance.as_deref())?;
+        let (guidance, guidance_target_step_ids) = match recovered {
+            Some(recovered) => (Some(recovered.guidance), Some(recovered.target_step_ids)),
+            None => (guidance, None),
+        };
         self.continue_run_scoped(
             session,
             request,
@@ -613,7 +1329,7 @@ where
             subagent_read_options,
             subagent_write_options,
             guidance,
-            None,
+            guidance_target_step_ids,
             handler,
             approval_handler,
         )
@@ -2851,13 +3567,26 @@ fn append_participant_result_and_terminal<H>(
     session: &mut Session,
     handler: &mut H,
     attempt: &TaskParticipantAttemptEntry,
-    mut result: TaskParticipantResultEntry,
+    result: TaskParticipantResultEntry,
     status: TaskParticipantAttemptStatus,
     reason: Option<String>,
 ) -> Result<()>
 where
     H: EventHandler + Send,
 {
+    append_task_controls(
+        session,
+        handler,
+        participant_result_and_terminal_controls(attempt, result, status, reason)?,
+    )
+}
+
+fn participant_result_and_terminal_controls(
+    attempt: &TaskParticipantAttemptEntry,
+    mut result: TaskParticipantResultEntry,
+    status: TaskParticipantAttemptStatus,
+    reason: Option<String>,
+) -> Result<Vec<ControlEntry>> {
     if result.attempt_id != attempt.attempt_id || result.task_id != attempt.task_id {
         bail!("participant result identity does not match its attempt");
     }
@@ -2866,12 +3595,29 @@ where
     }
     result.terminal_status = Some(status);
     result.validate_shape()?;
-    append_task_control(
-        session,
-        handler,
+    let mut terminal = attempt.clone();
+    terminal.status = status;
+    terminal.reason = reason.as_deref().map(crate::safe_persistence_text);
+    Ok(vec![
         ControlEntry::TaskParticipantResult(result),
-    )?;
-    append_participant_terminal(session, handler, attempt, status, reason)
+        ControlEntry::TaskParticipantAttempt(terminal),
+    ])
+}
+
+pub(super) fn task_guidance_review_settlement_controls(
+    mut controls_before_participant_terminal: Vec<ControlEntry>,
+    attempt: &TaskParticipantAttemptEntry,
+    result: TaskParticipantResultEntry,
+    controls_after_participant_terminal: Vec<ControlEntry>,
+) -> Result<Vec<ControlEntry>> {
+    controls_before_participant_terminal.extend(participant_result_and_terminal_controls(
+        attempt,
+        result,
+        TaskParticipantAttemptStatus::Completed,
+        None,
+    )?);
+    controls_before_participant_terminal.extend(controls_after_participant_terminal);
+    Ok(controls_before_participant_terminal)
 }
 
 pub(super) fn participant_result_entry(

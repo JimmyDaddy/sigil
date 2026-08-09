@@ -451,7 +451,11 @@ pub(super) fn child_status_from_output(output: &StepRunOutput) -> TaskChildSessi
         || !output.outcome.interrupted_tool_calls.is_empty()
     {
         TaskChildSessionStatus::Interrupted
-    } else if output.outcome.approval_denials > 0
+    } else if output
+        .outcome
+        .terminal_reason
+        .blocks_successful_completion()
+        || output.outcome.approval_denials > 0
         || has_blocking_tool_error(&output.outcome)
         || (!output.outcome.tool_errors.is_empty() && output.final_text.trim().is_empty())
     {

@@ -6,14 +6,80 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::{MemoryConfig, ModelMessage, PrefixSnapshot};
+use crate::{
+    MemoryConfig, ModelMessage, PrefixSnapshot, ToolAccess, ToolCategory, ToolPreviewCapability,
+    ToolSpec,
+};
 
 const ROOT_MEMORY_FILENAMES: &[&str] = &["SIGIL.md", "AGENTS.md", "CLAUDE.md", "SIGIL.local.md"];
 const BASE_SYSTEM_PROMPT: &str = "You are Sigil, an AI coding agent working inside the user's workspace. Prefer inspecting the workspace before edits, keep changes auditable, and follow loaded workspace instructions. Do not assume whether the user is in Desktop, TUI, CLI, or another client unless host context states it. When introducing Sigil, do not turn implementation details, UI entrypoints, or repository language into capability claims unless the user directly asks about them. When the user explicitly asks for parallel or delegated work, use the model-visible agent tools instead of inventing informal subagent behavior.";
 const WRITABLE_MEMORY_ENABLED_PROMPT: &str = "Writable memory is available. Decide from the user's meaning, not keyword matching, whether they intend information to persist beyond the current session. Use remember_user_preference only for stable interaction or workflow preferences that apply across workspaces, and remember_project_fact only for user-asserted facts or conventions of the current project. Ask for clarification when the intended scope or durable statement is ambiguous. Never store secrets, credentials, guesses, or inferred sensitive facts. Do not claim that anything was remembered durably unless the appropriate tool completed successfully and returned a durable receipt; then report its scope, memory_id, and version. If approval is denied or the write fails, explicitly say that the information can only be kept in the current session.";
 const WRITABLE_MEMORY_DISABLED_PROMPT: &str = "Writable memory tools are unavailable. If the user intends information to persist beyond the current session, explicitly say that you can only keep it in the current session and must not claim that it was remembered durably.";
+
+/// Model-visible tool name for durable cross-workspace user preferences.
+pub const REMEMBER_USER_PREFERENCE_TOOL_NAME: &str = "remember_user_preference";
+/// Model-visible tool name for durable facts scoped to the current project.
+pub const REMEMBER_PROJECT_FACT_TOOL_NAME: &str = "remember_project_fact";
+/// Maximum bytes accepted by either writable-memory statement tool.
+pub const MEMORY_STATEMENT_MAX_BYTES: usize = 2 * 1024;
+
+/// Returns the stable contract for one writable-memory tool.
+#[must_use]
+pub fn remember_memory_tool_spec(project_scoped: bool) -> ToolSpec {
+    let (name, description) = if project_scoped {
+        (
+            REMEMBER_PROJECT_FACT_TOOL_NAME,
+            "Durably remember one user-asserted fact, convention, or validated workflow for the current project across sessions. Infer durable intent from the user's meaning, not keyword matching, and ask for clarification when scope is ambiguous. The call opens an approval preview. Never store credentials, secrets, guesses, or facts for another workspace. Only a successful call returns a durable receipt.",
+        )
+    } else {
+        (
+            REMEMBER_USER_PREFERENCE_TOOL_NAME,
+            "Durably remember one stable user preference across Sigil workspaces and sessions. Infer durable intent from the user's meaning, not keyword matching; use this for interaction style or workflow preferences, and ask for clarification when scope is ambiguous. The call opens an approval preview. Never store credentials, secrets, or project-specific facts. Only a successful call returns a durable receipt.",
+        )
+    };
+    ToolSpec {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "statement": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MEMORY_STATEMENT_MAX_BYTES,
+                    "description": "A concise standalone statement to retain durably."
+                }
+            },
+            "required": ["statement"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Write,
+        network_effect: None,
+        preview: ToolPreviewCapability::Required,
+    }
+}
+
+/// Returns the two memory-write contracts allowed beside an automatic route decision.
+#[must_use]
+pub fn writable_memory_route_tool_specs() -> Vec<ToolSpec> {
+    vec![
+        remember_memory_tool_spec(false),
+        remember_memory_tool_spec(true),
+    ]
+}
+
+/// Returns whether a tool is an approved writable-memory side effect for routing microturns.
+#[must_use]
+pub fn is_writable_memory_route_tool(name: &str) -> bool {
+    matches!(
+        name,
+        REMEMBER_USER_PREFERENCE_TOOL_NAME | REMEMBER_PROJECT_FACT_TOOL_NAME
+    )
+}
 
 /// Loaded workspace memory summary for UI and request materialization.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

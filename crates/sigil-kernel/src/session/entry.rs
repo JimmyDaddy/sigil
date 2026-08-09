@@ -237,10 +237,13 @@ pub enum ControlEntry {
     TaskCreatedFromPlan(TaskCreatedFromPlanEntry),
     TaskHandoffRequested(TaskHandoffRequestedEntry),
     TaskHandoffResolved(TaskHandoffResolvedEntry),
+    TaskContinuationSelected(crate::TaskContinuationSelectedEntry),
     TaskRun(TaskRunEntry),
     TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry),
+    TaskRunTargetSelected(crate::TaskRunTargetSelectedEntry),
     TaskPlan(TaskPlanEntry),
     TaskGuidanceApplied(crate::TaskGuidanceAppliedEntry),
+    TaskGuidanceMaterialized(crate::TaskGuidanceMaterializedEntry),
     TaskStep(TaskStepEntry),
     TaskParticipantAttempt(TaskParticipantAttemptEntry),
     TaskParticipantRetryScheduled(TaskParticipantRetryScheduledEntry),
@@ -334,6 +337,9 @@ impl ControlEntry {
             Self::TerminalTask(entry) => entry.validate_durable(),
             Self::ToolArtifactAvailabilityChanged(entry) => entry.validate(),
             Self::ToolArtifactTombstonePlan(entry) => entry.validate(),
+            Self::TaskContinuationSelected(entry) => entry.validate_shape(),
+            Self::TaskRunTargetSelected(entry) => entry.validate_shape(),
+            Self::TaskGuidanceMaterialized(entry) => entry.validate_shape(),
             _ => Ok(()),
         }
     }

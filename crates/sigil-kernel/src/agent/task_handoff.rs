@@ -2,12 +2,15 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use crate::{
-    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationTurnRef, EventHandler,
-    REQUEST_TASK_PLANNING_TOOL_NAME, RunEvent, Session, SessionLogEntry, StartDurableTaskAction,
-    TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
-    TaskPlanningHandoffBinding, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, ToolResultMeta,
-    task_planning_reason_codes, validate_continue_without_task_planning_call,
+    CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+    ContinueDurableTaskAction, ControlEntry, ConversationTurnRef, EventHandler,
+    REQUEST_TASK_PLANNING_TOOL_NAME, RecoverableTaskGuidanceReviewAuthority, RunEvent, Session,
+    SessionLogEntry, StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
+    TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffRequestedEntry,
+    TaskHandoffResolvedEntry, TaskPlanningHandoffBinding, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, ToolCall, ToolErrorKind,
+    ToolExecutionStatus, ToolResult, ToolResultMeta, task_planning_reason_codes,
+    validate_continue_existing_task_call, validate_continue_without_task_planning_call,
 };
 
 use super::{
@@ -23,6 +26,264 @@ pub(super) fn task_planning_request_call_is_accepted(call: &ToolCall) -> bool {
 pub(super) fn continue_without_task_planning_call_is_accepted(call: &ToolCall) -> bool {
     call.name == CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
         && validate_continue_without_task_planning_call(call).is_ok()
+}
+
+pub(super) fn continue_existing_task_call_is_accepted(call: &ToolCall) -> bool {
+    call.name == CONTINUE_EXISTING_TASK_TOOL_NAME
+        && validate_continue_existing_task_call(call).is_ok()
+}
+
+pub(super) fn handle_continue_existing_task_call<H>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+    binding: &TaskContinuationHandoffBinding,
+    run_scope_id: Option<&str>,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<Option<ContinueDurableTaskAction>>
+where
+    H: EventHandler + Send,
+{
+    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
+    if let Err(error) = validate_continue_existing_task_call(call) {
+        let mut result = ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::InvalidInput,
+            error.to_string(),
+        );
+        attach_tool_call_context(&mut result, call, &[]);
+        append_tool_execution_audit(
+            session,
+            call,
+            &[],
+            ToolExecutionStatus::Failed,
+            None,
+            Some(&result),
+        )?;
+        record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+        return Ok(None);
+    }
+
+    validate_task_continuation_binding(session, binding)?;
+    let guidance_projection =
+        crate::project_conversation_prompt_for_persistence(binding.exact_guidance.expose_secret());
+    if guidance_projection.prompt_hash != binding.prompt_hash
+        || guidance_projection.safe_prompt != binding.safe_guidance
+        || guidance_projection.exact_prompt_required != binding.exact_prompt_required
+    {
+        bail!("task continuation exact guidance drifted from its host binding");
+    }
+    match crate::recoverable_task_guidance(
+        session,
+        &binding.task_id,
+        Some(binding.exact_guidance.expose_secret()),
+    ) {
+        Ok(Some(_)) => {
+            return reject_task_continuation_recovery(
+                session,
+                outcome,
+                call,
+                assistant_batch_results,
+                "accepted Task guidance is awaiting recovery; use `/task continue <exact original guidance>` before routing another continuation",
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return reject_task_continuation_recovery(
+                session,
+                outcome,
+                call,
+                assistant_batch_results,
+                &format!(
+                    "accepted Task guidance must be recovered first; use `/task continue <exact original guidance>`: {error:#}"
+                ),
+            );
+        }
+    }
+    let recovered_selection = match crate::recoverable_task_guidance_review(
+        session,
+        &binding.task_id,
+        Some(binding.exact_guidance.expose_secret()),
+    ) {
+        Ok(Some(review)) => match review.authority {
+            RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selected) => {
+                Some((*selected, review.guidance))
+            }
+            RecoverableTaskGuidanceReviewAuthority::Promoted(_) => {
+                return reject_task_continuation_recovery(
+                    session,
+                    outcome,
+                    call,
+                    assistant_batch_results,
+                    "an unfinished queued Task guidance review already exists; recover it with `/task continue <exact original guidance>` before routing another continuation",
+                );
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            return reject_task_continuation_recovery(
+                session,
+                outcome,
+                call,
+                assistant_batch_results,
+                &format!(
+                    "an unfinished Task guidance review must be recovered first; use `/task continue <exact original guidance>`: {error:#}"
+                ),
+            );
+        }
+    };
+    let recovered_selection_reused = recovered_selection.is_some();
+    let (selected, action_guidance) = recovered_selection.unwrap_or_else(|| {
+        (
+            TaskContinuationSelectedEntry {
+                task_id: binding.task_id.clone(),
+                source_turn: binding.source_turn.clone(),
+                plan_version: binding.plan_version,
+                task_status: binding.task_status,
+                plan_status: binding.plan_status,
+                route_contract_fingerprint: binding.route_contract_fingerprint.clone(),
+                prompt_hash: binding.prompt_hash.clone(),
+                exact_prompt_required: binding.exact_prompt_required,
+                guidance: binding.safe_guidance.clone(),
+                selected_at_ms: binding.decided_at_ms,
+            },
+            binding.exact_guidance.expose_secret().to_owned(),
+        )
+    });
+    let existing = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(entry))
+            if entry.source_turn == selected.source_turn =>
+        {
+            Some(entry)
+        }
+        _ => None,
+    });
+    let selection_missing = match existing {
+        Some(previous) if previous == &selected => false,
+        Some(_) => bail!("source turn is already bound to a different Task continuation"),
+        None => true,
+    };
+    let route_decision = task_continuation_route_decision_control(session, binding)?;
+    let mut continuation_controls = Vec::with_capacity(4);
+    if let Some(route_decision) = route_decision {
+        continuation_controls.push(ControlEntry::ConversationRouteDecisionRecorded(
+            route_decision,
+        ));
+    }
+    if selection_missing {
+        continuation_controls.push(ControlEntry::TaskContinuationSelected(selected.clone()));
+    }
+    if recovered_selection_reused {
+        let run_scope_id = run_scope_id.ok_or_else(|| {
+            anyhow!("recovered Task continuation requires a root cancellation scope")
+        })?;
+        let latest_bound_scope = session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+                    if binding.task_id == selected.task_id =>
+                {
+                    Some(binding.run_scope_id.as_str())
+                }
+                _ => None,
+            });
+        if latest_bound_scope != Some(run_scope_id) {
+            continuation_controls.push(ControlEntry::TaskRunCancellationScopeBound(
+                TaskRunCancellationScopeBoundEntry {
+                    task_id: selected.task_id.clone(),
+                    run_scope_id: run_scope_id.to_owned(),
+                },
+            ));
+        }
+        let focus = TaskRunTargetSelectedEntry::new(
+            selected.task_id.clone(),
+            run_scope_id,
+            binding.task_status,
+            binding.plan_version,
+            binding.plan_status,
+        );
+        let existing_focus = session.entries().iter().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(existing))
+                if existing.selection_id == focus.selection_id =>
+            {
+                Some(existing)
+            }
+            _ => None,
+        });
+        match existing_focus {
+            Some(existing) if existing == &focus => {}
+            Some(_) => bail!("recovered Task continuation focus has conflicting durable facts"),
+            None => continuation_controls.push(ControlEntry::TaskRunTargetSelected(focus)),
+        }
+    }
+    if !continuation_controls.is_empty() {
+        append_control_batch(session, handler, continuation_controls)?;
+    }
+
+    let result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        "exact durable Task continuation accepted; the conversation coordinator will resume it",
+        ToolResultMeta {
+            details: json!({
+                "task_id": binding.task_id.as_str(),
+                "plan_version": binding.plan_version,
+                "task_status": binding.task_status,
+                "plan_status": binding.plan_status,
+                "status": "accepted",
+            }),
+            ..ToolResultMeta::default()
+        },
+    );
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Completed,
+        None,
+        Some(&result),
+    )?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(Some(ContinueDurableTaskAction {
+        task_id: selected.task_id.clone(),
+        source_turn: selected.source_turn.clone(),
+        plan_version: selected.plan_version,
+        task_status: selected.task_status,
+        plan_status: selected.plan_status,
+        route_contract_fingerprint: selected.route_contract_fingerprint.clone(),
+        guidance: crate::SecretString::new(action_guidance),
+        guidance_receipt: selected,
+    }))
+}
+
+fn reject_task_continuation_recovery(
+    session: &mut Session,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+    message: &str,
+) -> Result<Option<ContinueDurableTaskAction>> {
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::InvalidInput,
+        message,
+    );
+    attach_tool_call_context(&mut result, call, &[]);
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Failed,
+        None,
+        Some(&result),
+    )?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(None)
 }
 
 pub(super) fn handle_continue_without_task_planning_call(
@@ -276,6 +537,45 @@ where
     Ok(())
 }
 
+fn task_continuation_route_decision_control(
+    session: &Session,
+    binding: &TaskContinuationHandoffBinding,
+) -> Result<Option<crate::ConversationRouteDecisionRecordedEntry>> {
+    use crate::conversation_route::{
+        ConversationRoute, ConversationRouteDecisionProjection,
+        ConversationRouteDecisionRecordedEntry, conversation_route_decision_id_for_source,
+    };
+    let projection = ConversationRouteDecisionProjection::from_entries(session.entries());
+    if projection.has_conflicts() {
+        bail!("conversation route decision projection contains conflicting durable facts");
+    }
+    let decision_id = conversation_route_decision_id_for_source(&binding.source_turn);
+    if let Some(existing) = projection.decision_id_for_source(&binding.source_turn)
+        && existing != &decision_id
+    {
+        bail!("source turn is already bound to a different route decision");
+    }
+    let entry = ConversationRouteDecisionRecordedEntry {
+        decision_id,
+        source_turn: binding.source_turn.clone(),
+        route: ConversationRoute::Task,
+        reason_codes: Vec::new(),
+        configured_policy: crate::TaskRoutingPolicy::Auto,
+        effective_capability: binding.effective_capability,
+        policy_snapshot_hash: binding.policy_snapshot_hash.clone(),
+        route_contract_fingerprint: binding.route_contract_fingerprint.clone(),
+        decided_at_ms: binding.decided_at_ms,
+    };
+    match projection.decision(&entry.decision_id) {
+        None => Ok(Some(entry)),
+        Some(previous) if previous == &entry => Ok(None),
+        Some(_) => bail!(
+            "route decision {} has conflicting durable facts",
+            entry.decision_id.as_str()
+        ),
+    }
+}
+
 pub(super) fn append_tool_ignored_after_task_handoff(
     session: &mut Session,
     outcome: &mut AgentRunOutcome,
@@ -373,6 +673,50 @@ fn validate_binding_against_session(
     Ok(())
 }
 
+fn validate_task_continuation_binding(
+    session: &Session,
+    binding: &TaskContinuationHandoffBinding,
+) -> Result<()> {
+    if binding.source_turn.session_scope_id != session.session_scope_id() {
+        bail!("task continuation source belongs to a different session");
+    }
+    if source_turn_objective(session, &binding.source_turn).is_none() {
+        bail!(
+            "task continuation source user turn {} is not present",
+            binding.source_turn.message_id
+        );
+    }
+    if binding.policy_snapshot_hash.trim().is_empty()
+        || binding.route_contract_fingerprint.trim().is_empty()
+    {
+        bail!("task continuation route binding is incomplete");
+    }
+    if !matches!(
+        binding.task_status,
+        TaskRunStatus::Started
+            | TaskRunStatus::Paused
+            | TaskRunStatus::Failed
+            | TaskRunStatus::Interrupted
+    ) {
+        bail!("task continuation binding is not resumable");
+    }
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&binding.task_id)
+        .ok_or_else(|| anyhow!("task continuation target is no longer present"))?;
+    let plan_status = binding
+        .plan_version
+        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
+    if task.status != binding.task_status
+        || task.latest_plan_version != binding.plan_version
+        || plan_status != binding.plan_status
+    {
+        bail!("task continuation target changed after routing was frozen");
+    }
+    Ok(())
+}
+
 fn source_turn_objective(session: &Session, source_turn: &ConversationTurnRef) -> Option<String> {
     session.entries().iter().find_map(|entry| match entry {
         SessionLogEntry::User(message) if message.id == source_turn.message_id => {
@@ -429,4 +773,19 @@ where
 {
     session.append_control(control.clone())?;
     handler.handle(RunEvent::Control(control))
+}
+
+fn append_control_batch<H>(
+    session: &mut Session,
+    handler: &mut H,
+    controls: Vec<ControlEntry>,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    session.append_controls(controls.clone())?;
+    for control in controls {
+        handler.handle(RunEvent::Control(control))?;
+    }
+    Ok(())
 }

@@ -767,8 +767,11 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
             let control = decode_control_entry(&event)?;
             match control {
                 ControlEntry::TaskRun(_)
+                | ControlEntry::TaskContinuationSelected(_)
                 | ControlEntry::TaskRunCancellationScopeBound(_)
+                | ControlEntry::TaskRunTargetSelected(_)
                 | ControlEntry::TaskPlan(_)
+                | ControlEntry::TaskGuidanceMaterialized(_)
                 | ControlEntry::TaskStep(_)
                 | ControlEntry::TaskParticipantAttempt(_)
                 | ControlEntry::TaskParticipantRetryScheduled(_)
@@ -1690,10 +1693,13 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
         ControlEntry::TaskHandoffRequested(_) => "task_handoff_requested",
         ControlEntry::TaskHandoffResolved(_) => "task_handoff_resolved",
+        ControlEntry::TaskContinuationSelected(_) => "task_continuation_selected",
         ControlEntry::TaskRun(_) => "task_run",
         ControlEntry::TaskRunCancellationScopeBound(_) => "task_run_cancellation_scope_bound",
+        ControlEntry::TaskRunTargetSelected(_) => "task_run_target_selected",
         ControlEntry::TaskPlan(_) => "task_plan",
         ControlEntry::TaskGuidanceApplied(_) => "task_guidance_applied",
+        ControlEntry::TaskGuidanceMaterialized(_) => "task_guidance_materialized",
         ControlEntry::TaskStep(_) => "task_step",
         ControlEntry::TaskParticipantAttempt(_) => "task_participant_attempt",
         ControlEntry::TaskParticipantRetryScheduled(_) => "task_participant_retry_scheduled",

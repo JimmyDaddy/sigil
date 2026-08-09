@@ -1,11 +1,17 @@
 use anyhow::Result;
 
+use crate::session::SessionWriterFault;
 use crate::{
-    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationTurnRef, SessionLogEntry,
-    TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId,
-    TaskHandoffProjection, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, ToolCall,
-    continue_without_task_planning_tool_spec, conversation_route_routing_contract_material,
-    validate_continue_without_task_planning_call,
+    AutomaticRouteCapability, CONTINUE_EXISTING_TASK_TOOL_NAME,
+    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationRoute,
+    ConversationRouteDecisionRecordedEntry, ConversationTurnRef, JsonlSessionStore, ModelMessage,
+    Session, SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
+    TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection,
+    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, ToolCall, continue_existing_task_tool_spec,
+    continue_without_task_planning_tool_spec, conversation_route_decision_id_for_source,
+    conversation_route_routing_contract_material, project_conversation_prompt_for_persistence,
+    validate_continue_existing_task_call, validate_continue_without_task_planning_call,
 };
 
 fn source_turn(message_id: &str) -> Result<ConversationTurnRef> {
@@ -78,6 +84,24 @@ fn direct_conversation_routing_tool_is_typed_and_bounded() {
     let mut invalid = valid.clone();
     invalid.args_json = r#"{"reason":"cross_layer"}"#.to_owned();
     assert!(validate_continue_without_task_planning_call(&invalid).is_err());
+}
+
+#[test]
+fn existing_task_continuation_tool_keeps_task_identity_host_owned() {
+    let spec = continue_existing_task_tool_spec();
+    assert_eq!(spec.name, CONTINUE_EXISTING_TASK_TOOL_NAME);
+    assert!(spec.input_schema["properties"].get("task_id").is_none());
+    let valid = ToolCall {
+        id: "call-continue-task".to_owned(),
+        name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
+        args_json: r#"{"reason":"continue_current_task"}"#.to_owned(),
+    };
+    assert!(validate_continue_existing_task_call(&valid).is_ok());
+
+    let mut injected_identity = valid;
+    injected_identity.args_json =
+        r#"{"reason":"continue_current_task","task_id":"task-decoy"}"#.to_owned();
+    assert!(validate_continue_existing_task_call(&injected_identity).is_err());
 }
 
 #[test]
@@ -161,5 +185,100 @@ fn accepted_and_rejected_resolution_shapes_are_strict() -> Result<()> {
         SessionLogEntry::Control(ControlEntry::TaskHandoffResolved(rejected_with_task)),
     ]);
     assert_eq!(projection.conflicts.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn continuation_route_and_exact_selection_recover_as_one_crash_safe_bundle() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("continuation-route-bundle.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    let task_id = TaskId::new("task-continuation-bundle")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "finish the durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for follow-up".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: Vec::new(),
+        reason: None,
+    }))?;
+    let mut user = ModelMessage::user("finish it and include the new requirement");
+    user.id = "continuation-source-message".to_owned();
+    session.append_user_message(user)?;
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        "continuation-source-message",
+        "continuation-source-run",
+    )?;
+    let prompt =
+        project_conversation_prompt_for_persistence("finish it and include the new requirement");
+    let route = ConversationRouteDecisionRecordedEntry {
+        decision_id: conversation_route_decision_id_for_source(&source_turn),
+        source_turn: source_turn.clone(),
+        route: ConversationRoute::Task,
+        reason_codes: Vec::new(),
+        configured_policy: TaskRoutingPolicy::Auto,
+        effective_capability: AutomaticRouteCapability::DirectTask,
+        policy_snapshot_hash: "sha256:policy-v1".to_owned(),
+        route_contract_fingerprint: "sha256:continuation-contract-v1".to_owned(),
+        decided_at_ms: 99,
+    };
+    let selected = TaskContinuationSelectedEntry {
+        task_id: task_id.clone(),
+        source_turn,
+        plan_version: Some(1),
+        task_status: TaskRunStatus::Paused,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        route_contract_fingerprint: route.route_contract_fingerprint.clone(),
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: prompt.exact_prompt_required,
+        guidance: prompt.safe_prompt,
+        selected_at_ms: 99,
+    };
+
+    store.inject_writer_fault(SessionWriterFault::PartialSecondRecord)?;
+    assert!(
+        session
+            .append_controls(vec![
+                ControlEntry::ConversationRouteDecisionRecorded(route.clone()),
+                ControlEntry::TaskContinuationSelected(selected.clone()),
+            ])
+            .is_err()
+    );
+
+    let recovered = Session::load_from_store("test", "model", JsonlSessionStore::new(&path)?)?;
+    let route_index = recovered
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(value))
+                    if value == &route
+            )
+        })
+        .expect("crash recovery restores the exact route decision");
+    assert!(matches!(
+        recovered.entries().get(route_index + 1),
+        Some(SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(value)))
+            if value == &selected
+    ));
+    assert_eq!(
+        recovered
+            .task_state_projection()
+            .current_task()
+            .map(|task| &task.task_id),
+        Some(&task_id)
+    );
+    assert!(!path.with_extension("jsonl.append-bundle-intent").exists());
     Ok(())
 }
