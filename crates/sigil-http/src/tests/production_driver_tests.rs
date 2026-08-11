@@ -3668,7 +3668,8 @@ fn seed_revision_session(
     session: &HttpSessionSnapshot,
 ) -> sigil_kernel::PlanReviewId {
     let root_config = sigil_kernel::RootConfig::load(config_path).expect("config should load");
-    let workspace_root = sigil_kernel::resolve_workspace_root(config_path, temp.path(), ".");
+    let workspace_root =
+        sigil_kernel::resolve_workspace_root(config_path, temp.path(), &root_config.workspace.root);
     let store = JsonlSessionStore::new(&session.session_log_path).expect("session store");
     let (provider_name, route) = production_test_model_route(temp);
     let mut session_log =
@@ -3779,7 +3780,7 @@ async fn production_revision_duplicate_registration_never_blocks_the_session() {
         r#"config_version = 2
 
 [workspace]
-root = "."
+root = "workspace"
 
 [agent]
 connection = "local-test"
@@ -4093,7 +4094,7 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
             r#"config_version = 2
 
 [workspace]
-root = "."
+root = "workspace"
 
 [agent]
 connection = "local-test"
