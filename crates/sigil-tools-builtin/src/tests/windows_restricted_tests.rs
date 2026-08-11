@@ -109,6 +109,7 @@ async fn supervise_native_probe(
     super::super::supervise_execution_child(
         super::super::SupervisedExecutionChild::WindowsRestricted(child),
         request,
+        None,
         output_limits,
         reader_fault,
         None,
@@ -130,6 +131,7 @@ async fn supervise_restricting_sid_probe(
     let outcome = super::super::supervise_execution_child(
         super::super::SupervisedExecutionChild::WindowsRestricted(child),
         request,
+        None,
         super::super::OutputCollectionLimits::execution(),
         super::super::PreflightReaderFault::None,
         None,
@@ -159,6 +161,7 @@ async fn supervise_app_container_probe(
     let outcome = super::super::supervise_execution_child(
         super::super::SupervisedExecutionChild::WindowsRestricted(child),
         request,
+        None,
         super::super::OutputCollectionLimits::execution(),
         super::super::PreflightReaderFault::None,
         None,
