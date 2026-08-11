@@ -1796,18 +1796,12 @@ fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
         v2_tool_result_entry("call-1", "bash", "tool output", ToolResultMeta::default()),
     ];
 
-    assert_eq!(
-        restored_tool_execution_index(&entries)["call-1"].tool_name,
-        "bash"
-    );
-    assert_eq!(
-        restored_tool_preview_snapshot_index(&entries)["call-1"].title,
-        "Preview"
-    );
-    assert!(restored_tool_result_call_ids(&entries).contains("call-1"));
+    let restored = restored_tool_occurrences(&entries);
+    assert_eq!(restored.executions[&2].tool_name, "bash");
+    assert_eq!(restored.previews[&2].title, "Preview");
     assert!(!should_render_restored_tool_execution(
-        &execution,
-        &restored_tool_result_call_ids(&entries)
+        0,
+        &restored.orphan_execution_indices
     ));
 
     let failed = ToolExecutionEntry {
@@ -1821,9 +1815,12 @@ fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
         error: None,
         model_content_hash: None,
     };
+    let failed_restored = restored_tool_occurrences(&[SessionLogEntry::Control(
+        ControlEntry::ToolExecution(Box::new(failed.clone())),
+    )]);
     assert!(should_render_restored_tool_execution(
-        &failed,
-        &restored_tool_result_call_ids(&entries)
+        0,
+        &failed_restored.orphan_execution_indices
     ));
     assert!(restored_tool_execution_content(&failed).contains("status failed"));
     assert_eq!(
@@ -2569,12 +2566,16 @@ fn render_session_control_entries_cover_remaining_labels() {
         restored_tool_execution_content(&execution_with_error),
         "boom"
     );
+    let cancelled = ToolExecutionEntry {
+        status: ToolExecutionStatus::Cancelled,
+        ..execution_with_error.clone()
+    };
+    let restored = restored_tool_occurrences(&[SessionLogEntry::Control(
+        ControlEntry::ToolExecution(Box::new(cancelled)),
+    )]);
     assert!(should_render_restored_tool_execution(
-        &ToolExecutionEntry {
-            status: ToolExecutionStatus::Cancelled,
-            ..execution_with_error.clone()
-        },
-        &std::collections::HashSet::new()
+        0,
+        &restored.orphan_execution_indices
     ));
 }
 

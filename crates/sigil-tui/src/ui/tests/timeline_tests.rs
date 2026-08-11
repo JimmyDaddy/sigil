@@ -1902,7 +1902,7 @@ fn render_timeline_entry_lines_can_collapse_default_expanded_tool_diff() {
     let lines = render_timeline_entry_lines_with_options(
         &entry,
         &TimelineRenderOptions {
-            collapsed_tool_activity_keys: BTreeSet::from(["call:call-diff".to_owned()]),
+            collapsed_tool_activity_keys: BTreeSet::from(["call:call-diff:entry:0".to_owned()]),
             ..TimelineRenderOptions::default()
         },
         0,
@@ -2022,7 +2022,7 @@ fn tool_activity_view_marks_read_list_and_simple_searches_as_inspection() {
     let complex_activity = crate::ui::tool_activity_view(&complex_bash_entry, 2)
         .expect("complex activity should parse");
 
-    assert_eq!(read_activity.key, "call:call-read");
+    assert_eq!(read_activity.key, "call:call-read:entry:0");
     assert_eq!(read_activity.title, "Read README.md");
     assert!(read_activity.is_inspection);
     assert_eq!(search_activity.title, "Searched needle in src/main.rs");

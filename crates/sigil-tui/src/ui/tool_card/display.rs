@@ -8,10 +8,14 @@ pub(super) fn build_tool_card_display(summary: &ToolCardRender) -> ToolCardDispl
     }
 }
 
-pub(super) fn build_tool_activity_view(summary: &ToolCardRender, source: &str) -> ToolActivityView {
+pub(super) fn build_tool_activity_view(
+    summary: &ToolCardRender,
+    source: &str,
+    entry_index: usize,
+) -> ToolActivityView {
     let display = build_tool_card_display(summary);
     ToolActivityView {
-        key: tool_activity_key(summary, source),
+        key: tool_activity_key(summary, source, entry_index),
         title: display.title.plain(),
         is_inspection: tool_activity_is_inspection_summary(summary),
         defaults_expanded: summary.diff.is_some()
@@ -33,15 +37,20 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
     {
         return agent_tool_display_status(&status);
     }
-    let label = if summary.is_error {
-        match summary.error_kind.as_deref() {
-            Some("approval_denied") | Some("permission_denied") => "DENIED",
-            Some("interrupted") => "INTERRUPTED",
-            Some("timeout") => "TIMEOUT",
-            _ => "ERROR",
-        }
+    let (label, kind) = if summary.is_error {
+        (
+            match summary.error_kind.as_deref() {
+                Some("approval_denied") | Some("permission_denied") => "DENIED",
+                Some("interrupted") => "INTERRUPTED",
+                Some("timeout") => "TIMEOUT",
+                _ => "ERROR",
+            },
+            StatusKind::Error,
+        )
+    } else if status_kind_from_label(&summary.status) == StatusKind::Running {
+        ("RUNNING", StatusKind::Running)
     } else {
-        "OK"
+        ("OK", StatusKind::Success)
     };
     let detail = if tool_name_matches(&summary.tool_name, "bash") {
         let mut details = Vec::new();
@@ -96,11 +105,7 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
     ToolCardDisplayStatus {
         label,
         detail,
-        kind: if summary.is_error {
-            StatusKind::Error
-        } else {
-            StatusKind::Success
-        },
+        kind,
         is_error: summary.is_error,
     }
 }
@@ -370,12 +375,12 @@ pub(super) fn title_segments(
 }
 
 pub(super) fn shell_command_title(action: &'static str, command: &str) -> ToolCardTitle {
-    let command = command.trim();
+    let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut parts = command.splitn(2, char::is_whitespace);
     let subject = parts
         .next()
         .filter(|part| !part.is_empty())
-        .unwrap_or(command);
+        .unwrap_or(command.as_str());
     let args = parts
         .next()
         .map(str::trim)
@@ -430,7 +435,11 @@ fn checkpoint_restore_display_status(summary: &ToolCardRender) -> ToolCardDispla
     }
 }
 
-pub(super) fn tool_activity_key(summary: &ToolCardRender, source: &str) -> String {
+pub(super) fn tool_activity_key(
+    summary: &ToolCardRender,
+    source: &str,
+    entry_index: usize,
+) -> String {
     if terminal_task_tool(summary)
         && let Some(task_id) = &summary.metadata.terminal_task_id
     {
@@ -439,8 +448,13 @@ pub(super) fn tool_activity_key(summary: &ToolCardRender, source: &str) -> Strin
     summary
         .call_id
         .as_ref()
-        .map(|call_id| format!("call:{call_id}"))
-        .unwrap_or_else(|| format!("hash:{:016x}", stable_tool_activity_hash(source)))
+        .map(|call_id| format!("call:{call_id}:entry:{entry_index}"))
+        .unwrap_or_else(|| {
+            format!(
+                "hash:{:016x}:entry:{entry_index}",
+                stable_tool_activity_hash(source)
+            )
+        })
 }
 
 pub(super) fn stable_tool_activity_hash(source: &str) -> u64 {

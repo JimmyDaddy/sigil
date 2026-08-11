@@ -26,7 +26,7 @@ use super::{
     },
     status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
     syntax_highlight::highlight_code_to_spans_with_theme,
-    text::{terminal_cell_width, truncate_inline_text},
+    text::{terminal_cell_width, truncate_inline_text, wrap_display_width},
     theme::ThemePalette,
 };
 
@@ -52,20 +52,20 @@ pub(crate) struct ToolActivityView {
 
 pub(crate) fn tool_activity_view(
     entry: &TimelineEntry,
-    _entry_index: usize,
+    entry_index: usize,
 ) -> Option<ToolActivityView> {
     let summary = parse_tool_summary(&entry.text);
-    Some(build_tool_activity_view(&summary, &entry.text))
+    Some(build_tool_activity_view(&summary, &entry.text, entry_index))
 }
 
 pub(crate) fn render_tool_entry_lines(
     entry: &TimelineEntry,
     options: &TimelineRenderOptions,
-    _entry_index: usize,
+    entry_index: usize,
 ) -> Vec<Line<'static>> {
     let summary = parse_tool_summary(&entry.text);
     let display = build_tool_card_display(&summary);
-    let activity = build_tool_activity_view(&summary, &entry.text);
+    let activity = build_tool_activity_view(&summary, &entry.text, entry_index);
     let palette = &options.theme.palette;
     let accent = palette.accent_danger;
     let selected = options
@@ -105,7 +105,7 @@ pub(crate) fn render_tool_entry_lines(
     }
     if tool_has_preview(&summary) {
         if expanded {
-            let body = render_tool_preview_body_with_palette(
+            let body = render_tool_expanded_preview_body_with_palette(
                 &summary,
                 accent,
                 options.max_content_width,
@@ -169,6 +169,7 @@ fn tool_name_matches(tool_name: &str, expected: &str) -> bool {
 struct ToolCardRender {
     call_id: Option<String>,
     tool_name: String,
+    status: String,
     is_error: bool,
     error_kind: Option<String>,
     summary: Option<String>,

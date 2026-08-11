@@ -1,4 +1,4 @@
-use super::agent_thread_status_label;
+use super::{agent_thread_status_label, remap_tool_activity_key_after_entry_removal};
 use sigil_kernel::{AgentInvocationSource, AgentThreadStatus};
 
 fn agent_thread_source_label(source: Option<AgentInvocationSource>) -> &'static str {
@@ -85,4 +85,20 @@ fn agent_thread_labels_cover_status_and_source_variants() {
         "unknown"
     );
     assert_eq!(agent_thread_source_label(None), "unknown");
+}
+
+#[test]
+fn tool_activity_occurrence_key_tracks_entry_removal() {
+    assert_eq!(
+        remap_tool_activity_key_after_entry_removal("call:call-0:entry:7".to_owned(), &[1, 4],),
+        Some("call:call-0:entry:5".to_owned())
+    );
+    assert_eq!(
+        remap_tool_activity_key_after_entry_removal("call:call-0:entry:4".to_owned(), &[1, 4],),
+        None
+    );
+    assert_eq!(
+        remap_tool_activity_key_after_entry_removal("terminal_task:terminal-1".to_owned(), &[1, 4],),
+        Some("terminal_task:terminal-1".to_owned())
+    );
 }

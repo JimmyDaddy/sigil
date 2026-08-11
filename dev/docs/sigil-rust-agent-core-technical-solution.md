@@ -1517,6 +1517,8 @@ Permission policy 负责决定一次工具调用是：
 - extension process 的网络启动授权使用不可序列化的 run-scoped admission：`Ask` 只有在真实交互审批证据存在时才可越过 spawn boundary；`Deny` 只有 exact backend plan 同时证明 network isolation、process-tree isolation 和 denied network receipt 时才可启动，并在执行后复核 receipt。model-triggered activation 作为本地 `Execute + NetworkEffect::Unknown` 工具走完整 local/network/source permission；配置声明的 eager、direct activation 与 refresh 属于既有 lifecycle management path，不把 `approval_default` 重新解释为启动审批，但仍必须显式携带当前 NetworkPolicy，不能退回隐式 default Allow
 - `ToolAccess` 只接受当前 `read` / `write` / `execute` 值；`access = "network"` 与其他非当前值直接拒绝，不安装容器级转换器
 - `bash` 静态是 `Shell / Execute`，但它覆盖单一 `permission_plan`，由结构化 Shell analyzer 把简单只读命令分类为 `Read`，并为重定向、wrapper、pipeline、subshell、dynamic expansion、测试/包管理和写操作生成逐节点 effects 后取最严格 aggregate；parser 不完整或执行边界无法证明时 fail closed
+- Shell analyzer 只可把语法与数据边界都能完整证明的受限循环降级为 `Read`；例如静态字面量列表上的文件存在性检查，循环变量只能出现在固定前缀的只读 path 中，分支只能输出结果。动态列表、glob、command substitution、未知变量、路径前缀漂移或任何 mutation 都必须继续按 `Execute` / incomplete 处理，不能为了减少误拒绝而放宽 protected target hard deny
+- 受限循环若包含 Git 查询，`Read` 判定还必须绑定实际执行的 root-owned、不可写 shell/Git identity；执行前重算 binding，并使用隔离环境把 `PATH` 收窄到该 Git，同时禁用 pager、signature helper、lazy fetch、optional locks 与交互提示。PATH 中更早命中的工作区/用户可写 Git、identity 漂移或 Git 配置副作用无法被约束时一律 fail closed，`danger-full-access` 也不能越过 protected target hard deny
 - `[permission.commands] allow/ask/deny` 在归一化命令文本上做显式匹配，优先级固定为 `deny > ask > allow`；它可以减少已信任命令的重复确认，但不替代 shell classifier、path subject、external-directory gate 或 protected path overlay
 - 命中的 command permission 必须作为结构化 `CommandPermissionMatch` 保留在 permission decision、approval request 和 `ToolApproval` audit entry 中，TUI 审批卡片展示对应 `permission.commands.<group>`、pattern 与命令文本
 - headless run 遇到最终 `ask` 返回结构化 `approval_required` tool error，不静默执行
@@ -1797,6 +1799,7 @@ pub struct ProviderCapabilities {
   frontier 隐藏，不能通过永久回退物理 ownership 来实现浏览。History-inspect 以 entry 内 logical
   content offset 锚定可见顶行；stream delta、timeline append、height resize 与 width reflow 不得把用户
   正在阅读的历史位置拖向 live tail
+- Bash tool card 的标题与展开内容必须来自已经过 SafePersist/secret redaction 的 ToolCall 展示上下文：折叠态显示有界单行命令，`Ctrl-O` 展开时显示完整安全命令和输出；session restore 使用同一 durable ToolCall 投影，不能只在 live 内存中可见。运行中 progress 与最终 result 必须先按当前活动 invocation 的 `call_id` 关联，并以其精确 timeline occurrence 作为替换 identity；`execution_id` 只可作为该活动 occurrence 内的 transient correlation，不能全局扫描并合并历史，从而既不能留下同一次调用的重复卡片，也不能把跨 turn 复用的 `call_id` / `execution_id` 误合并
 - 底部 live strip：只保留当前流式尾部、composer 与紧凑状态，不要求用户在 chat 区和 composer 之间切焦点
 - 底部输入区：支持多行输入、发送、取消、清空
 - 右侧信息区 + composer 下状态行：展示写权限、subagent 状态、cache 命中、上下文压力、花费与余额；右栏启动可见性由 `[appearance].info_rail` 控制，运行中用 `F2` 显示/隐藏、`Shift-F2` 切换精简/详情，窄终端仍按布局能力自动收起

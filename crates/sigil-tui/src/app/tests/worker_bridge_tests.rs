@@ -2017,6 +2017,677 @@ fn agent_thread_event_updates_only_focused_child_transcript() -> Result<()> {
     Ok(())
 }
 
+fn focus_live_child_transcript(
+    app: &mut AppState,
+    thread_id: &sigil_kernel::AgentThreadId,
+) -> Result<()> {
+    let relative_path = format!("children/{}.jsonl", thread_id.as_str());
+    app.agent_panel.active_view = super::super::AgentView::Child {
+        child_task_id: thread_id.as_str().to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative(relative_path.clone())?,
+    };
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: Path::new(&relative_path).to_path_buf(),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: Vec::new(),
+        rendered_body_lines: Vec::new(),
+        total_timeline_entries: 0,
+        transcript_truncated: false,
+        load_error: None,
+    });
+    Ok(())
+}
+
+#[test]
+fn child_bash_progress_and_final_share_one_redacted_command_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.secret_redactor = sigil_kernel::SecretRedactor::from_values(["child-secret"]);
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_child_bash_live")?;
+    let call_id = "call-child-bash";
+    focus_live_child_transcript(&mut app, &thread_id)?;
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallStarted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command":"printf exact-provider-argument"}).to_string(),
+        })),
+    })?;
+    let pending = &app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("child pending transcript")
+        .timeline_entries[0]
+        .text;
+    let pending_payload: serde_json::Value = serde_json::from_str(pending)?;
+    assert_eq!(pending_payload["status"], "running");
+    assert!(pending.contains("bash is running"));
+    assert!(!pending.contains("exact-provider-argument"));
+    assert!(app.agent_panel.safe_child_tool_calls.is_empty());
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallCompleted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({
+                "command": "printf child-secret && cargo check --workspace"
+            })
+            .to_string(),
+        })),
+    })?;
+    let completed_pending = &app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("completed safe call should retain pending card")
+        .timeline_entries[0]
+        .text;
+    let completed_pending_payload: serde_json::Value = serde_json::from_str(completed_pending)?;
+    assert_eq!(completed_pending_payload["status"], "running");
+    assert_eq!(
+        completed_pending_payload["metadata"]["details"]["call"]["summary"],
+        "command=printf [redacted] && cargo check --workspace"
+    );
+    let completed_pending_rendered = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("completed safe call should render pending card")
+        .rendered_body_lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(completed_pending_rendered.contains("RUNNING"));
+    assert!(!completed_pending_rendered.contains(" OK "));
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+            execution_id: sigil_kernel::ToolExecutionId::new("child-bash-execution")?,
+            call_id: call_id.to_owned(),
+            tool_name: "bash".to_owned(),
+            sequence: 1,
+            status: "running".to_owned(),
+            message: Some("foreground shell command is running".to_owned()),
+            output_preview: None,
+            output_log_ref: None,
+            total_bytes: Some(0),
+            updated_at_ms: None,
+            details: json!({"execution_mode":"foreground"}),
+        })),
+    })?;
+    let progress_transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("child progress transcript");
+    assert_eq!(progress_transcript.timeline_entries.len(), 1);
+    let progress_payload: serde_json::Value =
+        serde_json::from_str(&progress_transcript.timeline_entries[0].text)?;
+    assert_eq!(progress_payload["status"], "running");
+    assert_eq!(
+        progress_payload["metadata"]["details"]["execution_id"],
+        "child-bash-execution"
+    );
+    assert_eq!(
+        progress_payload["metadata"]["details"]["call"]["summary"],
+        "command=printf [redacted] && cargo check --workspace"
+    );
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolResult(production_display_bash_result(
+            call_id,
+            "child check completed",
+        ))),
+    })?;
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("focused child transcript");
+    let cards = transcript
+        .timeline_entries
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&cards[0].text)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["metadata"]["details"]["call"]["summary"],
+        "command=printf [redacted] && cargo check --workspace"
+    );
+    assert_eq!(
+        payload["metadata"]["details"]["execution_id"],
+        "child-bash-execution"
+    );
+    assert!(cards[0].text.contains("child check completed"));
+    assert!(
+        !cards[0]
+            .text
+            .contains("foreground shell command is running")
+    );
+    assert!(!cards[0].text.contains("child-secret"));
+    assert!(app.agent_panel.safe_child_tool_calls.is_empty());
+    assert!(app.agent_panel.child_tool_progress_execution_ids.is_empty());
+    assert!(app.agent_panel.child_tool_card_entry_indices.is_empty());
+    Ok(())
+}
+
+#[test]
+fn child_completed_call_restores_command_after_switch_before_progress_and_final() -> Result<()> {
+    let temp = tempdir()?;
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_child_bash_switch")?;
+    let child_session_ref =
+        sigil_kernel::SessionRef::new_relative("children/agent_child_bash_switch.jsonl")?;
+    let child_path = temp.path().join(child_session_ref.as_path());
+    let child_store = JsonlSessionStore::new(&child_path)?;
+    let call_id = "call-child-bash-switch";
+    let safe_call = ToolCall {
+        id: call_id.to_owned(),
+        name: "bash".to_owned(),
+        args_json: json!({"command":"printf restored-child-command"}).to_string(),
+    };
+
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join("parent.jsonl");
+    app.agent_panel.active_view = super::super::AgentView::Child {
+        child_task_id: thread_id.as_str().to_owned(),
+        child_session_ref: child_session_ref.clone(),
+    };
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: child_path.clone(),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: Vec::new(),
+        rendered_body_lines: Vec::new(),
+        total_timeline_entries: 0,
+        transcript_truncated: false,
+        load_error: None,
+    });
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallCompleted(safe_call.clone())),
+    })?;
+    child_store.append(&SessionLogEntry::Assistant(
+        ModelMessage::assistant_with_kind(
+            None,
+            vec![safe_call],
+            AssistantMessageKind::ToolPreamble,
+        ),
+    ))?;
+
+    app.agent_panel.active_view = super::super::AgentView::Main;
+    assert!(app.reload_active_agent_child_transcript());
+    assert!(app.agent_panel.safe_child_tool_calls.is_empty());
+    app.agent_panel.active_view = super::super::AgentView::Child {
+        child_task_id: thread_id.as_str().to_owned(),
+        child_session_ref: child_session_ref.clone(),
+    };
+    assert!(app.reload_active_agent_child_transcript());
+
+    let restored = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("restored child transcript");
+    assert_eq!(restored.timeline_entries.len(), 1);
+    assert!(
+        restored.timeline_entries[0]
+            .text
+            .contains("status\":\"running")
+    );
+    assert!(
+        restored.timeline_entries[0]
+            .text
+            .contains("command=printf restored-child-command")
+    );
+    assert_eq!(app.agent_panel.safe_child_tool_calls.len(), 1);
+    assert_eq!(app.agent_panel.child_tool_card_entry_indices.len(), 1);
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+            execution_id: sigil_kernel::ToolExecutionId::new("child-switch-execution")?,
+            call_id: call_id.to_owned(),
+            tool_name: "bash".to_owned(),
+            sequence: 1,
+            status: "running".to_owned(),
+            message: Some("restored child command is running".to_owned()),
+            output_preview: None,
+            output_log_ref: None,
+            total_bytes: Some(0),
+            updated_at_ms: Some(1),
+            details: json!({"execution_mode":"foreground"}),
+        })),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolResult(production_display_bash_result(
+            call_id,
+            "restored child done",
+        ))),
+    })?;
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("completed restored child transcript");
+    let cards = transcript
+        .timeline_entries
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 1);
+    assert!(
+        cards[0]
+            .text
+            .contains("command=printf restored-child-command")
+    );
+    assert!(cards[0].text.contains("restored child done"));
+    assert!(cards[0].text.contains("child-switch-execution"));
+    assert!(app.agent_panel.child_tool_card_entry_indices.is_empty());
+    Ok(())
+}
+
+#[test]
+fn child_failed_audit_then_live_result_replaces_one_restored_occurrence() -> Result<()> {
+    let temp = tempdir()?;
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_child_failed_audit_race")?;
+    let child_session_ref =
+        sigil_kernel::SessionRef::new_relative("children/agent_child_failed_audit_race.jsonl")?;
+    let child_path = temp.path().join(child_session_ref.as_path());
+    let child_store = JsonlSessionStore::new(&child_path)?;
+    let call_id = "call-child-failed-audit-race";
+    let safe_call = ToolCall {
+        id: call_id.to_owned(),
+        name: "bash".to_owned(),
+        args_json: json!({"command":"cargo test -p sigil-tui"}).to_string(),
+    };
+    child_store.append(&SessionLogEntry::Assistant(
+        ModelMessage::assistant_with_kind(
+            None,
+            vec![safe_call],
+            AssistantMessageKind::ToolPreamble,
+        ),
+    ))?;
+    child_store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+        Box::new(ToolExecutionEntry {
+            call_id: call_id.to_owned(),
+            tool_name: "bash".to_owned(),
+            status: ToolExecutionStatus::Failed,
+            duration_ms: Some(1),
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        }),
+    )))?;
+
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join("parent.jsonl");
+    app.agent_panel.active_view = super::super::AgentView::Child {
+        child_task_id: thread_id.as_str().to_owned(),
+        child_session_ref: child_session_ref.clone(),
+    };
+    assert!(app.reload_active_agent_child_transcript());
+
+    let restored = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("failed audit child transcript");
+    assert_eq!(restored.timeline_entries.len(), 1);
+    assert_eq!(restored.total_timeline_entries, 1);
+    assert!(
+        restored.timeline_entries[0]
+            .text
+            .contains("status\":\"error")
+    );
+    assert_eq!(
+        app.agent_panel
+            .child_tool_card_entry_indices
+            .values()
+            .map(|occurrence| occurrence.entry_index())
+            .collect::<Vec<_>>(),
+        vec![Some(0)]
+    );
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolResult(ToolResult::error(
+            call_id,
+            "bash",
+            ToolErrorKind::ExitStatus,
+            "child final failure",
+        ))),
+    })?;
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("settled failed child transcript");
+    assert_eq!(transcript.timeline_entries.len(), 1);
+    assert_eq!(transcript.total_timeline_entries, 1);
+    assert!(
+        transcript.timeline_entries[0]
+            .text
+            .contains("child final failure")
+    );
+    assert!(
+        transcript.timeline_entries[0]
+            .text
+            .contains("command=cargo test -p sigil-tui")
+    );
+    assert!(app.agent_panel.child_tool_card_entry_indices.is_empty());
+    assert!(app.agent_panel.safe_child_tool_calls.is_empty());
+
+    let mut replacement_app =
+        AppState::from_root_config(&temp.path().join("sigil.toml"), &test_config());
+    replacement_app.session_log_path = temp.path().join("replacement-parent.jsonl");
+    replacement_app.agent_panel.active_view = super::super::AgentView::Child {
+        child_task_id: thread_id.as_str().to_owned(),
+        child_session_ref,
+    };
+    assert!(replacement_app.reload_active_agent_child_transcript());
+    replacement_app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallStarted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command":"provider-exact-new-turn"}).to_string(),
+        })),
+    })?;
+    replacement_app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallCompleted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command":"printf new-child-turn"}).to_string(),
+        })),
+    })?;
+    replacement_app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id,
+        event: Box::new(RunEvent::ToolResult(production_display_bash_result(
+            call_id,
+            "new child turn completed",
+        ))),
+    })?;
+    let replacement_transcript = replacement_app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("replacement child transcript");
+    assert_eq!(replacement_transcript.timeline_entries.len(), 2);
+    assert_eq!(replacement_transcript.total_timeline_entries, 2);
+    assert!(
+        replacement_transcript.timeline_entries[0]
+            .text
+            .contains("status\":\"error")
+    );
+    assert!(
+        replacement_transcript.timeline_entries[1]
+            .text
+            .contains("command=printf new-child-turn")
+    );
+    assert!(
+        replacement_transcript.timeline_entries[1]
+            .text
+            .contains("new child turn completed")
+    );
+    Ok(())
+}
+
+#[test]
+fn child_safe_tool_calls_with_reused_ids_are_isolated_by_thread() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let first_thread = sigil_kernel::AgentThreadId::new("agent_child_scope_first")?;
+    let second_thread = sigil_kernel::AgentThreadId::new("agent_child_scope_second")?;
+    let call_id = "provider-reused-child-call-id";
+
+    focus_live_child_transcript(&mut app, &first_thread)?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: first_thread.clone(),
+        event: Box::new(RunEvent::ToolCallCompleted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command":"printf first-child-command"}).to_string(),
+        })),
+    })?;
+
+    focus_live_child_transcript(&mut app, &second_thread)?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: second_thread.clone(),
+        event: Box::new(RunEvent::ToolCallCompleted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command":"printf second-child-command"}).to_string(),
+        })),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: second_thread.clone(),
+        event: Box::new(RunEvent::ToolResult(production_display_bash_result(
+            call_id,
+            "second child done",
+        ))),
+    })?;
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("second child transcript");
+    assert_eq!(transcript.timeline_entries.len(), 1);
+    assert!(
+        transcript.timeline_entries[0]
+            .text
+            .contains("command=printf second-child-command")
+    );
+    assert!(
+        !transcript.timeline_entries[0]
+            .text
+            .contains("first-child-command")
+    );
+    assert!(app.agent_panel.safe_child_tool_calls.is_empty());
+    Ok(())
+}
+
+#[test]
+fn child_reused_call_id_keeps_distinct_terminal_cards() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_child_reused_call")?;
+    let call_id = "provider-reused-child-call-id";
+    let execution_id = "provider-reused-child-execution-id";
+    focus_live_child_transcript(&mut app, &thread_id)?;
+
+    for (turn_index, (command, output)) in [
+        ("printf first-child-command", "first child done"),
+        ("printf second-child-command", "second child done"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+            thread_id: thread_id.clone(),
+            event: Box::new(RunEvent::ToolCallCompleted(ToolCall {
+                id: call_id.to_owned(),
+                name: "bash".to_owned(),
+                args_json: json!({"command":command}).to_string(),
+            })),
+        })?;
+        app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+            thread_id: thread_id.clone(),
+            event: Box::new(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+                execution_id: sigil_kernel::ToolExecutionId::new(execution_id)?,
+                call_id: call_id.to_owned(),
+                tool_name: "bash".to_owned(),
+                sequence: 1,
+                status: "running".to_owned(),
+                message: Some(format!("turn {turn_index} progress one")),
+                output_preview: None,
+                output_log_ref: None,
+                total_bytes: Some(0),
+                updated_at_ms: Some(1),
+                details: json!({"execution_mode":"foreground"}),
+            })),
+        })?;
+        app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+            thread_id: thread_id.clone(),
+            event: Box::new(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+                execution_id: sigil_kernel::ToolExecutionId::new(execution_id)?,
+                call_id: call_id.to_owned(),
+                tool_name: "bash".to_owned(),
+                sequence: 2,
+                status: "running".to_owned(),
+                message: Some(format!("turn {turn_index} progress two")),
+                output_preview: None,
+                output_log_ref: None,
+                total_bytes: Some(0),
+                updated_at_ms: Some(2),
+                details: json!({"execution_mode":"foreground"}),
+            })),
+        })?;
+        assert_eq!(
+            app.agent_panel
+                .active_child_transcript
+                .as_ref()
+                .expect("child progress transcript")
+                .timeline_entries
+                .iter()
+                .filter(|entry| entry.role == TimelineRole::Tool)
+                .count(),
+            turn_index + 1,
+            "progress must replace only the current child occurrence"
+        );
+        app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+            thread_id: thread_id.clone(),
+            event: Box::new(RunEvent::ToolResult(production_display_bash_result(
+                call_id, output,
+            ))),
+        })?;
+    }
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("child transcript");
+    let cards = transcript
+        .timeline_entries
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 2);
+    assert!(cards[0].text.contains("command=printf first-child-command"));
+    assert!(cards[0].text.contains("first child done"));
+    assert!(cards[0].text.contains(execution_id));
+    assert!(!cards[0].text.contains("turn 1 progress"));
+    assert!(
+        cards[1]
+            .text
+            .contains("command=printf second-child-command")
+    );
+    assert!(cards[1].text.contains("second child done"));
+    assert!(cards[1].text.contains(execution_id));
+    assert!(!cards[1].text.contains("turn 0 progress"));
+    assert!(app.agent_panel.child_tool_card_entry_indices.is_empty());
+    Ok(())
+}
+
+#[test]
+fn child_maximum_batch_finalizes_offscreen_pending_without_inflating_total() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_child_maximum_batch")?;
+    focus_live_child_transcript(&mut app, &thread_id)?;
+
+    for index in 0..sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS {
+        app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+            thread_id: thread_id.clone(),
+            event: Box::new(RunEvent::ToolCallCompleted(ToolCall {
+                id: format!("call-child-maximum-{index}"),
+                name: "bash".to_owned(),
+                args_json: json!({"command": format!("printf child-maximum-{index}")}).to_string(),
+            })),
+        })?;
+    }
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("maximum child pending transcript");
+    assert_eq!(
+        transcript.total_timeline_entries,
+        sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS
+    );
+    assert_eq!(
+        transcript.timeline_entries.len(),
+        super::super::agent_flow::CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT
+    );
+    assert_eq!(
+        app.agent_panel.child_tool_card_entry_indices.len(),
+        sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS
+    );
+    assert!(
+        app.agent_panel
+            .child_tool_card_entry_indices
+            .values()
+            .any(|occurrence| occurrence.entry_index().is_none()),
+        "trimmed active occurrences must retain an offscreen identity"
+    );
+
+    for index in 0..sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS {
+        app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+            thread_id: thread_id.clone(),
+            event: Box::new(RunEvent::ToolResult(production_display_bash_result(
+                format!("call-child-maximum-{index}").as_str(),
+                format!("child maximum completed {index}").as_str(),
+            ))),
+        })?;
+        assert_eq!(
+            app.agent_panel
+                .active_child_transcript
+                .as_ref()
+                .expect("maximum child final transcript")
+                .total_timeline_entries,
+            sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS,
+            "finalizing an offscreen occurrence must not create a logical entry"
+        );
+    }
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("completed maximum child transcript");
+    assert_eq!(
+        transcript.timeline_entries.len(),
+        super::super::agent_flow::CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT
+    );
+    assert!(transcript.timeline_entries.iter().all(|entry| {
+        serde_json::from_str::<serde_json::Value>(&entry.text)
+            .ok()
+            .is_some_and(|value| {
+                value.get("status").and_then(serde_json::Value::as_str) == Some("ok")
+            })
+    }));
+    assert!(app.agent_panel.child_tool_card_entry_indices.is_empty());
+    assert!(app.agent_panel.safe_child_tool_calls.is_empty());
+    Ok(())
+}
+
 #[test]
 fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -2044,6 +2715,16 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
             args_json: "{}".to_owned(),
         })),
     })?;
+    let pending_tool_card = &app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("started tool should initialize child transcript")
+        .timeline_entries
+        .last()
+        .expect("pending tool card")
+        .text;
+    assert!(pending_tool_card.contains("read_file is running"));
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::Notice("after start".to_owned())),
@@ -2178,9 +2859,13 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
             .iter()
             .any(|(role, text)| *role == TimelineRole::Thinking && text.trim().is_empty())
     );
-    assert!(entries.contains(&(TimelineRole::Tool, "Started read_file")));
-    assert!(entries.contains(&(TimelineRole::Tool, "Completed read_file")));
-    assert!(entries.contains(&(TimelineRole::Tool, "file contents")));
+    assert!(!entries.contains(&(TimelineRole::Tool, "Started read_file")));
+    assert!(!entries.contains(&(TimelineRole::Tool, "Completed read_file")));
+    assert!(entries.iter().any(|(role, text)| {
+        *role == TimelineRole::Tool
+            && text.contains("\"call_id\":\"call-read\"")
+            && text.contains("file contents")
+    }));
     assert!(
         entries
             .iter()
@@ -3452,6 +4137,325 @@ fn tool_progress_and_result_update_existing_card_by_execution_id() -> Result<()>
     assert_eq!(terminal_cards.len(), 1);
     assert!(terminal_cards[0].text.contains("verdict passed"));
     assert!(!terminal_cards[0].text.contains("phase one"));
+    Ok(())
+}
+
+fn production_display_bash_result(call_id: &str, content: &str) -> ToolResult {
+    ToolResult::ok(
+        call_id,
+        "bash",
+        content,
+        ToolResultMeta {
+            details: json!({
+                "status_label": "ok",
+                "summary": format!("bash ok ({} observed bytes, {} persisted bytes)", content.len(), content.len()),
+                "preview": content,
+                "observed_bytes": content.len(),
+                "persisted_bytes": content.len(),
+                "has_more": false,
+                "display_capabilities": ["copy_summary"],
+                "preview_truncated": false
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+#[test]
+fn bash_progress_and_production_final_merge_once_with_safe_command() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.secret_redactor = sigil_kernel::SecretRedactor::from_values(["supersecret-token"]);
+    let call_id = "call-bash-production";
+    app.handle(RunEvent::ToolCallCompleted(ToolCall {
+        id: call_id.to_owned(),
+        name: "bash".to_owned(),
+        args_json: json!({
+            "command": "printf supersecret-token && cargo check --workspace"
+        })
+        .to_string(),
+    }))?;
+    app.handle(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+        execution_id: sigil_kernel::ToolExecutionId::new("bash-execution-production")?,
+        call_id: call_id.to_owned(),
+        tool_name: "bash".to_owned(),
+        sequence: 1,
+        status: "running".to_owned(),
+        message: Some("foreground shell command is running".to_owned()),
+        output_preview: None,
+        output_log_ref: None,
+        total_bytes: Some(0),
+        updated_at_ms: None,
+        details: json!({"execution_mode":"foreground"}),
+    }))?;
+    let progress_card = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool && entry.text.contains(call_id))
+        .expect("tool progress should render one card");
+    let progress_payload: serde_json::Value = serde_json::from_str(&progress_card.text)?;
+    assert_eq!(progress_payload["status"], "running");
+    let progress_timeline = app.timeline_plain_lines().join("\n");
+    assert!(progress_timeline.contains("RUNNING"));
+    assert!(!progress_timeline.contains("✓ OK"));
+
+    app.handle(RunEvent::ToolResult(production_display_bash_result(
+        call_id,
+        "check completed",
+    )))?;
+
+    let cards = app
+        .timeline
+        .iter()
+        .filter(|entry| {
+            entry.role == TimelineRole::Tool
+                && serde_json::from_str::<serde_json::Value>(&entry.text)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("call_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .is_some_and(|rendered_call_id| rendered_call_id == call_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 1);
+    assert!(cards[0].text.contains("check completed"));
+    assert!(
+        !cards[0]
+            .text
+            .contains("foreground shell command is running")
+    );
+    assert!(!cards[0].text.contains("supersecret-token"));
+    assert!(
+        cards[0]
+            .text
+            .contains("command=printf [redacted] && cargo check --workspace")
+    );
+    assert!(cards[0].text.contains("bash-execution-production"));
+    assert!(!app.safe_tool_calls.contains_key(call_id));
+    assert!(!app.tool_progress_execution_ids.contains_key(call_id));
+    assert!(app.tool_progress_entry_indices.is_empty());
+    Ok(())
+}
+
+#[test]
+fn reused_bash_call_and_execution_ids_keep_each_turns_progress_and_final_distinct() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let call_id = "provider-reused-bash-call";
+    let execution_id = "bash-reused-execution";
+
+    for (turn_index, (command, output)) in [
+        ("printf first", "first final output"),
+        ("printf second", "second final output"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        app.handle(RunEvent::ToolCallCompleted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command": command}).to_string(),
+        }))?;
+        for sequence in 1..=2 {
+            app.handle(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+                execution_id: sigil_kernel::ToolExecutionId::new(execution_id)?,
+                call_id: call_id.to_owned(),
+                tool_name: "bash".to_owned(),
+                sequence,
+                status: "running".to_owned(),
+                message: Some(format!("turn {turn_index} progress {sequence}")),
+                output_preview: None,
+                output_log_ref: None,
+                total_bytes: Some(0),
+                updated_at_ms: Some(sequence),
+                details: json!({"execution_mode":"foreground"}),
+            }))?;
+            assert_eq!(
+                app.timeline
+                    .iter()
+                    .filter(|entry| {
+                        entry.role == TimelineRole::Tool
+                            && serde_json::from_str::<serde_json::Value>(&entry.text)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("call_id")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_owned)
+                                })
+                                .is_some_and(|rendered_call_id| rendered_call_id == call_id)
+                    })
+                    .count(),
+                turn_index + 1,
+                "multiple progress events must merge only within the active turn"
+            );
+        }
+        app.handle(RunEvent::ToolResult(production_display_bash_result(
+            call_id, output,
+        )))?;
+    }
+
+    let cards = app
+        .timeline
+        .iter()
+        .filter(|entry| {
+            entry.role == TimelineRole::Tool
+                && serde_json::from_str::<serde_json::Value>(&entry.text)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("call_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .is_some_and(|rendered_call_id| rendered_call_id == call_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 2);
+    assert!(cards[0].text.contains("command=printf first"));
+    assert!(cards[0].text.contains("first final output"));
+    assert!(cards[1].text.contains("command=printf second"));
+    assert!(cards[1].text.contains("second final output"));
+    assert!(cards.iter().all(|card| card.text.contains(execution_id)));
+    assert!(cards.iter().all(
+        |card| !card.text.contains("turn 0 progress") && !card.text.contains("turn 1 progress")
+    ));
+    Ok(())
+}
+
+#[test]
+fn untracked_final_with_reused_execution_id_does_not_replace_history() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let call_id = "provider-reused-final-call";
+    let execution_id = "bash-reused-final-execution";
+
+    for (command, output) in [
+        ("printf first", "first final output"),
+        ("printf second", "second final output"),
+    ] {
+        app.handle(RunEvent::ToolCallCompleted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command": command}).to_string(),
+        }))?;
+        let mut result = production_display_bash_result(call_id, output);
+        result
+            .metadata
+            .details
+            .as_object_mut()
+            .expect("production display details should be an object")
+            .insert(
+                "execution_id".to_owned(),
+                serde_json::Value::String(execution_id.to_owned()),
+            );
+        app.handle(RunEvent::ToolResult(result))?;
+    }
+
+    let cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains(execution_id))
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 2);
+    assert!(cards[0].text.contains("command=printf first"));
+    assert!(cards[0].text.contains("first final output"));
+    assert!(cards[1].text.contains("command=printf second"));
+    assert!(cards[1].text.contains("second final output"));
+    Ok(())
+}
+
+#[test]
+fn first_progress_card_in_maximum_provider_batch_merges_with_its_final() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    for index in 0..sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS {
+        app.handle(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+            execution_id: sigil_kernel::ToolExecutionId::new(format!("execution-{index}"))?,
+            call_id: format!("call-{index}"),
+            tool_name: "bash".to_owned(),
+            sequence: 1,
+            status: "running".to_owned(),
+            message: Some(format!("progress-{index}")),
+            output_preview: None,
+            output_log_ref: None,
+            total_bytes: Some(0),
+            updated_at_ms: None,
+            details: json!({"execution_mode":"foreground"}),
+        }))?;
+        app.push_timeline(
+            TimelineRole::Tool,
+            json!({
+                "call_id": format!("background-{index}"),
+                "tool_name": "background_status",
+                "status": "ok",
+                "preview_kind": "text",
+                "preview_lines": [format!("background update {index}")],
+                "hidden_lines": 0
+            })
+            .to_string(),
+        );
+    }
+    let expected_card_count = sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS * 2;
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Tool)
+            .count(),
+        expected_card_count
+    );
+
+    app.handle(RunEvent::ToolResult(production_display_bash_result(
+        "call-0",
+        "first final output",
+    )))?;
+
+    let tool_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .collect::<Vec<_>>();
+    assert_eq!(tool_cards.len(), expected_card_count);
+    assert!(tool_cards[0].text.contains("first final output"));
+    assert!(!tool_cards[0].text.contains("progress-0"));
+    assert!(tool_cards[0].text.contains("execution-0"));
+    assert!(!app.tool_progress_entry_indices.contains_key("execution-0"));
+    Ok(())
+}
+
+#[test]
+fn repeated_call_id_without_progress_keeps_distinct_final_cards() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let call_id = "provider-reused-call-id";
+    for (command, output) in [("echo first", "first done"), ("echo second", "second done")] {
+        app.handle(RunEvent::ToolCallCompleted(ToolCall {
+            id: call_id.to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({"command":command}).to_string(),
+        }))?;
+        app.handle(RunEvent::ToolResult(production_display_bash_result(
+            call_id, output,
+        )))?;
+    }
+
+    let cards = app
+        .timeline
+        .iter()
+        .filter(|entry| {
+            entry.role == TimelineRole::Tool
+                && serde_json::from_str::<serde_json::Value>(&entry.text)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("call_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .is_some_and(|rendered_call_id| rendered_call_id == call_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 2);
+    assert!(cards[0].text.contains("command=echo first"));
+    assert!(cards[1].text.contains("command=echo second"));
     Ok(())
 }
 

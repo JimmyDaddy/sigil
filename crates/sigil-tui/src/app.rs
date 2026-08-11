@@ -59,7 +59,7 @@ use sigil_kernel::{
     MutationArtifactCleanupTarget, MutationArtifactInventoryItem, MutationArtifactRetentionReport,
     PermissionMode, PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig,
     SecretRedactor, SecretString, SessionConfig, SessionStats, StorageConfig, TaskStateProjection,
-    ToolPreviewSnapshot, resolve_workspace_root,
+    ToolCall, ToolPreviewSnapshot, resolve_workspace_root,
 };
 use sigil_runtime::{
     BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths, build_run_options,
@@ -372,6 +372,12 @@ pub struct AppState {
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
     tool_preview_snapshots: HashMap<String, ToolPreviewSnapshot>,
+    // Populated only from kernel safe-persistence projections, never exact provider arguments.
+    safe_tool_calls: HashMap<String, ToolCall>,
+    // Bridges one live progress card to its terminal result without treating call ids as global.
+    tool_progress_execution_ids: HashMap<String, String>,
+    // Tracks the exact live card occurrence for an active execution.
+    tool_progress_entry_indices: HashMap<String, usize>,
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
     thinking_block_mode: ThinkingBlockMode,
@@ -816,6 +822,9 @@ impl AppState {
             config_state: None,
             modal_state: None,
             tool_preview_snapshots: HashMap::new(),
+            safe_tool_calls: HashMap::new(),
+            tool_progress_execution_ids: HashMap::new(),
+            tool_progress_entry_indices: HashMap::new(),
             compaction_config: root_config.compaction.clone(),
             memory_config: root_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
@@ -944,6 +953,9 @@ impl AppState {
             config_state: None,
             modal_state: None,
             tool_preview_snapshots: HashMap::new(),
+            safe_tool_calls: HashMap::new(),
+            tool_progress_execution_ids: HashMap::new(),
+            tool_progress_entry_indices: HashMap::new(),
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,

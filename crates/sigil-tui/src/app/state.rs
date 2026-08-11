@@ -8,7 +8,7 @@ use std::{
 use sigil_kernel::{
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest,
     ConversationInputQueueId, ConversationInputQueuedEntry, EvidenceScope, ImageAttachment,
-    ReasoningEffort, SessionLogEntry, SessionStats, TaskIntegrationReviewRequest,
+    ReasoningEffort, SessionLogEntry, SessionStats, TaskIntegrationReviewRequest, ToolCall,
 };
 use sigil_runtime::BalanceSnapshot;
 
@@ -81,6 +81,39 @@ pub(crate) struct AgentPanelState {
     pub(in crate::app) selected: usize,
     pub(in crate::app) active_view: AgentView,
     pub(in crate::app) active_child_transcript: Option<ActiveAgentChildTranscript>,
+    // Values come only from SafePersist run-event projections, never provider-exact arguments.
+    pub(in crate::app) safe_child_tool_calls: BTreeMap<(String, String), ToolCall>,
+    // The first key component scopes reused provider call ids to one child session/thread.
+    pub(in crate::app) child_tool_progress_execution_ids: BTreeMap<(String, String), String>,
+    // Tracks the current invocation occurrence, including a failed audit placeholder that still
+    // awaits its ToolResult. The occurrence carries its latest-80 render position separately from
+    // its lifecycle kind so a reused provider call id can start a distinct logical card.
+    pub(in crate::app) child_tool_card_entry_indices:
+        BTreeMap<(String, String), ChildToolCardOccurrence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum ChildToolCardOccurrence {
+    Running(Option<usize>),
+    TerminalPlaceholder(Option<usize>),
+}
+
+impl ChildToolCardOccurrence {
+    pub(in crate::app) fn entry_index(self) -> Option<usize> {
+        match self {
+            Self::Running(index) | Self::TerminalPlaceholder(index) => index,
+        }
+    }
+
+    pub(in crate::app) fn set_entry_index(&mut self, index: Option<usize>) {
+        match self {
+            Self::Running(current) | Self::TerminalPlaceholder(current) => *current = index,
+        }
+    }
+
+    pub(in crate::app) fn is_running(self) -> bool {
+        matches!(self, Self::Running(_))
+    }
 }
 
 impl Default for AgentPanelState {
@@ -89,6 +122,9 @@ impl Default for AgentPanelState {
             selected: 0,
             active_view: AgentView::Main,
             active_child_transcript: None,
+            safe_child_tool_calls: BTreeMap::new(),
+            child_tool_progress_execution_ids: BTreeMap::new(),
+            child_tool_card_entry_indices: BTreeMap::new(),
         }
     }
 }

@@ -54,6 +54,39 @@ pub(in crate::ui::tool_card) fn render_bash_preview_with_palette(
     ));
     lines
 }
+
+pub(in crate::ui::tool_card) fn render_bash_command_section_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let Some(command) =
+        call_argument(summary, "command").filter(|command| !command.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let command_width = if max_content_width == 0 {
+        120
+    } else {
+        max_content_width.saturating_sub(4).max(1)
+    };
+    let command_lines = wrap_display_width(&command, command_width);
+    let mut lines = vec![timeline_section_line_with_palette(
+        accent,
+        "command",
+        palette.accent_info,
+        Vec::new(),
+        palette,
+    )];
+    lines.extend(render_code_preview_lines_with_palette(
+        accent,
+        &command_lines,
+        palette.markdown_code_bg,
+        palette,
+    ));
+    lines
+}
 pub(in crate::ui::tool_card) fn bash_preview_section_label(
     summary: &ToolCardRender,
 ) -> &'static str {

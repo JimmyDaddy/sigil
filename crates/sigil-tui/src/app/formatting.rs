@@ -261,20 +261,58 @@ pub(super) fn ratio_to_percent(ratio: f32) -> u32 {
     (ratio * 100.0).round().clamp(0.0, 999.0) as u32
 }
 
+#[cfg(test)]
 pub(super) fn format_tool_result_block_redacted(
     result: &ToolResult,
     preview: Option<&ToolPreviewSnapshot>,
     redactor: &SecretRedactor,
 ) -> String {
+    format_tool_result_block_redacted_with_call(result, None, preview, redactor)
+}
+
+pub(super) fn format_tool_result_block_redacted_with_call(
+    result: &ToolResult,
+    tool_call: Option<&ToolCall>,
+    preview: Option<&ToolPreviewSnapshot>,
+    redactor: &SecretRedactor,
+) -> String {
+    format_tool_result_block_redacted_with_call_status(
+        result,
+        tool_call,
+        preview,
+        redactor,
+        if result.is_error() { "error" } else { "ok" },
+    )
+}
+
+pub(super) fn format_tool_progress_block_redacted_with_call(
+    result: &ToolResult,
+    tool_call: Option<&ToolCall>,
+    redactor: &SecretRedactor,
+) -> String {
+    format_tool_result_block_redacted_with_call_status(result, tool_call, None, redactor, "running")
+}
+
+fn format_tool_result_block_redacted_with_call_status(
+    result: &ToolResult,
+    tool_call: Option<&ToolCall>,
+    preview: Option<&ToolPreviewSnapshot>,
+    redactor: &SecretRedactor,
+    status: &str,
+) -> String {
     let preview = if result.is_error() { None } else { preview };
     let error_kind = tool_result_error_kind(result);
     let artifact = tool_artifact_display_value_from_metadata(&result.metadata);
+    let mut metadata = result.metadata.clone();
+    if let Some(tool_call) = tool_call {
+        enrich_tool_metadata_from_safe_call(&mut metadata, tool_call);
+    }
     format_tool_preview_payload(
         Some(result.call_id.as_str()),
         result.tool_name.as_str(),
-        if result.is_error() { "error" } else { "ok" },
+        status,
         &result.content,
-        Some(&result.metadata),
+        Some(&metadata),
         preview,
         error_kind,
         redactor,
@@ -717,17 +755,17 @@ fn restored_tool_metadata(
             .and_then(|value| value.get("meta"))
             .and_then(project_model_meta_to_tool_result_meta)
     };
-    if let Some(tool_call) = tool_call {
-        enrich_restored_metadata_from_tool_call(&mut metadata, tool_call);
+    if let Some(tool_call) = tool_call
+        && matches!(tool_call.name.as_str(), "bash" | "read_file")
+    {
+        let metadata = metadata.get_or_insert_with(ToolResultMeta::default);
+        enrich_tool_metadata_from_safe_call(metadata, tool_call);
     }
     metadata
 }
 
-fn enrich_restored_metadata_from_tool_call(
-    metadata: &mut Option<ToolResultMeta>,
-    tool_call: &ToolCall,
-) {
-    if tool_call.name != "read_file" {
+fn enrich_tool_metadata_from_safe_call(metadata: &mut ToolResultMeta, tool_call: &ToolCall) {
+    if !matches!(tool_call.name.as_str(), "bash" | "read_file") {
         return;
     }
     let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.args_json) else {
@@ -736,17 +774,29 @@ fn enrich_restored_metadata_from_tool_call(
     let Some(args_object) = args.as_object() else {
         return;
     };
-    let metadata = metadata.get_or_insert_with(ToolResultMeta::default);
     let mut details = metadata.details.as_object().cloned().unwrap_or_default();
     let call_details = details
         .entry("call".to_owned())
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let Some(call_object) = call_details.as_object_mut() {
-        for key in ["path", "offset", "limit"] {
-            if let Some(value) = args_object.get(key) {
-                call_object
-                    .entry(key.to_owned())
-                    .or_insert_with(|| value.clone());
+        if tool_call.name == "bash" {
+            if let Some(command) = args_object
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .filter(|command| !command.trim().is_empty())
+            {
+                call_object.insert(
+                    "summary".to_owned(),
+                    serde_json::Value::String(format!("command={command}")),
+                );
+            }
+        } else {
+            for key in ["path", "offset", "limit"] {
+                if let Some(value) = args_object.get(key) {
+                    call_object
+                        .entry(key.to_owned())
+                        .or_insert_with(|| value.clone());
+                }
             }
         }
     }

@@ -14,8 +14,8 @@ use status_sync::{
     code_diagnostics_by_path, code_diagnostics_sidebar_line, code_diagnostics_status_line,
     code_intelligence_server_lines, mcp_activation_event_detail, normalize_diagnostic_path,
 };
+pub(super) use tool_card_lifecycle::durable_tool_card_replacement_key;
 use tool_card_lifecycle::tool_card_replacement_indices;
-pub(super) use tool_card_lifecycle::tool_card_replacement_key;
 #[cfg(test)]
 use tool_card_lifecycle::{
     agent_tool_name, wait_agent_pending_key_from_result, wait_agent_pending_key_from_tool_block,

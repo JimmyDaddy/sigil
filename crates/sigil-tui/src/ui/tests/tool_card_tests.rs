@@ -69,6 +69,7 @@ fn base_summary(tool_name: &str) -> ToolCardRender {
     ToolCardRender {
         call_id: None,
         tool_name: tool_name.to_owned(),
+        status: "ok".to_owned(),
         is_error: false,
         error_kind: None,
         summary: None,
@@ -695,7 +696,7 @@ fn tool_card_render_entry_lines_respect_selection_and_hidden_preview_state() {
         .to_string(),
     };
     let options = TimelineRenderOptions {
-        selected_tool_activity_key: Some("call:call-read".to_owned()),
+        selected_tool_activity_key: Some("call:call-read:entry:0".to_owned()),
         max_content_width: 72,
         ..TimelineRenderOptions::default()
     };
@@ -709,6 +710,89 @@ fn tool_card_render_entry_lines_respect_selection_and_hidden_preview_state() {
     assert!(text.contains("body"));
     assert!(text.contains("2 more lines hidden"));
     assert!(!text.contains("preview hidden"));
+}
+
+#[test]
+fn bash_header_is_single_line_and_expanded_body_shows_full_nested_command() {
+    let command = "cargo test --workspace --all-targets --features a-very-long-feature-name && printf full-command-tail-marker";
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "call_id": "call-bash-command",
+            "tool_name": "bash",
+            "status": "ok",
+            "preview_kind": "text",
+            "preview_lines": ["test result: ok"],
+            "hidden_lines": 0,
+            "metadata": {
+                "details": {
+                    "call": {"summary": "command_sha256=hash-only"},
+                    "shell": {"call": {"summary": format!("command={command}")}}
+                }
+            }
+        })
+        .to_string(),
+    };
+
+    let collapsed = render_tool_entry_lines(
+        &entry,
+        &TimelineRenderOptions {
+            max_content_width: 48,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let collapsed_header = line_plain_text(&collapsed[0]);
+    assert!(collapsed_header.contains("Ran cargo"));
+    assert!(collapsed_header.contains("..."));
+    assert!(!collapsed_header.contains('\n'));
+    assert!(!plain_text(&collapsed).contains("full-command-tail-marker"));
+
+    let expanded = render_tool_entry_lines(
+        &entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            max_content_width: 48,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let expanded_text = plain_text(&expanded);
+    assert!(expanded_text.contains("command"));
+    assert!(expanded_text.contains("printf full-"));
+    assert!(expanded_text.contains("command-tail-marker"));
+    assert!(expanded_text.contains("test result: ok"));
+}
+
+#[test]
+fn running_tool_card_uses_animated_running_status_instead_of_success() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "call_id": "call-running",
+            "tool_name": "bash",
+            "status": "running",
+            "preview_kind": "text",
+            "preview_lines": ["still working"],
+            "hidden_lines": 0,
+            "metadata": {"details": {"call": {"summary": "command=cargo test"}}}
+        })
+        .to_string(),
+    };
+    let summary = parse_tool_summary(&entry.text);
+    let display = build_tool_card_display(&summary);
+    assert_eq!(summary.status, "running");
+    assert!(!summary.is_error);
+    assert_eq!(display.status.label, "RUNNING");
+    assert_eq!(display.status.kind, StatusKind::Running);
+
+    let rendered = plain_text(&render_tool_entry_lines(
+        &entry,
+        &TimelineRenderOptions::default(),
+        0,
+    ));
+    assert!(rendered.contains("RUNNING"));
+    assert!(!rendered.contains(" OK "));
 }
 
 #[test]
@@ -733,7 +817,7 @@ fn tool_card_frame_keeps_header_meta_and_body_in_one_block() {
         .to_string(),
     };
     let options = TimelineRenderOptions {
-        selected_tool_activity_key: Some("call:call-frame".to_owned()),
+        selected_tool_activity_key: Some("call:call-frame:entry:0".to_owned()),
         max_content_width: 72,
         ..TimelineRenderOptions::default()
     };
@@ -819,7 +903,7 @@ fn tool_card_render_entry_lines_styles_hovered_header() {
         .to_string(),
     };
     let options = TimelineRenderOptions {
-        hovered_tool_activity_key: Some("call:call-hover".to_owned()),
+        hovered_tool_activity_key: Some("call:call-hover:entry:0".to_owned()),
         max_content_width: 72,
         ..TimelineRenderOptions::default()
     };
@@ -848,7 +932,7 @@ fn tool_card_render_entry_lines_use_configured_theme_palette() {
         .to_string(),
     };
     let options = TimelineRenderOptions {
-        hovered_tool_activity_key: Some("call:call-themed".to_owned()),
+        hovered_tool_activity_key: Some("call:call-themed:entry:0".to_owned()),
         max_content_width: 72,
         theme,
         ..TimelineRenderOptions::default()
@@ -977,6 +1061,7 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
     let exited_activity = build_tool_activity_view(
         &exited_from_top_level_details,
         &json!({"tool_name": "terminal_cancel"}).to_string(),
+        0,
     );
     let generic_error = ToolCardRender {
         is_error: true,
@@ -1013,7 +1098,7 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
 }
 
 #[test]
-fn tool_card_activity_view_uses_stable_hash_without_call_id() {
+fn tool_card_activity_view_uses_occurrence_identity_without_call_id() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
         text: json!({
@@ -1030,7 +1115,9 @@ fn tool_card_activity_view_uses_stable_hash_without_call_id() {
     let second = tool_activity_view(&entry, 1).expect("tool activity should render");
 
     assert!(first.key.starts_with("hash:"));
-    assert_eq!(first.key, second.key);
+    assert_ne!(first.key, second.key);
+    assert!(first.key.ends_with(":entry:0"));
+    assert!(second.key.ends_with(":entry:1"));
     assert_eq!(first.title, "Listed workspace");
 }
 
@@ -1888,7 +1975,7 @@ fn checkpoint_restore_card_distinguishes_preview_blocked_and_restored_states() {
     assert_eq!(display.title.plain(), "Review checkpoint restore");
     assert_eq!(display.status.label, "PREVIEW");
     assert_eq!(display.status.kind, StatusKind::Pending);
-    assert!(build_tool_activity_view(&preview, "preview").defaults_expanded);
+    assert!(build_tool_activity_view(&preview, "preview", 0).defaults_expanded);
 
     let blocked = parsed_summary(json!({
         "tool_name": "checkpoint_restore",

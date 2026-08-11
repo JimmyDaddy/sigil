@@ -4,6 +4,13 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(unix)]
+use std::{
+    ffi::OsString,
+    fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+};
+
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -38,6 +45,59 @@ use crate::{
 
 const SHELL_SEMANTIC_REGISTRY_VERSION: u32 = 2;
 const SHELL_ENVIRONMENT_POLICY_VERSION: u32 = 1;
+const FILE_PRESENCE_EXECUTION_BINDING_KEY: &str = "file_presence_execution_binding";
+const FILE_PRESENCE_EXECUTION_PROFILE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone)]
+struct FilePresenceExecutionProfile {
+    binding: String,
+    shell_program: PathBuf,
+    git_program: PathBuf,
+}
+
+impl FilePresenceExecutionProfile {
+    fn apply_to_environment(&self, environment: &mut BTreeMap<String, String>) {
+        let git_directory = self
+            .git_program
+            .parent()
+            .expect("trusted git executable must have a parent directory");
+        environment.insert(
+            "PATH".to_owned(),
+            git_directory.to_string_lossy().into_owned(),
+        );
+        for (name, value) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_SYSTEM", "/dev/null"),
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_NO_REPLACE_OBJECTS", "1"),
+            ("GIT_PAGER", "cat"),
+            ("PAGER", "cat"),
+            ("GIT_CONFIG_COUNT", "5"),
+            ("GIT_CONFIG_KEY_0", "core.pager"),
+            ("GIT_CONFIG_VALUE_0", "cat"),
+            ("GIT_CONFIG_KEY_1", "pager.log"),
+            ("GIT_CONFIG_VALUE_1", "false"),
+            ("GIT_CONFIG_KEY_2", "log.showSignature"),
+            ("GIT_CONFIG_VALUE_2", "false"),
+            ("GIT_CONFIG_KEY_3", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_3", "false"),
+            ("GIT_CONFIG_KEY_4", "core.hooksPath"),
+            ("GIT_CONFIG_VALUE_4", "/dev/null"),
+        ] {
+            environment.insert(name.to_owned(), value.to_owned());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct TrustedExecutableIdentity {
+    program: PathBuf,
+    binding: Value,
+}
 
 pub(crate) struct BashTool {
     pub(crate) scratch_root: PathBuf,
@@ -97,6 +157,13 @@ impl Tool for BashTool {
         let command = required_string(args, "command")?;
         reject_non_finite_bash_command(command, &self.shell)?;
         let analysis = self.analyze_command(ctx, command)?;
+        let file_presence_profile = file_presence_execution_profile_for_binding(
+            &ctx.workspace_root,
+            &self.shell,
+            analysis
+                .analysis_bindings
+                .get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
+        )?;
         let mut plan = analysis.permission_plan();
         let capabilities = self.backend.capabilities();
         let network_receipt = self.backend.planned_network_receipt();
@@ -136,11 +203,12 @@ impl Tool for BashTool {
         );
         plan.analysis_bindings.insert(
             "environment_binding".to_owned(),
-            shell_environment_binding(
+            shell_environment_binding_with_profile(
                 ctx,
                 &self.session_scratch_dir(ctx),
                 &self.shell,
                 plan.containment.environment,
+                file_presence_profile.as_ref(),
             )?,
         );
         Ok(plan)
@@ -160,11 +228,18 @@ impl Tool for BashTool {
                 plan.tool_name == "bash",
                 "prepared permission plan belongs to a different tool"
             );
-            let expected_environment_binding = shell_environment_binding(
+            let file_presence_profile = file_presence_execution_profile_for_binding(
+                &ctx.workspace_root,
+                &self.shell,
+                plan.analysis_bindings
+                    .get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
+            )?;
+            let expected_environment_binding = shell_environment_binding_with_profile(
                 &ctx,
                 &session_scratch,
                 &self.shell,
                 plan.containment.environment,
+                file_presence_profile.as_ref(),
             )?;
             anyhow::ensure!(
                 plan.analysis_bindings.get("environment_binding")
@@ -187,6 +262,7 @@ impl Tool for BashTool {
                     timeout_secs,
                     &self.shell,
                     plan.containment.environment,
+                    file_presence_profile.as_ref(),
                 ),
                 None,
             )
@@ -194,13 +270,21 @@ impl Tool for BashTool {
             // Direct tool invocations used by diagnostics/tests have no agent-prepared envelope.
             // Analyze once here and use that same result for execution and receipt projection.
             let analysis = self.analyze_command(&ctx, command)?;
-            let request = bash_execution_request_with_shell(
+            let file_presence_profile = file_presence_execution_profile_for_binding(
+                &ctx.workspace_root,
+                &self.shell,
+                analysis
+                    .analysis_bindings
+                    .get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
+            )?;
+            let request = bash_execution_request_from_containment(
                 command,
                 &ctx.workspace_root,
                 &session_scratch,
                 timeout_secs,
                 &self.shell,
-                &analysis,
+                analysis.containment.environment,
+                file_presence_profile.as_ref(),
             );
             (request, Some(analysis))
         };
@@ -1130,6 +1214,22 @@ pub(crate) fn analyze_shell_command_with_path_policy(
     shell: &ResolvedShell,
     path_policy: &ShellPathPolicyBinding,
 ) -> Result<ShellCommandAnalysis> {
+    analyze_shell_command_with_path_policy_and_environment(
+        workspace_root,
+        command,
+        shell,
+        path_policy,
+        &controlled_shell_environment(),
+    )
+}
+
+fn analyze_shell_command_with_path_policy_and_environment(
+    workspace_root: &Path,
+    command: &str,
+    shell: &ResolvedShell,
+    path_policy: &ShellPathPolicyBinding,
+    controlled_environment: &BTreeMap<String, String>,
+) -> Result<ShellCommandAnalysis> {
     if shell.dialect() != ShellDialect::Posix {
         let normalized_command = normalize_shell_command_for_permission(command);
         let subjects = vec![ToolSubject::command(
@@ -1164,16 +1264,47 @@ pub(crate) fn analyze_shell_command_with_path_policy(
         ));
     }
     let ast = inspect_posix_shell_ast(command, path_policy);
-    let family = classify_shell_command_family(workspace_root, command)?;
+    let mut family = classify_shell_command_family(workspace_root, command)?;
+    let file_presence_uses_git = family == CommandFamily::FilePresenceCheck
+        && bounded_file_presence_command_uses_git(command);
+    if family == CommandFamily::FilePresenceCheck && !ast.verified_file_presence_loop {
+        family = CommandFamily::Unknown;
+    }
+    let mut file_presence_execution_binding = None;
+    let file_presence_execution_status =
+        if file_presence_uses_git && family == CommandFamily::FilePresenceCheck {
+            match file_presence_execution_profile_with_environment(
+                workspace_root,
+                shell,
+                controlled_environment,
+            ) {
+                Ok(profile) => {
+                    file_presence_execution_binding = Some(profile.binding);
+                    None
+                }
+                Err(detail) => {
+                    family = CommandFamily::Unknown;
+                    Some(ToolAnalysisStatus::Conservative {
+                        reasons: vec![ToolAnalysisReason::new(
+                            ToolAnalysisReasonCode::UnprovenContainment,
+                            Some(detail),
+                        )],
+                    })
+                }
+            }
+        } else {
+            None
+        };
     let bound_paths = inspect_bound_shell_paths(workspace_root, command, &family, path_policy)?;
     let normalized_command = normalize_shell_command_for_permission(command);
     let destructive = shell_command_is_destructive(command);
     let has_file_write = shell_command_has_file_write(command);
     let semantic_limit_exceeded = shell_wrapper_limit_exceeded(command, 0);
     let semantic_dynamic_reason = shell_semantic_dynamic_reason(command);
-    let incomplete_analysis = (family != CommandFamily::FilePresenceCheck)
-        .then_some(ast.status.clone())
-        .flatten()
+    let incomplete_analysis = ast
+        .status
+        .clone()
+        .or(file_presence_execution_status)
         .or_else(|| bound_paths.status.clone())
         .or_else(|| {
             if semantic_limit_exceeded {
@@ -1319,7 +1450,7 @@ pub(crate) fn analyze_shell_command_with_path_policy(
         }
     });
 
-    Ok(build_shell_command_analysis(
+    let mut analysis = build_shell_command_analysis(
         ShellCommandAnalysisBase {
             command: command.to_owned(),
             normalized_command,
@@ -1337,7 +1468,13 @@ pub(crate) fn analyze_shell_command_with_path_policy(
         },
         analysis_status,
         has_file_write,
-    ))
+    );
+    if let Some(binding) = file_presence_execution_binding {
+        analysis
+            .analysis_bindings
+            .insert(FILE_PRESENCE_EXECUTION_BINDING_KEY.to_owned(), binding);
+    }
+    Ok(analysis)
 }
 
 struct ShellCommandAnalysisBase {
@@ -1813,32 +1950,34 @@ fn collect_git_effects(args: &[String], effects: &mut BTreeSet<ToolPermissionEff
         effects.insert(ToolPermissionEffect::ExecuteDynamicCode);
         return;
     }
-    let subcommand = git_subcommand(args);
+    let Some((subcommand, subcommand_args)) = git_subcommand_and_args(args) else {
+        effects.insert(ToolPermissionEffect::Unknown);
+        return;
+    };
     match subcommand {
-        Some(
-            "status" | "diff" | "log" | "show" | "blame" | "rev-parse" | "ls-files" | "grep"
-            | "branch",
-        ) => {
+        "status" | "diff" | "log" | "show" | "blame" | "rev-parse" | "ls-files" | "grep"
+        | "branch" => {
             effects.insert(ToolPermissionEffect::ExecuteTrustedBinary);
         }
-        Some("fetch" | "pull" | "clone" | "ls-remote") => {
+        "stash" if matches!(subcommand_args, [operation] if operation == "list") => {
+            effects.insert(ToolPermissionEffect::ExecuteTrustedBinary);
+        }
+        "fetch" | "pull" | "clone" | "ls-remote" => {
             effects.insert(ToolPermissionEffect::NetworkRead);
             effects.insert(ToolPermissionEffect::FileWrite);
         }
-        Some("push" | "send-pack") => {
+        "push" | "send-pack" => {
             effects.insert(ToolPermissionEffect::NetworkMutate);
             effects.insert(ToolPermissionEffect::RemoteMutation);
         }
-        Some(
-            "commit" | "merge" | "rebase" | "checkout" | "restore" | "reset" | "clean" | "add"
-            | "rm" | "mv" | "tag",
-        ) => {
+        "commit" | "merge" | "rebase" | "checkout" | "restore" | "reset" | "clean" | "add"
+        | "rm" | "mv" | "tag" => {
             effects.insert(ToolPermissionEffect::FileWrite);
-            if matches!(subcommand, Some("clean" | "rm")) {
+            if matches!(subcommand, "clean" | "rm") {
                 effects.insert(ToolPermissionEffect::FileDelete);
             }
         }
-        Some("remote" | "submodule") => {
+        "remote" | "submodule" => {
             effects.insert(ToolPermissionEffect::NetworkUnknown);
             effects.insert(ToolPermissionEffect::RemoteMutation);
         }
@@ -1846,10 +1985,6 @@ fn collect_git_effects(args: &[String], effects: &mut BTreeSet<ToolPermissionEff
             effects.insert(ToolPermissionEffect::Unknown);
         }
     }
-}
-
-fn git_subcommand(args: &[String]) -> Option<&str> {
-    git_subcommand_and_args(args).map(|(subcommand, _)| subcommand)
 }
 
 fn git_subcommand_and_args(args: &[String]) -> Option<(&str, &[String])> {
@@ -2202,6 +2337,7 @@ const MAX_SHELL_AST_DEPTH: usize = 64;
 struct ShellAstInspection {
     status: Option<ToolAnalysisStatus>,
     saw_readonly_structure: bool,
+    verified_file_presence_loop: bool,
     normalized_ast_hash: String,
 }
 
@@ -2218,6 +2354,7 @@ fn inspect_posix_shell_ast(
                 )],
             }),
             saw_readonly_structure: false,
+            verified_file_presence_loop: false,
             normalized_ast_hash: format!("limit:{}", sha256_hex(command.as_bytes())),
         };
     }
@@ -2232,6 +2369,7 @@ fn inspect_posix_shell_ast(
                 ),
             }),
             saw_readonly_structure: false,
+            verified_file_presence_loop: false,
             normalized_ast_hash: format!("unavailable:{}", sha256_hex(command.as_bytes())),
         };
     }
@@ -2244,6 +2382,7 @@ fn inspect_posix_shell_ast(
                 ),
             }),
             saw_readonly_structure: false,
+            verified_file_presence_loop: false,
             normalized_ast_hash: format!("invalid:{}", sha256_hex(command.as_bytes())),
         };
     };
@@ -2257,19 +2396,34 @@ fn inspect_posix_shell_ast(
                 ),
             }),
             saw_readonly_structure: false,
+            verified_file_presence_loop: false,
             normalized_ast_hash: format!("invalid:{}", sha256_hex(command.as_bytes())),
         };
     }
-    let allow_file_presence_loop =
-        for_in_file_test_echo_loop_is_safe_readonly(&tokenize_shell_subject_words(command));
+    let shell_tokens = tokenize_shell_subject_words(command);
+    let bounded_loop = parse_bounded_file_presence_command(&shell_tokens);
+    let allow_file_presence_loop = bounded_loop.as_ref().is_some_and(|loop_spec| {
+        posix_ast_matches_bounded_file_presence_loop(root, command.as_bytes(), loop_spec)
+    });
     let mut state = ShellAstWalkState {
         nodes: 0,
         saw_readonly_structure: false,
         allow_file_presence_loop,
         path_policy,
     };
-    let status =
-        inspect_posix_shell_ast_node(root, command.as_bytes(), 0, &mut state).or_else(|| {
+    let status = bounded_loop
+        .is_some_and(|_| !allow_file_presence_loop)
+        .then(|| ToolAnalysisStatus::Unsupported {
+            reason: ToolAnalysisReason::new(
+                ToolAnalysisReasonCode::UnsupportedSyntax,
+                Some(
+                    "the bounded file-presence token shape does not match the POSIX shell AST"
+                        .to_owned(),
+                ),
+            ),
+        })
+        .or_else(|| inspect_posix_shell_ast_node(root, command.as_bytes(), 0, &mut state))
+        .or_else(|| {
             ast_glob_may_expand_to_option(root, command.as_bytes()).then(|| {
                 ToolAnalysisStatus::Conservative {
                     reasons: vec![ToolAnalysisReason::new(
@@ -2282,8 +2436,282 @@ fn inspect_posix_shell_ast(
     ShellAstInspection {
         status,
         saw_readonly_structure: state.saw_readonly_structure,
+        verified_file_presence_loop: allow_file_presence_loop,
         normalized_ast_hash: sha256_hex(root.to_sexp().as_bytes()),
     }
+}
+
+fn posix_ast_matches_bounded_file_presence_loop(
+    root: Node<'_>,
+    source: &[u8],
+    loop_spec: &BoundedFilePresenceLoop<'_>,
+) -> bool {
+    let mut loop_node = None;
+    if !find_unique_posix_ast_node(root, "for_statement", &mut loop_node) {
+        return false;
+    }
+    let Some(loop_node) = loop_node else {
+        return false;
+    };
+    if root.kind() != "program" {
+        return false;
+    }
+    let root_children = posix_ast_named_children(root);
+    let prefix_segments = split_shell_command_segments(loop_spec.prefix);
+    if root_children.len() != prefix_segments.len().saturating_add(1)
+        || root_children
+            .last()
+            .is_none_or(|last| !posix_ast_same_node(*last, loop_node))
+        || root_children
+            .iter()
+            .zip(prefix_segments)
+            .any(|(node, tokens)| !posix_ast_prefix_command_matches(*node, source, tokens))
+    {
+        return false;
+    }
+    if source
+        .get(loop_node.end_byte()..)
+        .is_none_or(|suffix| !suffix.iter().all(u8::is_ascii_whitespace))
+        || loop_node
+            .child(0)
+            .is_none_or(|keyword| keyword.kind() != "for" || keyword.utf8_text(source) != Ok("for"))
+    {
+        return false;
+    }
+
+    let Some(variable) = loop_node.child_by_field_name("variable") else {
+        return false;
+    };
+    if variable.kind() != "variable_name" || variable.utf8_text(source) != Ok(loop_spec.variable) {
+        return false;
+    }
+    let mut value_cursor = loop_node.walk();
+    let values = loop_node
+        .children_by_field_name("value", &mut value_cursor)
+        .collect::<Vec<_>>();
+    if values.len() != loop_spec.items.len()
+        || values
+            .iter()
+            .zip(loop_spec.items)
+            .any(|(value, expected)| !posix_ast_static_literal_matches(*value, source, expected))
+    {
+        return false;
+    }
+
+    let Some(body) = loop_node.child_by_field_name("body") else {
+        return false;
+    };
+    let body_children = posix_ast_named_children(body);
+    let [if_statement] = body_children.as_slice() else {
+        return false;
+    };
+    body.kind() == "do_group"
+        && posix_ast_matches_bounded_presence_if(*if_statement, source, loop_spec)
+}
+
+fn posix_ast_prefix_command_matches(node: Node<'_>, source: &[u8], tokens: &[String]) -> bool {
+    if node.kind() != "command" || tokens.is_empty() {
+        return false;
+    }
+    let Some(name) = node.child_by_field_name("name") else {
+        return false;
+    };
+    let name_children = posix_ast_named_children(name);
+    let Ok(name_text) = name.utf8_text(source) else {
+        return false;
+    };
+    let Ok(command_text) = node.utf8_text(source) else {
+        return false;
+    };
+    name.kind() == "command_name"
+        && matches!(name_children.as_slice(), [word] if word.kind() == "word")
+        && name_text == tokens[0]
+        && !name_text
+            .chars()
+            .any(|character| matches!(character, '/' | '\\'))
+        && tokenize_shell_subject_words(command_text) == tokens
+}
+
+fn find_unique_posix_ast_node<'tree>(
+    node: Node<'tree>,
+    kind: &str,
+    found: &mut Option<Node<'tree>>,
+) -> bool {
+    if node.kind() == kind && found.replace(node).is_some() {
+        return false;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .all(|child| find_unique_posix_ast_node(child, kind, found))
+}
+
+fn posix_ast_named_children(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).collect()
+}
+
+fn posix_ast_static_literal_matches(node: Node<'_>, source: &[u8], expected: &str) -> bool {
+    let Ok(text) = node.utf8_text(source) else {
+        return false;
+    };
+    let tokens = tokenize_shell_subject_words(text);
+    matches!(tokens.as_slice(), [actual] if actual == expected)
+        && !posix_ast_contains_expansion(node)
+}
+
+fn posix_ast_contains_expansion(node: Node<'_>) -> bool {
+    if matches!(
+        node.kind(),
+        "expansion"
+            | "simple_expansion"
+            | "command_substitution"
+            | "process_substitution"
+            | "arithmetic_expansion"
+    ) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(posix_ast_contains_expansion)
+}
+
+fn posix_ast_matches_bounded_presence_if(
+    node: Node<'_>,
+    source: &[u8],
+    loop_spec: &BoundedFilePresenceLoop<'_>,
+) -> bool {
+    if node.kind() != "if_statement" {
+        return false;
+    }
+    let children = posix_ast_named_children(node);
+    let [condition, then_command, else_clause] = children.as_slice() else {
+        return false;
+    };
+    let else_children = posix_ast_named_children(*else_clause);
+    let [else_command] = else_children.as_slice() else {
+        return false;
+    };
+    node.child_by_field_name("condition")
+        .is_some_and(|field| posix_ast_same_node(field, *condition))
+        && posix_ast_matches_bounded_presence_test(*condition, source, loop_spec)
+        && posix_ast_is_unquoted_echo_command(*then_command, source, loop_spec.variable)
+        && else_clause.kind() == "else_clause"
+        && posix_ast_is_unquoted_echo_command(*else_command, source, loop_spec.variable)
+}
+
+fn posix_ast_matches_bounded_presence_test(
+    node: Node<'_>,
+    source: &[u8],
+    loop_spec: &BoundedFilePresenceLoop<'_>,
+) -> bool {
+    if node.kind() != "test_command"
+        || node.child(0).is_none_or(|open| open.kind() != "[")
+        || node
+            .child(node.child_count().saturating_sub(1) as u32)
+            .is_none_or(|close| close.kind() != "]")
+    {
+        return false;
+    }
+    let children = posix_ast_named_children(node);
+    let [unary] = children.as_slice() else {
+        return false;
+    };
+    if unary.kind() != "unary_expression" {
+        return false;
+    }
+    let Some(operator) = unary.child_by_field_name("operator") else {
+        return false;
+    };
+    let expected_operator = match loop_spec.path_kind {
+        FilePresenceLoopPathKind::ListedPath => "-f",
+        FilePresenceLoopPathKind::WorkspaceGitMetadata => "-e",
+    };
+    if operator.kind() != "test_operator" || operator.utf8_text(source) != Ok(expected_operator) {
+        return false;
+    }
+    let operands = posix_ast_named_children(*unary)
+        .into_iter()
+        .filter(|child| !posix_ast_same_node(*child, operator))
+        .collect::<Vec<_>>();
+    let [operand] = operands.as_slice() else {
+        return false;
+    };
+    let expected_path = match loop_spec.path_kind {
+        FilePresenceLoopPathKind::ListedPath => format!("${}", loop_spec.variable),
+        FilePresenceLoopPathKind::WorkspaceGitMetadata => {
+            format!(".git/${}", loop_spec.variable)
+        }
+    };
+    let Ok(operand_text) = operand.utf8_text(source) else {
+        return false;
+    };
+    let operand_tokens = tokenize_shell_subject_words(operand_text);
+    matches!(operand_tokens.as_slice(), [actual] if actual == &expected_path)
+        && posix_ast_expansions_match_loop_variable(*operand, source, loop_spec.variable, true)
+}
+
+fn posix_ast_is_unquoted_echo_command(node: Node<'_>, source: &[u8], variable: &str) -> bool {
+    if node.kind() != "command" {
+        return false;
+    }
+    let Some(name) = node.child_by_field_name("name") else {
+        return false;
+    };
+    let name_children = posix_ast_named_children(name);
+    if name.kind() != "command_name"
+        || !matches!(name_children.as_slice(), [word] if word.kind() == "word")
+        || name.utf8_text(source) != Ok("echo")
+    {
+        return false;
+    }
+    let mut argument_cursor = node.walk();
+    let arguments = node
+        .children_by_field_name("argument", &mut argument_cursor)
+        .collect::<Vec<_>>();
+    let mut redirect_cursor = node.walk();
+    !arguments.is_empty()
+        && node
+            .children_by_field_name("redirect", &mut redirect_cursor)
+            .next()
+            .is_none()
+        && arguments.iter().all(|argument| {
+            posix_ast_expansions_match_loop_variable(*argument, source, variable, false)
+        })
+}
+
+fn posix_ast_expansions_match_loop_variable(
+    node: Node<'_>,
+    source: &[u8],
+    variable: &str,
+    require_expansion: bool,
+) -> bool {
+    fn visit(node: Node<'_>, source: &[u8], expected: &str, count: &mut usize) -> bool {
+        if matches!(node.kind(), "expansion" | "simple_expansion") {
+            if node.utf8_text(source) != Ok(expected) {
+                return false;
+            }
+            *count = count.saturating_add(1);
+        } else if matches!(
+            node.kind(),
+            "command_substitution" | "process_substitution" | "arithmetic_expansion"
+        ) {
+            return false;
+        }
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .all(|child| visit(child, source, expected, count))
+    }
+
+    let expected = format!("${variable}");
+    let mut expansion_count = 0usize;
+    visit(node, source, &expected, &mut expansion_count)
+        && (!require_expansion || expansion_count == 1)
+}
+
+fn posix_ast_same_node(left: Node<'_>, right: Node<'_>) -> bool {
+    left.kind() == right.kind()
+        && left.start_byte() == right.start_byte()
+        && left.end_byte() == right.end_byte()
 }
 
 fn ast_glob_may_expand_to_option(node: Node<'_>, source: &[u8]) -> bool {
@@ -2358,7 +2786,10 @@ fn inspect_posix_shell_ast_node(
         state.saw_readonly_structure = true;
     }
     let allowed_loop_node = state.allow_file_presence_loop
-        && matches!(kind, "for_statement" | "if_statement" | "expansion");
+        && matches!(
+            kind,
+            "for_statement" | "if_statement" | "expansion" | "simple_expansion"
+        );
     let static_assignment = matches!(kind, "variable_assignment" | "variable_assignments")
         && node
             .utf8_text(source)
@@ -2487,6 +2918,7 @@ pub(crate) fn bash_execution_request(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn bash_execution_request_with_shell(
     command: &str,
     workspace_root: &Path,
@@ -2502,6 +2934,7 @@ pub(crate) fn bash_execution_request_with_shell(
         timeout_secs,
         shell,
         analysis.containment.environment,
+        None,
     )
 }
 
@@ -2512,6 +2945,7 @@ fn bash_execution_request_from_containment(
     timeout_secs: u64,
     shell: &ResolvedShell,
     environment_containment: EnvironmentContainment,
+    file_presence_profile: Option<&FilePresenceExecutionProfile>,
 ) -> ExecutionRequest {
     let restricted_environment = environment_containment == EnvironmentContainment::Restricted;
     let mut env = if restricted_environment {
@@ -2529,8 +2963,14 @@ fn bash_execution_request_from_containment(
             scratch_root.to_string_lossy().into_owned(),
         );
     }
+    if let Some(profile) = file_presence_profile {
+        profile.apply_to_environment(&mut env);
+    }
     ExecutionRequest {
-        program: shell.program_string(),
+        program: file_presence_profile.map_or_else(
+            || shell.program_string(),
+            |profile| profile.shell_program.to_string_lossy().into_owned(),
+        ),
         args: shell.one_shot_args(command),
         cwd: workspace_root.to_path_buf(),
         env,
@@ -2561,11 +3001,207 @@ fn controlled_shell_environment() -> BTreeMap<String, String> {
     environment
 }
 
+fn file_presence_execution_profile_for_binding(
+    workspace_root: &Path,
+    shell: &ResolvedShell,
+    expected_binding: Option<&String>,
+) -> Result<Option<FilePresenceExecutionProfile>> {
+    let Some(expected_binding) = expected_binding else {
+        return Ok(None);
+    };
+    let profile = file_presence_execution_profile_with_environment(
+        workspace_root,
+        shell,
+        &controlled_shell_environment(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        profile.binding == *expected_binding,
+        "bounded file-presence executable binding changed before execution"
+    );
+    Ok(Some(profile))
+}
+
+fn file_presence_execution_profile_with_environment(
+    workspace_root: &Path,
+    shell: &ResolvedShell,
+    environment: &BTreeMap<String, String>,
+) -> std::result::Result<FilePresenceExecutionProfile, String> {
+    if shell.dialect() != ShellDialect::Posix {
+        return Err("the bounded file-presence profile requires a POSIX shell".to_owned());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_root, environment);
+        return Err(
+            "the bounded file-presence executable profile is unavailable on this platform"
+                .to_owned(),
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let shell_identity =
+            trusted_executable_identity(workspace_root, Path::new("/bin/sh"), "POSIX shell")?;
+        let path = environment
+            .get("PATH")
+            .ok_or_else(|| "the controlled shell PATH is unavailable".to_owned())?;
+        let git_identity = resolve_trusted_git_from_path(workspace_root, path)?;
+        let binding_payload = serde_json::to_vec(&json!({
+            "version": FILE_PRESENCE_EXECUTION_PROFILE_VERSION,
+            "shell": shell_identity.binding,
+            "git": git_identity.binding,
+            "git_environment_profile": "bounded-read-v1",
+        }))
+        .map_err(|error| format!("failed to encode executable binding: {error}"))?;
+        let binding = format!(
+            "file-presence-exec-v{FILE_PRESENCE_EXECUTION_PROFILE_VERSION}:{}",
+            sha256_hex(&binding_payload)
+        );
+        Ok(FilePresenceExecutionProfile {
+            binding,
+            shell_program: shell_identity.program,
+            git_program: git_identity.program,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn resolve_trusted_git_from_path(
+    workspace_root: &Path,
+    path: &str,
+) -> std::result::Result<TrustedExecutableIdentity, String> {
+    let path = OsString::from(path);
+    for directory in std::env::split_paths(&path) {
+        if directory.as_os_str().is_empty() || !directory.is_absolute() {
+            return Err(format!(
+                "the controlled PATH contains a relative entry before trusted git: {}",
+                directory.display()
+            ));
+        }
+        let candidate = directory.join("git");
+        if fs::symlink_metadata(&candidate).is_err() {
+            continue;
+        }
+        return trusted_executable_identity(workspace_root, &candidate, "git");
+    }
+    Err("git was not found on the controlled PATH".to_owned())
+}
+
+#[cfg(unix)]
+fn trusted_executable_identity(
+    workspace_root: &Path,
+    candidate: &Path,
+    label: &str,
+) -> std::result::Result<TrustedExecutableIdentity, String> {
+    let program = fs::canonicalize(candidate)
+        .map_err(|error| format!("failed to resolve trusted {label} executable: {error}"))?;
+    let canonical_workspace = fs::canonicalize(workspace_root).map_err(|error| {
+        format!("failed to resolve workspace while binding trusted {label}: {error}")
+    })?;
+    if program.starts_with(&canonical_workspace) {
+        return Err(format!(
+            "the {label} executable resolves inside the workspace: {}",
+            program.display()
+        ));
+    }
+    if program.file_name() != candidate.file_name() {
+        return Err(format!(
+            "the {label} executable resolves to a different command identity: {}",
+            program.display()
+        ));
+    }
+
+    let metadata = fs::metadata(&program)
+        .map_err(|error| format!("failed to inspect trusted {label} executable: {error}"))?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o111 == 0
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err(format!(
+            "the {label} executable is not a root-owned, non-writable executable: {}",
+            program.display()
+        ));
+    }
+    let mut ancestor = program.parent();
+    while let Some(directory) = ancestor {
+        let directory_metadata = fs::metadata(directory).map_err(|error| {
+            format!(
+                "failed to inspect trusted {label} executable directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        if directory_metadata.uid() != 0 || directory_metadata.permissions().mode() & 0o022 != 0 {
+            return Err(format!(
+                "the {label} executable directory is not root-owned and non-writable: {}",
+                directory.display()
+            ));
+        }
+        ancestor = directory.parent();
+    }
+    let content = fs::read(&program)
+        .map_err(|error| format!("failed to bind trusted {label} executable bytes: {error}"))?;
+    let binding = json!({
+        "canonical_path": program.to_string_lossy(),
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+        "mode": metadata.permissions().mode(),
+        "uid": metadata.uid(),
+        "size": metadata.size(),
+        "modified_secs": metadata.mtime(),
+        "modified_nanos": metadata.mtime_nsec(),
+        "sha256": sha256_hex(&content),
+    });
+    Ok(TrustedExecutableIdentity { program, binding })
+}
+
+#[cfg(test)]
+pub(crate) fn analyze_shell_command_with_controlled_environment(
+    workspace_root: &Path,
+    command: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<ShellCommandAnalysis> {
+    let shell = ResolvedShell::resolve_explicit("sh")?;
+    analyze_shell_command_with_path_policy_and_environment(
+        workspace_root,
+        command,
+        &shell,
+        &ShellPathPolicyBinding::default(),
+        environment,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn bounded_file_presence_execution_environment(
+    workspace_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<(PathBuf, BTreeMap<String, String>)> {
+    let shell = ResolvedShell::resolve_explicit("sh")?;
+    let profile =
+        file_presence_execution_profile_with_environment(workspace_root, &shell, environment)
+            .map_err(anyhow::Error::msg)?;
+    let mut execution_environment = environment.clone();
+    profile.apply_to_environment(&mut execution_environment);
+    Ok((profile.shell_program, execution_environment))
+}
+
 pub(crate) fn shell_environment_binding(
     ctx: &ToolContext,
     scratch_root: &Path,
     shell: &ResolvedShell,
     environment_containment: EnvironmentContainment,
+) -> Result<String> {
+    shell_environment_binding_with_profile(ctx, scratch_root, shell, environment_containment, None)
+}
+
+fn shell_environment_binding_with_profile(
+    ctx: &ToolContext,
+    scratch_root: &Path,
+    shell: &ResolvedShell,
+    environment_containment: EnvironmentContainment,
+    file_presence_profile: Option<&FilePresenceExecutionProfile>,
 ) -> Result<String> {
     let scratch_root = absolute_path_from(&ctx.workspace_root, scratch_root);
     let restricted = environment_containment == EnvironmentContainment::Restricted;
@@ -2584,10 +3220,16 @@ pub(crate) fn shell_environment_binding(
             scratch_root.to_string_lossy().into_owned(),
         );
     }
+    if let Some(profile) = file_presence_profile {
+        profile.apply_to_environment(&mut environment);
+    }
     let canonical = serde_json::to_vec(&json!({
         "policy_version": SHELL_ENVIRONMENT_POLICY_VERSION,
         "profile": if restricted { "restricted" } else { "user_inherited" },
-        "shell_program": shell.program_string(),
+        "shell_program": file_presence_profile.map_or_else(
+            || shell.program_string(),
+            |profile| profile.shell_program.to_string_lossy().into_owned(),
+        ),
         "environment": environment,
     }))?;
     Ok(format!(
@@ -2996,7 +3638,7 @@ pub(crate) fn normalize_shell_command_for_permission(command: &str) -> String {
 fn classify_shell_command_family(workspace_root: &Path, command: &str) -> Result<CommandFamily> {
     let workspace_root = canonical_workspace_root(workspace_root)?;
     let raw_tokens = tokenize_shell_subject_words(command);
-    if for_in_file_test_echo_loop_is_safe_readonly(&raw_tokens) {
+    if bounded_file_presence_command_is_safe_readonly(&raw_tokens) {
         return Ok(CommandFamily::FilePresenceCheck);
     }
     let tokens = strip_workspace_cd_prefix(&workspace_root, raw_tokens)?;
@@ -3814,7 +4456,7 @@ pub(crate) fn bash_command_is_safe_readonly(command: &str) -> bool {
         return false;
     }
 
-    if for_in_file_test_echo_loop_is_safe_readonly(&tokens) {
+    if bounded_file_presence_command_is_safe_readonly(&tokens) {
         return true;
     }
 
@@ -4019,34 +4661,123 @@ fn tokens_contain_unsupported_readonly_expansion(tokens: &[String]) -> bool {
     })
 }
 
-fn for_in_file_test_echo_loop_is_safe_readonly(tokens: &[String]) -> bool {
-    let Some(variable) = parse_for_in_file_test_echo_loop_variable(tokens) else {
-        return false;
-    };
-    tokens.iter().skip(3).any(|token| token.contains('/'))
-        && tokens.iter().all(|token| {
-            !token.contains('`')
-                && !token.contains('*')
-                && !token.contains('?')
-                && !token.contains('(')
-                && !token.contains(')')
-                && token_only_references_loop_variable(token, variable)
-        })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilePresenceLoopPathKind {
+    ListedPath,
+    WorkspaceGitMetadata,
 }
 
-fn token_only_references_loop_variable(token: &str, variable: &str) -> bool {
-    let needle = format!("${variable}");
-    let mut rest = token;
-    while let Some(index) = rest.find('$') {
-        if !rest[index..].starts_with(&needle) {
-            return false;
-        }
-        rest = &rest[index + needle.len()..];
+#[derive(Debug)]
+struct BoundedFilePresenceLoop<'a> {
+    loop_start: usize,
+    prefix: &'a [String],
+    variable: &'a str,
+    items: &'a [String],
+    path_kind: FilePresenceLoopPathKind,
+}
+
+#[derive(Debug)]
+struct ParsedFilePresenceLoop<'a> {
+    variable: &'a str,
+    items: &'a [String],
+    path_kind: FilePresenceLoopPathKind,
+}
+
+fn bounded_file_presence_command_is_safe_readonly(tokens: &[String]) -> bool {
+    parse_bounded_file_presence_command(tokens).is_some()
+}
+
+fn bounded_file_presence_command_uses_git(command: &str) -> bool {
+    let tokens = tokenize_shell_subject_words(command);
+    parse_bounded_file_presence_command(&tokens).is_some_and(|loop_spec| {
+        split_shell_command_segments(loop_spec.prefix)
+            .iter()
+            .any(|segment| segment.first().is_some_and(|program| program == "git"))
+    })
+}
+
+fn parse_bounded_file_presence_command(tokens: &[String]) -> Option<BoundedFilePresenceLoop<'_>> {
+    if tokens.iter().any(|token| {
+        token
+            .chars()
+            .any(|character| matches!(character, '&' | '<' | '>'))
+    }) {
+        return None;
     }
-    true
+    let mut parsed = None;
+    for (loop_start, token) in tokens.iter().enumerate() {
+        if token != "for"
+            || loop_start > 0 && tokens.get(loop_start - 1).map(String::as_str) != Some(";")
+        {
+            continue;
+        }
+        let Some(loop_spec) = parse_for_in_file_test_echo_loop(&tokens[loop_start..]) else {
+            continue;
+        };
+        if loop_start > 0 {
+            let prefix = &tokens[..loop_start - 1];
+            if prefix.is_empty() || !readonly_shell_prefix_is_safe(prefix) {
+                continue;
+            }
+        }
+        if parsed.is_some() {
+            return None;
+        }
+        parsed = Some(BoundedFilePresenceLoop {
+            loop_start,
+            prefix: if loop_start == 0 {
+                &tokens[..0]
+            } else {
+                &tokens[..loop_start - 1]
+            },
+            variable: loop_spec.variable,
+            items: loop_spec.items,
+            path_kind: loop_spec.path_kind,
+        });
+    }
+    parsed
 }
 
-fn parse_for_in_file_test_echo_loop_variable(tokens: &[String]) -> Option<&str> {
+fn readonly_shell_prefix_is_safe(tokens: &[String]) -> bool {
+    if tokens_contain_unsupported_readonly_expansion(tokens) {
+        return false;
+    }
+    let segments = split_shell_command_segments(tokens);
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| bounded_file_presence_prefix_segment_is_safe(segment))
+}
+
+fn bounded_file_presence_prefix_segment_is_safe(tokens: &[String]) -> bool {
+    match tokens {
+        [command, arguments @ ..] if command == "echo" => !arguments.is_empty(),
+        [git, log, oneline, count] if git == "git" && log == "log" && oneline == "--oneline" => {
+            count.strip_prefix('-').is_some_and(|value| {
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        }
+        [git, log, oneline, count_flag, count]
+            if git == "git" && log == "log" && oneline == "--oneline" && count_flag == "-n" =>
+        {
+            !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit())
+        }
+        [git, branch, show_current]
+            if git == "git" && branch == "branch" && show_current == "--show-current" =>
+        {
+            true
+        }
+        [git, rev_parse, revision]
+            if git == "git" && rev_parse == "rev-parse" && revision == "HEAD" =>
+        {
+            true
+        }
+        [git, stash, list] if git == "git" && stash == "stash" && list == "list" => true,
+        _ => false,
+    }
+}
+
+fn parse_for_in_file_test_echo_loop(tokens: &[String]) -> Option<ParsedFilePresenceLoop<'_>> {
     if tokens.len() < 16
         || tokens.first().map(String::as_str) != Some("for")
         || tokens.get(2).map(String::as_str) != Some("in")
@@ -4059,46 +4790,39 @@ fn parse_for_in_file_test_echo_loop_variable(tokens: &[String]) -> Option<&str> 
     }
     let mut cursor = 3usize;
     while tokens.get(cursor).is_some_and(|token| token != ";") {
-        if tokens
-            .get(cursor)
-            .is_some_and(|token| token.starts_with('-'))
-        {
-            return None;
-        }
         cursor += 1;
     }
-    let variable_ref = format!("${variable}");
-    let expected = [
-        ";",
-        "do",
-        "if",
-        "[",
-        "-f",
-        variable_ref.as_str(),
-        "]",
-        ";",
-        "then",
-        "echo",
-    ];
-    for expected_token in expected {
-        if tokens.get(cursor).map(String::as_str) != Some(expected_token) {
-            return None;
-        }
-        cursor += 1;
-    }
-    while tokens.get(cursor).is_some_and(|token| token != ";") {
-        cursor += 1;
-    }
-    if tokens.get(cursor).map(String::as_str) != Some(";")
-        || tokens.get(cursor + 1).map(String::as_str) != Some("else")
-        || tokens.get(cursor + 2).map(String::as_str) != Some("echo")
+    let items = tokens.get(3..cursor)?;
+    if items.is_empty()
+        || !items
+            .iter()
+            .all(|item| file_presence_loop_item_is_static(item))
     {
         return None;
     }
-    cursor += 3;
-    while tokens.get(cursor).is_some_and(|token| token != ";") {
+    for expected in [";", "do", "if", "["] {
+        if tokens.get(cursor).map(String::as_str) != Some(expected) {
+            return None;
+        }
         cursor += 1;
     }
+    let operator = tokens.get(cursor)?.as_str();
+    cursor += 1;
+    let tested_path = tokens.get(cursor)?.as_str();
+    cursor += 1;
+    for expected in ["]", ";", "then"] {
+        if tokens.get(cursor).map(String::as_str) != Some(expected) {
+            return None;
+        }
+        cursor += 1;
+    }
+    cursor = parse_bounded_echo_clause(tokens, cursor, variable)?;
+    if tokens.get(cursor).map(String::as_str) != Some(";")
+        || tokens.get(cursor + 1).map(String::as_str) != Some("else")
+    {
+        return None;
+    }
+    cursor = parse_bounded_echo_clause(tokens, cursor + 2, variable)?;
     if tokens.get(cursor).map(String::as_str) != Some(";")
         || tokens.get(cursor + 1).map(String::as_str) != Some("fi")
         || tokens.get(cursor + 2).map(String::as_str) != Some(";")
@@ -4107,7 +4831,137 @@ fn parse_for_in_file_test_echo_loop_variable(tokens: &[String]) -> Option<&str> 
     {
         return None;
     }
-    Some(variable)
+    if !tokens.iter().all(|token| {
+        token_has_no_dynamic_shell_syntax(token)
+            && token_only_references_loop_variable(token, variable)
+    }) {
+        return None;
+    }
+
+    let variable_ref = format!("${variable}");
+    let git_metadata_ref = format!(".git/${variable}");
+    let path_kind = match (operator, tested_path) {
+        ("-f", path) if path == variable_ref && items.iter().any(|item| item.contains('/')) => {
+            FilePresenceLoopPathKind::ListedPath
+        }
+        ("-e", path)
+            if path == git_metadata_ref
+                && items.iter().all(|item| bounded_git_metadata_name(item)) =>
+        {
+            FilePresenceLoopPathKind::WorkspaceGitMetadata
+        }
+        _ => return None,
+    };
+    Some(ParsedFilePresenceLoop {
+        variable,
+        items,
+        path_kind,
+    })
+}
+
+fn parse_static_git_metadata_presence_loop_header(tokens: &[String]) -> Option<&[String]> {
+    if tokens.len() < 10
+        || tokens.first().map(String::as_str) != Some("for")
+        || tokens.get(2).map(String::as_str) != Some("in")
+    {
+        return None;
+    }
+    let variable = tokens.get(1)?.as_str();
+    if !is_shell_identifier(variable) {
+        return None;
+    }
+    let mut cursor = 3usize;
+    while tokens.get(cursor).is_some_and(|token| token != ";") {
+        cursor += 1;
+    }
+    let items = tokens.get(3..cursor)?;
+    if items.is_empty()
+        || !items
+            .iter()
+            .all(|item| file_presence_loop_item_is_static(item) && bounded_git_metadata_name(item))
+    {
+        return None;
+    }
+    let git_metadata_ref = format!(".git/${variable}");
+    for expected in [";", "do", "if", "[", "-e", git_metadata_ref.as_str(), "]"] {
+        if tokens.get(cursor).map(String::as_str) != Some(expected) {
+            return None;
+        }
+        cursor += 1;
+    }
+    Some(items)
+}
+
+fn parse_bounded_echo_clause(
+    tokens: &[String],
+    mut cursor: usize,
+    variable: &str,
+) -> Option<usize> {
+    if tokens.get(cursor).map(String::as_str) != Some("echo") {
+        return None;
+    }
+    cursor += 1;
+    let argument_start = cursor;
+    while tokens.get(cursor).is_some_and(|token| token != ";") {
+        let token = &tokens[cursor];
+        if matches!(token.as_str(), "&&" | "||" | "|" | "&")
+            || is_redirection_operator(token)
+            || redirection_target(token).is_some()
+            || !token_has_no_dynamic_shell_syntax(token)
+            || !token_only_references_loop_variable(token, variable)
+        {
+            return None;
+        }
+        cursor += 1;
+    }
+    (cursor > argument_start).then_some(cursor)
+}
+
+fn file_presence_loop_item_is_static(item: &str) -> bool {
+    !item.is_empty()
+        && !item.starts_with('-')
+        && !item.starts_with('~')
+        && !item.contains('$')
+        && token_has_no_dynamic_shell_syntax(item)
+        && !matches!(item, "." | "..")
+}
+
+fn bounded_git_metadata_name(item: &str) -> bool {
+    !item.is_empty()
+        && !matches!(item, "." | "..")
+        && item
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn token_has_no_dynamic_shell_syntax(token: &str) -> bool {
+    !token.contains('`')
+        && !token.contains('*')
+        && !token.contains('?')
+        && !token.contains('(')
+        && !token.contains(')')
+        && !token.contains('{')
+        && !token.contains('}')
+        && (matches!(token, "[" | "]") || !token.contains('[') && !token.contains(']'))
+}
+
+fn token_only_references_loop_variable(token: &str, variable: &str) -> bool {
+    let needle = format!("${variable}");
+    let mut rest = token;
+    while let Some(index) = rest.find('$') {
+        if !rest[index..].starts_with(&needle) {
+            return false;
+        }
+        rest = &rest[index + needle.len()..];
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_shell_identifier(value: &str) -> bool {
@@ -4199,11 +5053,12 @@ pub(crate) fn git_segment_is_safe_readonly(words: &[String]) -> bool {
     let Some((_, args)) = shell_segment_command_and_args(words) else {
         return false;
     };
-    let Some(subcommand) = git_subcommand(args) else {
+    let Some((subcommand, subcommand_args)) = git_subcommand_and_args(args) else {
         return false;
     };
     match subcommand {
         "status" | "diff" | "log" | "show" | "blame" | "rev-parse" | "ls-files" | "grep" => true,
+        "stash" => matches!(subcommand_args, [operation] if operation == "list"),
         "branch" => args
             .iter()
             .skip_while(|arg| arg.as_str() != "branch")
@@ -4238,17 +5093,69 @@ pub(crate) fn bash_path_subjects_from_cwd(
     let tokens = tokenize_shell_subject_words(command);
     let mut subjects = Vec::new();
     let mut cwd = initial_cwd.to_path_buf();
+    if let Some(loop_spec) = parse_bounded_file_presence_command(&tokens) {
+        collect_bash_path_subjects_from_tokens(
+            workspace_root,
+            &mut cwd,
+            &tokens[..loop_spec.loop_start],
+            &mut subjects,
+        )?;
+        for item in loop_spec.items {
+            let requested = match loop_spec.path_kind {
+                FilePresenceLoopPathKind::ListedPath => item.clone(),
+                FilePresenceLoopPathKind::WorkspaceGitMetadata => format!(".git/{item}"),
+            };
+            push_shell_path_subject(&mut subjects, workspace_root, &cwd, &requested)?;
+        }
+        return Ok(subjects);
+    }
+    collect_bash_path_subjects_from_tokens(workspace_root, &mut cwd, &tokens, &mut subjects)?;
+    for (loop_start, token) in tokens.iter().enumerate() {
+        if token != "for"
+            || loop_start > 0 && tokens.get(loop_start - 1).map(String::as_str) != Some(";")
+        {
+            continue;
+        }
+        let Some(items) = parse_static_git_metadata_presence_loop_header(&tokens[loop_start..])
+        else {
+            continue;
+        };
+        let mut loop_cwd = initial_cwd.to_path_buf();
+        let mut ignored_subjects = Vec::new();
+        collect_bash_path_subjects_from_tokens(
+            workspace_root,
+            &mut loop_cwd,
+            &tokens[..loop_start],
+            &mut ignored_subjects,
+        )?;
+        for item in items {
+            push_shell_path_subject(
+                &mut subjects,
+                workspace_root,
+                &loop_cwd,
+                &format!(".git/{item}"),
+            )?;
+        }
+    }
+    Ok(subjects)
+}
+
+fn collect_bash_path_subjects_from_tokens(
+    workspace_root: &Path,
+    cwd: &mut PathBuf,
+    tokens: &[String],
+    subjects: &mut Vec<ToolSubject>,
+) -> Result<()> {
     let mut segment_words = Vec::new();
     for token in tokens {
         if token == "&&" || token == "||" || token == ";" {
-            collect_bash_segment_subjects(workspace_root, &mut cwd, &segment_words, &mut subjects)?;
+            collect_bash_segment_subjects(workspace_root, cwd, &segment_words, subjects)?;
             segment_words.clear();
         } else {
-            segment_words.push(token);
+            segment_words.push(token.clone());
         }
     }
-    collect_bash_segment_subjects(workspace_root, &mut cwd, &segment_words, &mut subjects)?;
-    Ok(subjects)
+    collect_bash_segment_subjects(workspace_root, cwd, &segment_words, subjects)
 }
 
 pub(crate) fn collect_bash_segment_subjects(
@@ -4408,15 +5315,35 @@ pub(crate) fn tokenize_shell_subject_words(command: &str) -> Vec<String> {
     let mut chars = command.chars().peekable();
     let mut quote = None::<char>;
     while let Some(ch) = chars.next() {
-        if quote.is_some() {
-            if Some(ch) == quote {
-                quote = None;
-            } else if ch == '\\' {
-                if let Some(next) = chars.next() {
-                    current.push(next);
+        if let Some(active_quote) = quote {
+            match active_quote {
+                '\'' => {
+                    if ch == '\'' {
+                        quote = None;
+                    } else {
+                        current.push(ch);
+                    }
                 }
-            } else {
-                current.push(ch);
+                '"' => {
+                    if ch == '"' {
+                        quote = None;
+                    } else if ch == '\\' {
+                        match chars.peek().copied() {
+                            Some('$' | '`' | '"' | '\\') => {
+                                if let Some(escaped) = chars.next() {
+                                    current.push(escaped);
+                                }
+                            }
+                            Some('\n') => {
+                                chars.next();
+                            }
+                            _ => current.push('\\'),
+                        }
+                    } else {
+                        current.push(ch);
+                    }
+                }
+                _ => unreachable!("POSIX tokenizer only records single or double quotes"),
             }
             continue;
         }
@@ -4425,11 +5352,15 @@ pub(crate) fn tokenize_shell_subject_words(command: &str) -> Vec<String> {
             '\'' | '"' => quote = Some(ch),
             '\\' => {
                 if let Some(next) = chars.next() {
-                    if next == ';' {
+                    if next == '\n' {
+                        continue;
+                    } else if next == ';' {
                         current.push_str("\\;");
                     } else {
                         current.push(next);
                     }
+                } else {
+                    current.push('\\');
                 }
             }
             ' ' | '\t' => {
@@ -4460,6 +5391,13 @@ pub(crate) fn tokenize_shell_subject_words(command: &str) -> Vec<String> {
                     words.push(std::mem::take(&mut current));
                 }
                 words.push("&&".to_owned());
+            }
+            '&' if chars.peek() == Some(&'>') => current.push(ch),
+            '&' => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+                words.push("&".to_owned());
             }
             '|' if chars.peek() == Some(&'|') => {
                 chars.next();

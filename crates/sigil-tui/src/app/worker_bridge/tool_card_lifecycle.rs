@@ -1,4 +1,4 @@
-use sigil_kernel::{ToolProgressEvent, ToolResult, ToolResultMeta};
+use sigil_kernel::{MAX_PROVIDER_TURN_TOOL_CALLS, ToolProgressEvent, ToolResult, ToolResultMeta};
 
 use super::super::{TimelineEntry, TimelineRole, formatting::agent_result_poll_tool_name};
 
@@ -23,22 +23,43 @@ pub(super) fn tool_card_replacement_indices(
     timeline: &[TimelineEntry],
     rendered: &str,
 ) -> Option<Vec<usize>> {
-    let current_key = tool_card_replacement_key(rendered)?;
-    const RECENT_TOOL_CARD_SCAN: usize = 96;
-    let start_index = timeline.len().saturating_sub(RECENT_TOOL_CARD_SCAN);
-    let indices = timeline
+    let current_key = durable_tool_card_replacement_key(rendered)?;
+    let mut indices = timeline
         .iter()
         .enumerate()
-        .skip(start_index)
+        .rev()
+        .filter(|(_, previous)| previous.role == TimelineRole::Tool)
+        // A provider turn can legally contain this many tool calls. Count
+        // cards rather than raw timeline entries so notices and reasoning do
+        // not evict the first progress card from the merge window.
+        .take(MAX_PROVIDER_TURN_TOOL_CALLS)
         .filter_map(|(index, previous)| {
-            if previous.role != TimelineRole::Tool {
-                return None;
-            }
-            let previous_key = tool_card_replacement_key(&previous.text)?;
+            let previous_key = durable_tool_card_replacement_key(&previous.text)?;
             (previous_key == current_key).then_some(index)
         })
         .collect::<Vec<_>>();
+    indices.reverse();
     (!indices.is_empty()).then_some(indices)
+}
+
+pub(in crate::app) fn durable_tool_card_replacement_key(text: &str) -> Option<String> {
+    // Provider execution ids may be reused across turns. Only domain identities that remain
+    // authoritative across events may opt into a timeline scan; execution cards merge through
+    // their exact active entry index instead.
+    terminal_task_key_from_tool_block(text).or_else(|| agent_thread_key_from_tool_block(text))
+}
+
+pub(super) fn tracked_tool_card_replacement_index(
+    timeline: &[TimelineEntry],
+    rendered: &str,
+    entry_index: usize,
+) -> Option<Vec<usize>> {
+    let current_key = tool_card_replacement_key(rendered)?;
+    let previous = timeline.get(entry_index)?;
+    (previous.role == TimelineRole::Tool
+        && tool_card_replacement_key(&previous.text)
+            .is_some_and(|previous_key| previous_key == current_key))
+    .then_some(vec![entry_index])
 }
 
 pub(in crate::app) fn tool_card_replacement_key(text: &str) -> Option<String> {
@@ -73,6 +94,26 @@ pub(super) fn tool_progress_result(progress: ToolProgressEvent) -> ToolResult {
             ..ToolResultMeta::default()
         },
     )
+}
+
+pub(super) fn attach_progress_execution_id(result: &mut ToolResult, execution_id: &str) {
+    if execution_id.trim().is_empty() {
+        return;
+    }
+    match &mut result.metadata.details {
+        serde_json::Value::Object(details) => {
+            details
+                .entry("execution_id".to_owned())
+                .or_insert_with(|| serde_json::Value::String(execution_id.to_owned()));
+        }
+        existing => {
+            let previous = std::mem::replace(existing, serde_json::Value::Null);
+            *existing = serde_json::json!({
+                "execution_id": execution_id,
+                "display": previous,
+            });
+        }
+    }
 }
 
 pub(super) fn tool_progress_summary(progress: &ToolProgressEvent) -> String {

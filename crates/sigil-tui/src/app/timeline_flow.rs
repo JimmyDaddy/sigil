@@ -345,6 +345,7 @@ impl AppState {
     ) {
         let history_anchor =
             history_anchor.map(|anchor| anchor.after_removing_timeline_entries(removed_indices));
+        self.remap_tool_activity_state_after_entry_removal(removed_indices);
         self.timeline_state.streaming_assistant_index = None;
         self.timeline_state.streaming_reasoning_index = None;
         self.timeline_state.expanded_thinking_entry_indices.clear();
@@ -359,6 +360,43 @@ impl AppState {
             .rebuild(&self.timeline, &options);
         self.timeline_state.revision = self.timeline_state.revision.saturating_add(1);
         self.restore_timeline_history_anchor(history_anchor);
+    }
+
+    fn remap_tool_activity_state_after_entry_removal(&mut self, removed_indices: &[usize]) {
+        self.tool_progress_entry_indices.retain(|_, entry_index| {
+            if removed_indices.contains(entry_index) {
+                return false;
+            }
+            let shift = removed_indices
+                .iter()
+                .filter(|removed_index| **removed_index < *entry_index)
+                .count();
+            *entry_index = (*entry_index).saturating_sub(shift);
+            true
+        });
+        self.timeline_state.selected_tool_activity_key = self
+            .timeline_state
+            .selected_tool_activity_key
+            .take()
+            .and_then(|key| remap_tool_activity_key_after_entry_removal(key, removed_indices));
+        self.timeline_state.expanded_tool_activity_keys =
+            std::mem::take(&mut self.timeline_state.expanded_tool_activity_keys)
+                .into_iter()
+                .filter_map(|key| remap_tool_activity_key_after_entry_removal(key, removed_indices))
+                .collect();
+        self.timeline_state.collapsed_tool_activity_keys =
+            std::mem::take(&mut self.timeline_state.collapsed_tool_activity_keys)
+                .into_iter()
+                .filter_map(|key| remap_tool_activity_key_after_entry_removal(key, removed_indices))
+                .collect();
+        self.timeline_state.tool_activity_visible_rows =
+            std::mem::take(&mut self.timeline_state.tool_activity_visible_rows)
+                .into_iter()
+                .filter_map(|(key, rows)| {
+                    remap_tool_activity_key_after_entry_removal(key, removed_indices)
+                        .map(|key| (key, rows))
+                })
+                .collect();
     }
 
     pub(super) fn push_phase_marker(&mut self, text: impl Into<String>) {
@@ -1739,6 +1777,26 @@ impl AppState {
             ),
         })
     }
+}
+
+fn remap_tool_activity_key_after_entry_removal(
+    key: String,
+    removed_indices: &[usize],
+) -> Option<String> {
+    let Some((prefix, index)) = key.rsplit_once(":entry:") else {
+        return Some(key);
+    };
+    let Ok(index) = index.parse::<usize>() else {
+        return Some(key);
+    };
+    if removed_indices.contains(&index) {
+        return None;
+    }
+    let shift = removed_indices
+        .iter()
+        .filter(|removed_index| **removed_index < index)
+        .count();
+    Some(format!("{prefix}:entry:{}", index.saturating_sub(shift)))
 }
 
 fn timeline_history_line_weight(line: &str) -> usize {

@@ -1,8 +1,12 @@
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{Seek, SeekFrom, Write},
+};
 
 use super::*;
 use crate::app::tests::common::test_config;
-use sigil_kernel::ModelMessage;
+use sigil_kernel::{AssistantMessageKind, ModelMessage, ToolCall, ToolResult, ToolResultMeta};
 use tempfile::tempdir;
 
 fn sync_child(
@@ -220,6 +224,144 @@ fn child_transcript_readers_cover_invalid_paths_blank_lines_and_tail_truncation(
     let recent = read_recent_session_entries(&long_path, 2, signature)?;
     assert_eq!(recent.entries.len(), 2);
     assert!(recent.truncated);
+    Ok(())
+}
+
+#[test]
+fn child_transcript_tail_reader_bounds_a_corrupt_line_without_newlines() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let path = temp.path().join("oversized-child.jsonl");
+    let file = fs::File::create(&path)?;
+    file.set_len((CHILD_AGENT_TRANSCRIPT_TAIL_MAX_BYTES + 4_096) as u64)?;
+    drop(file);
+
+    let mut file = fs::File::open(&path)?;
+    let (bytes, truncated) = read_tail_jsonl_bytes(
+        &mut file,
+        fs::metadata(&path)?.len(),
+        CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT,
+    )?;
+
+    assert!(truncated);
+    assert!(
+        bytes.is_empty(),
+        "a partial oversized JSONL line must be dropped"
+    );
+    Ok(())
+}
+
+#[test]
+fn child_transcript_tail_reader_discards_the_partial_line_at_the_byte_cap() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let path = temp.path().join("partial-child.jsonl");
+    let mut file = fs::File::create(&path)?;
+    file.set_len((CHILD_AGENT_TRANSCRIPT_TAIL_MAX_BYTES + 4_096) as u64)?;
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(b"\n{\"ok\":true}\n")?;
+    drop(file);
+
+    let mut file = fs::File::open(&path)?;
+    let (bytes, truncated) = read_tail_jsonl_bytes(
+        &mut file,
+        fs::metadata(&path)?.len(),
+        CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT,
+    )?;
+
+    assert!(truncated);
+    assert_eq!(bytes, b"{\"ok\":true}\n");
+    Ok(())
+}
+
+#[test]
+fn child_transcript_restore_pairs_maximum_batch_before_latest_eighty_raw_entries()
+-> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/child-bash-tail.jsonl")?;
+    let child_path = temp.path().join(child_ref.as_path());
+    let child_store = JsonlSessionStore::new(&child_path)?;
+    let calls = (0..sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS)
+        .map(|index| ToolCall {
+            id: format!("call-child-bash-tail-{index}"),
+            name: "bash".to_owned(),
+            args_json: serde_json::json!({
+                "command": format!("printf child-batch-command-{index}")
+            })
+            .to_string(),
+        })
+        .collect::<Vec<_>>();
+    child_store.append(&SessionLogEntry::Assistant(
+        ModelMessage::assistant_with_kind(None, calls.clone(), AssistantMessageKind::ToolPreamble),
+    ))?;
+    for (index, call) in calls.iter().enumerate() {
+        let result = ToolResult::ok(
+            call.id.clone(),
+            "bash",
+            format!("child restore completed {index}"),
+            ToolResultMeta::default(),
+        );
+        let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+            &result,
+            None,
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )?;
+        child_store.append(&SessionLogEntry::ToolResultV3(recorded))?;
+    }
+
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join("parent.jsonl");
+    app.agent_panel.active_view = AgentView::Child {
+        child_task_id: "child-bash-tail".to_owned(),
+        child_session_ref: child_ref,
+    };
+
+    assert!(app.reload_active_agent_child_transcript());
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("restored child transcript");
+    assert_eq!(
+        transcript.timeline_entries.len(),
+        CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT
+    );
+    assert_eq!(
+        transcript.total_timeline_entries,
+        sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS
+    );
+    assert!(!transcript.transcript_truncated);
+    let first_payload: serde_json::Value =
+        serde_json::from_str(&transcript.timeline_entries[0].text)?;
+    let last_payload: serde_json::Value = serde_json::from_str(
+        &transcript
+            .timeline_entries
+            .last()
+            .expect("latest restored child tool card")
+            .text,
+    )?;
+    let first_visible_index =
+        sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS - CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT;
+    assert_eq!(
+        first_payload["metadata"]["details"]["call"]["summary"],
+        format!("command=printf child-batch-command-{first_visible_index}")
+    );
+    assert!(
+        transcript.timeline_entries[0]
+            .text
+            .contains(&format!("child restore completed {first_visible_index}"))
+    );
+    let last_index = sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS - 1;
+    assert_eq!(
+        last_payload["metadata"]["details"]["call"]["summary"],
+        format!("command=printf child-batch-command-{last_index}")
+    );
+    assert!(
+        transcript
+            .timeline_entries
+            .last()
+            .expect("latest restored child tool card")
+            .text
+            .contains(&format!("child restore completed {last_index}"))
+    );
     Ok(())
 }
 

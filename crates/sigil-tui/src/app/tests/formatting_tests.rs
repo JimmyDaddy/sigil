@@ -1,14 +1,14 @@
 use super::super::{
     build_model_picker_options, char_to_byte_index, format_terminal_task_block_redacted,
     format_token_compact, format_token_count, format_tool_content_block_redacted_for_restore,
-    format_tool_result_block_redacted, hash_timeline_line, human_file_size,
-    line_has_visible_content, non_empty_or, normalize_command_prefix_character,
-    parse_reasoning_effort, persisted_root_config, plain_line_text, ratio_to_percent,
-    sidebar_width_for_terminal, summarize_error,
+    format_tool_result_block_redacted, format_tool_result_block_redacted_with_call,
+    hash_timeline_line, human_file_size, line_has_visible_content, non_empty_or,
+    normalize_command_prefix_character, parse_reasoning_effort, persisted_root_config,
+    plain_line_text, ratio_to_percent, sidebar_width_for_terminal, summarize_error,
 };
 use super::*;
 use ratatui::text::{Line, Span};
-use sigil_kernel::{SecretRedactor, ToolDiffBudget};
+use sigil_kernel::{SecretRedactor, ToolCall, ToolDiffBudget};
 
 #[test]
 fn summarize_error_prefers_last_non_empty_cause_line() {
@@ -127,6 +127,52 @@ fn format_tool_result_block_redacted_includes_json_preview_diff_and_metadata() -
             .is_some_and(|summary| { summary.contains("2.0 KB") && summary.contains("diff") })
     );
     assert_eq!(payload["diff"]["files"][0]["path"], "note.txt");
+    Ok(())
+}
+
+#[test]
+fn bash_safe_tool_call_enriches_live_display_and_redacts_command() -> Result<()> {
+    let result = ToolResult::ok(
+        "call-bash-live",
+        "bash",
+        "done",
+        ToolResultMeta {
+            details: json!({
+                "status_label": "ok",
+                "summary": "bash ok",
+                "preview": "done",
+                "observed_bytes": 4,
+                "persisted_bytes": 4,
+                "has_more": false,
+                "display_capabilities": ["copy_summary"],
+                "preview_truncated": false
+            }),
+            ..ToolResultMeta::default()
+        },
+    );
+    let tool_call = ToolCall {
+        id: "call-bash-live".to_owned(),
+        name: "bash".to_owned(),
+        args_json: json!({
+            "command": "printf supersecret-token && cargo check --workspace"
+        })
+        .to_string(),
+    };
+
+    let rendered = format_tool_result_block_redacted_with_call(
+        &result,
+        Some(&tool_call),
+        None,
+        &SecretRedactor::from_values(["supersecret-token"]),
+    );
+    let payload: serde_json::Value = serde_json::from_str(&rendered)?;
+
+    assert!(!rendered.contains("supersecret-token"));
+    assert_eq!(
+        payload["metadata"]["details"]["call"]["summary"],
+        "command=printf [redacted] && cargo check --workspace"
+    );
+    assert_eq!(payload["metadata"]["details"]["status_label"], "ok");
     Ok(())
 }
 

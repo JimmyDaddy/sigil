@@ -45,9 +45,8 @@ use audit_log::{
 };
 use audit_log::{
     render_model_message_line, render_session_log_entry, render_tool_execution_line,
-    render_tool_result_v2_content_with_store, restored_reasoning_note, restored_tool_call_index,
-    restored_tool_execution_content, restored_tool_execution_index,
-    restored_tool_preview_snapshot_index, restored_tool_result_call_ids,
+    render_tool_result_v2_content_with_store, restored_reasoning_note,
+    restored_tool_execution_content, restored_tool_occurrences,
     should_render_restored_tool_execution, unix_time_ms,
 };
 pub(super) use history::{current_focus_label, session_history_display_label, short_session_token};
@@ -292,7 +291,7 @@ impl AppState {
             review_snapshot.latest_checkpoint_restore_sequence;
         self.review.readiness_sequences_by_scope = review_snapshot.readiness_sequences_by_scope;
         self.runtime.stats = session_stats_from_entries(&entries);
-        self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
+        self.tool_preview_snapshots = restored_tool_occurrences(&entries).pending_previews;
         self.session_browser.current_entries = entries;
         self.reconcile_integration_review();
         self.mark_current_session_entries_changed_with_review_lines(review_snapshot.lines);
@@ -308,7 +307,7 @@ impl AppState {
             .push(SessionLogEntry::Control(control));
         self.runtime.stats = session_stats_from_entries(&self.session_browser.current_entries);
         self.tool_preview_snapshots =
-            restored_tool_preview_snapshot_index(&self.session_browser.current_entries);
+            restored_tool_occurrences(&self.session_browser.current_entries).pending_previews;
         self.mark_current_session_entries_changed_live();
         self.reconcile_optimistic_conversation_queue_items();
         self.refresh_active_agent_view_after_parent_sync();
@@ -541,6 +540,9 @@ impl AppState {
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);
         self.timeline.clear();
+        self.safe_tool_calls.clear();
+        self.tool_progress_execution_ids.clear();
+        self.tool_progress_entry_indices.clear();
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
         self.timeline_state.expanded_thinking_entry_indices.clear();
@@ -576,15 +578,12 @@ impl AppState {
         self.push_event("focus", self.active_pane.label());
         self.push_event("restore", format!("entries={}", entries.len()));
 
-        let restored_tool_executions = restored_tool_execution_index(&entries);
-        let restored_tool_calls = restored_tool_call_index(&entries);
-        let restored_tool_previews = restored_tool_preview_snapshot_index(&entries);
-        let restored_tool_result_call_ids = restored_tool_result_call_ids(&entries);
+        let restored_tools = restored_tool_occurrences(&entries);
         let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(&entries);
         let suppressed_assistant_preamble_indices = suppressed_assistant_preamble_indices(&entries);
         let tool_artifact_store =
             sigil_kernel::ToolArtifactStore::for_session_path(&self.session_log_path);
-        self.tool_preview_snapshots = restored_tool_previews.clone();
+        self.tool_preview_snapshots = restored_tools.pending_previews.clone();
         for (entry_index, entry) in entries.into_iter().enumerate() {
             match entry {
                 SessionLogEntry::User(message) => {
@@ -601,9 +600,9 @@ impl AppState {
                     }
                 }
                 SessionLogEntry::ToolResultV3(result) => {
-                    let execution = restored_tool_executions.get(&result.call_id);
-                    let preview = restored_tool_previews.get(&result.call_id);
-                    let tool_call = restored_tool_calls.get(&result.call_id);
+                    let execution = restored_tools.executions.get(&entry_index);
+                    let preview = restored_tools.previews.get(&entry_index);
+                    let tool_call = restored_tools.calls.get(&entry_index);
                     self.replace_or_push_tool_card(format_tool_content_block_redacted_for_restore(
                         Some(&result.call_id),
                         &render_tool_result_v2_content_with_store(
@@ -628,12 +627,12 @@ impl AppState {
                     }
                     ControlEntry::ToolExecution(execution)
                         if should_render_restored_tool_execution(
-                            execution.as_ref(),
-                            &restored_tool_result_call_ids,
+                            entry_index,
+                            &restored_tools.orphan_execution_indices,
                         ) =>
                     {
-                        let preview = restored_tool_previews.get(&execution.call_id);
-                        let tool_call = restored_tool_calls.get(&execution.call_id);
+                        let preview = restored_tools.previews.get(&entry_index);
+                        let tool_call = restored_tools.calls.get(&entry_index);
                         self.replace_or_push_tool_card(
                             format_tool_content_block_redacted_for_restore(
                                 Some(execution.call_id.as_str()),

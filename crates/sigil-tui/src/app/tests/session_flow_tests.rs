@@ -156,6 +156,284 @@ fn restored_read_file_tool_result_uses_original_tool_call_for_code_preview() -> 
 }
 
 #[test]
+fn restored_bash_result_uses_safe_tool_call_when_execution_audit_is_hash_only() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let call_id = "call-bash-restored";
+    let entries = vec![
+        SessionLogEntry::User(ModelMessage::user("run workspace tests")),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: "bash".to_owned(),
+                args_json: json!({"command":"cargo test --workspace"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: call_id.to_owned(),
+            tool_name: "bash".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(12),
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta {
+                exit_code: Some(0),
+                details: json!({
+                    "call": {
+                        "command_sha256": "hash-only",
+                        "summary": "command_sha256=hash-only"
+                    }
+                }),
+                ..ToolResultMeta::default()
+            },
+            error: None,
+            model_content_hash: Some("model-hash".to_owned()),
+        }))),
+        v2_tool_result_entry(
+            call_id,
+            "bash",
+            "test result: ok",
+            ToolResultMeta::default(),
+        ),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 30);
+    assert!(rendered.contains("Ran cargo test --workspace"));
+    assert!(!rendered.contains("Ran bash"));
+    assert!(!rendered.contains("command_sha256=hash-only"));
+    Ok(())
+}
+
+#[test]
+fn restored_reused_call_id_keeps_each_bash_command_with_its_own_result() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let call_id = "call-0";
+    let entries = vec![
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: "bash".to_owned(),
+                args_json: json!({"command":"printf first-command"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        v2_tool_result_entry(call_id, "bash", "first output", ToolResultMeta::default()),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: "bash".to_owned(),
+                args_json: json!({"command":"printf second-command"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        v2_tool_result_entry(call_id, "bash", "second output", ToolResultMeta::default()),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_payloads = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .map(|entry| serde_json::from_str::<serde_json::Value>(&entry.text))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(tool_payloads.len(), 2);
+    assert_eq!(
+        tool_payloads[0]["metadata"]["details"]["call"]["summary"],
+        "command=printf first-command"
+    );
+    assert_eq!(
+        tool_payloads[1]["metadata"]["details"]["call"]["summary"],
+        "command=printf second-command"
+    );
+    assert_ne!(
+        app.timeline_state.tool_activity_cache[0].key,
+        app.timeline_state.tool_activity_cache[1].key
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_reused_call_id_keeps_each_preview_with_its_own_result() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let call_id = "call-0";
+    let preview = |path: &str, replacement: &str| {
+        ToolPreviewSnapshot::from_preview(
+            call_id,
+            "write_file",
+            &ToolPreview {
+                title: format!("Update {path}"),
+                summary: format!("Preview {path}"),
+                body: format!(
+                    "--- current/{path}\n+++ proposed/{path}\n@@ -1 +1 @@\n-old\n+{replacement}"
+                ),
+                changed_files: vec![path.to_owned()],
+                file_diffs: vec![sigil_kernel::ToolPreviewFile {
+                    path: path.to_owned(),
+                    diff: format!(
+                        "--- current/{path}\n+++ proposed/{path}\n@@ -1 +1 @@\n-old\n+{replacement}"
+                    ),
+                }],
+            },
+            sigil_kernel::ToolDiffBudget::default(),
+            None,
+        )
+    };
+    let entries = vec![
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: "write_file".to_owned(),
+                args_json: json!({"path":"first.txt"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(preview(
+            "first.txt",
+            "first",
+        ))),
+        v2_tool_result_entry(
+            call_id,
+            "write_file",
+            "wrote first",
+            ToolResultMeta::default(),
+        ),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: "write_file".to_owned(),
+                args_json: json!({"path":"second.txt"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(preview(
+            "second.txt",
+            "second",
+        ))),
+        v2_tool_result_entry(
+            call_id,
+            "write_file",
+            "wrote second",
+            ToolResultMeta::default(),
+        ),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_payloads = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .map(|entry| serde_json::from_str::<serde_json::Value>(&entry.text))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(tool_payloads.len(), 2);
+    assert_eq!(tool_payloads[0]["diff"]["files"][0]["path"], "first.txt");
+    assert_eq!(tool_payloads[1]["diff"]["files"][0]["path"], "second.txt");
+    Ok(())
+}
+
+#[test]
+fn restored_completed_and_incomplete_invocations_with_same_call_id_both_render() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let call_id = "call-0";
+    let execution = |status| ToolExecutionEntry {
+        call_id: call_id.to_owned(),
+        tool_name: "bash".to_owned(),
+        status,
+        duration_ms: Some(4),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta::default(),
+        error: None,
+        model_content_hash: None,
+    };
+    let entries = vec![
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: "bash".to_owned(),
+                args_json: json!({"command":"printf completed"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(execution(
+            ToolExecutionStatus::Completed,
+        )))),
+        v2_tool_result_entry(
+            call_id,
+            "bash",
+            "completed output",
+            ToolResultMeta::default(),
+        ),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: "bash".to_owned(),
+                args_json: json!({"command":"printf interrupted"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(execution(
+            ToolExecutionStatus::Interrupted,
+        )))),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_payloads = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .map(|entry| serde_json::from_str::<serde_json::Value>(&entry.text))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(tool_payloads.len(), 2);
+    assert_eq!(tool_payloads[0]["status"], "ok");
+    assert_eq!(tool_payloads[1]["status"], "error");
+    assert_eq!(
+        tool_payloads[0]["metadata"]["details"]["call"]["summary"],
+        "command=printf completed"
+    );
+    assert_eq!(
+        tool_payloads[1]["metadata"]["details"]["call"]["summary"],
+        "command=printf interrupted"
+    );
+    Ok(())
+}
+
+#[test]
 fn restored_prefix_snapshot_keeps_materialization_metadata_out_of_activity() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();

@@ -728,7 +728,11 @@ fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<
   "hidden_lines": 0
 }"##,
     );
-    let tool_key = "call:call-first".to_owned();
+    let tool_key = app
+        .timeline_state
+        .selected_tool_activity_key
+        .clone()
+        .expect("tool card should be selected");
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
         Some(tool_key.clone())
@@ -1895,7 +1899,7 @@ fn child_agent_transcript_reload_uses_tail_and_skips_unchanged_files() -> Result
     app.reload_active_agent_child_transcript();
     let rendered = transcript_plain(app.transcript_lines(16));
 
-    assert!(rendered.contains("showing latest 80 child transcript entries"));
+    assert!(rendered.contains("showing latest 80 of 96 child transcript entries"));
     assert!(!rendered.contains("child message 0"));
     assert!(rendered.contains("child message 95"));
 

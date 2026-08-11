@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
     path::Path,
@@ -17,17 +18,58 @@ use sigil_kernel::{
     AgentBatchProjection, AgentResultContinuationProjection, AgentThreadDisplayNameEntry,
     AgentThreadId, AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus,
     ControlEntry, JsonlSessionStore, SessionLogEntry, TaskRunProjection, TaskStateProjection,
-    normalize_task_agent_display_name,
+    ToolCall, ToolExecutionStatus, ToolResult, ToolResultMeta, normalize_task_agent_display_name,
 };
 
 use super::{
     ActiveAgentChildTranscript, AgentSidebarItem, AgentView, AppAction, AppState,
-    ChildTranscriptFileSignature,
+    ChildTranscriptFileSignature, formatting::format_tool_progress_block_redacted_with_call,
+    state::ChildToolCardOccurrence,
 };
 
-const CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT: usize = 80;
+pub(super) const CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT: usize = 80;
 const CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT: usize = CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT * 16;
 const CHILD_AGENT_TRANSCRIPT_TAIL_CHUNK_SIZE: usize = 32 * 1024;
+// One safe provider turn is capped at 1 MiB of tool args. Keep enough room for a legal
+// multi-call turn plus recent result projections without letting a corrupt JSONL line grow reads
+// with the whole session file.
+const CHILD_AGENT_TRANSCRIPT_TAIL_MAX_BYTES: usize =
+    sigil_kernel::MAX_PROVIDER_TURN_TOOL_ARGS_BYTES * 16;
+
+#[derive(Debug, Clone)]
+struct PendingChildToolCall {
+    order: usize,
+    call: ToolCall,
+    render_running_card: bool,
+}
+
+pub(super) fn child_tool_event_scope(
+    child_task_id: &str,
+    child_session_ref: &sigil_kernel::SessionRef,
+) -> String {
+    format!(
+        "{}|{}",
+        child_task_id,
+        child_session_ref.as_path().display()
+    )
+}
+
+pub(super) fn format_child_pending_tool_card(
+    call: &ToolCall,
+    safe_call: Option<&ToolCall>,
+    redactor: &sigil_kernel::SecretRedactor,
+) -> String {
+    let result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        format!("{} is running", call.name),
+        ToolResultMeta {
+            details: serde_json::json!({"child_tool_call_pending":true}),
+            ..ToolResultMeta::default()
+        },
+    );
+    format_tool_progress_block_redacted_with_call(&result, safe_call, redactor)
+}
 
 impl AppState {
     pub(crate) fn active_agent_label(&self) -> String {
@@ -701,23 +743,41 @@ impl AppState {
 
     pub(super) fn reload_active_agent_child_transcript(&mut self) -> bool {
         let history_anchor = self.capture_timeline_history_anchor();
-        let AgentView::Child {
-            child_session_ref, ..
-        } = &self.agent_panel.active_view
-        else {
-            let changed = self.agent_panel.active_child_transcript.is_some();
-            self.agent_panel.active_child_transcript = None;
-            self.restore_timeline_history_anchor(history_anchor);
-            return changed;
+        let (child_task_id, child_session_ref) = match self.agent_panel.active_view.clone() {
+            AgentView::Child {
+                child_task_id,
+                child_session_ref,
+            } => (child_task_id, child_session_ref),
+            AgentView::Main => {
+                let changed = self.agent_panel.active_child_transcript.is_some();
+                self.agent_panel.active_child_transcript = None;
+                self.agent_panel.safe_child_tool_calls.clear();
+                self.agent_panel.child_tool_progress_execution_ids.clear();
+                self.agent_panel.child_tool_card_entry_indices.clear();
+                self.restore_timeline_history_anchor(history_anchor);
+                return changed;
+            }
         };
         let parent_dir = self
             .session_log_path
             .parent()
             .unwrap_or_else(|| Path::new("."));
         let path = child_session_ref.resolve(parent_dir);
+        let child_scope = child_tool_event_scope(&child_task_id, &child_session_ref);
+        if self
+            .agent_panel
+            .active_child_transcript
+            .as_ref()
+            .is_none_or(|transcript| transcript.path != path)
+        {
+            self.agent_panel.safe_child_tool_calls.clear();
+            self.agent_panel.child_tool_progress_execution_ids.clear();
+            self.agent_panel.child_tool_card_entry_indices.clear();
+        }
         let file_signature = match child_transcript_file_signature(&path) {
             Ok(file_signature) => file_signature,
             Err(error) => {
+                self.clear_child_tool_state_for_scope(child_scope.as_str());
                 let error = error.to_string();
                 let changed = !self
                     .agent_panel
@@ -760,8 +820,14 @@ impl AppState {
         );
         self.agent_panel.active_child_transcript = Some(match load_result {
             Ok(recent) => {
+                let pending_calls = pending_child_tool_calls(&recent.entries);
                 let (timeline_entries, total_timeline_entries) =
-                    self.bounded_child_timeline_entries(&recent.entries);
+                    self.bounded_child_timeline_entries(&recent.entries, &pending_calls);
+                self.restore_pending_child_tool_state(
+                    child_scope.as_str(),
+                    &pending_calls,
+                    &timeline_entries,
+                );
                 let rendered_body_lines = self.render_child_timeline_body_lines(&timeline_entries);
                 ActiveAgentChildTranscript {
                     path,
@@ -773,15 +839,18 @@ impl AppState {
                     load_error: None,
                 }
             }
-            Err(error) => ActiveAgentChildTranscript {
-                path,
-                file_signature,
-                timeline_entries: Vec::new(),
-                rendered_body_lines: Vec::new(),
-                total_timeline_entries: 0,
-                transcript_truncated: false,
-                load_error: Some(error.to_string()),
-            },
+            Err(error) => {
+                self.clear_child_tool_state_for_scope(child_scope.as_str());
+                ActiveAgentChildTranscript {
+                    path,
+                    file_signature,
+                    timeline_entries: Vec::new(),
+                    rendered_body_lines: Vec::new(),
+                    total_timeline_entries: 0,
+                    transcript_truncated: false,
+                    load_error: Some(error.to_string()),
+                }
+            }
         });
         self.restore_timeline_history_anchor(history_anchor);
         true
@@ -807,8 +876,22 @@ impl AppState {
     fn bounded_child_timeline_entries(
         &self,
         entries: &[SessionLogEntry],
+        pending_calls: &[PendingChildToolCall],
     ) -> (Vec<TimelineEntry>, usize) {
-        let timeline_entries = self.restored_timeline_entries_from_session_entries(entries);
+        let mut timeline_entries = self.restored_timeline_entries_from_session_entries(entries);
+        timeline_entries.extend(
+            pending_calls
+                .iter()
+                .filter(|pending| pending.render_running_card)
+                .map(|pending| TimelineEntry {
+                    role: TimelineRole::Tool,
+                    text: format_child_pending_tool_card(
+                        &pending.call,
+                        Some(&pending.call),
+                        &self.secret_redactor,
+                    ),
+                }),
+        );
         let total_timeline_entries = timeline_entries.len();
         if total_timeline_entries <= CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT {
             return (timeline_entries, total_timeline_entries);
@@ -821,6 +904,73 @@ impl AppState {
             total_timeline_entries,
         )
     }
+
+    fn restore_pending_child_tool_state(
+        &mut self,
+        child_scope: &str,
+        pending_calls: &[PendingChildToolCall],
+        timeline_entries: &[TimelineEntry],
+    ) {
+        self.agent_panel
+            .safe_child_tool_calls
+            .retain(|(scope, _), _| scope != child_scope);
+        self.agent_panel
+            .child_tool_card_entry_indices
+            .retain(|(scope, _), _| scope != child_scope);
+        let pending_ids = pending_calls
+            .iter()
+            .map(|pending| pending.call.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.agent_panel
+            .child_tool_progress_execution_ids
+            .retain(|(scope, call_id), _| {
+                scope != child_scope || pending_ids.contains(call_id.as_str())
+            });
+        for pending in pending_calls {
+            let key = (child_scope.to_owned(), pending.call.id.clone());
+            self.agent_panel
+                .safe_child_tool_calls
+                .insert(key.clone(), pending.call.clone());
+            let occurrence = if pending.render_running_card {
+                ChildToolCardOccurrence::Running(None)
+            } else {
+                ChildToolCardOccurrence::TerminalPlaceholder(None)
+            };
+            self.agent_panel
+                .child_tool_card_entry_indices
+                .insert(key, occurrence);
+        }
+        for (index, entry) in timeline_entries.iter().enumerate() {
+            if entry.role != TimelineRole::Tool {
+                continue;
+            }
+            let Some(call_id) = child_tool_card_call_id(&entry.text) else {
+                continue;
+            };
+            if !pending_ids.contains(call_id.as_str()) {
+                continue;
+            }
+            if let Some(occurrence) = self
+                .agent_panel
+                .child_tool_card_entry_indices
+                .get_mut(&(child_scope.to_owned(), call_id))
+            {
+                occurrence.set_entry_index(Some(index));
+            }
+        }
+    }
+
+    fn clear_child_tool_state_for_scope(&mut self, child_scope: &str) {
+        self.agent_panel
+            .safe_child_tool_calls
+            .retain(|(scope, _), _| scope != child_scope);
+        self.agent_panel
+            .child_tool_progress_execution_ids
+            .retain(|(scope, _), _| scope != child_scope);
+        self.agent_panel
+            .child_tool_card_entry_indices
+            .retain(|(scope, _), _| scope != child_scope);
+    }
 }
 
 #[derive(Debug)]
@@ -828,6 +978,55 @@ struct RecentSessionEntries {
     entries: Vec<SessionLogEntry>,
     file_signature: ChildTranscriptFileSignature,
     truncated: bool,
+}
+
+fn pending_child_tool_calls(entries: &[SessionLogEntry]) -> Vec<PendingChildToolCall> {
+    let mut pending = BTreeMap::<String, PendingChildToolCall>::new();
+    let mut order = 0usize;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Assistant(message) => {
+                for call in &message.tool_calls {
+                    order = order.saturating_add(1);
+                    pending.insert(
+                        call.id.clone(),
+                        PendingChildToolCall {
+                            order,
+                            call: call.clone(),
+                            render_running_card: true,
+                        },
+                    );
+                }
+            }
+            SessionLogEntry::ToolResultV3(result) => {
+                pending.remove(&result.call_id);
+            }
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if matches!(
+                    execution.status,
+                    ToolExecutionStatus::Failed
+                        | ToolExecutionStatus::Cancelled
+                        | ToolExecutionStatus::Interrupted
+                ) =>
+            {
+                if let Some(call) = pending.get_mut(&execution.call_id) {
+                    call.render_running_card = false;
+                }
+            }
+            SessionLogEntry::User(_) | SessionLogEntry::Control(_) => {}
+        }
+    }
+    let mut pending = pending.into_values().collect::<Vec<_>>();
+    pending.sort_by_key(|call| call.order);
+    pending
+}
+
+fn child_tool_card_call_id(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    value
+        .get("call_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 fn child_transcript_file_signature(path: &Path) -> anyhow::Result<ChildTranscriptFileSignature> {
@@ -870,7 +1069,7 @@ fn read_recent_session_entries(
     let mut truncated = truncated_by_seek || start > 0;
     let mut entries = Vec::new();
     for raw_line in lines.into_iter().skip(start).rev() {
-        if entries.len() >= CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT {
+        if entries.len() >= max_lines {
             truncated = true;
             break;
         }
@@ -905,10 +1104,12 @@ fn read_tail_jsonl_bytes(
     max_lines: usize,
 ) -> anyhow::Result<(Vec<u8>, bool)> {
     let mut position = file_len;
+    let byte_floor = file_len.saturating_sub(CHILD_AGENT_TRANSCRIPT_TAIL_MAX_BYTES as u64);
     let mut newline_count = 0usize;
     let mut chunks = Vec::new();
-    while position > 0 && newline_count <= max_lines {
-        let read_size = position.min(CHILD_AGENT_TRANSCRIPT_TAIL_CHUNK_SIZE as u64) as usize;
+    while position > byte_floor && newline_count <= max_lines {
+        let read_size =
+            (position - byte_floor).min(CHILD_AGENT_TRANSCRIPT_TAIL_CHUNK_SIZE as u64) as usize;
         position = position.saturating_sub(read_size as u64);
         file.seek(SeekFrom::Start(position))?;
         let mut chunk = vec![0; read_size];

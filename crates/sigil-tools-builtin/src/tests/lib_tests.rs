@@ -6625,6 +6625,300 @@ fn bash_file_test_echo_loop_is_readonly_but_scripts_still_execute() -> Result<()
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::create_dir_all(workspace.path().join(".git"))?;
+    let tool = posix_bash_tool(workspace.path())?;
+    let context = ToolContext::new(workspace.path(), 30);
+    let command = r#"git log --oneline -n 6; echo "=== branch ==="; git branch --show-current; echo "=== HEAD ==="; git rev-parse HEAD; echo "=== stash ==="; git stash list; echo "=== merge markers ==="; for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#;
+
+    let stash_list = tool.permission_plan(&context, &json!({ "command": "git stash list" }))?;
+    assert_eq!(stash_list.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(stash_list.access, ToolAccess::Read);
+    assert_eq!(stash_list.operation, ToolOperation::ExecuteReadOnlyCommand);
+    let stash_push = tool.permission_plan(&context, &json!({ "command": "git stash push" }))?;
+    assert_eq!(stash_push.access, ToolAccess::Execute);
+    assert_eq!(stash_push.operation, ToolOperation::ExecuteUnknownCommand);
+
+    let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+    assert_eq!(plan.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(plan.access, ToolAccess::Read);
+    assert_eq!(plan.operation, ToolOperation::ExecuteReadOnlyCommand);
+    assert!(
+        plan.analysis_bindings
+            .contains_key("file_presence_execution_binding"),
+        "the read-only decision must bind the trusted shell and git executables"
+    );
+    assert_eq!(
+        plan.effects,
+        BTreeSet::from([
+            ToolPermissionEffect::FileRead,
+            ToolPermissionEffect::ExecuteTrustedBinary,
+        ])
+    );
+    for marker in ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"] {
+        assert!(plan.subjects.iter().any(|subject| {
+            subject.kind == ToolSubjectKind::Path && subject.original == format!(".git/{marker}")
+        }));
+    }
+    assert!(plan.subjects.iter().all(|subject| {
+        subject.kind != ToolSubjectKind::Path
+            || !subject.original.contains("$f") && !subject.original.contains("EXISTS")
+    }));
+
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+    registry.register(Arc::new(posix_bash_tool(workspace.path())?));
+    let spec = registry.spec_for("bash").context("bash spec must exist")?;
+    let bound_plan =
+        registry.permission_plan(&context, &tool_call("bash", json!({ "command": command })))?;
+    let danger_config = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        ..Default::default()
+    };
+    let policy_context = PermissionEvaluationContext {
+        workspace_root: fs::canonicalize(workspace.path())?,
+        ..Default::default()
+    };
+    let decision = PermissionPolicyChain::new_with_context(&danger_config, &policy_context)
+        .decide_plan(&spec, &bound_plan)?;
+    assert_eq!(decision.risk, PermissionRisk::Low);
+    assert_eq!(decision.mode, sigil_kernel::ApprovalMode::Allow);
+
+    let attached_background = r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo ok&rm ".git/$f"; else echo absent; fi; done"#;
+    assert!(
+        super::tokenize_shell_subject_words(attached_background)
+            .windows(3)
+            .any(|window| window == ["ok", "&", "rm"]),
+        "a bare background operator must not remain attached to an echo argument"
+    );
+    let background_analysis = super::analyze_shell_command(workspace.path(), attached_background)?;
+    assert_eq!(background_analysis.access, ToolAccess::Execute);
+    assert_eq!(
+        background_analysis.operation,
+        ToolOperation::ExecuteUnknownCommand
+    );
+    assert!(!background_analysis.analysis_status.is_complete());
+    assert!(background_analysis.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.original == ".git/MERGE_HEAD"
+    }));
+    assert!(
+        tool.permission_plan(&context, &json!({ "command": attached_background }),)
+            .is_err(),
+        "bash must also reject background execution before policy evaluation"
+    );
+    let background_draft = background_analysis.permission_plan();
+    // BashTool rejects `&` before binding a plan. Recreate that analyzed draft here so the test
+    // also proves the independent danger-full-access hard-safety decision.
+    let background_plan = sigil_kernel::ToolPermissionPlanV2 {
+        schema_version: sigil_kernel::TOOL_PERMISSION_PLAN_SCHEMA_VERSION,
+        tool_name: "bash".to_owned(),
+        access: background_draft.access,
+        operation: background_draft.operation,
+        effects: background_draft.effects,
+        subjects: background_draft.subjects,
+        analysis: background_draft.analysis,
+        containment: background_draft.containment,
+        semantic_scope: background_draft.semantic_scope,
+        tool_default_mode: background_draft.tool_default_mode,
+        analysis_bindings: background_draft.analysis_bindings,
+        plan_hash: "sha256:test-background-plan".to_owned(),
+        safe_summary: background_draft.safe_summary,
+    };
+    let background_decision =
+        PermissionPolicyChain::new_with_context(&danger_config, &policy_context)
+            .decide_plan(&spec, &background_plan)?;
+    assert_eq!(background_decision.risk, PermissionRisk::Protected);
+    assert_eq!(background_decision.mode, sigil_kernel::ApprovalMode::Deny);
+
+    let protected_write = r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo overwrite > ".git/$f"; else echo absent; fi; done"#;
+    let protected_plan = registry.permission_plan(
+        &context,
+        &tool_call("bash", json!({ "command": protected_write })),
+    )?;
+    assert!(
+        protected_plan.subjects.iter().any(|subject| {
+            subject.kind == ToolSubjectKind::Path && subject.original == ".git/MERGE_HEAD"
+        }),
+        "static marker target must remain explicit: {:?}",
+        protected_plan.subjects
+    );
+    let protected_decision =
+        PermissionPolicyChain::new_with_context(&danger_config, &policy_context)
+            .decide_plan(&spec, &protected_plan)?;
+    assert_eq!(
+        protected_decision.risk,
+        PermissionRisk::Protected,
+        "subjects={:?}, zones={:?}",
+        protected_plan.subjects,
+        protected_decision.subject_zones
+    );
+    assert_eq!(protected_decision.mode, sigil_kernel::ApprovalMode::Deny);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_git_metadata_presence_loop_binds_a_controlled_git_environment() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::create_dir_all(workspace.path().join(".git"))?;
+    let command = r#"git log --oneline -n 6; for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#;
+    let controlled = std::env::vars().collect::<BTreeMap<_, _>>();
+
+    let analysis = super::analyze_shell_command_with_controlled_environment(
+        workspace.path(),
+        command,
+        &controlled,
+    )?;
+    assert_eq!(analysis.access, ToolAccess::Read);
+    assert!(analysis.analysis_status.is_complete());
+
+    let (shell_program, execution_environment) =
+        super::bounded_file_presence_execution_environment(workspace.path(), &controlled)?;
+    assert!(shell_program.is_absolute());
+    assert_eq!(execution_environment["GIT_OPTIONAL_LOCKS"], "0");
+    assert_eq!(execution_environment["GIT_NO_LAZY_FETCH"], "1");
+    assert_eq!(execution_environment["GIT_TERMINAL_PROMPT"], "0");
+    assert_eq!(execution_environment["GIT_CONFIG_NOSYSTEM"], "1");
+    assert_eq!(execution_environment["GIT_CONFIG_GLOBAL"], "/dev/null");
+    assert_eq!(
+        execution_environment["GIT_CONFIG_KEY_2"],
+        "log.showSignature"
+    );
+    assert_eq!(execution_environment["GIT_CONFIG_VALUE_2"], "false");
+    let execution_path = PathBuf::from(&execution_environment["PATH"]);
+    assert!(execution_path.is_absolute());
+    assert!(!execution_path.starts_with(workspace.path()));
+    assert!(execution_path.join("git").is_file());
+
+    let untrusted_bin = workspace.path().join("bin");
+    fs::create_dir_all(&untrusted_bin)?;
+    let untrusted_git = untrusted_bin.join("git");
+    fs::write(&untrusted_git, "#!/bin/sh\nprintf compromised\n")?;
+    fs::set_permissions(&untrusted_git, fs::Permissions::from_mode(0o755))?;
+    let mut untrusted_environment = controlled;
+    let original_path = untrusted_environment
+        .get("PATH")
+        .cloned()
+        .unwrap_or_else(|| "/usr/bin:/bin".to_owned());
+    untrusted_environment.insert(
+        "PATH".to_owned(),
+        format!("{}:{original_path}", untrusted_bin.display()),
+    );
+    let untrusted_analysis = super::analyze_shell_command_with_controlled_environment(
+        workspace.path(),
+        command,
+        &untrusted_environment,
+    )?;
+    assert_eq!(untrusted_analysis.access, ToolAccess::Execute);
+    assert_eq!(
+        untrusted_analysis.operation,
+        ToolOperation::ExecuteUnknownCommand
+    );
+    assert!(!untrusted_analysis.analysis_status.is_complete());
+    assert!(
+        super::bounded_file_presence_execution_environment(
+            workspace.path(),
+            &untrusted_environment,
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_git_metadata_presence_loop_rejects_dynamic_or_mutating_variants() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::create_dir_all(workspace.path().join(".git"))?;
+    let tool = posix_bash_tool(workspace.path())?;
+    let context = ToolContext::new(workspace.path(), 30);
+    assert_eq!(
+        super::tokenize_shell_subject_words(r"./g'\it' status")[0],
+        r"./g\it"
+    );
+    assert_eq!(
+        super::tokenize_shell_subject_words(r#"g"\it" status"#)[0],
+        r"g\it"
+    );
+    assert_eq!(
+        super::tokenize_shell_subject_words(r#"g"\\it" status"#)[0],
+        r"g\it"
+    );
+
+    for (label, command) in [
+        (
+            "mutation",
+            r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo overwrite > ".git/$f"; else echo absent; fi; done"#,
+        ),
+        (
+            "command substitution",
+            r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f: $(head -c 20 .git/$f)"; else echo absent; fi; done"#,
+        ),
+        (
+            "arbitrary fd redirection",
+            r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f" 3> ".git/$f"; else echo absent; fi; done"#,
+        ),
+        (
+            "glob",
+            r#"for f in MERGE_*; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo absent; fi; done"#,
+        ),
+        (
+            "dynamic prefix",
+            r#"for f in MERGE_HEAD; do if [ -e "$prefix/$f" ]; then echo "EXISTS $prefix/$f"; else echo absent; fi; done"#,
+        ),
+        (
+            "unknown variable",
+            r#"for f in MERGE_HEAD; do if [ -e ".git/$g" ]; then echo "EXISTS .git/$g"; else echo absent; fi; done"#,
+        ),
+        (
+            "quoted reserved and builtin tokens",
+            r#""for" f "in" MERGE_HEAD; "do" "if" "[" -e ".git/$f" "]"; "then" "echo" "EXISTS .git/$f"; "else" "echo" "absent .git/$f"; "fi"; "done""#,
+        ),
+        (
+            "mixed quoted echo builtin",
+            r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then "echo" "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#,
+        ),
+        (
+            "mixed quoted do keyword",
+            r#"for f in MERGE_HEAD; "do" if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#,
+        ),
+        (
+            "single-quoted backslash prefix",
+            r#"./g'\it' status; for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#,
+        ),
+        (
+            "double-quoted preserved backslash prefix",
+            r#"g"\it" status; for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#,
+        ),
+        (
+            "double-quoted escaped backslash prefix",
+            r#"g"\\it" status; for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#,
+        ),
+        (
+            "workspace git basename prefix",
+            r#"./g'it' status; for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#,
+        ),
+        (
+            "quoted git command identity prefix",
+            r#"g"it" status; for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#,
+        ),
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(plan.access, ToolAccess::Execute, "{label}: {command}");
+        assert_eq!(
+            plan.operation,
+            ToolOperation::ExecuteUnknownCommand,
+            "{label}: {command}"
+        );
+        assert!(!plan.analysis.is_complete(), "{label}: {command}");
+        assert!(plan.semantic_scope.is_none(), "{label}: {command}");
+    }
+    Ok(())
+}
+
 #[test]
 fn diff_and_text_limit_helpers_handle_noop_and_head_limits() {
     let diff = super::render_unified_diff("same\n", "same\n", "current", "proposed");

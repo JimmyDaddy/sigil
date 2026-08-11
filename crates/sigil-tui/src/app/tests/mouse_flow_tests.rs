@@ -977,7 +977,7 @@ fn mouse_press_tool_card_body_selects_without_toggling() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
-        Some("call:call-first".to_owned())
+        Some(format!("call:call-first:entry:{first_entry_index}"))
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert_eq!(app.composer.input, "draft");
@@ -1004,13 +1004,13 @@ fn mouse_click_tool_card_body_toggles_card_on_release() -> Result<()> {
     assert!(matches!(up, AppMouseOutcome::Redraw));
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
-        Some("call:call-first".to_owned())
+        Some(format!("call:call-first:entry:{first_entry_index}"))
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(
         app.timeline_state
             .expanded_tool_activity_keys
-            .contains("call:call-first")
+            .contains(&format!("call:call-first:entry:{first_entry_index}"))
     );
     Ok(())
 }
@@ -1064,13 +1064,13 @@ fn mouse_click_tool_card_header_toggles_card() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
-        Some("call:call-first".to_owned())
+        Some(format!("call:call-first:entry:{first_entry_index}"))
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(
         app.timeline_state
             .expanded_tool_activity_keys
-            .contains("call:call-first")
+            .contains(&format!("call:call-first:entry:{first_entry_index}"))
     );
     assert_eq!(
         app.mouse_hover_target,
@@ -1095,13 +1095,13 @@ fn mouse_release_only_tool_card_header_toggles_card() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
-        Some("call:call-first".to_owned())
+        Some(format!("call:call-first:entry:{first_entry_index}"))
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(
         app.timeline_state
             .expanded_tool_activity_keys
-            .contains("call:call-first")
+            .contains(&format!("call:call-first:entry:{first_entry_index}"))
     );
     Ok(())
 }
@@ -1123,7 +1123,7 @@ fn mouse_click_tool_card_header_keeps_expanded_card_visible() -> Result<()> {
     assert!(
         app.timeline_state
             .expanded_tool_activity_keys
-            .contains("call:call-long")
+            .contains(&format!("call:call-long:entry:{long_entry_index}"))
     );
     let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 20), &app);
     let expanded_hit_area = expanded_layout
@@ -1149,13 +1149,13 @@ fn mouse_click_tool_card_hidden_preview_toggles_card() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
-        Some("call:call-first".to_owned())
+        Some(format!("call:call-first:entry:{first_entry_index}"))
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(
         app.timeline_state
             .expanded_tool_activity_keys
-            .contains("call:call-first")
+            .contains(&format!("call:call-first:entry:{first_entry_index}"))
     );
     assert_eq!(
         app.mouse_hover_target,

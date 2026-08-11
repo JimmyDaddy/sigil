@@ -74,8 +74,8 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
             .len(),
         2
     );
-    let first_key = "call:call-first".to_owned();
-    let second_key = "call:call-second".to_owned();
+    let first_key = app.timeline_state.tool_activity_cache[0].key.clone();
+    let second_key = app.timeline_state.tool_activity_cache[1].key.clone();
 
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
@@ -143,6 +143,117 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert_eq!(app.timeline_state.selected_tool_activity_key, None);
     assert_eq!(app.last_notice(), Some("activity focus cleared"));
+    Ok(())
+}
+
+#[test]
+fn reused_call_id_cards_expand_independently_by_timeline_occurrence() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    for (command, output) in [
+        ("printf first", "first output"),
+        ("printf second", "second output"),
+    ] {
+        app.push_timeline(
+            TimelineRole::Tool,
+            serde_json::json!({
+                "call_id": "call-0",
+                "tool_name": "bash",
+                "status": "ok",
+                "preview_kind": "text",
+                "preview_lines": [output],
+                "hidden_lines": 0,
+                "metadata": {"details": {"call": {"summary": format!("command={command}")}}}
+            })
+            .to_string(),
+        );
+    }
+    let first_activity = app.timeline_state.tool_activity_cache[0].clone();
+    let second_activity = app.timeline_state.tool_activity_cache[1].clone();
+    let first_key = first_activity.key;
+    let second_key = second_activity.key;
+    assert_ne!(first_key, second_key);
+    assert!(first_key.ends_with(&format!(":entry:{}", first_activity.index)));
+    assert!(second_key.ends_with(&format!(":entry:{}", second_activity.index)));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))?;
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key.as_deref(),
+        Some(first_key.as_str())
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&first_key)
+    );
+    assert!(
+        !app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&second_key)
+    );
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&first_key)
+    );
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&second_key)
+    );
+    Ok(())
+}
+
+#[test]
+fn ctrl_o_reveals_full_bash_command_section() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(64, 24);
+    let call_id = "call-bash-expand";
+    let command = "cargo test --workspace --all-targets --features a-very-long-feature-name && printf full-command-tail-marker";
+    app.handle(RunEvent::ToolCallCompleted(ToolCall {
+        id: call_id.to_owned(),
+        name: "bash".to_owned(),
+        args_json: serde_json::json!({"command":command}).to_string(),
+    }))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        call_id,
+        "bash",
+        "test result: ok",
+        ToolResultMeta {
+            details: serde_json::json!({
+                "status_label": "ok",
+                "summary": "bash ok",
+                "preview": "test result: ok",
+                "observed_bytes": 15,
+                "persisted_bytes": 15,
+                "has_more": false,
+                "display_capabilities": ["copy_summary"],
+                "preview_truncated": false
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+    let activity_key = app
+        .timeline_state
+        .selected_tool_activity_key
+        .clone()
+        .expect("bash result should select its activity card");
+
+    assert!(!full_plain_timeline(&app).contains("full-command-tail-marker"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&activity_key)
+    );
+    let expanded = full_plain_timeline(&app);
+    assert!(expanded.contains("command"));
+    assert!(expanded.contains("full-command-tail-marker"));
+    assert!(expanded.contains("test result: ok"));
     Ok(())
 }
 
@@ -361,7 +472,11 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
 }"#,
     );
     assert!(app.tool_timeline_entry_indices().is_some());
-    let tool_key = "call:call-diff".to_owned();
+    let tool_key = app
+        .timeline_state
+        .selected_tool_activity_key
+        .clone()
+        .expect("diff card should be selected");
 
     assert!(
         !app.timeline_state
@@ -436,7 +551,11 @@ fn non_default_tool_card_toggle_pages_large_preview_before_closing() -> Result<(
         })
         .to_string(),
     );
-    let tool_key = "call:call-large".to_owned();
+    let tool_key = app
+        .timeline_state
+        .selected_tool_activity_key
+        .clone()
+        .expect("large tool card should be selected");
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
         Some(tool_key.clone())
@@ -591,7 +710,11 @@ fn ctrl_t_tool_toggle_preserves_live_tail_when_already_at_latest() -> Result<()>
     for index in 0..24 {
         app.push_timeline(TimelineRole::Assistant, format!("tail message {index}"));
     }
-    let tool_key = "call:call-old".to_owned();
+    let tool_key = app
+        .timeline_state
+        .selected_tool_activity_key
+        .clone()
+        .expect("old tool card should remain selected");
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
         Some(tool_key.clone())
@@ -725,13 +848,16 @@ fn tool_activity_metadata_is_cached_after_append() {
         .first()
         .expect("tool activity should be cached")
         .clone();
-    assert_eq!(activity.key, "call:call-cache");
+    assert_eq!(
+        activity.key,
+        format!("call:call-cache:entry:{}", activity.index)
+    );
     assert!(activity.defaults_expanded);
 
     app.timeline[activity.index].text = "not json anymore".to_owned();
 
     assert_eq!(
-        app.timeline_entry_index_for_activity_key("call:call-cache"),
+        app.timeline_entry_index_for_activity_key(&activity.key),
         Some(activity.index)
     );
     assert_eq!(

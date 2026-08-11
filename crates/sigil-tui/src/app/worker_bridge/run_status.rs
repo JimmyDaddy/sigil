@@ -27,6 +27,9 @@ impl AppState {
         self.approval.pending = None;
         self.modal_state = None;
         self.runtime.last_phase_marker = None;
+        self.safe_tool_calls.clear();
+        self.tool_progress_execution_ids.clear();
+        self.tool_progress_entry_indices.clear();
         self.clear_recent_egress_disclosure();
     }
 

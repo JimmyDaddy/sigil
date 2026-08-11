@@ -424,10 +424,9 @@ pub use permission::{
     ToolApprovalSessionGrantUnavailableReason, ToolApprovalSessionGrantUnavailableReasonCode,
     ToolOperation, apply_risk_overlay, classify_path_trust_zone,
     derive_command_family_allow_pattern, derive_command_family_allow_pattern_for_call,
-    derive_permission_risk,
-    derive_permission_risk_with_network_effect, evaluate_network_policy, infer_tool_operation,
-    tool_approval_session_grant_availability_for_plan, tool_approval_session_grant_available,
-    tool_approval_session_grant_available_for_facets,
+    derive_permission_risk, derive_permission_risk_with_network_effect, evaluate_network_policy,
+    infer_tool_operation, tool_approval_session_grant_availability_for_plan,
+    tool_approval_session_grant_available, tool_approval_session_grant_available_for_facets,
     tool_approval_session_grant_available_for_parts,
     tool_approval_session_grant_available_for_plan,
 };

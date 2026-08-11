@@ -994,50 +994,106 @@ pub(super) fn render_tool_egress_line(egress: &ToolEgressEntry) -> String {
     )
 }
 
-pub(super) fn restored_tool_execution_index(
-    entries: &[SessionLogEntry],
-) -> HashMap<String, ToolExecutionEntry> {
-    let mut executions = HashMap::new();
-    for entry in entries {
-        if let SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry {
-            executions.insert(execution.call_id.clone(), execution.as_ref().clone());
-        }
-    }
-    executions
+#[derive(Default)]
+pub(super) struct RestoredToolOccurrences {
+    pub(super) calls: HashMap<usize, ToolCall>,
+    pub(super) executions: HashMap<usize, ToolExecutionEntry>,
+    pub(super) previews: HashMap<usize, ToolPreviewSnapshot>,
+    pub(super) orphan_execution_indices: HashSet<usize>,
+    pub(super) pending_previews: HashMap<String, ToolPreviewSnapshot>,
 }
 
-pub(super) fn restored_tool_call_index(entries: &[SessionLogEntry]) -> HashMap<String, ToolCall> {
-    let mut calls = HashMap::new();
-    for entry in entries {
-        if let SessionLogEntry::Assistant(message) = entry {
-            for call in &message.tool_calls {
-                calls.insert(call.id.clone(), call.clone());
+#[derive(Default)]
+struct PendingRestoredToolOccurrence {
+    call: Option<ToolCall>,
+    execution: Option<(usize, ToolExecutionEntry)>,
+    preview: Option<ToolPreviewSnapshot>,
+}
+
+pub(super) fn restored_tool_occurrences(entries: &[SessionLogEntry]) -> RestoredToolOccurrences {
+    let mut pending = HashMap::<String, PendingRestoredToolOccurrence>::new();
+    let mut restored = RestoredToolOccurrences::default();
+    for (entry_index, entry) in entries.iter().enumerate() {
+        match entry {
+            SessionLogEntry::Assistant(message) => {
+                for call in &message.tool_calls {
+                    if let Some(previous) = pending.remove(&call.id) {
+                        record_orphan_tool_occurrence(&mut restored, previous);
+                    }
+                    pending.insert(
+                        call.id.clone(),
+                        PendingRestoredToolOccurrence {
+                            call: Some(call.clone()),
+                            ..PendingRestoredToolOccurrence::default()
+                        },
+                    );
+                }
             }
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) => {
+                pending
+                    .entry(execution.call_id.clone())
+                    .or_default()
+                    .execution = Some((entry_index, execution.as_ref().clone()));
+            }
+            SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(preview)) => {
+                pending.entry(preview.call_id.clone()).or_default().preview = Some(preview.clone());
+            }
+            SessionLogEntry::ToolResultV3(result) => {
+                if let Some(occurrence) = pending.remove(&result.call_id) {
+                    if let Some(call) = occurrence.call {
+                        restored.calls.insert(entry_index, call);
+                    }
+                    if let Some((_, execution)) = occurrence.execution {
+                        restored.executions.insert(entry_index, execution);
+                    }
+                    if let Some(preview) = occurrence.preview {
+                        restored.previews.insert(entry_index, preview);
+                    }
+                }
+            }
+            SessionLogEntry::User(_) | SessionLogEntry::Control(_) => {}
         }
     }
-    calls
-}
-
-pub(super) fn restored_tool_preview_snapshot_index(
-    entries: &[SessionLogEntry],
-) -> HashMap<String, ToolPreviewSnapshot> {
-    let mut snapshots = HashMap::new();
-    for entry in entries {
-        if let SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)) = entry {
-            snapshots.insert(snapshot.call_id.clone(), snapshot.clone());
+    for (call_id, occurrence) in pending {
+        let renders_orphan = occurrence.execution.as_ref().is_some_and(|(_, execution)| {
+            matches!(
+                execution.status,
+                ToolExecutionStatus::Failed
+                    | ToolExecutionStatus::Cancelled
+                    | ToolExecutionStatus::Interrupted
+            )
+        });
+        if renders_orphan {
+            record_orphan_tool_occurrence(&mut restored, occurrence);
+        } else if let Some(preview) = occurrence.preview {
+            restored.pending_previews.insert(call_id, preview);
         }
     }
-    snapshots
+    restored
 }
 
-pub(super) fn restored_tool_result_call_ids(entries: &[SessionLogEntry]) -> HashSet<String> {
-    entries
-        .iter()
-        .filter_map(|entry| match entry {
-            SessionLogEntry::ToolResultV3(result) => Some(result.call_id.clone()),
-            _ => None,
-        })
-        .collect()
+fn record_orphan_tool_occurrence(
+    restored: &mut RestoredToolOccurrences,
+    occurrence: PendingRestoredToolOccurrence,
+) {
+    let Some((entry_index, execution)) = occurrence.execution else {
+        return;
+    };
+    if !matches!(
+        execution.status,
+        ToolExecutionStatus::Failed
+            | ToolExecutionStatus::Cancelled
+            | ToolExecutionStatus::Interrupted
+    ) {
+        return;
+    }
+    restored.orphan_execution_indices.insert(entry_index);
+    if let Some(call) = occurrence.call {
+        restored.calls.insert(entry_index, call);
+    }
+    if let Some(preview) = occurrence.preview {
+        restored.previews.insert(entry_index, preview);
+    }
 }
 
 pub(super) fn render_tool_result_v2_content(result: &ToolResultRecordedV3) -> String {
@@ -1101,16 +1157,10 @@ fn tool_artifact_availability_label(availability: ToolArtifactAvailability) -> &
 }
 
 pub(super) fn should_render_restored_tool_execution(
-    execution: &ToolExecutionEntry,
-    tool_result_call_ids: &HashSet<String>,
+    entry_index: usize,
+    orphan_execution_indices: &HashSet<usize>,
 ) -> bool {
-    !tool_result_call_ids.contains(&execution.call_id)
-        && matches!(
-            execution.status,
-            ToolExecutionStatus::Failed
-                | ToolExecutionStatus::Cancelled
-                | ToolExecutionStatus::Interrupted
-        )
+    orphan_execution_indices.contains(&entry_index)
 }
 
 pub(super) fn restored_tool_execution_content(execution: &ToolExecutionEntry) -> String {

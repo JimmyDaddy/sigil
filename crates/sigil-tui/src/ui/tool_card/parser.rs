@@ -4,6 +4,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
     let fallback = ToolCardRender {
         call_id: None,
         tool_name: "result".to_owned(),
+        status: "ok".to_owned(),
         is_error: false,
         error_kind: None,
         summary: None,
@@ -33,8 +34,9 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("ok")
-        .to_uppercase();
-    let is_error = status == "ERROR";
+        .trim()
+        .to_ascii_lowercase();
+    let is_error = status == "error";
     let error_kind = object
         .get("error_kind")
         .and_then(Value::as_str)
@@ -89,6 +91,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
             .and_then(Value::as_str)
             .map(str::to_owned),
         tool_name,
+        status,
         is_error,
         error_kind,
         summary,
@@ -225,9 +228,9 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
-        call_summary: object
-            .get("details")
-            .and_then(|details| details.get("call"))
+        call_summary: shell_context
+            .and_then(|shell| shell.get("call"))
+            .or(call_context)
             .and_then(|call| call.get("summary"))
             .and_then(Value::as_str)
             .map(str::to_owned),

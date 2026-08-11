@@ -10,13 +10,11 @@ use super::{
             format_agent_thread_status_block, format_terminal_task_block_redacted,
             format_tool_content_block_redacted_for_restore,
         },
-        worker_bridge::tool_card_replacement_key,
+        worker_bridge::durable_tool_card_replacement_key,
     },
     audit_log::{
-        render_tool_result_v2_content, restored_reasoning_note, restored_tool_call_index,
-        restored_tool_execution_content, restored_tool_execution_index,
-        restored_tool_preview_snapshot_index, restored_tool_result_call_ids,
-        should_render_restored_tool_execution,
+        render_tool_result_v2_content, restored_reasoning_note, restored_tool_execution_content,
+        restored_tool_occurrences, should_render_restored_tool_execution,
     },
 };
 
@@ -24,10 +22,7 @@ pub(super) fn restored_timeline_entries_from_session_entries(
     entries: &[SessionLogEntry],
     redactor: &sigil_kernel::SecretRedactor,
 ) -> Vec<crate::timeline::TimelineEntry> {
-    let restored_tool_executions = restored_tool_execution_index(entries);
-    let restored_tool_calls = restored_tool_call_index(entries);
-    let restored_tool_previews = restored_tool_preview_snapshot_index(entries);
-    let restored_tool_result_call_ids = restored_tool_result_call_ids(entries);
+    let restored_tools = restored_tool_occurrences(entries);
     let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(entries);
     let suppressed_assistant_preamble_indices = suppressed_assistant_preamble_indices(entries);
     let mut timeline = Vec::new();
@@ -53,9 +48,9 @@ pub(super) fn restored_timeline_entries_from_session_entries(
                 }
             }
             SessionLogEntry::ToolResultV3(result) => {
-                let execution = restored_tool_executions.get(&result.call_id);
-                let preview = restored_tool_previews.get(&result.call_id);
-                let tool_call = restored_tool_calls.get(&result.call_id);
+                let execution = restored_tools.executions.get(&entry_index);
+                let preview = restored_tools.previews.get(&entry_index);
+                let tool_call = restored_tools.calls.get(&entry_index);
                 push_restored_tool_card(
                     &mut timeline,
                     format_tool_content_block_redacted_for_restore(
@@ -79,12 +74,12 @@ pub(super) fn restored_timeline_entries_from_session_entries(
             }
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
                 if should_render_restored_tool_execution(
-                    execution.as_ref(),
-                    &restored_tool_result_call_ids,
+                    entry_index,
+                    &restored_tools.orphan_execution_indices,
                 ) =>
             {
-                let preview = restored_tool_previews.get(&execution.call_id);
-                let tool_call = restored_tool_calls.get(&execution.call_id);
+                let preview = restored_tools.previews.get(&entry_index);
+                let tool_call = restored_tools.calls.get(&entry_index);
                 push_restored_tool_card(
                     &mut timeline,
                     format_tool_content_block_redacted_for_restore(
@@ -116,7 +111,7 @@ pub(super) fn restored_timeline_entries_from_session_entries(
 }
 
 fn push_restored_tool_card(timeline: &mut Vec<crate::timeline::TimelineEntry>, text: String) {
-    let Some(current_key) = tool_card_replacement_key(&text) else {
+    let Some(current_key) = durable_tool_card_replacement_key(&text) else {
         timeline.push(crate::timeline::TimelineEntry {
             role: TimelineRole::Tool,
             text,
@@ -128,7 +123,7 @@ fn push_restored_tool_card(timeline: &mut Vec<crate::timeline::TimelineEntry>, t
         .enumerate()
         .filter_map(|(index, entry)| {
             (entry.role == TimelineRole::Tool
-                && tool_card_replacement_key(&entry.text)
+                && durable_tool_card_replacement_key(&entry.text)
                     .is_some_and(|previous_key| previous_key == current_key))
             .then_some(index)
         })
