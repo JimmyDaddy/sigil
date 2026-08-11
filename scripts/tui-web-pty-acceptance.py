@@ -35,6 +35,7 @@ ANSI_RE = re.compile(
 FINAL_ANSWER = "Fixture websearch completed."
 SEMANTIC_TITLE = "Fixture websearch validation"
 TOOL_CALL_ID = "fixture-websearch-call"
+ROUTING_CALL_ID = "fixture-direct-conversation-route"
 MAX_FIXTURE_REQUEST_BYTES = 1024 * 1024
 
 
@@ -74,6 +75,12 @@ class FixtureState:
             and tool["function"].get("name") == "websearch"
             for tool in tool_items
         )
+        has_direct_route_tool = any(
+            isinstance(tool, dict)
+            and isinstance(tool.get("function"), dict)
+            and tool["function"].get("name") == "continue_without_task_planning"
+            for tool in tool_items
+        )
         has_tool_result = any(
             isinstance(message, dict)
             and message.get("role") == "tool"
@@ -83,6 +90,7 @@ class FixtureState:
         with self.lock:
             self.provider_requests.append(
                 {
+                    "has_direct_route_tool": has_direct_route_tool,
                     "has_websearch_tool": has_websearch_tool,
                     "has_tool_result": has_tool_result,
                 }
@@ -120,6 +128,34 @@ def is_semantic_title_request(payload: object) -> bool:
         and isinstance(message.get("content"), str)
         and "Generate a concise semantic title for a coding-agent conversation"
         in message["content"]
+        for message in messages
+    )
+
+
+def provider_request_exposes_tool(payload: object, name: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    return any(
+        isinstance(tool, dict)
+        and isinstance(tool.get("function"), dict)
+        and tool["function"].get("name") == name
+        for tool in tools
+    )
+
+
+def provider_request_has_result(payload: object, call_id: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(message, dict)
+        and message.get("role") == "tool"
+        and message.get("tool_call_id") == call_id
         for message in messages
     )
 
@@ -206,8 +242,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
             )
             self.fixture.semantic_title_completed.set()
             return
-        request_index = self.fixture.record_provider(payload)
-        if request_index == 1:
+        self.fixture.record_provider(payload)
+        if provider_request_exposes_tool(payload, "continue_without_task_planning"):
+            self._send_tool_call(
+                ROUTING_CALL_ID,
+                "continue_without_task_planning",
+                '{"reason":"does_not_meet_task_planning_criteria"}',
+            )
+            return
+        if provider_request_exposes_tool(payload, "websearch") and not provider_request_has_result(
+            payload, TOOL_CALL_ID
+        ):
             self._send_sse(
                 {
                     "choices": [
@@ -237,6 +282,30 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     {
                         "delta": {"content": FINAL_ANSWER},
                         "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+
+    def _send_tool_call(self, call_id: str, name: str, arguments: str) -> None:
+        self._send_sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": arguments,
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
                     }
                 ]
             }
@@ -621,9 +690,11 @@ def assert_acceptance(
         raise RuntimeError(
             f"fixture rejected an HTTP payload: {', '.join(protocol_error_kinds)}"
     )
-    if not provider_requests[0]["has_websearch_tool"]:
-        raise RuntimeError("initial provider request did not expose websearch")
-    if not any(request["has_tool_result"] for request in provider_requests[1:]):
+    if not provider_requests or not provider_requests[0]["has_direct_route_tool"]:
+        raise RuntimeError("initial provider request did not expose typed routing")
+    if not any(request["has_websearch_tool"] for request in provider_requests[1:]):
+        raise RuntimeError("ordinary provider request did not expose websearch")
+    if not any(request["has_tool_result"] for request in provider_requests[2:]):
         raise RuntimeError("no continuation provider request contained the websearch tool result")
     if semantic_title_requests != 1:
         raise RuntimeError(

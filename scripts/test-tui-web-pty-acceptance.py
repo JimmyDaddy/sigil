@@ -51,9 +51,56 @@ class WebPtyAcceptanceTests(unittest.TestCase):
         self.assertEqual(protocol_errors, [])
         self.assertEqual(
             provider_requests,
-            [{"has_websearch_tool": False, "has_tool_result": False}],
+            [
+                {
+                    "has_direct_route_tool": False,
+                    "has_websearch_tool": False,
+                    "has_tool_result": False,
+                }
+            ],
         )
         self.assertEqual(title_requests, 0)
+
+    def test_provider_request_classifies_routing_and_ordinary_tool_turns(self) -> None:
+        route_payload = {
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "continue_without_task_planning"},
+                }
+            ],
+        }
+        ordinary_payload = {
+            "messages": [],
+            "tools": [
+                {"type": "function", "function": {"name": "websearch"}}
+            ],
+        }
+        continuation_payload = {
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": MODULE.TOOL_CALL_ID,
+                    "content": "fixture result",
+                }
+            ],
+            "tools": ordinary_payload["tools"],
+        }
+
+        self.assertTrue(
+            MODULE.provider_request_exposes_tool(
+                route_payload, "continue_without_task_planning"
+            )
+        )
+        self.assertFalse(MODULE.provider_request_exposes_tool(route_payload, "websearch"))
+        self.assertTrue(MODULE.provider_request_exposes_tool(ordinary_payload, "websearch"))
+        self.assertFalse(
+            MODULE.provider_request_has_result(ordinary_payload, MODULE.TOOL_CALL_ID)
+        )
+        self.assertTrue(
+            MODULE.provider_request_has_result(continuation_payload, MODULE.TOOL_CALL_ID)
+        )
 
     def test_write_config_uses_v2_unauthenticated_loopback_connection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
