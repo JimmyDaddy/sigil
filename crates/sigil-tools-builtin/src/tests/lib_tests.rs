@@ -1439,7 +1439,11 @@ async fn docker_cleanup_output_limit_force_removes_and_verifies_daemon_container
         DockerExecutionBackend::new(fixture.docker.clone(), "fixture:latest".to_owned(), false);
 
     let receipt = backend
-        .execute(docker_cleanup_request(temp.path(), 10_000))
+        // macOS CI runs this 140 MiB fixture beside the rest of the platform-reliability
+        // suite. Give the output reader enough wall-clock headroom to reach the resource
+        // limit under runner contention; the assertion below still requires OutputLimit,
+        // so a stalled fixture cannot pass by timing out.
+        .execute(docker_cleanup_request(temp.path(), 30_000))
         .await?;
     let output = receipt.effective_output();
 
