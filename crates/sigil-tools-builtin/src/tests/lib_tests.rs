@@ -4820,28 +4820,28 @@ async fn bash_uses_session_scoped_scratch_namespace_env() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_builtin_tools_with_test_paths(&mut registry, &workspace, scratch_root.clone());
 
+    #[cfg(windows)]
+    let command_a = "$scratch = $env:SIGIL_SCRATCH_DIR; Set-Content -NoNewline -LiteralPath (Join-Path $scratch 'probe') -Value 'tool-a'; Set-Content -NoNewline -LiteralPath (Join-Path $scratch 'env-path') -Value $scratch; [Console]::Out.Write('ok')";
+    #[cfg(not(windows))]
+    let command_a = "printf tool-a > \"$SIGIL_SCRATCH_DIR/probe\" && printf '%s' \"$SIGIL_SCRATCH_DIR\" > \"$SIGIL_SCRATCH_DIR/env-path\" && printf ok";
+
     let result_a = registry
         .execute(
             ctx_a.clone(),
-            tool_call(
-                "bash",
-                json!({
-                    "command": "printf tool-a > \"$SIGIL_SCRATCH_DIR/probe\" && printf '%s' \"$SIGIL_SCRATCH_DIR\" > \"$SIGIL_SCRATCH_DIR/env-path\" && printf ok"
-                }),
-            ),
+            tool_call("bash", json!({ "command": command_a })),
         )
         .await?;
     assert!(matches!(result_a.status, ToolResultStatus::Ok));
 
+    #[cfg(windows)]
+    let command_b = "$probe = Join-Path $env:SIGIL_SCRATCH_DIR 'probe'; if (Test-Path -LiteralPath $probe) { exit 1 }; [Console]::Out.Write('isolated')";
+    #[cfg(not(windows))]
+    let command_b = "test ! -e \"$SIGIL_SCRATCH_DIR/probe\" && printf isolated";
+
     let result_b = registry
         .execute(
             ctx_b.clone(),
-            tool_call(
-                "bash",
-                json!({
-                    "command": "test ! -e \"$SIGIL_SCRATCH_DIR/probe\" && printf isolated"
-                }),
-            ),
+            tool_call("bash", json!({ "command": command_b })),
         )
         .await?;
     assert!(matches!(result_b.status, ToolResultStatus::Ok));
