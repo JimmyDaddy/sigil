@@ -2497,8 +2497,14 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn application_preparation_enables_model_owned_auto_handoff_without_host_classification()
 -> Result<()> {
+    // Attaching the task-role provider constructs the configured DeepSeek route during
+    // preparation. Keep that credential lookup hermetic instead of inheriting a developer key or
+    // racing another test's process-global environment mutation.
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
