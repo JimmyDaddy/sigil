@@ -13147,6 +13147,7 @@ async fn unknown_family_command_variants_share_command_family_session_grant() ->
             ..PermissionConfig::default()
         },
         permission_context: crate::PermissionEvaluationContext::default(),
+        permission_mode_override: None,
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
     };

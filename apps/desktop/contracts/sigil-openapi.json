@@ -9032,7 +9032,7 @@
   "info": {
     "description": "Localhost-only adapter surface for desktop and future local clients.",
     "title": "Sigil Local App Server API",
-    "version": "0.0.1-beta.3"
+    "version": "0.0.1-beta.4"
   },
   "openapi": "3.1.0",
   "paths": {

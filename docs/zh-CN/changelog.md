@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -8,8 +8,20 @@
 
 ## 尚未发布 - main
 
+- 自 v0.0.1-beta.4 起暂无面向用户的新变更。
+
+## v0.0.1-beta.4 - 2026-08-11
+
+本次 beta 稳定了长时间运行的 TUI session，让 shell 执行在 transcript 中保持可审计，并收口
+durable Task 续接、记忆路由和 final answer 协调链路。
+
 - 修复 final answer 后 TUI transcript 错乱，并恢复终端 resize/reflow 后查看更早历史的能力。
   历史浏览会在新输出到达时保持稳定内容锚点；同一 session 的重复 artifact 维护失败只提示一次。
+- busy turn 中提交的 follow-up 会等待安全交付点，不再中断当前 run；plan、queue、verification、
+  attachment 和 agent 的紧凑控制在窄屏、短屏下仍保持对齐、可见并对应真实动作。
+- Bash 卡片现在会在实时执行、reload 和 child-agent transcript 中显示经过安全投影的命令；
+  running 与 terminal 状态不再合并成重复或误导性的卡片。受限的只读 Git metadata 检查可以被
+  正确识别，同时不会放宽 `.git` mutation 的 protected 规则或 `danger-full-access` 的 hard deny。
 - 继续 paused Task 时会选择精确的 durable Task，把用户本次续接指导带入经审阅的替代计划，并且
   TUI 只展示当前 Task，不再重新显示已经过时的初始计划；显式开始 plan review 也会把旧 Task
   从当前工作区移入历史，而不是继续与 plan preview 并列展示。

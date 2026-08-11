@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,9 +8,23 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+- No user-facing changes since v0.0.1-beta.4.
+
+## v0.0.1-beta.4 - 2026-08-11
+
+This beta stabilizes long-running TUI sessions, makes shell execution auditable in the transcript,
+and closes durable Task continuation, memory-routing, and final-answer coordination gaps.
+
 - Fixed TUI transcript corruption after a final answer and restored access to older history after
   terminal resize or reflow. History inspection now keeps a stable content anchor while new output
   arrives, and repeated artifact-maintenance failures are shown once per session.
+- Busy-turn follow-ups now wait for a safe delivery point without interrupting the active run, and
+  compact plan, queue, verification, attachment, and agent controls remain aligned and actionable on
+  narrow or short terminals.
+- Bash cards now show the policy-safe command during live execution, after reload, and in child-agent
+  transcripts; running and terminal states no longer collapse into duplicate or misleading cards.
+  Bounded read-only Git metadata checks are recognized without weakening protected `.git` mutation
+  rules or `danger-full-access` hard-deny boundaries.
 - Continuing a paused Task now selects the exact durable Task, carries the user's continuation
   guidance through a reviewed replacement plan, and shows only the current Task in the TUI instead
   of reviving an obsolete initial plan. Starting an explicit plan review also clears the prior Task
