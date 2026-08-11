@@ -1384,11 +1384,20 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
     secure_private_path_permissions(path)
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("failed to open directory {}", path.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    // Memory sidecars and journals are individually synced before publication. Rust's portable
+    // Windows filesystem API cannot open a directory for fsync, so attempting to do so turns a
+    // successful durable write into `Access is denied` on Windows.
+    Ok(())
 }
 
 fn unix_time_ms() -> Result<u64> {

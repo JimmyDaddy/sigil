@@ -147,7 +147,13 @@ impl InteractiveSessionAttachmentLease {
             return Err(InteractiveSessionAttachmentError::UnsafeLeasePath);
         }
         let lease_path = parent.join(format!("{file_name}.attachment-lock"));
+        let generation_path = parent.join(format!("{file_name}.attachment-generation"));
         if let Ok(metadata) = fs::symlink_metadata(&lease_path)
+            && (metadata.file_type().is_symlink() || !metadata.file_type().is_file())
+        {
+            return Err(InteractiveSessionAttachmentError::UnsafeLeasePath);
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&generation_path)
             && (metadata.file_type().is_symlink() || !metadata.file_type().is_file())
         {
             return Err(InteractiveSessionAttachmentError::UnsafeLeasePath);
@@ -178,7 +184,8 @@ impl InteractiveSessionAttachmentLease {
         match lease.try_lock() {
             Ok(()) => {
                 if let Some(expected) = expected_recovery {
-                    let observed_generation = read_observed_generation(&mut lease);
+                    let observed_generation = read_generation_file(&generation_path)
+                        .unwrap_or_else(|| read_observed_generation(&mut lease));
                     let (current_binding, expected_binding) = match expected {
                         AttachmentRecoveryExpectation::SessionIdentity {
                             session_identity,
@@ -208,6 +215,7 @@ impl InteractiveSessionAttachmentLease {
                     }
                 }
                 let generation = uuid::Uuid::new_v4().to_string();
+                write_generation_file(&generation_path, &generation)?;
                 lease
                     .set_len(0)
                     .and_then(|()| lease.rewind())
@@ -223,7 +231,11 @@ impl InteractiveSessionAttachmentLease {
                 })
             }
             Err(fs::TryLockError::WouldBlock) => {
-                let observed_generation = read_observed_generation(&mut lease);
+                // Windows range locks prevent the losing handle from reading the locked file.
+                // Keep the recovery generation in a separate private sidecar so a rejected
+                // controller can still receive an exact, usable recovery binding.
+                let observed_generation = read_generation_file(&generation_path)
+                    .unwrap_or_else(|| read_observed_generation(&mut lease));
                 Err(InteractiveSessionAttachmentError::Busy {
                     observed_generation,
                 })
@@ -325,6 +337,57 @@ fn read_observed_generation(lease: &mut File) -> String {
         return generation.trim().to_owned();
     }
     "unavailable".to_owned()
+}
+
+fn read_generation_file(path: &Path) -> Option<String> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let mut generation = String::new();
+    if Read::by_ref(&mut file)
+        .take(64)
+        .read_to_string(&mut generation)
+        .is_ok()
+        && uuid::Uuid::parse_str(generation.trim()).is_ok()
+    {
+        return Some(generation.trim().to_owned());
+    }
+    None
+}
+
+fn write_generation_file(
+    path: &Path,
+    generation: &str,
+) -> Result<(), InteractiveSessionAttachmentError> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    let mut file = options
+        .open(path)
+        .map_err(InteractiveSessionAttachmentError::Unavailable)?;
+    let metadata = file
+        .metadata()
+        .map_err(InteractiveSessionAttachmentError::Unavailable)?;
+    if !metadata.is_file() {
+        return Err(InteractiveSessionAttachmentError::UnsafeLeasePath);
+    }
+    #[cfg(unix)]
+    {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o777 != 0o600 {
+            permissions.set_mode(0o600);
+            file.set_permissions(permissions)
+                .map_err(InteractiveSessionAttachmentError::Unavailable)?;
+        }
+    }
+    file.set_len(0)
+        .and_then(|()| file.rewind())
+        .and_then(|()| file.write_all(generation.as_bytes()))
+        .and_then(|()| file.sync_data())
+        .map_err(InteractiveSessionAttachmentError::Unavailable)
 }
 
 #[cfg(test)]

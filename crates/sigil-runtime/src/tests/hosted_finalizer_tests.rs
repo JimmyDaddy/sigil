@@ -194,10 +194,18 @@ async fn gemini_hosted_provider_evidence_finalizes_to_safe_source_and_unicode_ci
                 break;
             }
         }
-        let response = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
-            data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"猫🙂 grounded\"}]},\"groundingMetadata\":{\"webSearchQueries\":[\"raw query\"],\"groundingChunks\":[{\"web\":{\"uri\":\"https://example.com/path?token=raw\",\"title\":\"Example\"}}],\"groundingSupports\":[{\"segment\":{\"partIndex\":0,\"startIndex\":0,\"endIndex\":7,\"text\":\"猫🙂\"},\"groundingChunkIndices\":[0]}]}}]}\n\n\
+        let body = "data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"猫🙂 grounded\"}]},\"groundingMetadata\":{\"webSearchQueries\":[\"raw query\"],\"groundingChunks\":[{\"web\":{\"uri\":\"https://example.com/path?token=raw\",\"title\":\"Example\"}}],\"groundingSupports\":[{\"segment\":{\"partIndex\":0,\"startIndex\":0,\"endIndex\":7,\"text\":\"猫🙂\"},\"groundingChunkIndices\":[0]}]}}]}\n\n\
             data: [DONE]\n\n";
-        let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        if tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+            .await
+            .is_ok()
+        {
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut socket).await;
+        }
     });
     let provider = GeminiProvider::new(
         GeminiProviderConfig {
