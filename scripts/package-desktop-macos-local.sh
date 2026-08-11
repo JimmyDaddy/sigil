@@ -301,7 +301,7 @@ for target in "${targets[@]}"; do
     --expected-commit "${commit:0:12}"
 
   updater_archive="$output_root/Sigil_${version}_${target}.app.tar.gz"
-  tar -czf "$updater_archive" -C "$work_root" Sigil.app
+  COPYFILE_DISABLE=1 tar -czf "$updater_archive" -C "$work_root" Sigil.app
   roundtrip_root="$work_root/archive-roundtrip"
   mkdir -p "$roundtrip_root"
   tar -xzf "$updater_archive" -C "$roundtrip_root"

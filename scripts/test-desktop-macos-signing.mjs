@@ -120,6 +120,7 @@ for (const token of [
   "--tag",
   "app.notary.zip",
   "submission.dmg",
+  "COPYFILE_DISABLE=1",
 ]) {
   assert.match(packageScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }
@@ -194,6 +195,7 @@ for (const token of [
   "complete",
   "verify-finalized",
   "swapped Desktop updater signature",
+  "COPYFILE_DISABLE=1",
 ]) {
   assert.match(finalizeScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }
@@ -304,6 +306,7 @@ for (const token of [
   "X-GitHub-Api-Version: 2026-03-10",
   "SIGIL_RELEASE_ADMIN_TOKEN",
   "generate-desktop-update-manifest.mjs",
+  '${RELEASE_TAG}^{commit}',
   "release-candidate.mjs create",
   "release-candidate.mjs verify",
   "prepare-publication:",

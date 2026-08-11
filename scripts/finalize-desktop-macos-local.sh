@@ -196,7 +196,7 @@ for target in "${targets[@]}"; do
       --archive "$updater_archive" \
       --signature "${updater_archive}.sig" >/dev/null 2>&1; then
     temporary_archive="$temporary_root/$(basename "$updater_archive")"
-    tar -czf "$temporary_archive" -C "$work_root" Sigil.app
+    COPYFILE_DISABLE=1 tar -czf "$temporary_archive" -C "$work_root" Sigil.app
     roundtrip_root="$temporary_root/roundtrip-$target"
     mkdir -p "$roundtrip_root"
     tar -xzf "$temporary_archive" -C "$roundtrip_root"

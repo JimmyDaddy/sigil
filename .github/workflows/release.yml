@@ -467,7 +467,7 @@ jobs:
             --version "${version}" \
             --artifact-dir "${desktop_dir}" \
             --repository "${GITHUB_REPOSITORY}" \
-            --pub-date "$(git show -s --format=%cI "${RELEASE_TAG}")" \
+            --pub-date "$(git show -s --format=%cI "${RELEASE_TAG}^{commit}")" \
             --notes "Sigil Desktop ${version} beta update. See the release notes for details." \
             --output "${desktop_dir}/latest.json"
           if printf '%s\n' "${asset_names[@]}" | grep -Fxq latest.json; then
