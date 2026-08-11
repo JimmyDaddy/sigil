@@ -300,6 +300,8 @@ for (const token of [
   "--channel any",
   "Verify immutable releases policy",
   "repos/${GITHUB_REPOSITORY}/immutable-releases",
+  "already public and immutable",
+  "accepting the published state as recovery proof",
   "Verify published release immutability",
   "releases/tags/${RELEASE_TAG}",
   ".immutable // false",

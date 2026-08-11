@@ -955,18 +955,31 @@ jobs:
           GH_TOKEN: ${{ secrets.SIGIL_RELEASE_ADMIN_TOKEN || github.token }}
         run: |
           set -euo pipefail
-          if ! policy="$(
+          policy_error="${RUNNER_TEMP}/sigil-immutable-releases-policy-error.txt"
+          if policy="$(
             gh api \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               "repos/${GITHUB_REPOSITORY}/immutable-releases"
-          )"; then
-            echo "cannot prove GitHub immutable releases are enabled; configure SIGIL_RELEASE_ADMIN_TOKEN with repository Administration read access" >&2
-            exit 1
-          fi
-          if [[ "$(jq -r '.enabled // false' <<<"${policy}")" != "true" ]]; then
-            echo "GitHub immutable releases must be enabled before publication" >&2
-            exit 1
+          )" 2>"${policy_error}"; then
+            if [[ "$(jq -r '.enabled // false' <<<"${policy}")" != "true" ]]; then
+              echo "GitHub immutable releases must be enabled before publication" >&2
+              exit 1
+            fi
+          else
+            release="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+            )"
+            if [[ "$(jq -r '.draft' <<<"${release}")" != "false" ||
+                  "$(jq -r '.immutable // false' <<<"${release}")" != "true" ]]; then
+              cat "${policy_error}" >&2
+              echo "cannot prove GitHub immutable releases are enabled; configure SIGIL_RELEASE_ADMIN_TOKEN with repository Administration read access" >&2
+              exit 1
+            fi
+            echo "release ${RELEASE_TAG} is already public and immutable; accepting the published state as recovery proof"
           fi
 
       - name: Publish the completed draft
