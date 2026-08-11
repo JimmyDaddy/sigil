@@ -6,7 +6,7 @@ use std::{
 
 #[cfg(unix)]
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
 };
@@ -3043,7 +3043,7 @@ fn file_presence_execution_profile_with_environment(
     #[cfg(unix)]
     {
         let shell_identity =
-            trusted_executable_identity(workspace_root, Path::new("/bin/sh"), "POSIX shell")?;
+            trusted_executable_identity(workspace_root, Path::new("/bin/sh"), "POSIX shell", None)?;
         let path = environment
             .get("PATH")
             .ok_or_else(|| "the controlled shell PATH is unavailable".to_owned())?;
@@ -3084,7 +3084,12 @@ fn resolve_trusted_git_from_path(
         if fs::symlink_metadata(&candidate).is_err() {
             continue;
         }
-        return trusted_executable_identity(workspace_root, &candidate, "git");
+        return trusted_executable_identity(
+            workspace_root,
+            &candidate,
+            "git",
+            Some(OsStr::new("git")),
+        );
     }
     Err("git was not found on the controlled PATH".to_owned())
 }
@@ -3094,6 +3099,7 @@ fn trusted_executable_identity(
     workspace_root: &Path,
     candidate: &Path,
     label: &str,
+    expected_canonical_name: Option<&OsStr>,
 ) -> std::result::Result<TrustedExecutableIdentity, String> {
     let program = fs::canonicalize(candidate)
         .map_err(|error| format!("failed to resolve trusted {label} executable: {error}"))?;
@@ -3106,7 +3112,7 @@ fn trusted_executable_identity(
             program.display()
         ));
     }
-    if program.file_name() != candidate.file_name() {
+    if expected_canonical_name.is_some_and(|expected| program.file_name() != Some(expected)) {
         return Err(format!(
             "the {label} executable resolves to a different command identity: {}",
             program.display()
