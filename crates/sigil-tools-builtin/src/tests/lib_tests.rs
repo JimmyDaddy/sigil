@@ -6825,6 +6825,34 @@ fn bash_git_metadata_presence_loop_binds_a_controlled_git_environment() -> Resul
         )
         .is_err()
     );
+
+    let external_bin = tempfile::tempdir()?;
+    let external_git = external_bin.path().join("git");
+    fs::write(&external_git, "#!/bin/sh\nprintf external\n")?;
+    fs::set_permissions(&external_git, fs::Permissions::from_mode(0o755))?;
+    let mut external_environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let original_path = external_environment
+        .get("PATH")
+        .cloned()
+        .unwrap_or_else(|| "/usr/bin:/bin".to_owned());
+    external_environment.insert(
+        "PATH".to_owned(),
+        format!("{}:{original_path}", external_bin.path().display()),
+    );
+    let external_analysis = super::analyze_shell_command_with_controlled_environment(
+        workspace.path(),
+        command,
+        &external_environment,
+    )?;
+    assert_eq!(external_analysis.access, ToolAccess::Read);
+    let (_, external_execution_environment) = super::bounded_file_presence_execution_environment(
+        workspace.path(),
+        &external_environment,
+    )?;
+    assert_ne!(
+        PathBuf::from(&external_execution_environment["PATH"]),
+        external_bin.path()
+    );
     Ok(())
 }
 

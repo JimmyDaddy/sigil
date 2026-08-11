@@ -3072,7 +3072,11 @@ fn resolve_trusted_git_from_path(
     workspace_root: &Path,
     path: &str,
 ) -> std::result::Result<TrustedExecutableIdentity, String> {
+    let canonical_workspace = fs::canonicalize(workspace_root).map_err(|error| {
+        format!("failed to resolve workspace while binding trusted git: {error}")
+    })?;
     let path = OsString::from(path);
+    let mut rejected_candidates = Vec::new();
     for directory in std::env::split_paths(&path) {
         if directory.as_os_str().is_empty() || !directory.is_absolute() {
             return Err(format!(
@@ -3084,14 +3088,27 @@ fn resolve_trusted_git_from_path(
         if fs::symlink_metadata(&candidate).is_err() {
             continue;
         }
-        return trusted_executable_identity(
+        let canonical_candidate = fs::canonicalize(&candidate)
+            .map_err(|error| format!("failed to resolve git executable: {error}"))?;
+        if canonical_candidate.starts_with(&canonical_workspace) {
+            return Err(format!(
+                "the git executable resolves inside the workspace: {}",
+                canonical_candidate.display()
+            ));
+        }
+        match trusted_executable_identity(
             workspace_root,
             &candidate,
             "git",
             Some(OsStr::new("git")),
-        );
+        ) {
+            Ok(identity) => return Ok(identity),
+            Err(error) => rejected_candidates.push(error),
+        }
     }
-    Err("git was not found on the controlled PATH".to_owned())
+    Err(rejected_candidates
+        .pop()
+        .unwrap_or_else(|| "git was not found on the controlled PATH".to_owned()))
 }
 
 #[cfg(unix)]
