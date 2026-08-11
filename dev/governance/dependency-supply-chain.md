@@ -71,11 +71,13 @@ RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也�
 依赖引入前后的 production build 对比：主 JS 从 `770.44 kB / 229.53 kB gzip` 增至
 `818.91 kB / 247.35 kB gzip`；KaTeX 与 Mermaid 保持异步 chunk，其中 KaTeX core 为
 `259.63 kB / 77.62 kB gzip`，Mermaid core 为 `36.27 kB / 12.07 kB gzip`，各图种实现继续由
-Vite 拆分。`pnpm audit --audit-level high` 当前为零漏洞；`openapi-typescript` 传递图中的
-`js-yaml` 通过 workspace override 固定为 `4.3.0`；其
-`@redocly/openapi-core -> minimatch` 路径中的 `brace-expansion` 也固定为 `5.0.8`，以修复
-`GHSA-mh99-v99m-4gvg` 的无界 expansion-length DoS，直到上游约束自然覆盖对应修复版本。两个
-override 都由 contract regeneration、完整 desktop check 和 high-severity audit 验证。升级
+Vite 拆分。`pnpm audit --audit-level high` 当前无 high-severity 漏洞；`openapi-typescript` 传递图中的
+`js-yaml` 通过 workspace override 固定为 `4.3.1`；其
+`@redocly/openapi-core -> minimatch` 路径中的 `brace-expansion` 也固定为 `5.0.9`，以覆盖
+`GHSA-mh99-v99m-4gvg` 与后续 expansion-array DoS 修复，直到上游约束自然覆盖对应版本。
+`webdriverio -> cheerio` 与 `jsdom` 的 `undici` 固定为 `7.29.0`，`vite -> postcss` 的
+`nanoid` 固定为 `3.3.17`，避免已知 high-severity advisory。以上 override 均由 contract
+regeneration、完整 desktop check 和 high-severity audit 验证。升级
 KaTeX、Mermaid、DOMPurify 或 sanitize pipeline 时必须重跑不可信 URL/HTML/SVG 语料、安全审计和
 bundle 差异检查，不得只以视觉 smoke 通过作为升级依据。
 
