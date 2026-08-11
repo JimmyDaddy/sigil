@@ -592,7 +592,7 @@ mode = "danger-full-access"
 
 [web]
 enabled = true
-network_mode = "allow"
+network_mode = "ask"
 proxy_mode = "environment"
 allow_http = true
 search_route = "mcp"

@@ -110,6 +110,7 @@ class WebPtyAcceptanceTests(unittest.TestCase):
             text = config.read_text(encoding="utf-8")
             self.assertIn("config_version = 2", text)
             self.assertIn('connection = "web-fixture"', text)
+            self.assertIn('network_mode = "ask"', text)
             self.assertIn("[connections.web-fixture]", text)
             self.assertIn('provider = "custom"', text)
             self.assertIn('protocol = "chat_completions"', text)
