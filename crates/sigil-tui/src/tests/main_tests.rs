@@ -6,36 +6,30 @@ use crate::{
     app::{AppAction, AppState},
     mouse::HitTarget,
     runner::{WorkerCommand, WorkerCommandSender, WorkerMessage},
-    timeline::TimelineRole,
 };
 use anyhow::{Result, anyhow};
 use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
+    Terminal,
+    backend::{Backend, TestBackend},
+    layout::{Position, Rect},
+    style::Style,
 };
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CONFIG_VERSION_V2, CompactionConfig, ConnectionId, ControlEntry, EventHandler,
+    AgentConfig, CONFIG_VERSION_V2, CompactionConfig, ConnectionId, ControlEntry,
     JsonlSessionStore, MemoryConfig, ModelMessage, ModelRef, PermissionConfig, RootConfig,
-    RunEvent, SessionConfig, SessionLogEntry, WorkspaceConfig, WorkspaceTrust, stable_workspace_id,
+    SessionConfig, SessionLogEntry, WorkspaceConfig, WorkspaceTrust, stable_workspace_id,
 };
 
 use super::{
     AppMouseOutcome, BACKGROUND_TASK_WAKE_INTERVAL, ExternalLaunchPlatform, ExternalLaunchTarget,
-    InitialSessionTarget, SCROLLBACK_SEED_POLL_INTERVAL, SPINNER_FRAME_MILLIS,
-    ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
-    apply_key_action, apply_mouse_outcome, build_initial_app, drain_worker_messages,
-    external_launch_plan, flush_pending_worker_commands, inline_viewport_growth,
-    mouse_layout_snapshot, native_scrollback_available, next_mouse_capture_action,
-    next_wake_deadline, padded_scrollback_row, plan_scrollback_sync,
-    plan_scrollback_sync_with_chunk_size, prepare_scrollback_sync,
-    prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
-    render_scrollback_rows, render_tui_exit_resume_hint, restart_worker_after_session_transition,
-    restore_initial_session_from_disk, scrollback_frontier_update, scrollback_plain_line,
-    scrollback_row_style, scrollback_separator, scrollback_wrapped_rows,
-    should_sync_terminal_scrollback, tested_next_wake_deadline, wrap_scrollback_text,
+    InitialSessionTarget, SPINNER_FRAME_MILLIS, WorkerRuntime, apply_key_action,
+    apply_mouse_outcome, build_initial_app, drain_worker_messages, enter_terminal_presentation,
+    external_launch_plan, finalize_terminal_presentation, flush_pending_worker_commands,
+    leave_terminal_presentation, mouse_layout_snapshot, next_mouse_capture_action,
+    next_wake_deadline, process_app_action, process_app_action_with_spawner,
+    render_tui_exit_resume_hint, restart_worker_after_session_transition,
+    restore_initial_session_from_disk,
 };
 
 fn test_config() -> RootConfig {
@@ -130,6 +124,71 @@ fn tui_exit_resume_hint_includes_session_id_and_resume_command() {
     assert_eq!(
         hint,
         "Sigil session: abc123\nResume with: sigil resume abc123\n"
+    );
+}
+
+#[test]
+fn terminal_finalization_clears_the_frame_and_parks_the_cursor_at_origin() {
+    let backend = TestBackend::new(12, 4);
+    let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+    terminal
+        .draw(|frame| {
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "stale TUI frame", Style::default());
+        })
+        .expect("test frame should draw");
+    terminal
+        .set_cursor_position(Position::new(7, 3))
+        .expect("test cursor should move");
+
+    finalize_terminal_presentation(&mut terminal).expect("terminal finalization should succeed");
+
+    assert_eq!(
+        terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor should be readable"),
+        Position::ORIGIN
+    );
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .all(|cell| cell.symbol() == " "),
+        "no stale TUI cells may remain before the resume hint or a fatal error is printed"
+    );
+}
+
+#[test]
+fn terminal_presentation_uses_a_balanced_alternate_screen_lifecycle() {
+    let mut output = Vec::new();
+
+    enter_terminal_presentation(&mut output).expect("alternate screen should activate");
+    leave_terminal_presentation(&mut output).expect("alternate screen should restore");
+
+    assert_eq!(output, b"\x1b[?1049h\x1b[3J\x1b[2J\x1b[1;1H\x1b[?1049l");
+}
+
+#[test]
+fn wake_deadline_only_polls_while_runtime_work_is_active() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    assert_eq!(next_wake_deadline(&app), None);
+
+    app.runtime.is_busy = true;
+    assert_eq!(
+        next_wake_deadline(&app),
+        Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
+    );
+
+    app.runtime.is_busy = false;
+    let (_sender, receiver) = mpsc::channel();
+    app.set_pending_model_catalog_for_test(receiver);
+    assert_eq!(
+        next_wake_deadline(&app),
+        Some(BACKGROUND_TASK_WAKE_INTERVAL)
     );
 }
 
@@ -284,359 +343,6 @@ fn mouse_layout_snapshot_falls_back_to_terminal_size_before_first_frame() {
     let layout = mouse_layout_snapshot(Rect::default(), Rect::new(0, 0, 100, 30), &app);
 
     assert_eq!(layout.screen, Rect::new(0, 0, 100, 30));
-}
-
-#[test]
-fn initial_sync_skips_replaying_history() {
-    let state = ScrollbackSyncState::default();
-
-    let plan = plan_scrollback_sync(&state, "session-a", 2, 0);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn inline_viewport_only_rebuilds_when_the_terminal_exceeds_its_high_water_mark() {
-    assert_eq!(inline_viewport_growth(Some(24), 20), None);
-    assert_eq!(inline_viewport_growth(Some(24), 24), None);
-    assert_eq!(inline_viewport_growth(Some(24), 40), Some(40));
-    assert_eq!(inline_viewport_growth(None, 40), None);
-}
-
-#[test]
-fn native_scrollback_is_disabled_for_fullscreen_fallback() {
-    assert!(native_scrollback_available(Some(24)));
-    assert!(!native_scrollback_available(None));
-}
-
-#[test]
-fn initial_sync_skips_large_history_replay() {
-    let state = ScrollbackSyncState::default();
-
-    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-a", 5, 0, 2);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn default_initial_sync_skips_large_history_replay() {
-    let state = ScrollbackSyncState::default();
-
-    let plan = plan_scrollback_sync(&state, "session-a", 5_000, 0);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn pending_seed_continues_from_previous_chunk() {
-    let state = ScrollbackSyncState {
-        session_id: Some("session-a".to_owned()),
-        revision: 1,
-        line_count: 2,
-        entry_count: 0,
-        sequence_hash: 42,
-        pending_seed: Some(ScrollbackSeedProgress {
-            session_id: "session-a".to_owned(),
-            next_line_index: 2,
-            prefix_hash: 42,
-        }),
-    };
-
-    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-a", 5, 42, 2);
-
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: false,
-            from_index: 2,
-            to_index: 4,
-            total_line_count: 5,
-        }
-    );
-}
-
-#[test]
-fn zero_chunk_size_still_skips_initial_history_replay() {
-    let state = ScrollbackSyncState::default();
-
-    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-a", 3, 0, 0);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn stale_pending_seed_from_previous_session_does_not_replay_history() {
-    let state = ScrollbackSyncState {
-        session_id: Some("session-a".to_owned()),
-        revision: 1,
-        line_count: 2,
-        entry_count: 0,
-        sequence_hash: 42,
-        pending_seed: Some(ScrollbackSeedProgress {
-            session_id: "session-a".to_owned(),
-            next_line_index: 2,
-            prefix_hash: 42,
-        }),
-    };
-
-    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-b", 4, 0, 2);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn mismatched_pending_seed_falls_back_to_append_logic() {
-    let state = ScrollbackSyncState {
-        session_id: Some("session-a".to_owned()),
-        revision: 1,
-        line_count: 2,
-        entry_count: 0,
-        sequence_hash: 42,
-        pending_seed: Some(ScrollbackSeedProgress {
-            session_id: "session-a".to_owned(),
-            next_line_index: 1,
-            prefix_hash: 42,
-        }),
-    };
-
-    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-a", 4, 42, 2);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Append { from_index: 2 });
-}
-
-#[test]
-fn growing_history_appends_only_new_lines() {
-    let state = ScrollbackSyncState {
-        session_id: Some("session-a".to_owned()),
-        revision: 1,
-        line_count: 1,
-        entry_count: 0,
-        sequence_hash: 42,
-        pending_seed: None,
-    };
-
-    let plan = plan_scrollback_sync(&state, "session-a", 2, 42);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Append { from_index: 1 });
-}
-
-#[test]
-fn switching_sessions_without_existing_scrollback_skips_history_replay() {
-    let state = ScrollbackSyncState {
-        session_id: Some("session-a".to_owned()),
-        revision: 2,
-        line_count: 0,
-        entry_count: 0,
-        sequence_hash: 0,
-        pending_seed: None,
-    };
-
-    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-b", 3, 0, 2);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn restored_or_switched_session_skips_history_replay() {
-    let state = ScrollbackSyncState {
-        session_id: Some("session-a".to_owned()),
-        revision: 2,
-        line_count: 1,
-        entry_count: 0,
-        sequence_hash: 9,
-        pending_seed: None,
-    };
-
-    let plan = plan_scrollback_sync(&state, "session-b", 2, 3);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn changing_existing_live_line_does_not_append_scrollback() {
-    let state = ScrollbackSyncState {
-        session_id: Some("session-a".to_owned()),
-        revision: 3,
-        line_count: 1,
-        entry_count: 0,
-        sequence_hash: 11,
-        pending_seed: None,
-    };
-
-    let plan = plan_scrollback_sync(&state, "session-a", 2, 12);
-
-    assert_eq!(plan, ScrollbackSyncPlan::Noop);
-}
-
-#[test]
-fn busy_run_defers_terminal_scrollback_sync() {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-
-    assert!(should_sync_terminal_scrollback(&app));
-
-    app.runtime.is_busy = true;
-
-    assert!(!should_sync_terminal_scrollback(&app));
-}
-
-#[test]
-fn setup_mode_defers_terminal_scrollback_sync() {
-    let app = AppState::from_setup(
-        Path::new("sigil.toml").to_path_buf(),
-        Path::new(".").to_path_buf(),
-        Some("missing config".to_owned()),
-    );
-
-    assert!(!should_sync_terminal_scrollback(&app));
-}
-
-#[test]
-fn next_wake_deadline_prefers_busy_then_seed_then_event_driven_idle() {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let pending_seed = ScrollbackSyncState {
-        pending_seed: Some(ScrollbackSeedProgress {
-            session_id: app.session_id.clone(),
-            next_line_index: 1,
-            prefix_hash: 0,
-        }),
-        ..ScrollbackSyncState::default()
-    };
-
-    app.runtime.is_busy = true;
-    assert_eq!(
-        tested_next_wake_deadline(&app, &ScrollbackSyncState::default()),
-        Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
-    );
-
-    app.runtime.is_busy = false;
-    assert_eq!(
-        tested_next_wake_deadline(&app, &pending_seed),
-        Some(SCROLLBACK_SEED_POLL_INTERVAL)
-    );
-
-    assert_eq!(
-        tested_next_wake_deadline(&app, &ScrollbackSyncState::default()),
-        None
-    );
-
-    let (_sender, receiver) =
-        mpsc::channel::<Result<sigil_runtime::provider_connections::ModelCatalogResult, String>>();
-    app.set_pending_model_catalog_for_test(receiver);
-    assert_eq!(
-        tested_next_wake_deadline(&app, &ScrollbackSyncState::default()),
-        Some(BACKGROUND_TASK_WAKE_INTERVAL)
-    );
-}
-
-#[test]
-fn wrap_scrollback_text_respects_display_width_for_cjk() {
-    assert_eq!(wrap_scrollback_text("你好", 2), vec!["你", "好"]);
-    assert_eq!(wrap_scrollback_text("你好ab", 4), vec!["你好", "ab"]);
-}
-
-#[test]
-fn scrollback_width_matches_ratatui_for_halfwidth_katakana_marks() {
-    assert_eq!(wrap_scrollback_text("ｶﾞx", 2), vec!["ｶﾞ", "x"]);
-    assert_eq!(padded_scrollback_row("ｶﾞ", 2), "ｶﾞ");
-}
-
-#[test]
-fn scrollback_plain_line_concatenates_spans() {
-    let line = Line::from(vec![Span::raw("hello "), Span::raw("world")]);
-
-    assert_eq!(scrollback_plain_line(&line), "hello world");
-}
-
-#[test]
-fn scrollback_row_style_uses_first_non_empty_span_style() {
-    let line = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(
-            "important",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("ignored", Style::default().fg(Color::Red)),
-    ]);
-
-    let style = scrollback_row_style(&line);
-
-    assert_eq!(style.fg, Some(Color::Cyan));
-    assert!(style.add_modifier.contains(Modifier::BOLD));
-}
-
-#[test]
-fn scrollback_separator_includes_session_provider_and_model() {
-    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let separator = scrollback_separator(&app);
-
-    let text = scrollback_plain_line(&separator);
-
-    assert!(text.contains("---- session "));
-    assert!(text.contains("deepseek"));
-    assert!(text.contains("deepseek-v4-flash"));
-}
-
-#[test]
-fn scrollback_separator_uses_configured_theme() {
-    let mut config = test_config();
-    config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
-    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    let separator = scrollback_separator(&app);
-    let expected = crate::ui::theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight).palette;
-
-    assert_eq!(separator.spans[0].style.fg, Some(expected.text_muted));
-    assert_eq!(separator.spans[1].style.fg, Some(expected.accent_info));
-    assert_eq!(separator.spans[2].style.fg, Some(expected.text_muted));
-}
-
-#[test]
-fn wrap_scrollback_text_preserves_empty_and_zero_width_inputs() {
-    assert_eq!(wrap_scrollback_text("", 10), vec![""]);
-    assert_eq!(wrap_scrollback_text("hello", 0), vec!["hello"]);
-    assert_eq!(wrap_scrollback_text("ab\tcd", 10), vec!["abcd"]);
-    assert_eq!(wrap_scrollback_text("你", 1), vec!["?"]);
-    assert_eq!(padded_scrollback_row("你", 1), "?");
-    assert_eq!(
-        padded_scrollback_row(&wrap_scrollback_text("你", 1)[0], 1),
-        "?"
-    );
-}
-
-#[test]
-fn render_scrollback_rows_prints_exactly_one_physical_row() {
-    let mut buffer = Buffer::empty(Rect::new(0, 0, 12, 2));
-    let rows = vec![("你好 world".to_owned(), Style::default())];
-
-    render_scrollback_rows(&mut buffer, &rows);
-
-    assert_eq!(buffer[(0, 0)].symbol(), "你好 world  ");
-    for x in 1..12 {
-        assert_eq!(buffer[(x, 0)].symbol(), "");
-    }
-}
-
-#[test]
-fn render_scrollback_rows_pads_cjk_by_display_width_without_trailing_cells() {
-    let mut buffer = Buffer::empty(Rect::new(0, 0, 8, 1));
-    let rows = vec![("你好".to_owned(), Style::default())];
-
-    render_scrollback_rows(&mut buffer, &rows);
-
-    assert_eq!(buffer[(0, 0)].symbol(), "你好    ");
-    for x in 1..8 {
-        assert_eq!(buffer[(x, 0)].symbol(), "");
-    }
-}
-
-#[test]
-fn padded_scrollback_row_is_width_bounded_and_drops_terminal_controls() {
-    assert_eq!(padded_scrollback_row("abc\u{1b}[31mdef", 5), "abc[3");
-    assert_eq!(
-        crate::ui::terminal_cell_width(&padded_scrollback_row("你好 world", 8)),
-        8
-    );
 }
 
 #[test]
@@ -1071,512 +777,6 @@ fn fake_worker_runtime() -> (WorkerRuntime, mpsc::Receiver<WorkerCommand>) {
         },
         worker_rx,
     )
-}
-
-fn app_with_scrollback() -> AppState {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let _ = app.set_terminal_size(48, 6);
-    app.handle_worker_message(WorkerMessage::SessionSwitched {
-        session_log_path: PathBuf::from(".sigil/sessions/session-restored.jsonl"),
-        provider_name: "deepseek".to_owned(),
-        model_name: "deepseek-v4-flash".to_owned(),
-        entries: vec![
-            SessionLogEntry::User(ModelMessage::user("hello")),
-            SessionLogEntry::Assistant(ModelMessage::assistant(
-                Some(
-                    "restored answer with enough wrapped content to overflow the live panel"
-                        .to_owned(),
-                ),
-                Vec::new(),
-            )),
-        ],
-    })
-    .expect("session switch should restore timeline");
-    app.handle_worker_message(WorkerMessage::Notice("checking".to_owned()))
-        .expect("notice should render");
-    app.handle_worker_message(WorkerMessage::RunStarted {
-        prompt: "follow-up".to_owned(),
-    })
-    .expect("run started should render");
-    app.runtime.is_busy = false;
-    app
-}
-
-#[test]
-fn wake_deadline_prefers_busy_then_seed_then_event_driven_idle() {
-    let mut busy_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    busy_app.runtime.is_busy = true;
-    assert_eq!(
-        next_wake_deadline(&busy_app, &ScrollbackSyncState::default()),
-        Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
-    );
-
-    let seeded_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let seeded_state = ScrollbackSyncState {
-        pending_seed: Some(ScrollbackSeedProgress {
-            session_id: seeded_app.session_id.clone(),
-            next_line_index: 1,
-            prefix_hash: 0,
-        }),
-        ..ScrollbackSyncState::default()
-    };
-    assert_eq!(
-        next_wake_deadline(&seeded_app, &seeded_state),
-        Some(SCROLLBACK_SEED_POLL_INTERVAL)
-    );
-
-    let setup_app = AppState::from_setup(
-        PathBuf::from("sigil.toml"),
-        PathBuf::from("."),
-        Some("broken".to_owned()),
-    );
-    assert_eq!(next_wake_deadline(&setup_app, &seeded_state), None);
-}
-
-#[test]
-fn prepare_scrollback_sync_returns_none_when_scrollback_is_disabled_or_unchanged() {
-    let setup_app = AppState::from_setup(
-        PathBuf::from("sigil.toml"),
-        PathBuf::from("."),
-        Some("broken".to_owned()),
-    );
-    assert!(prepare_scrollback_sync(&setup_app, &ScrollbackSyncState::default()).is_none());
-
-    let app = app_with_scrollback();
-    let line_count = app.scrollback_line_count();
-    let synced = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count,
-        entry_count: app.scrollback_entry_count(),
-        sequence_hash: app.timeline_entry_prefix_hash(app.scrollback_entry_count()),
-        pending_seed: None,
-    };
-    assert!(prepare_scrollback_sync(&app, &synced).is_none());
-}
-
-#[test]
-fn prepare_scrollback_sync_skips_reseed_and_appends_expected_batches() {
-    let app = app_with_scrollback();
-    let line_count = app.scrollback_line_count();
-    assert!(line_count > 0);
-
-    let skipped_reseed = prepare_scrollback_sync(
-        &app,
-        &ScrollbackSyncState {
-            session_id: Some("previous-session".to_owned()),
-            revision: 1,
-            line_count: 1,
-            entry_count: 0,
-            sequence_hash: 7,
-            pending_seed: None,
-        },
-    )
-    .expect("expected state sync");
-    assert!(skipped_reseed.line_batches.is_empty());
-    assert_eq!(
-        skipped_reseed.next_state.session_id,
-        Some(app.session_id.clone())
-    );
-    assert_eq!(skipped_reseed.next_state.line_count, line_count);
-    assert_eq!(skipped_reseed.next_state.pending_seed, None);
-
-    let append = prepare_scrollback_sync(
-        &app,
-        &ScrollbackSyncState {
-            session_id: Some(app.session_id.clone()),
-            revision: app.timeline_revision().saturating_sub(1),
-            line_count: line_count.saturating_sub(1),
-            entry_count: app.timeline_entry_count_at_or_before_line(line_count.saturating_sub(1)),
-            sequence_hash: app.timeline_entry_prefix_hash(
-                app.timeline_entry_count_at_or_before_line(line_count.saturating_sub(1)),
-            ),
-            pending_seed: None,
-        },
-    )
-    .expect("expected append");
-    assert!(append.line_batches.len() <= 1);
-    assert_eq!(append.next_state.line_count, line_count);
-    assert!(append.next_state.pending_seed.is_none());
-}
-
-#[test]
-fn prepare_scrollback_sync_tracks_current_session_without_initial_seed() {
-    let app = app_with_scrollback();
-    assert!(app.scrollback_line_count() > 1);
-
-    let prepared =
-        prepare_scrollback_sync_with_chunk_size(&app, &ScrollbackSyncState::default(), 1)
-            .expect("expected state sync");
-
-    assert_eq!(prepared.next_state.line_count, app.scrollback_line_count());
-    assert_eq!(prepared.next_state.pending_seed, None);
-    assert!(prepared.line_batches.is_empty());
-    assert_eq!(scrollback_frontier_update(&prepared), Some((0, true)));
-}
-
-#[test]
-fn prepare_scrollback_sync_appends_non_empty_batches_from_shared_prefix() {
-    let app = app_with_scrollback();
-
-    let prepared = prepare_scrollback_sync(
-        &app,
-        &ScrollbackSyncState {
-            session_id: Some(app.session_id.clone()),
-            revision: app.timeline_revision().saturating_sub(1),
-            line_count: 0,
-            entry_count: 0,
-            sequence_hash: app.scrollback_prefix_hash(0),
-            pending_seed: None,
-        },
-    )
-    .expect("expected append plan");
-
-    assert!(!prepared.line_batches.is_empty());
-    assert_eq!(prepared.next_state.line_count, app.scrollback_line_count());
-    assert_eq!(
-        scrollback_frontier_update(&prepared),
-        Some((prepared.next_state.entry_count, false))
-    );
-}
-
-#[test]
-fn prepare_scrollback_sync_survives_rerender_width_changes_and_append() {
-    let mut app = app_with_scrollback();
-    let mut state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count: app.scrollback_line_count(),
-        entry_count: app.scrollback_entry_count(),
-        sequence_hash: app.timeline_entry_prefix_hash(app.scrollback_entry_count()),
-        pending_seed: None,
-    };
-
-    assert!(app.set_terminal_size(32, 8));
-    let after_narrow = prepare_scrollback_sync(&app, &state)
-        .expect("narrow rerender should produce a scrollback sync plan");
-    assert_eq!(
-        after_narrow.next_state.line_count,
-        app.scrollback_line_count()
-    );
-    assert_eq!(
-        after_narrow.next_state.sequence_hash,
-        app.timeline_entry_prefix_hash(after_narrow.next_state.entry_count)
-    );
-    state = after_narrow.next_state;
-
-    assert!(app.set_terminal_size(90, 8));
-    let after_wide = prepare_scrollback_sync(&app, &state)
-        .expect("wide rerender should produce a scrollback sync plan");
-    assert_eq!(
-        after_wide.next_state.line_count,
-        app.scrollback_line_count_for_entry_count(after_wide.next_state.entry_count)
-    );
-    assert_eq!(after_wide.next_state.entry_count, state.entry_count);
-    assert_eq!(
-        after_wide.next_state.sequence_hash,
-        app.timeline_entry_prefix_hash(after_wide.next_state.entry_count)
-    );
-    state = after_wide.next_state;
-
-    for index in 0..12 {
-        app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
-            Some(format!("after resize {index}")),
-            Vec::new(),
-        )))
-        .expect("assistant message should append timeline entry");
-    }
-    let after_append =
-        prepare_scrollback_sync_with_chunk_size(&app, &state, 2).expect("append should sync");
-    assert_eq!(
-        after_append.next_state.line_count,
-        app.scrollback_line_count()
-    );
-    assert_eq!(
-        after_append.next_state.sequence_hash,
-        app.timeline_entry_prefix_hash(after_append.next_state.entry_count)
-    );
-}
-
-#[test]
-fn busy_reflow_and_completion_append_from_the_stable_entry_frontier() {
-    let mut app = app_with_scrollback();
-    let state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count: app.scrollback_line_count(),
-        entry_count: app.scrollback_entry_count(),
-        sequence_hash: app.timeline_entry_prefix_hash(app.scrollback_entry_count()),
-        pending_seed: None,
-    };
-    let owned_entries = state.entry_count;
-
-    app.runtime.is_busy = true;
-    assert!(app.set_terminal_size(32, 8));
-    for index in 0..12 {
-        app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
-            Some(format!("completed after busy reflow {index}")),
-            Vec::new(),
-        )))
-        .expect("assistant message should append timeline entry");
-    }
-    assert!(prepare_scrollback_sync(&app, &state).is_none());
-
-    app.runtime.is_busy = false;
-    let prepared = prepare_scrollback_sync(&app, &state)
-        .expect("completion after reflow must reconcile native scrollback");
-
-    assert!(prepared.next_state.entry_count > owned_entries);
-    assert!(!prepared.line_batches.is_empty());
-}
-
-#[test]
-fn same_session_projection_replacement_rebases_before_future_appends() {
-    let mut app = app_with_scrollback();
-    let state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count: app.scrollback_line_count(),
-        entry_count: app.scrollback_entry_count(),
-        sequence_hash: app.timeline_entry_prefix_hash(app.scrollback_entry_count()),
-        pending_seed: None,
-    };
-
-    assert!(state.entry_count > 0);
-    app.timeline[0].text.push_str(" replacement");
-    assert!(app.set_terminal_size(47, 6));
-    let rebased = prepare_scrollback_sync(&app, &state)
-        .expect("same-session projection replacement should be observed");
-    assert!(rebased.rebase_frontier);
-    assert!(!rebased.line_batches.is_empty());
-    assert_eq!(
-        scrollback_frontier_update(&rebased),
-        Some((rebased.next_state.entry_count, true))
-    );
-
-    let mut rebased_state = rebased.next_state;
-    for index in 0..12 {
-        app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
-            Some(format!("after projection replacement {index}")),
-            Vec::new(),
-        )))
-        .expect("assistant message should append timeline entry");
-    }
-    let appended = prepare_scrollback_sync(&app, &rebased_state)
-        .expect("new entries after a projection rebase should remain appendable");
-    assert!(!appended.line_batches.is_empty());
-    rebased_state = appended.next_state;
-    assert_eq!(rebased_state.entry_count, app.scrollback_entry_count());
-}
-
-#[test]
-fn projection_replacement_and_new_entries_are_seeded_in_the_same_sync_window() {
-    let mut app = app_with_scrollback();
-    let owned_entry_count = app.scrollback_entry_count();
-    let state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count: app.scrollback_line_count(),
-        entry_count: owned_entry_count,
-        sequence_hash: app.timeline_entry_prefix_hash(owned_entry_count),
-        pending_seed: None,
-    };
-
-    app.timeline[0].text.push_str(" replacement in same window");
-    assert!(app.set_terminal_size(47, 6));
-    for index in 0..12 {
-        app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
-            Some(format!("same-window append {index}")),
-            Vec::new(),
-        )))
-        .expect("assistant message should append timeline entry");
-    }
-
-    let prepared = prepare_scrollback_sync(&app, &state)
-        .expect("replacement and append should start a current projection epoch");
-
-    assert!(prepared.rebase_frontier);
-    assert!(!prepared.line_batches.is_empty());
-    assert_eq!(
-        prepared.next_state.entry_count,
-        app.scrollback_entry_count()
-    );
-    assert_eq!(
-        scrollback_frontier_update(&prepared),
-        Some((prepared.next_state.entry_count, true))
-    );
-    assert!(prepare_scrollback_sync(&app, &prepared.next_state).is_none());
-}
-
-#[test]
-fn projection_reseed_never_rewinds_the_existing_native_frontier() {
-    let mut app = app_with_scrollback();
-    let owned_entry_count = app.scrollback_entry_count();
-    let state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count: app.scrollback_line_count(),
-        entry_count: owned_entry_count,
-        sequence_hash: app.timeline_entry_prefix_hash(owned_entry_count),
-        pending_seed: None,
-    };
-    assert!(owned_entry_count > 0);
-
-    app.timeline[0].text.push_str(" replacement");
-    assert!(app.set_terminal_size(31, 8));
-    let prepared = prepare_scrollback_sync_with_chunk_size(&app, &state, 1)
-        .expect("replacement should begin a bounded projection seed");
-
-    assert!(prepared.rebase_frontier);
-    assert_eq!(
-        scrollback_frontier_update(&prepared),
-        Some((owned_entry_count.max(prepared.next_state.entry_count), true))
-    );
-}
-
-#[test]
-fn projection_change_during_seed_restarts_without_rewinding_the_physical_frontier() {
-    let mut app = app_with_scrollback();
-    let owned_entry_count = app.scrollback_entry_count();
-    let state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count: app.scrollback_line_count(),
-        entry_count: owned_entry_count,
-        sequence_hash: app.timeline_entry_prefix_hash(owned_entry_count),
-        pending_seed: None,
-    };
-
-    app.timeline[0].text.push_str(" first replacement");
-    assert!(app.set_terminal_size(31, 8));
-    let first = prepare_scrollback_sync_with_chunk_size(&app, &state, 1)
-        .expect("first replacement should begin a projection seed");
-    assert!(first.next_state.pending_seed.is_some());
-    let (first_frontier, first_rebase) =
-        scrollback_frontier_update(&first).expect("seed should update the frontier");
-    assert!(first_rebase);
-    app.set_native_scrollback_frontier(app.session_id.clone(), first_frontier, first_rebase);
-
-    app.timeline[0].role = TimelineRole::User;
-    assert!(app.set_terminal_size(33, 8));
-    let restarted = prepare_scrollback_sync_with_chunk_size(&app, &first.next_state, 1)
-        .expect("changed seeded prefix should restart the projection epoch");
-    assert!(restarted.rebase_frontier);
-    let (restarted_frontier, restarted_rebase) =
-        scrollback_frontier_update(&restarted).expect("restarted seed should update the frontier");
-    assert!(restarted_rebase);
-    assert!(restarted_frontier >= first_frontier);
-}
-
-#[test]
-fn prepare_scrollback_sync_reseeds_when_owned_prefix_changed() {
-    let app = app_with_scrollback();
-
-    let prepared = prepare_scrollback_sync(
-        &app,
-        &ScrollbackSyncState {
-            session_id: Some(app.session_id.clone()),
-            revision: app.timeline_revision().saturating_sub(1),
-            line_count: 1,
-            entry_count: app.timeline_entry_count_at_or_before_line(1),
-            sequence_hash: u64::MAX,
-            pending_seed: None,
-        },
-    )
-    .expect("expected replacement projection seed");
-
-    assert!(!prepared.line_batches.is_empty());
-    assert!(prepared.next_state.pending_seed.is_none());
-}
-
-#[test]
-fn prepare_scrollback_sync_never_rewinds_the_native_cursor_when_layout_expands() {
-    let mut app = app_with_scrollback();
-    app.set_terminal_size(48, 8);
-    let emitted_line_count = app.scrollback_line_count();
-    assert!(emitted_line_count > 0);
-    let state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision().saturating_sub(1),
-        line_count: emitted_line_count,
-        entry_count: app.scrollback_entry_count(),
-        sequence_hash: app.timeline_entry_prefix_hash(app.scrollback_entry_count()),
-        pending_seed: None,
-    };
-
-    app.set_terminal_size(48, 40);
-    let prepared = prepare_scrollback_sync(&app, &state).expect("layout change should be observed");
-
-    assert!(prepared.line_batches.is_empty());
-    assert_eq!(prepared.next_state.line_count, emitted_line_count);
-    assert_eq!(prepared.next_state.sequence_hash, state.sequence_hash);
-}
-
-#[test]
-fn prepare_scrollback_sync_observes_height_only_cutoff_growth_without_a_revision() {
-    let mut app = app_with_scrollback();
-    app.set_terminal_size(80, 40);
-    let wide_cutoff = app.scrollback_line_count();
-    let state = ScrollbackSyncState {
-        session_id: Some(app.session_id.clone()),
-        revision: app.timeline_revision(),
-        line_count: wide_cutoff,
-        entry_count: app.scrollback_entry_count(),
-        sequence_hash: app.timeline_entry_prefix_hash(app.scrollback_entry_count()),
-        pending_seed: None,
-    };
-
-    let revision = app.timeline_revision();
-    assert!(app.set_terminal_size(80, 8));
-    assert_eq!(app.timeline_revision(), revision);
-    let narrow_cutoff = app.scrollback_line_count();
-    assert!(narrow_cutoff > wide_cutoff);
-    let prepared = prepare_scrollback_sync(&app, &state)
-        .expect("a larger height-only cutoff must not be hidden by the revision fast path");
-
-    assert!(!prepared.line_batches.is_empty());
-    assert_eq!(prepared.next_state.line_count, narrow_cutoff);
-}
-
-#[test]
-fn scrollback_plain_and_wrapped_rows_preserve_style_metadata() {
-    let line = Line::from(vec![
-        Span::styled(
-            "Alert",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" body"),
-    ]);
-
-    assert_eq!(scrollback_plain_line(&line), "Alert body");
-
-    let style = scrollback_row_style(&line);
-    assert_eq!(style.fg, Some(Color::Yellow));
-    assert!(style.add_modifier.contains(Modifier::BOLD));
-
-    let wrapped = scrollback_wrapped_rows(&line, 5);
-    assert_eq!(wrapped.len(), 2);
-    assert_eq!(wrapped[0].0, "Alert");
-    assert_eq!(wrapped[0].1.fg, Some(Color::Yellow));
-}
-
-#[test]
-fn blank_scrollback_rows_use_default_style() {
-    let line = Line::from(vec![Span::raw("   ")]);
-
-    assert_eq!(scrollback_row_style(&line), Style::default());
-}
-
-#[test]
-fn scrollback_separator_mentions_session_provider_and_model() {
-    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let separator = scrollback_plain_line(&scrollback_separator(&app));
-
-    assert!(separator.contains("---- session "));
-    assert!(separator.contains(&app.runtime.provider_name));
-    assert!(separator.contains(&app.runtime.model_name));
 }
 
 #[test]

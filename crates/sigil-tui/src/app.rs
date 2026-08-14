@@ -103,7 +103,7 @@ pub(crate) use self::runtime_status::{
 };
 use self::state::{
     ActiveTaskRuntimeStatus, AgentPanelState, ApprovalState, ComposerState, EgressDisclosureState,
-    ReviewState, RuntimeStatusState, SessionBrowserState, TimelineState, TimelineViewportMode,
+    ReviewState, RuntimeStatusState, SessionBrowserState, TimelineState,
 };
 use self::timeline_render_store::TimelineRenderStore;
 #[cfg(test)]

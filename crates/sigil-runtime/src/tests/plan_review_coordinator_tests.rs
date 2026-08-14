@@ -1,14 +1,26 @@
-use anyhow::Result;
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
+
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
+use futures::{Stream, stream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener as TokioTcpListener;
 
 use sigil_kernel::{
-    AgentRunPurpose, ControlEntry, ConversationRoute, ConversationRouteDecisionRecordedEntry,
-    ConversationTurnRef, ModelMessage, PlanDecision, PlanDraftCreatedEntry, PlanId,
-    PlanReviewAttemptStatus, PlanReviewProjection, PlanReviewSource, PlanSourceRef, Session,
-    SessionLogEntry, SessionRef, TaskRoutingPolicy, TaskRunStatus,
-    conversation_route_decision_id_for_source, plan_review_attempt_id_for_review,
-    plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
+    Agent, AgentRunOptions, AgentRunPurpose, AutoApproveHandler, CompactionConfig,
+    CompletionRequest, ControlEntry, ConversationRoute, ConversationRouteDecisionRecordedEntry,
+    ConversationTurnRef, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
+    ModelMessage, NoopEventHandler, PermissionConfig, PermissionEvaluationContext, PlanDecision,
+    PlanDraftCreatedEntry, PlanId, PlanReviewAttemptStatus, PlanReviewProjection, PlanReviewSource,
+    PlanSourceRef, Provider, ProviderCapabilities, ProviderChunk, RunCancellationOwner, RunEvent,
+    Session, SessionLogEntry, SessionRef, TaskRoutingPolicy, TaskRunStatus, Tool, ToolAccess,
+    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, conversation_route_decision_id_for_source,
+    plan_review_attempt_id_for_review, plan_review_plan_id_for_attempt,
+    plan_review_policy_snapshot_hash,
 };
 
 use crate::PlanReviewRunOutcome;
@@ -78,6 +90,415 @@ fn draft_entry(plan_id: &PlanId) -> PlanDraftCreatedEntry {
         workspace_snapshot_id: None,
         created_at_ms: 50,
     }
+}
+
+fn plan_review_provider_capabilities() -> ProviderCapabilities {
+    ProviderCapabilities {
+        exact_prefix_cache: false,
+        reports_cache_tokens: false,
+        reasoning_stream: sigil_kernel::ReasoningStreamSupport::Unsupported,
+        supports_reasoning_effort: false,
+        supports_tool_stream: true,
+        supports_background_tasks: false,
+        supports_response_handles: false,
+        supports_reasoning_artifacts: false,
+        supports_structured_output: true,
+        supports_assistant_prefix_seed: false,
+        supports_schema_constrained_tools: true,
+        supports_agent_background_resume: false,
+        supports_agent_thread_usage: false,
+        supports_agent_result_replay: false,
+        supports_infill_completion: false,
+        supports_system_fingerprint: false,
+        tool_name_max_chars: 64,
+    }
+}
+
+fn plan_review_test_options(workspace_root: &std::path::Path) -> AgentRunOptions {
+    AgentRunOptions {
+        workspace_root: workspace_root.to_path_buf(),
+        max_turns: None,
+        tool_timeout_secs: 5,
+        reasoning_effort: None,
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_context: PermissionEvaluationContext::default(),
+        permission_mode_override: None,
+        memory_config: MemoryConfig::with_enabled(false),
+        compaction_config: CompactionConfig::default(),
+    }
+}
+
+fn submitted_draft_chunks(call_id: &str) -> Vec<Result<ProviderChunk>> {
+    let args = r#"{
+        "schema_version": 2,
+        "summary": "Bounded plan review",
+        "steps": [{
+            "step_id": "step_1",
+            "title": "Implement the bounded change",
+            "role": "executor",
+            "depends_on": [],
+            "mode": "write",
+            "isolation": "sequential_workspace_write",
+            "target_paths": ["src/coordinator.rs"]
+        }],
+        "target_paths": ["src/coordinator.rs"],
+        "suggested_checks": ["cargo test"]
+    }"#;
+    vec![
+        Ok(ProviderChunk::ToolCallStart {
+            id: call_id.to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+        }),
+        Ok(ProviderChunk::ToolCallArgsDelta {
+            id: call_id.to_owned(),
+            delta: args.to_owned(),
+        }),
+        Ok(ProviderChunk::ToolCallComplete(ToolCall {
+            id: call_id.to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            args_json: args.to_owned(),
+        })),
+        Ok(ProviderChunk::Done),
+    ]
+}
+
+struct PlanReviewInspectionTool;
+
+#[async_trait]
+impl Tool for PlanReviewInspectionTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "inspect_workspace".to_owned(),
+            description: "Returns one bounded read-only observation".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "inspect_workspace",
+            "bounded evidence",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[derive(Clone, Default)]
+struct LoopingPlanReviewProvider {
+    request_tools: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl Provider for LoopingPlanReviewProvider {
+    fn name(&self) -> &str {
+        "looping-plan-review"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        plan_review_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_names = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let request_index = {
+            let mut requests = self
+                .request_tools
+                .lock()
+                .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?;
+            let request_index = requests.len();
+            requests.push(tool_names.clone());
+            request_index
+        };
+        if tool_names.iter().any(|name| name == "inspect_workspace") && request_index < 8 {
+            let call_id = format!("inspect-{request_index}");
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: call_id.clone(),
+                    name: "inspect_workspace".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: call_id.clone(),
+                    delta: "{}".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: call_id,
+                    name: "inspect_workspace".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        if tool_names
+            .iter()
+            .any(|name| name == sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME)
+            && !tool_names.iter().any(|name| name == "inspect_workspace")
+        {
+            return Ok(Box::pin(stream::iter(submitted_draft_chunks(
+                "bounded-draft",
+            ))));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(
+                "research did not converge".to_owned(),
+            )),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[derive(Clone, Default)]
+struct InterruptedPlanReviewProvider {
+    request_tools: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl Provider for InterruptedPlanReviewProvider {
+    fn name(&self) -> &str {
+        "interrupted-plan-review"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        plan_review_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_names = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let request_index = {
+            let mut requests = self
+                .request_tools
+                .lock()
+                .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?;
+            let request_index = requests.len();
+            requests.push(tool_names.clone());
+            request_index
+        };
+        if request_index == 0 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(
+                    "partial research response".to_owned(),
+                )),
+                Err(anyhow!("simulated TLS unexpected EOF")),
+            ])));
+        }
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME)
+        );
+        assert!(!tool_names.iter().any(|name| name == "inspect_workspace"));
+        Ok(Box::pin(stream::iter(submitted_draft_chunks(
+            "recovered-draft",
+        ))))
+    }
+}
+
+#[derive(Clone, Default)]
+struct UncertainPlanReviewProvider {
+    request_tools: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl Provider for UncertainPlanReviewProvider {
+    fn name(&self) -> &str {
+        "uncertain-plan-review"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        plan_review_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.request_tools
+            .lock()
+            .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?
+            .push(request.tools.iter().map(|tool| tool.name.clone()).collect());
+        Err(anyhow!("simulated uncertain transport outcome"))
+    }
+}
+
+#[derive(Default)]
+struct RecordingPlanReviewEvents(Vec<RunEvent>);
+
+impl EventHandler for RecordingPlanReviewEvents {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        self.0.push(event);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn plan_review_research_is_bounded_and_finalizes_with_only_the_submit_tool() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (parent_session, request) = session_with_route_decision()?;
+    let parent_session = parent_session.with_store(JsonlSessionStore::new(
+        temp.path().join("sessions/session.jsonl"),
+    )?);
+    let provider = LoopingPlanReviewProvider::default();
+    let request_tools = Arc::clone(&provider.request_tools);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(PlanReviewInspectionTool));
+    let owner = RunCancellationOwner::new();
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let outcome = PlanReviewCoordinator::run_plan_review(
+        &parent_session,
+        &request,
+        &agent,
+        plan_review_test_options(temp.path()),
+        registry,
+        &mut handler,
+        &mut approval_handler,
+        owner.handle(),
+    )
+    .await?;
+
+    assert!(matches!(outcome, PlanReviewRunOutcome::DraftReady { .. }));
+    assert!(
+        owner.handle().is_naturally_finalized(),
+        "the coordinator must claim the root terminal only after its internal phases complete"
+    );
+    let requests = request_tools
+        .lock()
+        .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?;
+    assert_eq!(
+        requests.len(),
+        5,
+        "four research turns must be followed by exactly one finalization turn"
+    );
+    assert!(requests[..4].iter().all(|tools| {
+        tools.iter().any(|name| name == "inspect_workspace")
+            && tools
+                .iter()
+                .any(|name| name == sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME)
+    }));
+    assert_eq!(
+        requests[4],
+        vec![sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned()],
+        "the finalization turn must not retain research or hosted-tool preparation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_review_stream_interruption_uses_durable_evidence_for_submit_only_finalization()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (parent_session, request) = session_with_route_decision()?;
+    let parent_session = parent_session.with_store(JsonlSessionStore::new(
+        temp.path().join("sessions/session.jsonl"),
+    )?);
+    let provider = InterruptedPlanReviewProvider::default();
+    let request_tools = Arc::clone(&provider.request_tools);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(PlanReviewInspectionTool));
+    let owner = RunCancellationOwner::new();
+    let mut handler = RecordingPlanReviewEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let outcome = PlanReviewCoordinator::run_plan_review(
+        &parent_session,
+        &request,
+        &agent,
+        plan_review_test_options(temp.path()),
+        registry,
+        &mut handler,
+        &mut approval_handler,
+        owner.handle(),
+    )
+    .await?;
+
+    assert!(matches!(outcome, PlanReviewRunOutcome::DraftReady { .. }));
+    assert!(
+        owner.handle().is_naturally_finalized(),
+        "submit-only recovery must finalize the root cancellation tree exactly once"
+    );
+    let requests = request_tools
+        .lock()
+        .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?;
+    assert_eq!(requests.len(), 2, "the failed request must not be replayed");
+    assert!(requests[0].iter().any(|name| name == "inspect_workspace"));
+    assert_eq!(
+        requests[1],
+        vec![sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned()]
+    );
+    assert!(handler.0.iter().any(|event| matches!(
+        event,
+        RunEvent::Notice(message) if message.contains("submit-only finalization")
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_review_transport_uncertainty_is_not_automatically_replayed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (parent_session, request) = session_with_route_decision()?;
+    let parent_session = parent_session.with_store(JsonlSessionStore::new(
+        temp.path().join("sessions/session.jsonl"),
+    )?);
+    let provider = UncertainPlanReviewProvider::default();
+    let request_tools = Arc::clone(&provider.request_tools);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(PlanReviewInspectionTool));
+    let owner = RunCancellationOwner::new();
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = PlanReviewCoordinator::run_plan_review(
+        &parent_session,
+        &request,
+        &agent,
+        plan_review_test_options(temp.path()),
+        registry,
+        &mut handler,
+        &mut approval_handler,
+        owner.handle(),
+    )
+    .await
+    .expect_err("an uncertain request must require explicit recovery");
+
+    assert!(format!("{error:#}").contains("uncertain transport outcome"));
+    assert_eq!(
+        request_tools
+            .lock()
+            .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?
+            .len(),
+        1,
+        "transport uncertainty must not trigger an automatic submit-only request"
+    );
+    Ok(())
 }
 
 #[test]

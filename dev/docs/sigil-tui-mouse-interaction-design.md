@@ -1,6 +1,6 @@
 # Sigil TUI 鼠标交互功能设计
 
-状态：Implementation Snapshot（2026-08-03）
+状态：Implementation Snapshot（2026-08-15）
 
 本文定义 `sigil-tui` 支持鼠标交互时的产品边界、功能范围、事件模型、状态模型、实现分层、测试策略和分阶段交付计划。
 
@@ -16,7 +16,7 @@
 | 文本选择增强 | 已落地 | 支持按列选择、松开自动复制、`Ctrl-C` 失败重试、系统剪贴板与 OSC52 双适配器 |
 | Terminal capability / mouse capture 开关 | 已落地 | `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`[terminal].scroll_sensitivity` 进入配置、`/config` 和 `/doctor` |
 | Phase 4 小交互 | 已落地 | composer 点击定位光标、tool card header / hidden-preview 行展开/折叠、tool card hover visual state、可配置滚轮灵敏度 |
-| 推迟项 | 明确推迟 | hover tooltip/preview、双击手势、拖拽 resize、右键菜单、直接操作 terminal 原生 scrollback |
+| 推迟项 | 明确推迟 | hover tooltip/preview、双击手势、拖拽 resize、右键菜单 |
 
 相关约束：
 
@@ -44,8 +44,8 @@
 3. 鼠标动作必须复用现有 `AppState` 行为与 `AppAction`，不能绕过审批、session 或 worker command 路径。
 4. 鼠标交互不能破坏当前 chat/composer-first 心智：
    - composer 默认保持主输入位置
-   - stable history 仍优先进入 terminal 原生 scrollback
-   - live panel 只承载当前尾部、当前状态和可操作卡片
+   - stable history 与 live tail 都由 alternate-screen 内的应用时间线管理
+   - live panel 承载当前可见历史窗口、当前状态和可操作卡片
 
 ### 2.2 工程目标
 
@@ -63,7 +63,7 @@
 2. hover tooltip 或 hover preview。
 3. 双击、三击、多指手势。
 4. 依赖 GUI 桌面事件的能力。
-5. 鼠标直接操作 terminal 原生 scrollback 中的历史消息。
+5. 在应用退出后继续操作已经离开的 alternate-screen 内容。
 
 这些能力可以作为后续扩展，但不进入当前实现闭环。
 
@@ -164,7 +164,7 @@ Phase 1 目标是让鼠标在主要 TUI 表面可用，但不碰审批安全动�
 
 - hover tooltip / preview
 - 双击、右键菜单、拖拽 resize
-- terminal 原生 scrollback 历史消息直接操作
+- 已经离开的 alternate-screen 历史内容直接操作
 
 ### 5.2 Phase 2：审批 modal 鼠标支持
 
@@ -220,7 +220,7 @@ Phase 3 目标是让 setup/config/session selector 也能被鼠标操作。
 
 1. hover tooltip 或 hover preview。
 2. 双击、右键菜单、拖拽 resize。
-3. 鼠标直接操作 terminal 原生 scrollback 中的历史消息。
+3. 在应用退出后继续操作已经离开的 alternate-screen 内容。
 
 ## 6. 信息架构与区域模型
 
@@ -842,7 +842,7 @@ cargo check -p sigil-tui
    - 不支持 OSC52 的终端可关闭 `[terminal].osc52_clipboard`；系统剪贴板仍会独立尝试
    - 滚轮步长通过 `[terminal].scroll_sensitivity` 调整
 6. 仍推迟哪些鼠标能力？
-   - hover tooltip/preview、双击手势、拖拽 resize、右键菜单、直接操作 terminal 原生 scrollback
+   - hover tooltip/preview、双击手势、拖拽 resize、右键菜单
 
 ## 16. 当前结论
 

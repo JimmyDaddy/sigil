@@ -1,6 +1,6 @@
 # RFC-0063 Automatic Plan Review and Default AI Orchestration V1
 
-状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5，2026-08-06 复核通过——修复均在 main，§14 targeted gates、desktop contract drift check 与 `pnpm --dir apps/desktop check` 全绿；real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
+状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5；2026-08-14 的真实 PlanReview session 复盘与收敛修复见 §13.8；real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
 
 创建日期：2026-08-03
 
@@ -640,9 +640,14 @@ PlanReview 默认 tool surface：
 
 - trusted workspace read tools；
 - read-only code-intelligence；
-- 受既有 egress/disclosure/network policy 约束的 read-only remote capability；
 - 一次 bounded host-owned read-only Explore discovery；
 - `submit_plan_draft` internal tool。
+
+当前 PlanReview 不继承普通 conversation 的 `websearch`/provider-hosted search、`webfetch` 或
+remote MCP preparer。scoped registry 必须把 request-level preparer 与其依赖的模型可见 capability
+一起裁剪，不能在工具已被 read-only scope 移除后继续向 provider request 注入 hosted capability、
+产生 disclosure 或消耗 web budget。未来若要让 plan review 使用 remote read，必须单独定义有界
+egress/tool surface 与对应 disclosure、预算和恢复契约，不能依赖普通 conversation 的隐式继承。
 
 PlanReview 禁止：
 
@@ -1133,6 +1138,43 @@ conversation_coordinator / plan_review`、`cargo test -p sigil-tui plan / routin
 --check` 与 `pnpm --dir apps/desktop check` 通过。剩余 release 门槛不变：real-model campaign
 （§12.2 三路 eval，消耗真实额度）与 current-source Desktop E2E（需 CI 复验）未通过前不得标记
 implemented。
+
+## 13.8 Real-session convergence and provider-interruption remediation（2026-08-14）
+
+对 session `72d5c0cc-73c3-4e1d-9530-5da992cb1fba` 的 parent/child JSONL 逐条复盘确认：
+PlanReview 在约 335 秒内发起 10 次 provider physical attempt、完成 26 次只读工具调用，却没有调用
+`submit_plan_draft`；child request prefix 从约 13 KiB 增长到 238 KiB，最后一次响应已产生输出后因
+TLS `unexpected EOF` 被 durable 分类为 `ProtocolRejectedAfterOutput`，原实现直接把整个 review
+终止为 Failed。该 session 同时暴露出普通 conversation 的 hosted preparer 被 PlanReview scoped
+registry 隐式继承，以及旧配置把历史默认 `4/3` 固化为显式 web cap 的问题。
+
+本轮将 PlanReview 收敛契约改为两个 host-owned phase：research phase 最多 4 个 model turn；随后
+最多 1 个 submit-only finalization turn，后者只暴露 internal `submit_plan_draft`，不得继续研究或
+继承 ordinary-conversation hosted preparer。若 research 正常完成但未提交 draft，或 durable
+physical-attempt 明确为 `ProtocolRejectedAfterOutput`，只允许基于 child session 已记录证据进入这
+一次 finalization；`TransportOutcomeUncertain`、零输出连接失败或其他未证明边界不自动重放。
+两个内部 phase 使用 child cancellation，外层 coordinator 只在最终 outcome 确定后竞争一次 root
+natural terminal，避免子 run 提前 finalize 使后续收尾失去监督。
+
+hosted request-level preparer 现在绑定其真实模型可见 capability；`websearch` 被 PlanReview allow/deny
+scope 移除后，不再注入 hosted tool、展示 disclosure 或占用 hosted budget。ordinary hosted request
+先取得 provisional reservation，只有 provider stream 已建立、provider 已响应或 transport outcome
+不确定时才 commit request count；pre-wire validation、本地 pre-dispatch cancellation 和已证明的
+`ConnectFailedBeforeDispatch` 会写唯一 terminal outcome 并释放 reservation。预算耗尽判断先于
+disclosure，未发送的请求不再产生虚假披露。
+
+新增回归覆盖：4 research + 1 submit-only 的精确请求分布、TLS 输出后中断的 submit-only recovery、
+uncertain transport 不重放、PlanReview scope 的零 hosted injection/disclosure/charge、pre-wire 与
+本地 cancellation refund、connect retry 复用一次 provisional reservation、全量 pre-dispatch connect
+failure refund，以及 stream established/NotUsed 和 uncertain transport 均只收费一次。RFC 状态仍为
+implementation-in-progress；本轮不替代 §12 的 real-model campaign 与 Desktop E2E release 门槛。
+
+本轮实际 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`
+（0 failed）、`cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`
+（Vitest 276/276 + production build）、desktop contract drift、`./scripts/check-docs.sh`、
+`python3 scripts/test-tui-stateful-pty-acceptance.py`（45/45）与 `git diff --check` 全部通过。
+需要 checksum-pinned DeepSeek V4 tokenizer 的 real-binary stateful PTY campaign 本机未执行，不能由
+上述 deterministic terminal replay 冒充。
 
 ## 14. Validation plan
 

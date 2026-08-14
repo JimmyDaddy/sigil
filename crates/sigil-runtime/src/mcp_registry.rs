@@ -1671,12 +1671,16 @@ pub fn attach_remote_mcp_activation_presenter(
         provider_capabilities.tool_name_max_chars,
         Arc::clone(&presenter),
     );
-    registry.set_run_input_preparer(Arc::new(
-        crate::hosted_web_search::HostedWebSearchInputPreparer::new(
+    registry.set_run_input_preparer_for_tools(
+        Arc::new(crate::hosted_web_search::HostedWebSearchInputPreparer::new(
             root_config.clone(),
             Arc::clone(&presenter),
+        )),
+        sigil_kernel::ToolRegistryScope::from_names_and_prefixes(
+            ["websearch"],
+            std::iter::empty::<&str>(),
         ),
-    ));
+    );
     if !root_config
         .mcp_servers
         .iter()

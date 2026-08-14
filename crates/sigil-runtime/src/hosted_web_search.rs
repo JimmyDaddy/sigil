@@ -4,19 +4,21 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentHostedTurn, AgentHostedTurnPreparer, AgentRunInput, AgentRunInputPreparer, ApprovalMode,
-    EgressAuditRecorder, EgressDataCategory, EgressDisclosureKind, EgressDisclosurePresenter,
-    EgressNetworkRoute, FinalizedHostedTurn, HostedConstraintEnforcement,
-    HostedCustomToolCompatibility, HostedEvidenceProcessor, HostedFinalizationContext,
-    HostedToolAuthorization, HostedToolKind, HostedToolLimits, HostedToolRequest,
-    HostedToolTerminalStatus, HostedTurnBuffer, HostedTurnError, HostedWebSearchCapability,
-    NetworkPolicy, PreEgressDisclosure, Provider, RootConfig, Session, WebBudgetReservationKind,
-    WebBudgetReservationRequest, WebSearchRoute, WebTaskTreeBudget, validate_disclosure_receipt,
+    AgentHostedTurn, AgentHostedTurnDispatchLifecycle, AgentHostedTurnPreparer, AgentRunInput,
+    AgentRunInputPreparer, ApprovalMode, EgressAuditRecorder, EgressDataCategory,
+    EgressDisclosureKind, EgressDisclosurePresenter, EgressNetworkRoute, FinalizedHostedTurn,
+    HostedConstraintEnforcement, HostedCustomToolCompatibility, HostedEvidenceProcessor,
+    HostedFinalizationContext, HostedToolAuthorization, HostedToolKind, HostedToolLimits,
+    HostedToolRequest, HostedToolTerminalStatus, HostedTurnBuffer, HostedTurnError,
+    HostedWebSearchCapability, NetworkPolicy, PreEgressDisclosure, Provider, RootConfig, Session,
+    WebBudgetReservationKind, WebBudgetReservationRequest, WebSearchRoute, WebTaskTreeBudget,
+    validate_disclosure_receipt,
 };
 use url::Url;
 
 use crate::{
-    ActiveHostedEgress, EgressOrderingCoordinator, HostedEvidenceFinalizer, hosted_terminal_status,
+    ActiveHostedEgress, AuthorizedHostedEgress, EgressOrderingCoordinator, HostedEvidenceFinalizer,
+    hosted_terminal_status,
 };
 
 pub(crate) struct HostedWebSearchInputPreparer {
@@ -140,10 +142,6 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
                 EgressDataCategory::ConnectionMetadata,
             ],
         )?;
-        let receipt = self.presenter.present(disclosure.clone()).await?;
-        self.recorder
-            .append_disclosure_presented(&validate_disclosure_receipt(&disclosure, receipt)?)?;
-
         let reservation = match self.budget.reserve(WebBudgetReservationRequest {
             correlation_id: correlation_id.clone(),
             attempt_id: format!("hosted-web-attempt-{unique}"),
@@ -158,6 +156,9 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
             Err(sigil_kernel::WebBudgetError::Exhausted { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        let receipt = self.presenter.present(disclosure.clone()).await?;
+        self.recorder
+            .append_disclosure_presented(&validate_disclosure_receipt(&disclosure, receipt)?)?;
         let authorization = HostedToolAuthorization {
             record_id: format!("hosted-web-authorization-record-{unique}"),
             root_run_id,
@@ -170,16 +171,16 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
             effect: ApprovalMode::Allow,
             scope: sigil_kernel::HostedAuthorizationScope::ProviderRequest,
         };
-        let active = EgressOrderingCoordinator::new(self.recorder.clone(), None)
-            .authorize_hosted_request(&authorization, reservation, &|| true)?
-            .begin_request()?;
+        let authorized = EgressOrderingCoordinator::new(self.recorder.clone(), None)
+            .authorize_hosted_request(&authorization, reservation, &|| true)?;
         let processor = Arc::new(AuthorizedHostedFinalizer {
             inner: HostedEvidenceFinalizer::new(crate::web_search_tool::current_rfc3339()),
-            active: Mutex::new(Some(active)),
+            state: Mutex::new(AuthorizedHostedState::Authorized(authorized)),
         });
         Ok(Some(AgentHostedTurn {
             hosted_tools: vec![request],
-            evidence_processor: processor,
+            evidence_processor: Arc::clone(&processor) as Arc<dyn HostedEvidenceProcessor>,
+            dispatch_lifecycle: processor,
         }))
     }
 }
@@ -270,7 +271,45 @@ fn hosted_limits(root: &RootConfig, capability: HostedWebSearchCapability) -> Ho
 
 struct AuthorizedHostedFinalizer {
     inner: HostedEvidenceFinalizer,
-    active: Mutex<Option<ActiveHostedEgress>>,
+    state: Mutex<AuthorizedHostedState>,
+}
+
+enum AuthorizedHostedState {
+    Authorized(AuthorizedHostedEgress),
+    Active(ActiveHostedEgress),
+    Terminal,
+}
+
+impl AgentHostedTurnDispatchLifecycle for AuthorizedHostedFinalizer {
+    fn mark_dispatched(&self) -> Result<(), HostedTurnError> {
+        let mut state = self.state.lock().map_err(|_| hosted_egress_lock_error())?;
+        let current = std::mem::replace(&mut *state, AuthorizedHostedState::Terminal);
+        match current {
+            AuthorizedHostedState::Authorized(authorized) => {
+                let active = authorized.begin_request().map_err(hosted_egress_error)?;
+                *state = AuthorizedHostedState::Active(active);
+            }
+            AuthorizedHostedState::Active(active) => {
+                *state = AuthorizedHostedState::Active(active);
+            }
+            AuthorizedHostedState::Terminal => {}
+        }
+        Ok(())
+    }
+
+    fn finish(&self, status: HostedToolTerminalStatus) -> Result<(), HostedTurnError> {
+        let mut state = self.state.lock().map_err(|_| hosted_egress_lock_error())?;
+        let current = std::mem::replace(&mut *state, AuthorizedHostedState::Terminal);
+        match current {
+            AuthorizedHostedState::Authorized(authorized) => authorized
+                .finish_without_request(status)
+                .map_err(hosted_egress_error),
+            AuthorizedHostedState::Active(active) => {
+                active.finish(status).map_err(hosted_egress_error)
+            }
+            AuthorizedHostedState::Terminal => Ok(()),
+        }
+    }
 }
 
 #[async_trait]
@@ -280,19 +319,15 @@ impl HostedEvidenceProcessor for AuthorizedHostedFinalizer {
         context: HostedFinalizationContext,
         buffer: &HostedTurnBuffer,
     ) -> Result<FinalizedHostedTurn, HostedTurnError> {
+        self.mark_dispatched()?;
         let finalized = self.inner.finalize(context, buffer).await;
-        let mut active = self
-            .active
-            .lock()
-            .map_err(|_| {
-                HostedTurnError::FinalizationFailed("hosted egress lock poisoned".to_owned())
-            })?
-            .take()
-            .ok_or_else(|| {
-                HostedTurnError::FinalizationFailed(
-                    "hosted egress slot missing at finalization".to_owned(),
-                )
-            })?;
+        let mut state = self.state.lock().map_err(|_| hosted_egress_lock_error())?;
+        let current = std::mem::replace(&mut *state, AuthorizedHostedState::Terminal);
+        let AuthorizedHostedState::Active(mut active) = current else {
+            return Err(HostedTurnError::FinalizationFailed(
+                "hosted egress was already terminal before evidence finalization".to_owned(),
+            ));
+        };
         match finalized {
             Ok(finalized) => {
                 active
@@ -327,12 +362,29 @@ impl HostedEvidenceProcessor for AuthorizedHostedFinalizer {
 
 impl Drop for AuthorizedHostedFinalizer {
     fn drop(&mut self) {
-        if let Ok(slot) = self.active.get_mut()
-            && let Some(active) = slot.take()
-        {
-            let _ = active.finish(HostedToolTerminalStatus::RequestFailed);
+        let state = match self.state.get_mut() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let current = std::mem::replace(state, AuthorizedHostedState::Terminal);
+        match current {
+            AuthorizedHostedState::Authorized(authorized) => {
+                let _ = authorized.finish_without_request(HostedToolTerminalStatus::RequestFailed);
+            }
+            AuthorizedHostedState::Active(active) => {
+                let _ = active.finish(HostedToolTerminalStatus::RequestFailed);
+            }
+            AuthorizedHostedState::Terminal => {}
         }
     }
+}
+
+fn hosted_egress_lock_error() -> HostedTurnError {
+    HostedTurnError::FinalizationFailed("hosted egress lock poisoned".to_owned())
+}
+
+fn hosted_egress_error(error: impl std::fmt::Display) -> HostedTurnError {
+    HostedTurnError::FinalizationFailed(format!("hosted egress lifecycle failed: {error}"))
 }
 
 fn sha256(value: &str) -> String {

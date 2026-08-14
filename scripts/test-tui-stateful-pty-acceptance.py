@@ -64,6 +64,21 @@ class VtScreenTests(unittest.TestCase):
         self.assertEqual(screen.text().count(canary), 1)
         self.assertIn("updated", screen.text())
 
+    def test_leaving_alternate_screen_restores_the_primary_buffer(self) -> None:
+        screen = MODULE.VtScreen(rows=3, cols=20)
+        screen.feed(b"shell prompt")
+        screen.feed(MODULE.ENTER_ALTERNATE_SCREEN + b"application frame")
+
+        self.assertTrue(screen.alternate_screen_active)
+        self.assertIn("application frame", screen.text())
+        self.assertNotIn("shell prompt", screen.text())
+
+        screen.feed(MODULE.LEAVE_ALTERNATE_SCREEN)
+
+        self.assertFalse(screen.alternate_screen_active)
+        self.assertIn("shell prompt", screen.text())
+        self.assertNotIn("application frame", screen.text())
+
     def test_cursor_position_and_line_erase_match_ratatui_style_updates(self) -> None:
         screen = MODULE.VtScreen(rows=4, cols=20)
         screen.feed(b"\x1b[2;4Hbefore\x1b[2;4H\x1b[Kafter")
@@ -221,20 +236,47 @@ class PtyRunnerTerminalContractTests(unittest.TestCase):
         )
         self.assertEqual(runner.cpr_request_count, 1)
 
-    def test_native_inline_scrollback_requires_a_real_scroll_region_sequence(self) -> None:
+    def test_fullscreen_lifecycle_is_detected_without_native_scrollback(self) -> None:
         runner = MODULE.PtyRunner(
             ["sigil"],
             Path("."),
             {},
             Path("unused.log"),
+            rows=3,
+            cols=5,
         )
-        runner.output.extend(b"\x1b[3;8r\x1b[2S\x1b[r")
+        runner.output.extend(MODULE.ENTER_ALTERNATE_SCREEN + b"\x1b[1;1HFRAME")
 
-        self.assertTrue(runner.observed_native_inline_scrollback())
-
-        runner.output.clear()
-        runner.output.extend(b"\x1b[3;8r\x1b[2S")
+        self.assertTrue(runner.entered_alternate_screen())
+        self.assertFalse(runner.left_alternate_screen())
         self.assertFalse(runner.observed_native_inline_scrollback())
+        self.assertFalse(runner.emitted_single_line_scrolling_region())
+
+        runner.output.extend(MODULE.LEAVE_ALTERNATE_SCREEN)
+
+        self.assertTrue(runner.left_alternate_screen())
+        self.assertFalse(runner.observed_native_inline_scrollback())
+
+    def test_fullscreen_startup_purges_history_and_clears_the_active_screen(self) -> None:
+        runner = MODULE.PtyRunner(
+            ["sigil"],
+            Path("."),
+            {},
+            Path("unused.log"),
+            rows=3,
+            cols=20,
+        )
+        runner.output.extend(
+            MODULE.ENTER_ALTERNATE_SCREEN
+            + MODULE.ERASE_SCROLLBACK
+            + MODULE.CLEAR_SCREEN
+            + MODULE.CURSOR_HOME
+            + b"application frame"
+        )
+
+        self.assertTrue(runner.entered_alternate_screen())
+        self.assertEqual(runner.terminal().history_text(), "")
+        self.assertIn("application frame", runner.screen())
 
     def test_terminal_replay_applies_resize_at_the_recorded_output_boundary(self) -> None:
         runner = MODULE.PtyRunner(

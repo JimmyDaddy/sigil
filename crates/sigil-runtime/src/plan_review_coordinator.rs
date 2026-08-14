@@ -3,14 +3,15 @@ use std::path::Path;
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
-    Agent, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunPurpose, ControlEntry,
-    ConversationRoute, ConversationRouteDecisionProjection, ConversationTurnRef, EventHandler,
-    IntentAcceptanceAuthorityV1, IntentAdmissionContextV1, IntentStackId, ModelMessage,
-    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
-    PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus, PlanReviewId,
-    PlanReviewProjection, PlanReviewSource, PlanReviewTerminalReason, PlanSourceRef,
-    PlanTaskStartMode, Session, SessionLogEntry, SessionRef, StartPlanReviewAction,
+    Agent, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunPurpose,
+    AgentRunTerminalReason, ControlEntry, ConversationRoute, ConversationRouteDecisionProjection,
+    ConversationTurnRef, EventHandler, IntentAcceptanceAuthorityV1, IntentAdmissionContextV1,
+    IntentStackId, ModelMessage, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
+    PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId,
+    PlanPermissionGrantedEntry, PlanReviewAttemptEntry, PlanReviewAttemptId,
+    PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection, PlanReviewSource,
+    PlanReviewTerminalReason, PlanSourceRef, PlanTaskStartMode, ProviderPhysicalAttemptOutcome,
+    RunEvent, Session, SessionLogEntry, SessionRef, StartPlanReviewAction,
     TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
     admit_suggested_decomposition, append_task_intent_plan_admission, bind_task_plan_intents,
     build_workspace_snapshot, plan_review_attempt_id_for_review,
@@ -24,6 +25,9 @@ use sigil_kernel::{
 use sigil_kernel::ApprovalHandler;
 
 use crate::{RootConfig, attach_session_url_capability_store};
+
+const PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS: usize = 4;
+const PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS: usize = 1;
 
 /// Host-owned outcome of one plan review run.
 #[derive(Debug, Clone)]
@@ -247,8 +251,10 @@ impl PlanReviewCoordinator {
     /// Runs the read-only plan review child session.
     ///
     /// The run uses the read-only tool registry, never writes to the parent session, and closes
-    /// with a validated typed draft. When the model finishes without a draft, the host injects one
-    /// bounded retry contract; a second draft-less finish closes with `CompletedWithoutDraft`.
+    /// with a validated typed draft. Research is bounded independently from an ordinary agent run.
+    /// If research reaches that bound, finishes without a draft, or loses a provider stream at a
+    /// typed recoverable boundary, the host starts one submit-only finalization turn. A draft-less
+    /// finalization closes with `CompletedWithoutDraft`.
     #[allow(clippy::too_many_arguments)]
     pub async fn run_plan_review<H, A>(
         parent_session: &Session,
@@ -276,90 +282,166 @@ impl PlanReviewCoordinator {
             source: request.plan_source_ref(),
             workspace_snapshot_id: request.workspace_snapshot_id.clone(),
         };
-        for attempt in 0..=1 {
-            if cancellation.is_cancel_requested() {
+        if cancellation.is_cancel_requested() {
+            return Ok(PlanReviewRunOutcome::Cancelled);
+        }
+
+        let configured_max_turns = options.max_turns;
+        let host_imposed_research_cap = configured_max_turns
+            .is_none_or(|max_turns| max_turns > PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS);
+        let mut research_options = options.clone();
+        research_options.max_turns = Some(
+            configured_max_turns
+                .unwrap_or(PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS)
+                .min(PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS),
+        );
+        let research_input = plan_review_run_input(request, &draft_context, &cancellation, false);
+        let research = agent
+            .run_with_approval_input_and_tool_registry(
+                &mut child_session,
+                research_input,
+                research_options,
+                tool_registry,
+                handler,
+                approval_handler,
+            )
+            .await;
+        let recovery_cause = match research {
+            Ok(_) if cancellation.is_cancel_requested() => {
                 return Ok(PlanReviewRunOutcome::Cancelled);
             }
-            let mut transient = vec![ModelMessage::system(
-                plan_review_system_prompt_contract_material(),
-            )];
-            if attempt == 1 {
-                transient.push(ModelMessage::system(
-                    plan_review_no_draft_retry_contract_material(),
-                ));
-            }
-            transient.push(ModelMessage::user(request.objective.clone()));
-            let input = AgentRunInput::without_persisted_user_message(transient)
-                .with_logical_run_id(request.child_logical_run_id())
-                .with_cancellation(cancellation.clone())
-                .with_run_purpose(AgentRunPurpose::PlanReview(
-                    sigil_kernel::PlanReviewPurposeContext {
-                        plan_review_id: request.plan_review_id.clone(),
-                        attempt_id: request.attempt_id.clone(),
-                        plan_id: request.plan_id.clone(),
-                        source_turn: request.source_turn.clone(),
-                        route_decision_id: request.route_decision_id.clone(),
-                    },
-                ))
-                .with_plan_review_draft(draft_context.clone());
-            let output = agent
-                .run_with_approval_input_and_tool_registry(
-                    &mut child_session,
-                    input,
-                    options.clone(),
-                    tool_registry.clone(),
-                    handler,
-                    approval_handler,
-                )
-                .await?;
-            match output.disposition {
+            Ok(output) => match output.disposition {
                 AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
-                    let draft = child_session
-                        .plan_artifact_projection()
-                        .plans
-                        .get(&action.plan_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "plan review draft {} is missing from its child session",
-                                action.plan_id.as_str()
-                            )
-                        })?;
-                    return Ok(PlanReviewRunOutcome::DraftReady {
-                        draft: Box::new(draft),
-                    });
+                    let outcome = plan_review_draft_ready_outcome(&child_session, &action.plan_id)?;
+                    return complete_plan_review_run(&cancellation, outcome);
                 }
-                AgentRunDisposition::FinalAnswer => {
-                    if attempt == 0 {
-                        continue;
-                    }
-                    return Ok(PlanReviewRunOutcome::CompletedWithoutDraft);
+                AgentRunDisposition::FinalAnswer => None,
+                AgentRunDisposition::Interrupted
+                    if host_imposed_research_cap
+                        && output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns =>
+                {
+                    handler.handle(RunEvent::Notice(format!(
+                        "Plan review research reached its {PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS}-turn bound; continuing with one submit-only finalization turn."
+                    )))?;
+                    None
                 }
                 AgentRunDisposition::Interrupted => {
-                    return Ok(PlanReviewRunOutcome::Interrupted(
-                        "plan review run was interrupted before a draft".to_owned(),
-                    ));
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Interrupted(
+                            "plan review run was interrupted before a draft".to_owned(),
+                        ),
+                    );
                 }
                 AgentRunDisposition::Blocked => {
-                    return Ok(PlanReviewRunOutcome::Failed(
-                        "plan review run was blocked before a draft".to_owned(),
-                    ));
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Failed(
+                            "plan review run was blocked before a draft".to_owned(),
+                        ),
+                    );
                 }
                 AgentRunDisposition::StartDurableTask(_)
                 | AgentRunDisposition::ContinueDurableTask(_)
                 | AgentRunDisposition::TaskPlanAccepted => {
-                    return Ok(PlanReviewRunOutcome::Failed(
-                        "plan review run attempted an out-of-scope handoff".to_owned(),
-                    ));
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Failed(
+                            "plan review run attempted an out-of-scope handoff".to_owned(),
+                        ),
+                    );
                 }
                 AgentRunDisposition::StartPlanReview(_) => {
-                    return Ok(PlanReviewRunOutcome::Failed(
-                        "plan review run requested a nested plan review".to_owned(),
-                    ));
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Failed(
+                            "plan review run requested a nested plan review".to_owned(),
+                        ),
+                    );
                 }
+            },
+            Err(error) => {
+                if cancellation.is_cancel_requested() {
+                    return Ok(PlanReviewRunOutcome::Cancelled);
+                }
+                let recovery_allowed =
+                    match plan_review_provider_terminal_allows_submit_only_recovery(
+                        &child_session,
+                        &request.child_logical_run_id(),
+                    ) {
+                        Ok(recovery_allowed) => recovery_allowed,
+                        Err(projection_error) => {
+                            return Err(error.context(format!(
+                        "plan review provider failure could not be classified from durable physical-attempt evidence: {projection_error:#}"
+                    )));
+                        }
+                    };
+                if !recovery_allowed {
+                    return Err(error);
+                }
+                handler.handle(RunEvent::Notice(
+                    "Plan review provider stream ended before a durable result; continuing with one submit-only finalization turn from the recorded read-only evidence."
+                        .to_owned(),
+                ))?;
+                Some(format!("{error:#}"))
             }
+        };
+
+        if cancellation.is_cancel_requested() {
+            return Ok(PlanReviewRunOutcome::Cancelled);
         }
-        Ok(PlanReviewRunOutcome::CompletedWithoutDraft)
+        let mut finalization_options = options;
+        finalization_options.max_turns = Some(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS);
+        let finalization_input =
+            plan_review_run_input(request, &draft_context, &cancellation, true);
+        let finalization = agent
+            .run_with_approval_input_and_tool_registry(
+                &mut child_session,
+                finalization_input,
+                finalization_options,
+                sigil_kernel::ToolRegistry::new(),
+                handler,
+                approval_handler,
+            )
+            .await;
+        let output = match (finalization, recovery_cause) {
+            (Ok(_), _) if cancellation.is_cancel_requested() => {
+                return Ok(PlanReviewRunOutcome::Cancelled);
+            }
+            (Ok(output), _) => output,
+            (Err(_), _) if cancellation.is_cancel_requested() => {
+                return Ok(PlanReviewRunOutcome::Cancelled);
+            }
+            (Err(error), Some(recovery_cause)) => {
+                return Err(error.context(format!(
+                    "plan review submit-only recovery failed after the research stream ended early ({recovery_cause})"
+                )));
+            }
+            (Err(error), None) => {
+                return Err(error.context("plan review submit-only finalization failed"));
+            }
+        };
+        let outcome = match output.disposition {
+            AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
+                plan_review_draft_ready_outcome(&child_session, &action.plan_id)?
+            }
+            AgentRunDisposition::FinalAnswer => PlanReviewRunOutcome::CompletedWithoutDraft,
+            AgentRunDisposition::Interrupted => PlanReviewRunOutcome::Interrupted(
+                "plan review finalization was interrupted before a draft".to_owned(),
+            ),
+            AgentRunDisposition::Blocked => PlanReviewRunOutcome::Failed(
+                "plan review finalization was blocked before a draft".to_owned(),
+            ),
+            AgentRunDisposition::StartDurableTask(_)
+            | AgentRunDisposition::ContinueDurableTask(_)
+            | AgentRunDisposition::TaskPlanAccepted => PlanReviewRunOutcome::Failed(
+                "plan review finalization attempted an out-of-scope handoff".to_owned(),
+            ),
+            AgentRunDisposition::StartPlanReview(_) => PlanReviewRunOutcome::Failed(
+                "plan review finalization requested a nested plan review".to_owned(),
+            ),
+        };
+        complete_plan_review_run(&cancellation, outcome)
     }
 
     /// Commits a validated draft from the plan review child session into the parent session.
@@ -1187,6 +1269,85 @@ fn append_attempt_status(
     projection.validate_append(&entry)?;
     session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
     Ok(())
+}
+
+fn plan_review_run_input(
+    request: &PlanReviewRunRequest,
+    draft_context: &sigil_kernel::PlanReviewDraftContext,
+    cancellation: &sigil_kernel::RunCancellationHandle,
+    finalization_only: bool,
+) -> AgentRunInput {
+    let mut transient = vec![ModelMessage::system(
+        plan_review_system_prompt_contract_material(),
+    )];
+    if finalization_only {
+        transient.push(ModelMessage::system(
+            plan_review_no_draft_retry_contract_material(),
+        ));
+    }
+    transient.push(ModelMessage::user(request.objective.clone()));
+    AgentRunInput::without_persisted_user_message(transient)
+        .with_logical_run_id(request.child_logical_run_id())
+        .with_child_cancellation(cancellation.clone())
+        .with_run_purpose(AgentRunPurpose::PlanReview(
+            sigil_kernel::PlanReviewPurposeContext {
+                plan_review_id: request.plan_review_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                plan_id: request.plan_id.clone(),
+                source_turn: request.source_turn.clone(),
+                route_decision_id: request.route_decision_id.clone(),
+            },
+        ))
+        .with_plan_review_draft(draft_context.clone())
+}
+
+fn plan_review_draft_ready_outcome(
+    child_session: &Session,
+    plan_id: &PlanId,
+) -> Result<PlanReviewRunOutcome> {
+    let draft = child_session
+        .plan_artifact_projection()
+        .plans
+        .get(plan_id)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "plan review draft {} is missing from its child session",
+                plan_id.as_str()
+            )
+        })?;
+    Ok(PlanReviewRunOutcome::DraftReady {
+        draft: Box::new(draft),
+    })
+}
+
+fn complete_plan_review_run(
+    cancellation: &sigil_kernel::RunCancellationHandle,
+    outcome: PlanReviewRunOutcome,
+) -> Result<PlanReviewRunOutcome> {
+    if !cancellation.is_naturally_finalized() && !cancellation.try_finalize_naturally() {
+        if cancellation.is_cancel_requested() {
+            return Ok(PlanReviewRunOutcome::Cancelled);
+        }
+        bail!("run cancellation won before plan review completion");
+    }
+    Ok(outcome)
+}
+
+fn plan_review_provider_terminal_allows_submit_only_recovery(
+    child_session: &Session,
+    logical_run_id: &str,
+) -> Result<bool> {
+    let projection = child_session.provider_physical_attempt_projection()?;
+    let outcome = projection
+        .attempts_for_logical_run_id(logical_run_id)
+        .last()
+        .and_then(|attempt| attempt.terminal.as_ref())
+        .map(|terminal| terminal.outcome);
+    Ok(matches!(
+        outcome,
+        Some(ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput)
+    ))
 }
 
 fn build_plan_review_child_session(

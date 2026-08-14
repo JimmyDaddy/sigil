@@ -302,7 +302,27 @@ impl std::fmt::Debug for AuthorizedHostedEgress {
 }
 
 impl AuthorizedHostedEgress {
-    /// Commits the hosted-request count at the provider request first-byte boundary.
+    /// Appends the unique terminal outcome while the provider request is still proven
+    /// undispatched. Dropping the provisional reservation refunds it without charging the hosted
+    /// request dimension.
+    pub fn finish_without_request(
+        mut self,
+        status: HostedToolTerminalStatus,
+    ) -> Result<(), EgressOrderingError> {
+        if matches!(
+            status,
+            HostedToolTerminalStatus::Observed | HostedToolTerminalStatus::NotUsed
+        ) {
+            return Err(EgressOrderingError::BindingMismatch);
+        }
+        self.recorder
+            .append_hosted_outcome(&hosted_outcome(&self.authorization, status))?;
+        self.reservation.take();
+        Ok(())
+    }
+
+    /// Commits the hosted-request count when provider dispatch is known or a provider response
+    /// proves the request crossed the local pre-wire boundary.
     pub fn begin_request(mut self) -> Result<ActiveHostedEgress, EgressOrderingError> {
         let mut reservation = self
             .reservation

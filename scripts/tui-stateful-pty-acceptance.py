@@ -79,7 +79,7 @@ def stateful_history_response_body(request_index: int) -> str:
     if request_index == 2:
         suffix = f"{suffix} {QUEUED_FOLLOW_UP_REPLY}"
     # Ctrl-Home renders the beginning of the oldest long response. Keep a dedicated marker at
-    # that boundary; the suffix remains useful for native-scrollback and de-duplication checks.
+    # that boundary; the suffix remains useful for durable session de-duplication checks.
     return f"{history_head_canary(request_index)} " + ("verified-history " * 4000) + suffix
 
 
@@ -87,13 +87,18 @@ COMMIT_PATTERN = re.compile(r"^[0-9a-f]{12,40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 CURSOR_POSITION_QUERY = b"\x1b[6n"
 CURSOR_POSITION_RESPONSE = b"\x1b[1;1R"
+ENTER_ALTERNATE_SCREEN = b"\x1b[?1049h"
+LEAVE_ALTERNATE_SCREEN = b"\x1b[?1049l"
+ERASE_SCROLLBACK = b"\x1b[3J"
+CLEAR_SCREEN = b"\x1b[2J"
+CURSOR_HOME = b"\x1b[1;1H"
 # Use Crossterm's complete CSI-u encoding for Escape. Unlike a lone ESC byte, it cannot remain
 # buffered as the prefix of a later key while the PTY is being resized or redrawn.
 ESCAPE_KEY_SEQUENCE = b"\x1b[27u"
 # XTerm-compatible modified Home/End sequences decoded by Crossterm as Ctrl-Home/Ctrl-End.
 CTRL_HOME_KEY_SEQUENCE = b"\x1b[1;5H"
 CTRL_END_KEY_SEQUENCE = b"\x1b[1;5F"
-SCROLL_REGION_UP_PATTERN = re.compile(rb"\x1b\[\d+;\d+r\x1b\[\d+S\x1b\[r")
+SINGLE_LINE_SCROLL_REGION_PATTERN = re.compile(rb"\x1b\[(\d+);\1r\x1b\[\d+S\x1b\[r")
 DEFAULT_PTY_ROWS = 42
 DEFAULT_PTY_COLS = 140
 MACH_O_MAGICS = {
@@ -693,8 +698,21 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+@dataclasses.dataclass
+class VtBufferState:
+    cells: list[list[str]]
+    history: list[list[str]]
+    row: int
+    col: int
+    saved: tuple[int, int]
+    scroll_top: int
+    scroll_bottom: int
+    autowrap: bool
+    wrap_pending: bool
+
+
 class VtScreen:
-    """Small deterministic VT screen for ratatui inline and alternate-screen output."""
+    """Small deterministic VT screen with distinct primary and alternate buffers."""
 
     def __init__(self, rows: int = 42, cols: int = 140) -> None:
         self.rows = rows
@@ -708,6 +726,8 @@ class VtScreen:
         self.scroll_bottom = rows
         self.autowrap = True
         self.wrap_pending = False
+        self.alternate_screen_active = False
+        self._primary_state: VtBufferState | None = None
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._pending_text = ""
 
@@ -725,12 +745,21 @@ class VtScreen:
         if rows <= 0 or cols <= 0:
             raise ValueError("terminal dimensions must be positive")
 
+        if self._primary_state is not None:
+            primary = self._primary_state
+            primary.cells = self._resized_cells(primary.cells, rows, cols)
+            primary.row = min(primary.row, rows - 1)
+            primary.col = min(primary.col, cols - 1)
+            primary.saved = (
+                min(primary.saved[0], rows - 1),
+                min(primary.saved[1], cols - 1),
+            )
+
         old_rows = self.rows
         old_full_region = self.scroll_top == 0 and self.scroll_bottom == old_rows
         # Terminal reflow on resize is emulator-specific. Keep this model deterministic and only
         # treat explicit top-anchored scroll commands as native scrollback ownership changes.
-        resized = [row[:cols] + [" "] * max(0, cols - len(row)) for row in self.cells[:rows]]
-        resized.extend([[" " for _ in range(cols)] for _ in range(rows - len(resized))])
+        resized = self._resized_cells(self.cells, rows, cols)
         self.rows = rows
         self.cols = cols
         self.cells = resized
@@ -744,6 +773,12 @@ class VtScreen:
             self.scroll_top = min(self.scroll_top, rows - 1)
             self.scroll_bottom = min(max(self.scroll_top + 1, self.scroll_bottom), rows)
         self.wrap_pending = False
+
+    @staticmethod
+    def _resized_cells(cells: list[list[str]], rows: int, cols: int) -> list[list[str]]:
+        resized = [row[:cols] + [" "] * max(0, cols - len(row)) for row in cells[:rows]]
+        resized.extend([[" " for _ in range(cols)] for _ in range(rows - len(resized))])
+        return resized
 
     def feed(self, data: bytes) -> None:
         text = self._pending_text + self._decoder.decode(data, final=False)
@@ -871,13 +906,42 @@ class VtScreen:
             self.autowrap = command == "h"
             self.wrap_pending = False
         elif command in ("h", "l") and private and first in (47, 1047, 1049):
-            if command == "h":
-                self._erase_display(2)
+            if command == "h" and not self.alternate_screen_active:
+                self._primary_state = VtBufferState(
+                    cells=[row.copy() for row in self.cells],
+                    history=[row.copy() for row in self.history],
+                    row=self.row,
+                    col=self.col,
+                    saved=self.saved,
+                    scroll_top=self.scroll_top,
+                    scroll_bottom=self.scroll_bottom,
+                    autowrap=self.autowrap,
+                    wrap_pending=self.wrap_pending,
+                )
+                self.alternate_screen_active = True
+                self.cells = [[" " for _ in range(self.cols)] for _ in range(self.rows)]
+                self.history = []
                 self.row = 0
                 self.col = 0
+                self.saved = (0, 0)
                 self.scroll_top = 0
                 self.scroll_bottom = self.rows
+                self.autowrap = True
                 self.wrap_pending = False
+            elif command == "l" and self.alternate_screen_active:
+                primary = self._primary_state
+                assert primary is not None
+                self.cells = primary.cells
+                self.history = primary.history
+                self.row = primary.row
+                self.col = primary.col
+                self.saved = primary.saved
+                self.scroll_top = primary.scroll_top
+                self.scroll_bottom = primary.scroll_bottom
+                self.autowrap = primary.autowrap
+                self.wrap_pending = primary.wrap_pending
+                self.alternate_screen_active = False
+                self._primary_state = None
 
     def _set_scrolling_region(self, values: list[int]) -> None:
         top = values[0] if values and values[0] else 1
@@ -1125,7 +1189,16 @@ class PtyRunner:
         return [CURSOR_POSITION_RESPONSE] * count
 
     def observed_native_inline_scrollback(self) -> bool:
-        return SCROLL_REGION_UP_PATTERN.search(bytes(self.output)) is not None
+        return bool(self.terminal().history)
+
+    def entered_alternate_screen(self) -> bool:
+        return ENTER_ALTERNATE_SCREEN in self.output
+
+    def left_alternate_screen(self) -> bool:
+        return LEAVE_ALTERNATE_SCREEN in self.output
+
+    def emitted_single_line_scrolling_region(self) -> bool:
+        return SINGLE_LINE_SCROLL_REGION_PATTERN.search(bytes(self.output)) is not None
 
     def resize(self, rows: int, cols: int) -> int:
         if rows <= 0 or cols <= 0:
@@ -1347,10 +1420,21 @@ def wait_for_main_tui(runner: PtyRunner, timeout: float) -> None:
     if looks_like_trust_gate(initial):
         runner.send("\r")
         runner.wait_until(looks_like_main_tui, timeout, "trusted main TUI")
-    if runner.cpr_request_count == 0:
+    if not runner.entered_alternate_screen():
         raise AcceptanceError(
-            "TUI did not request a cursor position; inline viewport coverage was not established"
+            "TUI did not enter the alternate screen before rendering its first frame"
         )
+    startup = bytes(runner.output)
+    alternate_offset = startup.find(ENTER_ALTERNATE_SCREEN)
+    purge_offset = startup.find(ERASE_SCROLLBACK, alternate_offset)
+    clear_offset = startup.find(CLEAR_SCREEN, alternate_offset)
+    home_offset = startup.find(CURSOR_HOME, alternate_offset)
+    if not alternate_offset <= purge_offset < clear_offset < home_offset:
+        raise AcceptanceError(
+            "TUI did not purge history, clear the alternate screen, and home the cursor before its first frame"
+        )
+    if runner.cpr_request_count != 0:
+        raise AcceptanceError("full-screen TUI unexpectedly queried the terminal cursor position")
 
 
 def write_config(
@@ -1964,32 +2048,26 @@ def main() -> int:
             "return from in-app history inspection to the live tail",
             final_screen=True,
         )
-        if not first_runner.observed_native_inline_scrollback():
+        if first_runner.observed_native_inline_scrollback():
             raise AcceptanceError(
-                "stateful flow did not exercise the native inline scrollback region"
+                "full-screen flow leaked application transcript rows into native scrollback"
             )
-        terminal = first_runner.terminal()
-        native_history = terminal.history_text()
-        terminal_text = terminal.full_text()
-        if count_on_screen(native_history, "STATEFUL-HISTORY-1") == 0:
+        if first_runner.emitted_single_line_scrolling_region():
             raise AcceptanceError(
-                "oldest completed turn was not retained in native terminal scrollback"
+                "stateful flow used the non-portable single-line scrolling-region fast path"
             )
-        if count_on_screen(native_history, PLAN_SUMMARY_CANARY) == 0:
-            raise AcceptanceError("completed plan preview was not retained in native scrollback")
-        for turn in range(1, 4):
-            marker = f"STATEFUL-HISTORY-{turn}"
-            marker_count = count_on_screen(terminal_text, marker)
-            if marker_count != 1:
-                raise AcceptanceError(
-                    f"terminal history rendered {marker} {marker_count} times"
-                )
-        if count_on_screen(terminal_text, QUEUED_FOLLOW_UP_PROMPT) != 1:
-            raise AcceptanceError("delivered queued follow-up was not rendered exactly once")
-        if count_on_screen(terminal_text, QUEUED_FOLLOW_UP_REPLY) != 1:
-            raise AcceptanceError("queued follow-up reply was not rendered exactly once")
-
         first_runner.quit(timeout=deadline.remaining(10.0))
+        if not first_runner.left_alternate_screen():
+            raise AcceptanceError("TUI did not restore the primary screen before exiting")
+        if first_runner.cpr_request_count != 0:
+            raise AcceptanceError(
+                "full-screen TUI queried the cursor during rendering or exit cleanup"
+            )
+        raw_output = bytes(first_runner.output)
+        leave_offset = raw_output.rfind(LEAVE_ALTERNATE_SCREEN)
+        hint_offset = raw_output.rfind(b"Sigil session:")
+        if hint_offset >= 0 and leave_offset > hint_offset:
+            raise AcceptanceError("resume hint was printed before the primary screen was restored")
         first_runner.stop()
         first_runner = None
         write_config(

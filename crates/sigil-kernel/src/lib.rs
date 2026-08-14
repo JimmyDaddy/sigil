@@ -60,15 +60,15 @@ pub mod web_budget;
 pub mod write_isolation;
 
 pub use agent::{
-    Agent, AgentDelegationRequirement, AgentHostedTurn, AgentHostedTurnPreparer,
-    AgentRunDisposition, AgentRunInput, AgentRunInputPreparer, AgentRunOptions, AgentRunOutcome,
-    AgentRunOutput, AgentRunPurpose, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate,
-    ContinueDurableTaskAction, ConversationPurposeContext, FinalAnswerContext,
-    PendingConversationInputProvider, PlanReviewDraftSubmittedAction, PlanReviewPurposeContext,
-    StartDurableTaskAction, StartPlanReviewAction, TaskParticipantContext, TaskPlannerContext,
-    TaskSynthesisContext, durable_tool_execution_entry, projected_agent_run_readiness,
-    route_surface_tool_specs, route_surface_tool_specs_for_context,
-    route_surface_tool_specs_with_memory,
+    Agent, AgentDelegationRequirement, AgentHostedTurn, AgentHostedTurnDispatchLifecycle,
+    AgentHostedTurnPreparer, AgentRunDisposition, AgentRunInput, AgentRunInputPreparer,
+    AgentRunOptions, AgentRunOutcome, AgentRunOutput, AgentRunPurpose, AgentRunResult,
+    AgentRunTerminalReason, AgentToolDelegate, ContinueDurableTaskAction,
+    ConversationPurposeContext, FinalAnswerContext, PendingConversationInputProvider,
+    PlanReviewDraftSubmittedAction, PlanReviewPurposeContext, StartDurableTaskAction,
+    StartPlanReviewAction, TaskParticipantContext, TaskPlannerContext, TaskSynthesisContext,
+    durable_tool_execution_entry, projected_agent_run_readiness, route_surface_tool_specs,
+    route_surface_tool_specs_for_context, route_surface_tool_specs_with_memory,
 };
 pub use agent_thread::{
     AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId,

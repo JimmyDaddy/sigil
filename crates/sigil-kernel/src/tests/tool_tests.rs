@@ -6,16 +6,17 @@ use serde_json::json;
 
 use crate::{
     AgentInvocationGrant, AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentProfileId,
-    AgentRole, ApprovalMode, DeclaredToolPermissionFacts, DelegationAuthority, DurableEventType,
-    ExecutionCoverageLabel, ExecutionCoverageSummary, JsonlSessionStore, MessageRole,
-    MutationEventRecorder, NetworkPolicy, PermissionConfig, PermissionMode, RunCancellationOwner,
-    SessionStreamRecord, TaskIsolationMode, Tool, ToolAccess, ToolCategory, ToolContext,
-    ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner,
-    ToolOperation, ToolPermissionPlanDraft, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind,
-    ToolSubjectScope, VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationScan, declared_tool_permission_plan, provider::ToolCall,
+    AgentRole, AgentRunInput, AgentRunInputPreparer, ApprovalMode, DeclaredToolPermissionFacts,
+    DelegationAuthority, DurableEventType, ExecutionCoverageLabel, ExecutionCoverageSummary,
+    JsonlSessionStore, MessageRole, MutationEventRecorder, NetworkPolicy, PermissionConfig,
+    PermissionMode, RunCancellationOwner, SessionStreamRecord, TaskIsolationMode, Tool, ToolAccess,
+    ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind,
+    ToolLifecycleOwner, ToolOperation, ToolPermissionPlanDraft, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision,
+    ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubjectKind, ToolSubjectScope, VerificationScope, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationScan, declared_tool_permission_plan,
+    provider::ToolCall,
 };
 
 #[test]
@@ -155,6 +156,20 @@ fn preview_snapshot_builder_truncates_by_byte_budget() {
 }
 
 struct RegistryFixtureTool;
+
+struct RegistryFixtureRunInputPreparer;
+
+#[async_trait]
+impl AgentRunInputPreparer for RegistryFixtureRunInputPreparer {
+    async fn prepare(
+        &self,
+        _provider: &dyn crate::Provider,
+        _session: &crate::Session,
+        input: AgentRunInput,
+    ) -> Result<AgentRunInput> {
+        Ok(input)
+    }
+}
 
 #[async_trait]
 impl Tool for RegistryFixtureTool {
@@ -758,6 +773,36 @@ fn tool_registry_scope_empty_and_into_registry_are_stable() {
     let unwrapped = scoped.into_registry();
 
     assert!(unwrapped.spec_for("read_file").is_some());
+}
+
+#[test]
+fn scoped_registry_drops_input_preparer_when_its_capability_tool_is_hidden() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedRegistryTool("websearch")));
+    registry.register(Arc::new(NamedRegistryTool("read_file")));
+    registry.set_run_input_preparer_for_tools(
+        Arc::new(RegistryFixtureRunInputPreparer),
+        ToolRegistryScope::from_names_and_prefixes(["websearch"], std::iter::empty::<&str>()),
+    );
+
+    assert!(registry.run_input_preparer().is_some());
+
+    let read_only = registry
+        .scoped(ToolRegistryScope::from_names_and_prefixes(
+            ["read_file"],
+            std::iter::empty::<&str>(),
+        ))
+        .into_registry();
+    assert!(read_only.spec_for("websearch").is_none());
+    assert!(read_only.run_input_preparer().is_none());
+
+    let web_enabled = registry
+        .scoped(ToolRegistryScope::from_names_and_prefixes(
+            ["websearch"],
+            std::iter::empty::<&str>(),
+        ))
+        .into_registry();
+    assert!(web_enabled.run_input_preparer().is_some());
 }
 
 #[test]

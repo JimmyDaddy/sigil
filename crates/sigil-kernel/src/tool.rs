@@ -2440,9 +2440,15 @@ pub trait Tool: Send + Sync {
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
-    run_input_preparer: Arc<RwLock<Option<Arc<dyn crate::AgentRunInputPreparer>>>>,
+    run_input_preparer: Arc<RwLock<Option<RunInputPreparerBinding>>>,
     scope: Option<Arc<ToolRegistryScope>>,
     deny_scope: Option<Arc<ToolRegistryScope>>,
+}
+
+#[derive(Clone)]
+struct RunInputPreparerBinding {
+    preparer: Arc<dyn crate::AgentRunInputPreparer>,
+    required_tools: Option<ToolRegistryScope>,
 }
 
 /// Non-owning handle used by tools that need to mutate their containing registry.
@@ -2452,7 +2458,7 @@ pub struct ToolRegistry {
 #[derive(Clone)]
 pub struct WeakToolRegistry {
     tools: Weak<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
-    run_input_preparer: Weak<RwLock<Option<Arc<dyn crate::AgentRunInputPreparer>>>>,
+    run_input_preparer: Weak<RwLock<Option<RunInputPreparerBinding>>>,
     scope: Option<Arc<ToolRegistryScope>>,
     deny_scope: Option<Arc<ToolRegistryScope>>,
 }
@@ -2538,7 +2544,31 @@ impl ToolRegistry {
             Ok(slot) => slot,
             Err(poisoned) => poisoned.into_inner(),
         };
-        *slot = Some(preparer);
+        *slot = Some(RunInputPreparerBinding {
+            preparer,
+            required_tools: None,
+        });
+    }
+
+    /// Attaches a per-run input resolver only while at least one matching capability tool is
+    /// visible through the effective registry scope.
+    ///
+    /// Runtime capabilities that alter provider requests must not survive a role or purpose scope
+    /// that removed their model-visible tool. The binding is evaluated against both the current
+    /// tool generation and the effective allow/deny scopes each time a run starts.
+    pub fn set_run_input_preparer_for_tools(
+        &mut self,
+        preparer: Arc<dyn crate::AgentRunInputPreparer>,
+        required_tools: ToolRegistryScope,
+    ) {
+        let mut slot = match self.run_input_preparer.write() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(RunInputPreparerBinding {
+            preparer,
+            required_tools: Some(required_tools),
+        });
     }
 
     pub(crate) fn run_input_preparer(&self) -> Option<Arc<dyn crate::AgentRunInputPreparer>> {
@@ -2546,7 +2576,20 @@ impl ToolRegistry {
             Ok(slot) => slot,
             Err(poisoned) => poisoned.into_inner(),
         };
-        slot.clone()
+        let binding = slot.as_ref()?;
+        if let Some(required_tools) = binding.required_tools.as_ref() {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if !tools
+                .keys()
+                .any(|name| required_tools.allows(name) && self.allows(name))
+            {
+                return None;
+            }
+        }
+        Some(Arc::clone(&binding.preparer))
     }
 
     /// Returns a role-scoped registry sharing the same underlying tool map.

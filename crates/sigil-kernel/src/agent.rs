@@ -1522,6 +1522,25 @@ pub trait AgentRunInputPreparer: Send + Sync {
 pub struct AgentHostedTurn {
     pub hosted_tools: Vec<crate::HostedToolRequest>,
     pub evidence_processor: Arc<dyn crate::HostedEvidenceProcessor>,
+    /// Runtime-owned provisional authorization that becomes chargeable only after provider
+    /// dispatch is known to have happened. The kernel drives this lifecycle independently from
+    /// evidence finalization because a stream can fail after dispatch but before evidence exists.
+    pub dispatch_lifecycle: Arc<dyn AgentHostedTurnDispatchLifecycle>,
+}
+
+/// Provider-neutral lifecycle for one provisional hosted-provider authorization.
+///
+/// Implementations must be idempotent: physical connect retries reuse the same authorization,
+/// and error finalization can race with a processor-owned terminal append. `mark_dispatched`
+/// commits the hosted-request budget exactly once; `finish` appends the unique durable hosted
+/// outcome without changing whether the request was charged.
+pub trait AgentHostedTurnDispatchLifecycle: Send + Sync {
+    /// Marks that the provider request was dispatched or that the provider returned a response.
+    fn mark_dispatched(&self) -> Result<(), crate::HostedTurnError>;
+
+    /// Finishes the authorization with one durable terminal outcome.
+    fn finish(&self, status: crate::HostedToolTerminalStatus)
+    -> Result<(), crate::HostedTurnError>;
 }
 
 /// Runtime hook invoked immediately before every provider request in a multi-turn run.
@@ -2375,68 +2394,90 @@ where
             } else {
                 logical_run_id.clone()
             };
-            let (request, current_hosted_processor) = match initial_frozen_request.as_ref() {
-                Some(frozen_request) => {
-                    validate_initial_frozen_request(session, frozen_request)?;
-                    (
-                        frozen_request.request().clone(),
-                        hosted_evidence_processor.clone(),
-                    )
-                }
-                None => {
-                    let mut request = session
-                        .build_request_with_transient_messages_context_overlays_and_max_tokens(
-                            &options.workspace_root,
-                            &options.memory_config,
-                            tool_specs,
-                            max_output_tokens,
-                            options.reasoning_effort.clone(),
-                            previous_response_handle.clone(),
-                            options.traffic_partition_key.clone(),
-                            &transient_context,
-                            runtime_context.clone(),
-                            &current_run_overlays,
-                        )?;
-                    let prepared_hosted_turn = match (
-                        participant_finalization_turn,
-                        hosted_turn_preparer.as_ref(),
-                    ) {
-                        (true, _) | (false, None) => None,
-                        (false, Some(preparer)) => match preparer.prepare_turn().await? {
-                            Some(turn) => Some(turn),
-                            None => {
-                                // The run-wide hosted budget stays exhausted for the rest of the
-                                // run; surface the soft skip once instead of every provider turn.
-                                if !hosted_unavailable_noticed {
-                                    hosted_unavailable_noticed = true;
-                                    handler.handle(RunEvent::Notice(
+            let (request, current_hosted_processor, current_hosted_dispatch_lifecycle) =
+                match initial_frozen_request.as_ref() {
+                    Some(frozen_request) => {
+                        validate_initial_frozen_request(session, frozen_request)?;
+                        (
+                            frozen_request.request().clone(),
+                            hosted_evidence_processor.clone(),
+                            None,
+                        )
+                    }
+                    None => {
+                        let mut request = session
+                            .build_request_with_transient_messages_context_overlays_and_max_tokens(
+                                &options.workspace_root,
+                                &options.memory_config,
+                                tool_specs,
+                                max_output_tokens,
+                                options.reasoning_effort.clone(),
+                                previous_response_handle.clone(),
+                                options.traffic_partition_key.clone(),
+                                &transient_context,
+                                runtime_context.clone(),
+                                &current_run_overlays,
+                            )?;
+                        let prepared_hosted_turn = match (
+                            participant_finalization_turn,
+                            hosted_turn_preparer.as_ref(),
+                        ) {
+                            (true, _) | (false, None) => None,
+                            (false, Some(preparer)) => match preparer.prepare_turn().await? {
+                                Some(turn) => Some(turn),
+                                None => {
+                                    // The run-wide hosted budget stays exhausted for the rest of the
+                                    // run; surface the soft skip once instead of every provider turn.
+                                    if !hosted_unavailable_noticed {
+                                        hosted_unavailable_noticed = true;
+                                        handler.handle(RunEvent::Notice(
                                         "hosted web search is unavailable for this request (web budget exhausted)".to_owned(),
                                     ))?;
+                                    }
+                                    None
                                 }
-                                None
-                            }
-                        },
-                    };
-                    let current_hosted_tools = if participant_finalization_turn {
-                        &[][..]
-                    } else {
-                        prepared_hosted_turn
+                            },
+                        };
+                        let current_hosted_tools = if participant_finalization_turn {
+                            &[][..]
+                        } else {
+                            prepared_hosted_turn
+                                .as_ref()
+                                .map_or(hosted_tools.as_slice(), |turn| {
+                                    turn.hosted_tools.as_slice()
+                                })
+                        };
+                        request.hosted_tools = current_hosted_tools.to_vec();
+                        let current_hosted_processor = prepared_hosted_turn
                             .as_ref()
-                            .map_or(hosted_tools.as_slice(), |turn| turn.hosted_tools.as_slice())
-                    };
-                    request.hosted_tools = current_hosted_tools.to_vec();
-                    let current_hosted_processor = prepared_hosted_turn
-                        .as_ref()
-                        .map(|turn| Arc::clone(&turn.evidence_processor))
-                        .or_else(|| hosted_evidence_processor.clone());
-                    (request, current_hosted_processor)
-                }
-            };
+                            .map(|turn| Arc::clone(&turn.evidence_processor))
+                            .or_else(|| hosted_evidence_processor.clone());
+                        let current_hosted_dispatch_lifecycle = prepared_hosted_turn
+                            .as_ref()
+                            .map(|turn| Arc::clone(&turn.dispatch_lifecycle));
+                        (
+                            request,
+                            current_hosted_processor,
+                            current_hosted_dispatch_lifecycle,
+                        )
+                    }
+                };
 
             let provider_effect =
                 match begin_run_effect(cancellation.as_ref(), RunEffectKind::ProviderRequest) {
                     Ok(effect) => effect,
                     Err(error) => {
+                        if let Some(lifecycle) = current_hosted_dispatch_lifecycle.as_ref() {
+                            let status = if cancellation
+                                .as_ref()
+                                .is_some_and(RunCancellationHandle::is_cancel_requested)
+                            {
+                                crate::HostedToolTerminalStatus::Cancelled
+                            } else {
+                                crate::HostedToolTerminalStatus::RequestFailed
+                            };
+                            lifecycle.finish(status)?;
+                        }
                         if cancellation
                             .as_ref()
                             .is_some_and(RunCancellationHandle::is_cancel_requested)
@@ -2469,6 +2510,7 @@ where
                             &mut provider_event_handler,
                             cancellation.as_ref(),
                             current_hosted_processor.as_ref(),
+                            current_hosted_dispatch_lifecycle.as_ref(),
                         )
                         .await
                     }
@@ -2483,6 +2525,7 @@ where
                             &mut provider_event_handler,
                             cancellation.as_ref(),
                             current_hosted_processor.as_ref(),
+                            current_hosted_dispatch_lifecycle.as_ref(),
                         )
                         .await
                     }

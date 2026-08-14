@@ -303,13 +303,12 @@ fn column_selection_helpers_cover_empty_and_zero_width_edges() {
 }
 
 #[test]
-fn short_transcript_stays_in_live_panel_instead_of_terminal_scrollback() {
+fn short_transcript_is_visible_in_the_application_timeline() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 32);
     app.push_timeline(TimelineRole::User, "hello");
     app.push_timeline(TimelineRole::Assistant, "latest answer");
 
-    assert_eq!(app.scrollback_line_count(), 0);
     let live = app
         .transcript_lines(app.timeline_viewport_rows())
         .into_iter()
@@ -1201,7 +1200,6 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
     app.rebuild_timeline_render_store();
 
     assert_eq!(app.effective_timeline_render_len(), 0);
-    assert_eq!(app.scrollback_prefix_hash(0), 0);
     assert_eq!(app.visible_timeline_render_range(10), 0..0);
     assert_eq!(
         app.transcript_lines(10)
@@ -1228,57 +1226,13 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
     app.append_timeline_render_store_entry(0);
     assert!(app.timeline_entry_render_range(0).is_some());
     assert!(app.visible_timeline_render_range(10).end <= app.timeline_render_line_count());
-    assert_eq!(
-        app.scrollback_prefix_hash(app.scrollback_line_count()),
-        app.scrollback_prefix_hash(usize::MAX)
-    );
 
     app.timeline.clear();
     app.rebuild_timeline_render_store();
     app.push_timeline(TimelineRole::Assistant, "streaming answer");
     app.timeline_state.streaming_assistant_index = Some(0);
     app.runtime.is_busy = true;
-    assert_eq!(app.scrollback_cutoff_line(), 0);
-    Ok(())
-}
-
-#[test]
-fn parent_scrollback_cutoff_never_uses_child_transcript_length() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    sync_child_agent_for_transcript_tests(&mut app)?;
-    assert!(!app.terminal_scrollback_active());
-    app.set_terminal_size(80, 1);
-    app.timeline = (0..16)
-        .map(|index| TimelineEntry {
-            role: TimelineRole::User,
-            text: format!("parent prompt {index}"),
-        })
-        .collect();
-    app.rebuild_timeline_render_store();
-    let parent_cutoff = app.scrollback_cutoff_line();
-    let parent_hash = app.scrollback_prefix_hash(parent_cutoff);
-    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
-        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
-        file_signature: super::super::ChildTranscriptFileSignature::empty(),
-        timeline_entries: Vec::new(),
-        rendered_body_lines: (0..8)
-            .map(|index| Line::from(format!("child line {index}")))
-            .collect(),
-        total_timeline_entries: 8,
-        transcript_truncated: false,
-        load_error: None,
-    });
-
-    assert_eq!(app.scrollback_cutoff_line(), parent_cutoff);
-    assert_eq!(app.scrollback_prefix_hash(parent_cutoff), parent_hash);
-    assert!(
-        !transcript_plain(app.scrollback_lines()).contains("child line"),
-        "native scrollback must continue to read the main transcript store"
-    );
-    assert!(app.visible_timeline_render_range(4).end <= app.timeline_render_line_count());
-    assert!(transcript_plain(app.transcript_lines(12)).contains("child line"));
-    assert!(!app.begin_timeline_text_selection_at(0, 0));
-    assert!(app.selected_timeline_text().is_none());
+    assert_eq!(app.visible_timeline_render_range(10), 0..1);
     Ok(())
 }
 
@@ -1302,6 +1256,42 @@ fn info_rail_visibility_rebuilds_the_timeline_for_the_actual_content_width() {
 }
 
 #[test]
+fn info_rail_visibility_preserves_the_main_history_anchor() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 12);
+    let text = (0..240)
+        .map(|index| format!("rail-token-{index:03}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    app.push_timeline(TimelineRole::Assistant, text);
+    let target_line = app
+        .timeline_plain_lines()
+        .iter()
+        .position(|line| line.contains("rail-token-120"))
+        .expect("visible-rail render should contain the marker");
+    let viewport = app.timeline_viewport_rows();
+    app.timeline_scroll_back = app
+        .effective_timeline_render_len()
+        .saturating_sub(target_line.saturating_add(viewport));
+    assert_eq!(
+        app.visible_timeline_render_range(viewport).start,
+        target_line
+    );
+
+    app.toggle_info_rail_visibility();
+
+    let visible = app.visible_timeline_render_range(app.timeline_viewport_rows());
+    let top_after = app
+        .timeline_plain_line(visible.start)
+        .expect("reflowed top line after hiding the rail");
+    assert!(!app.info_rail_visible());
+    assert!(
+        top_after.contains("rail-token-120"),
+        "rail reflow must preserve the logical top marker: {top_after:?}"
+    );
+}
+
+#[test]
 fn narrow_terminal_timeline_projection_uses_the_real_content_width() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(12, 20);
@@ -1318,66 +1308,6 @@ fn narrow_terminal_timeline_projection_uses_the_real_content_width() {
             .all(|line| crate::ui::terminal_cell_width(line) <= 10),
         "render-store rows must already fit the ten-cell live-panel width: {lines:?}"
     );
-}
-
-#[test]
-fn live_timeline_never_reclaims_rows_owned_by_native_scrollback_after_growth() {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(48, 8);
-    for index in 0..20 {
-        app.push_timeline(TimelineRole::Assistant, format!("owned row {index}"));
-    }
-    let owned_entries = app.scrollback_entry_count();
-    assert!(owned_entries > 0);
-    app.set_native_scrollback_frontier(app.session_id.clone(), owned_entries, false);
-    let owned_line = app.scrollback_line_count_for_entry_count(owned_entries);
-
-    app.set_terminal_size(48, 40);
-    let visible = app.visible_timeline_render_range(40);
-
-    assert!(!app.timeline_history_inspection_active());
-    assert!(visible.start >= owned_line.min(visible.end));
-}
-
-#[test]
-fn page_up_enters_native_history_inspection_after_viewport_growth() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(48, 8);
-    for index in 0..10 {
-        app.push_timeline(TimelineRole::Assistant, format!("owned row {index}"));
-    }
-    let owned_entries = app.scrollback_entry_count();
-    assert!(owned_entries > 0);
-    app.set_native_scrollback_frontier(app.session_id.clone(), owned_entries, false);
-    let owned_line = app.scrollback_line_count_for_entry_count(owned_entries);
-
-    app.set_terminal_size(48, 80);
-    let viewport = app.timeline_viewport_rows();
-    assert_eq!(app.max_timeline_scroll_back(), 0);
-    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
-
-    app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
-
-    assert!(app.timeline_history_inspection_active());
-    assert_eq!(app.timeline_scroll_back, 0);
-    assert_eq!(app.visible_timeline_render_range(viewport).start, 0);
-    assert!(app.transcript_lines(viewport).iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("owned row 0"))
-    }));
-
-    for index in 10..80 {
-        app.push_timeline(TimelineRole::Assistant, format!("later row {index}"));
-    }
-    assert!(app.timeline_scroll_back > 0);
-    assert_eq!(app.visible_timeline_render_range(viewport).start, 0);
-
-    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))?;
-
-    assert!(!app.timeline_history_inspection_active());
-    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
-    Ok(())
 }
 
 #[test]
@@ -1478,37 +1408,6 @@ fn history_anchor_maps_a_long_entry_by_logical_content_across_width_reflow() {
         top_after.contains("token120"),
         "logical marker should remain on the anchored top row: {top_after:?}"
     );
-}
-
-#[test]
-fn ctrl_home_enters_native_history_inspection_after_width_reflow() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(24, 8);
-    for index in 0..6 {
-        app.push_timeline(
-            TimelineRole::Assistant,
-            format!("width reflow history {index} ").repeat(3),
-        );
-    }
-    let owned_entries = app.scrollback_entry_count();
-    assert!(owned_entries > 0);
-    app.set_native_scrollback_frontier(app.session_id.clone(), owned_entries, false);
-
-    app.set_terminal_size(120, 80);
-    let viewport = app.timeline_viewport_rows();
-    let owned_line = app.scrollback_line_count_for_entry_count(owned_entries);
-    assert_eq!(app.max_timeline_scroll_back(), 0);
-    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL))?;
-
-    assert!(app.timeline_history_inspection_active());
-    assert_eq!(app.visible_timeline_render_range(viewport).start, 0);
-
-    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))?;
-    assert!(!app.timeline_history_inspection_active());
-    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
-    Ok(())
 }
 
 #[test]

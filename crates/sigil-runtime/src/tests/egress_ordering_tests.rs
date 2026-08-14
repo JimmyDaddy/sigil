@@ -445,3 +445,35 @@ fn hosted_authorization_is_durable_before_provider_request_permit() {
         DurableEventType::HostedToolOutcome
     ));
 }
+
+#[test]
+fn undispatched_hosted_authorization_finishes_without_charging_budget() {
+    let (_temp, store, recorder) = durable_runtime();
+    let coordinator = EgressOrderingCoordinator::new(recorder, None);
+    let authorization = HostedToolAuthorization {
+        record_id: "hosted-undispatched-authorization-record".to_owned(),
+        root_run_id: "root-run".to_owned(),
+        correlation_id: "hosted-correlation".to_owned(),
+        authorization_id: "hosted-undispatched-authorization".to_owned(),
+        route_lease_id: "hosted-route-lease".to_owned(),
+        hosted_request_fingerprint: "hosted-fingerprint".to_owned(),
+        provider_name: "gemini".to_owned(),
+        model_name: "gemini-test".to_owned(),
+        effect: ApprovalMode::Allow,
+        scope: HostedAuthorizationScope::ProviderRequest,
+    };
+    let budget = budget();
+    coordinator
+        .authorize_hosted_request(&authorization, hosted_reservation(&budget), &|| true)
+        .expect("hosted authorization")
+        .finish_without_request(HostedToolTerminalStatus::RequestFailed)
+        .expect("undispatched terminal");
+
+    assert_eq!(budget.snapshot().expect("snapshot").hosted_requests, 0);
+    let records = store.read_event_records_writer().expect("records");
+    assert!(has_event(
+        &records,
+        DurableEventType::HostedToolAuthorization
+    ));
+    assert!(has_event(&records, DurableEventType::HostedToolOutcome));
+}

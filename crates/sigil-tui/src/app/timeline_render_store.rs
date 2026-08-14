@@ -2,9 +2,11 @@ use std::ops::Range;
 
 use ratatui::text::Line;
 
+#[cfg(test)]
+use super::formatting::hash_timeline_line;
 use super::{
     TimelineEntry, TimelineRole,
-    formatting::{hash_timeline_line, line_has_visible_content, plain_line_text},
+    formatting::{line_has_visible_content, plain_line_text},
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -79,11 +81,8 @@ pub(crate) enum TimelineRenderInvariantError {
         lines: usize,
         plain_lines: usize,
     },
+    #[cfg(test)]
     PrefixHashesLen {
-        expected: usize,
-        actual: usize,
-    },
-    EntryPrefixHashesLen {
         expected: usize,
         actual: usize,
     },
@@ -107,8 +106,8 @@ pub(crate) struct TimelineRenderStore {
     global_key: TimelineRenderGlobalKey,
     blocks: Vec<RenderedTimelineBlock>,
     prefix_line_counts: Vec<usize>,
+    #[cfg(test)]
     prefix_hashes: Vec<u64>,
-    entry_prefix_hashes: Vec<u64>,
     last_visible_block_index: Option<usize>,
     last_reused_prefix_lines: usize,
     revision: u64,
@@ -130,7 +129,6 @@ impl TimelineRenderStore {
         self.last_visible_block_index = self.find_last_visible_block_index();
         self.last_reused_prefix_lines = 0;
         self.rebuild_indexes();
-        self.rebuild_entry_prefix_hashes(timeline);
         self.revision = self.revision.saturating_add(1);
         debug_assert!(self.validate_invariants().is_ok());
     }
@@ -156,14 +154,6 @@ impl TimelineRenderStore {
             self.restore_separator_on_block(previous_index);
         }
         self.blocks.push(block);
-        let entry_hash = hash_timeline_entry(
-            self.entry_prefix_hashes.last().copied().unwrap_or(0),
-            &timeline[index],
-        );
-        if self.entry_prefix_hashes.is_empty() {
-            self.entry_prefix_hashes.push(0);
-        }
-        self.entry_prefix_hashes.push(entry_hash);
         self.last_reused_prefix_lines = 0;
         if block_is_visible {
             self.last_visible_block_index = Some(index);
@@ -208,7 +198,6 @@ impl TimelineRenderStore {
             reuse_unchanged_prefix(&mut self.blocks[index], &mut next_block);
         debug_assert!(self.last_reused_prefix_lines <= next_block.lines.len());
         self.blocks[index] = next_block;
-        self.rebuild_entry_prefix_hashes_from(timeline, index);
         match (was_visible, is_visible) {
             (true, true) => self.rebuild_indexes_from(index),
             (false, false) => {}
@@ -233,8 +222,8 @@ impl TimelineRenderStore {
         TimelineRenderSnapshot {
             blocks: &self.blocks,
             prefix_line_counts: &self.prefix_line_counts,
+            #[cfg(test)]
             prefix_hashes: &self.prefix_hashes,
-            entry_prefix_hashes: &self.entry_prefix_hashes,
             total_lines: self.total_lines(),
             revision: self.revision,
         }
@@ -321,16 +310,11 @@ impl TimelineRenderStore {
                 );
             }
         }
+        #[cfg(test)]
         if self.prefix_hashes.len() != expected_total {
             return Err(TimelineRenderInvariantError::PrefixHashesLen {
                 expected: expected_total,
                 actual: self.prefix_hashes.len(),
-            });
-        }
-        if self.entry_prefix_hashes.len() != self.blocks.len().saturating_add(1) {
-            return Err(TimelineRenderInvariantError::EntryPrefixHashesLen {
-                expected: self.blocks.len().saturating_add(1),
-                actual: self.entry_prefix_hashes.len(),
             });
         }
         Ok(())
@@ -343,39 +327,9 @@ impl TimelineRenderStore {
     fn rebuild_indexes(&mut self) {
         self.prefix_line_counts.clear();
         self.prefix_line_counts.push(0);
+        #[cfg(test)]
         self.prefix_hashes.clear();
         self.rebuild_indexes_from(0);
-    }
-
-    fn rebuild_entry_prefix_hashes(&mut self, timeline: &[TimelineEntry]) {
-        self.entry_prefix_hashes.clear();
-        self.entry_prefix_hashes.push(0);
-        for entry in timeline.iter().take(self.blocks.len()) {
-            let hash =
-                hash_timeline_entry(self.entry_prefix_hashes.last().copied().unwrap_or(0), entry);
-            self.entry_prefix_hashes.push(hash);
-        }
-    }
-
-    fn rebuild_entry_prefix_hashes_from(
-        &mut self,
-        timeline: &[TimelineEntry],
-        start_entry_index: usize,
-    ) {
-        if self.entry_prefix_hashes.len() <= start_entry_index {
-            self.rebuild_entry_prefix_hashes(timeline);
-            return;
-        }
-        self.entry_prefix_hashes.truncate(start_entry_index + 1);
-        for entry in timeline
-            .iter()
-            .skip(start_entry_index)
-            .take(self.blocks.len().saturating_sub(start_entry_index))
-        {
-            let hash =
-                hash_timeline_entry(self.entry_prefix_hashes.last().copied().unwrap_or(0), entry);
-            self.entry_prefix_hashes.push(hash);
-        }
     }
 
     fn rebuild_indexes_from(&mut self, start_block_index: usize) {
@@ -386,14 +340,17 @@ impl TimelineRenderStore {
             .copied()
             .unwrap_or(0);
         self.prefix_line_counts.truncate(start_block_index + 1);
+        #[cfg(test)]
         self.prefix_hashes.truncate(base_line_count);
         let mut line_count = base_line_count;
+        #[cfg(test)]
         let mut hash = self.prefix_hashes.last().copied().unwrap_or(0);
-        for (index, block) in self.blocks.iter().enumerate().skip(start_block_index) {
+        for (index, _block) in self.blocks.iter().enumerate().skip(start_block_index) {
             let effective_lines = self.effective_block_line_count(index);
             line_count = line_count.saturating_add(effective_lines);
             self.prefix_line_counts.push(line_count);
-            for plain in block.plain_lines.iter().take(effective_lines) {
+            #[cfg(test)]
+            for plain in _block.plain_lines.iter().take(effective_lines) {
                 hash = hash_timeline_line(hash, plain);
                 self.prefix_hashes.push(hash);
             }
@@ -469,8 +426,8 @@ impl TimelineRenderStore {
 pub(crate) struct TimelineRenderSnapshot<'a> {
     blocks: &'a [RenderedTimelineBlock],
     prefix_line_counts: &'a [usize],
+    #[cfg(test)]
     prefix_hashes: &'a [u64],
-    entry_prefix_hashes: &'a [u64],
     total_lines: usize,
     revision: u64,
 }
@@ -488,28 +445,6 @@ impl<'a> TimelineRenderSnapshot<'a> {
         let start = *self.prefix_line_counts.get(entry_index)?;
         let end = *self.prefix_line_counts.get(entry_index.saturating_add(1))?;
         Some(start..end.min(self.total_lines))
-    }
-
-    pub(crate) fn line_count_for_entry_count(self, entry_count: usize) -> usize {
-        self.prefix_line_counts
-            .get(entry_count.min(self.blocks.len()))
-            .copied()
-            .unwrap_or(self.total_lines)
-            .min(self.total_lines)
-    }
-
-    pub(crate) fn entry_count_at_or_before_line(self, line_count: usize) -> usize {
-        self.prefix_line_counts
-            .partition_point(|count| *count <= line_count.min(self.total_lines))
-            .saturating_sub(1)
-            .min(self.blocks.len())
-    }
-
-    pub(crate) fn entry_prefix_hash(self, entry_count: usize) -> u64 {
-        self.entry_prefix_hashes
-            .get(entry_count.min(self.blocks.len()))
-            .copied()
-            .unwrap_or(0)
     }
 
     pub(crate) fn entry_at_line(self, line_index: usize) -> Option<usize> {
@@ -545,6 +480,7 @@ impl<'a> TimelineRenderSnapshot<'a> {
         self.iter_plain_lines().nth(line_index).map(String::as_str)
     }
 
+    #[cfg(test)]
     pub(crate) fn prefix_hashes(self) -> &'a [u64] {
         self.prefix_hashes
     }
@@ -583,20 +519,6 @@ impl<'a> TimelineRenderSnapshot<'a> {
         };
         end.saturating_sub(start)
     }
-}
-
-fn hash_timeline_entry(seed: u64, entry: &TimelineEntry) -> u64 {
-    let role = match entry.role {
-        TimelineRole::System => "system",
-        TimelineRole::User => "user",
-        TimelineRole::Assistant => "assistant",
-        TimelineRole::Phase => "phase",
-        TimelineRole::Thinking => "thinking",
-        TimelineRole::Tool => "tool",
-        TimelineRole::Notice => "notice",
-    };
-    let hash = hash_timeline_line(seed, role);
-    hash_timeline_line(hash, &entry.text)
 }
 
 fn render_block(

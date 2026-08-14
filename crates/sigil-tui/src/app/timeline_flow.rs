@@ -10,7 +10,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::{
     AgentView, AppAction, AppState, ApprovalPresentationState, EventEntry, LiveActivitySummary,
     PaneFocus, RunPhase, ThinkingBlockMode, TimelineEntry, TimelineRole, TimelineTextSelection,
-    TimelineViewportMode,
     agent_flow::agent_thread_sidebar_detail,
     formatting::{
         line_has_visible_content, plain_line_text, sidebar_width_for_terminal,
@@ -103,105 +102,7 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    pub(super) fn scrollback_cutoff_line(&self) -> usize {
-        let snapshot = self.timeline_state.render_store.snapshot();
-        let durable_cutoff_entry = match self.timeline_state.streaming_assistant_index {
-            Some(index) if index + 1 == self.timeline.len() && self.runtime.is_busy => index,
-            _ => self.timeline.len(),
-        };
-        // Native terminal scrollback is irreversible, so temporary status, queue, composer,
-        // agent-panel, and egress heights must not move its ownership boundary. Reserve the
-        // transcript rows available under the compact base shell; transient UI can temporarily
-        // cover more of the live tail without permanently emitting it.
-        let stable_live_tail_rows = self
-            .terminal_height
-            .saturating_sub(self.minimum_composer_height())
-            .saturating_sub(1)
-            .saturating_sub(crate::ui::LIVE_PANEL_BOTTOM_PADDING)
-            .max(1) as usize;
-        let live_tail_start = self
-            .main_timeline_render_len()
-            .saturating_sub(stable_live_tail_rows);
-        let cutoff_entry_count = durable_cutoff_entry.min(
-            snapshot.entry_count_at_or_before_line(live_tail_start.min(snapshot.total_lines())),
-        );
-        snapshot.line_count_for_entry_count(cutoff_entry_count)
-    }
-
-    pub(crate) fn scrollback_entry_count(&self) -> usize {
-        self.timeline_state
-            .render_store
-            .snapshot()
-            .entry_count_at_or_before_line(self.scrollback_cutoff_line())
-    }
-
-    pub(crate) fn scrollback_line_count_for_entry_count(&self, entry_count: usize) -> usize {
-        self.timeline_state
-            .render_store
-            .snapshot()
-            .line_count_for_entry_count(entry_count)
-    }
-
-    pub(crate) fn timeline_entry_count_at_or_before_line(&self, line_count: usize) -> usize {
-        self.timeline_state
-            .render_store
-            .snapshot()
-            .entry_count_at_or_before_line(line_count)
-    }
-
-    pub(crate) fn timeline_entry_count(&self) -> usize {
-        self.timeline.len()
-    }
-
-    pub(crate) fn timeline_entry_prefix_hash(&self, entry_count: usize) -> u64 {
-        self.timeline_state
-            .render_store
-            .snapshot()
-            .entry_prefix_hash(entry_count)
-    }
-
-    pub(crate) fn set_native_scrollback_frontier(
-        &mut self,
-        session_id: String,
-        entry_count: usize,
-        rebase: bool,
-    ) {
-        if !rebase
-            && self.timeline_state.native_scrollback_session_id.as_deref()
-                == Some(session_id.as_str())
-        {
-            self.timeline_state.native_scrollback_entry_count = self
-                .timeline_state
-                .native_scrollback_entry_count
-                .max(entry_count);
-        } else {
-            self.timeline_state.native_scrollback_session_id = Some(session_id);
-            self.timeline_state.native_scrollback_entry_count = entry_count;
-        }
-    }
-
-    pub(crate) fn native_scrollback_entry_count(&self) -> usize {
-        if self.timeline_state.native_scrollback_session_id.as_deref()
-            == Some(self.session_id.as_str())
-        {
-            self.timeline_state.native_scrollback_entry_count
-        } else {
-            0
-        }
-    }
-
-    fn native_scrollback_frontier_line(&self) -> usize {
-        if self.timeline_state.native_scrollback_session_id.as_deref()
-            != Some(self.session_id.as_str())
-        {
-            return 0;
-        }
-        self.scrollback_line_count_for_entry_count(
-            self.timeline_state.native_scrollback_entry_count,
-        )
-    }
-
-    pub(crate) fn terminal_scrollback_active(&self) -> bool {
+    pub(crate) fn main_timeline_active(&self) -> bool {
         matches!(self.agent_panel.active_view, AgentView::Main)
     }
 
@@ -657,7 +558,6 @@ impl AppState {
         if delta == 0 {
             return;
         }
-        self.enter_timeline_history_inspection();
         self.timeline_scroll_back = self
             .timeline_scroll_back
             .saturating_add(delta)
@@ -666,23 +566,18 @@ impl AppState {
 
     pub(super) fn unscroll_timeline(&mut self, delta: usize) {
         self.timeline_scroll_back = self.timeline_scroll_back.saturating_sub(delta);
-        if self.timeline_scroll_back == 0 {
-            self.timeline_state.viewport_mode = TimelineViewportMode::LiveTail;
-        }
     }
 
     pub(super) fn scroll_timeline_to_top(&mut self) {
-        self.enter_timeline_history_inspection();
         self.timeline_scroll_back = self.max_timeline_scroll_back();
     }
 
     pub(super) fn return_timeline_to_live_tail(&mut self) {
         self.timeline_scroll_back = 0;
-        self.timeline_state.viewport_mode = TimelineViewportMode::LiveTail;
     }
 
     pub(super) fn timeline_at_live_tail(&self) -> bool {
-        self.timeline_scroll_back == 0 && !self.timeline_history_inspection_active()
+        self.timeline_scroll_back == 0
     }
 
     pub(super) fn capture_timeline_history_anchor(&self) -> Option<TimelineHistoryAnchor> {
@@ -958,19 +853,6 @@ impl AppState {
         }
     }
 
-    fn enter_timeline_history_inspection(&mut self) {
-        if matches!(self.agent_panel.active_view, AgentView::Main)
-            && self.native_scrollback_frontier_line() > 0
-        {
-            self.timeline_state.viewport_mode = TimelineViewportMode::HistoryInspect;
-        }
-    }
-
-    pub(crate) fn timeline_history_inspection_active(&self) -> bool {
-        matches!(self.agent_panel.active_view, AgentView::Main)
-            && self.timeline_state.viewport_mode == TimelineViewportMode::HistoryInspect
-    }
-
     pub fn handle_mouse_scroll(&mut self, upward: bool) {
         let delta = self.terminal_scroll_sensitivity();
         if self.approval.has_actionable_pending() {
@@ -1015,53 +897,6 @@ impl AppState {
         }
     }
 
-    pub fn scrollback_lines(&self) -> Vec<Line<'static>> {
-        self.scrollback_lines_from(0)
-    }
-
-    pub fn scrollback_lines_from(&self, from_index: usize) -> Vec<Line<'static>> {
-        self.scrollback_lines_range(from_index, self.scrollback_cutoff_line())
-    }
-
-    pub fn scrollback_lines_range(&self, from_index: usize, to_index: usize) -> Vec<Line<'static>> {
-        let cutoff_line = self.scrollback_cutoff_line();
-        let start = from_index.min(cutoff_line);
-        let end = to_index.min(cutoff_line).max(start);
-        let mut lines = self
-            .timeline_state
-            .render_store
-            .snapshot()
-            .lines_range(start..end);
-        if end >= cutoff_line {
-            while lines
-                .last()
-                .map(|line| !line_has_visible_content(line))
-                .unwrap_or(false)
-            {
-                let _ = lines.pop();
-            }
-        }
-        lines
-    }
-
-    pub fn scrollback_line_count(&self) -> usize {
-        self.scrollback_cutoff_line()
-    }
-
-    pub fn scrollback_prefix_hash(&self, line_count: usize) -> u64 {
-        let count = line_count.min(self.scrollback_cutoff_line());
-        if count == 0 {
-            return 0;
-        }
-        self.timeline_state
-            .render_store
-            .snapshot()
-            .prefix_hashes()
-            .get(count - 1)
-            .copied()
-            .unwrap_or(0)
-    }
-
     pub(crate) fn visible_timeline_render_range(&self, max_lines: usize) -> Range<usize> {
         let effective_len = self
             .effective_timeline_render_len()
@@ -1074,13 +909,7 @@ impl AppState {
             .timeline_scroll_back
             .min(effective_len.saturating_sub(viewport));
         let end = effective_len.saturating_sub(scroll_back);
-        let mut start = end.saturating_sub(viewport);
-        if scroll_back == 0
-            && matches!(self.agent_panel.active_view, AgentView::Main)
-            && !self.timeline_history_inspection_active()
-        {
-            start = start.max(self.native_scrollback_frontier_line().min(end));
-        }
+        let start = end.saturating_sub(viewport);
         start..end
     }
 
@@ -1371,7 +1200,7 @@ impl AppState {
     }
 
     pub(crate) fn selected_timeline_line_range(&self) -> Option<Range<usize>> {
-        if !self.terminal_scrollback_active() {
+        if !self.main_timeline_active() {
             return None;
         }
         let range = self.timeline_state.text_selection?.normalized_range();
@@ -1460,7 +1289,7 @@ impl AppState {
         line_index: usize,
         column: usize,
     ) -> bool {
-        if !self.terminal_scrollback_active() {
+        if !self.main_timeline_active() {
             return self.clear_timeline_text_selection();
         }
         if line_index >= self.timeline_state.render_store.snapshot().total_lines() {
@@ -1472,7 +1301,7 @@ impl AppState {
     }
 
     pub(crate) fn update_timeline_text_selection(&mut self, line_index: usize) -> bool {
-        if !self.terminal_scrollback_active() {
+        if !self.main_timeline_active() {
             return self.clear_timeline_text_selection();
         }
         let Some(anchor) = self.timeline_state.text_selection_anchor else {
@@ -1494,7 +1323,7 @@ impl AppState {
         line_index: usize,
         column: usize,
     ) -> bool {
-        if !self.terminal_scrollback_active() {
+        if !self.main_timeline_active() {
             return self.clear_timeline_text_selection();
         }
         let Some(anchor) = self.timeline_state.text_selection_anchor else {

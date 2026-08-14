@@ -28,7 +28,6 @@ pub mod runner;
 pub(crate) mod sessions;
 pub(crate) mod setup;
 pub(crate) mod slash;
-pub(crate) mod terminal_backend;
 pub(crate) mod timeline;
 pub mod ui;
 pub(crate) mod view_model;

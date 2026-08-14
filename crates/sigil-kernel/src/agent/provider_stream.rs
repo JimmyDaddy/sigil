@@ -39,12 +39,22 @@ pub(super) async fn collect_provider_turn<H>(
     handler: &mut H,
     cancellation: Option<&crate::RunCancellationHandle>,
     hosted_processor: Option<&std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
+    hosted_dispatch_lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
 {
     let frozen_request =
-        FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request)?;
+        match FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request) {
+            Ok(request) => request,
+            Err(error) => {
+                finish_undispatched_hosted_turn(
+                    hosted_dispatch_lifecycle,
+                    crate::HostedToolTerminalStatus::RequestFailed,
+                )?;
+                return Err(error);
+            }
+        };
     collect_frozen_provider_turn(
         provider,
         session,
@@ -55,6 +65,7 @@ where
         handler,
         cancellation,
         hosted_processor,
+        hosted_dispatch_lifecycle,
     )
     .await
 }
@@ -74,32 +85,43 @@ pub(super) async fn collect_frozen_provider_turn<H>(
     handler: &mut H,
     cancellation: Option<&crate::RunCancellationHandle>,
     hosted_processor: Option<&std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
+    hosted_dispatch_lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
 {
-    if frozen_request.session_scope_id() != session.session_scope_id() {
-        anyhow::bail!("frozen provider request belongs to a different session scope");
-    }
     let request_template = frozen_request.request().clone();
-    crate::validate_request_image_attachments(&request_template)?;
-    crate::validate_image_input_capability(
-        provider.image_input_capability(&request_template.model_name),
-        &request_template,
-    )?;
     let hosted_enabled = !request_template.hosted_tools.is_empty();
-    if hosted_enabled && hosted_processor.is_none() {
-        return Err(crate::HostedTurnError::MissingProcessor.into());
-    }
-    if hosted_enabled
-        && !provider
-            .hosted_web_search_capability(&request_template.model_name)
-            .is_supported()
-    {
-        anyhow::bail!("provider model does not support hosted web search");
-    }
-    for hosted_tool in &request_template.hosted_tools {
-        hosted_tool.validate()?;
+    let pre_wire_validation = (|| -> Result<()> {
+        if frozen_request.session_scope_id() != session.session_scope_id() {
+            anyhow::bail!("frozen provider request belongs to a different session scope");
+        }
+        crate::validate_request_image_attachments(&request_template)?;
+        crate::validate_image_input_capability(
+            provider.image_input_capability(&request_template.model_name),
+            &request_template,
+        )?;
+        if hosted_enabled && hosted_processor.is_none() {
+            return Err(crate::HostedTurnError::MissingProcessor.into());
+        }
+        if hosted_enabled
+            && !provider
+                .hosted_web_search_capability(&request_template.model_name)
+                .is_supported()
+        {
+            anyhow::bail!("provider model does not support hosted web search");
+        }
+        for hosted_tool in &request_template.hosted_tools {
+            hosted_tool.validate()?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = pre_wire_validation {
+        finish_undispatched_hosted_turn(
+            hosted_dispatch_lifecycle,
+            crate::HostedToolTerminalStatus::RequestFailed,
+        )?;
+        return Err(error);
     }
     let mut connect_retries = 0usize;
     loop {
@@ -110,7 +132,18 @@ where
             model_name: request.model_name.clone(),
         };
         let mut physical_attempt =
-            ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request).await?;
+            match ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request)
+                .await
+            {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    finish_undispatched_hosted_turn(
+                        hosted_dispatch_lifecycle,
+                        crate::HostedToolTerminalStatus::RequestFailed,
+                    )?;
+                    return Err(error);
+                }
+            };
         let mut generation_observed = false;
         let result = collect_provider_turn_after_send_barrier(
             provider,
@@ -121,6 +154,7 @@ where
             handler,
             cancellation,
             hosted_processor,
+            hosted_dispatch_lifecycle,
             hosted_enabled,
             hosted_context,
             &mut physical_attempt,
@@ -174,10 +208,20 @@ where
                     "provider connection failed before request dispatch; retrying physical attempt {connect_retries}/{MAX_PRE_DISPATCH_CONNECT_RETRIES} after {} ms",
                     delay.as_millis()
                 )))?;
-                wait_for_pre_dispatch_connect_retry(delay, cancellation).await?;
+                if let Err(error) = wait_for_pre_dispatch_connect_retry(delay, cancellation).await {
+                    finish_undispatched_hosted_turn(
+                        hosted_dispatch_lifecycle,
+                        crate::HostedToolTerminalStatus::Cancelled,
+                    )?;
+                    return Err(error);
+                }
             }
-            (Err(error), Ok(())) => return Err(error),
+            (Err(error), Ok(())) => {
+                finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
+                return Err(error);
+            }
             (Err(error), Err(terminal_error)) => {
+                finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
                 return Err(error.context(format!(
                     "provider turn failed and physical-attempt terminal append also failed: {terminal_error:#}"
                 )));
@@ -205,6 +249,44 @@ async fn wait_for_pre_dispatch_connect_retry(
     Ok(())
 }
 
+fn finish_undispatched_hosted_turn(
+    lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
+    status: crate::HostedToolTerminalStatus,
+) -> Result<()> {
+    if let Some(lifecycle) = lifecycle {
+        lifecycle.finish(status).map_err(anyhow::Error::from)?;
+    }
+    Ok(())
+}
+
+fn finish_failed_hosted_attempt(
+    lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
+    error: &anyhow::Error,
+    rejection: Option<crate::ProviderRequestRejection>,
+) -> Result<()> {
+    let Some(lifecycle) = lifecycle else {
+        return Ok(());
+    };
+    if error
+        .downcast_ref::<ProviderConnectCancelledBeforeDispatch>()
+        .is_some()
+    {
+        lifecycle
+            .finish(crate::HostedToolTerminalStatus::Cancelled)
+            .map_err(anyhow::Error::from)?;
+        return Ok(());
+    }
+    if rejection != Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch) {
+        // A stream was established, the provider returned a typed response, or the transport
+        // outcome is uncertain. In every case the request may have reached the provider and the
+        // hosted-request count must become non-refundable.
+        lifecycle.mark_dispatched().map_err(anyhow::Error::from)?;
+    }
+    lifecycle
+        .finish(crate::HostedToolTerminalStatus::RequestFailed)
+        .map_err(anyhow::Error::from)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn collect_provider_turn_after_send_barrier<H>(
     provider: &dyn Provider,
@@ -215,6 +297,7 @@ async fn collect_provider_turn_after_send_barrier<H>(
     handler: &mut H,
     cancellation: Option<&crate::RunCancellationHandle>,
     hosted_processor: Option<&std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
+    hosted_dispatch_lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
     hosted_enabled: bool,
     hosted_context: crate::HostedFinalizationContext,
     physical_attempt: &mut ProviderPhysicalAttemptAudit,
@@ -232,7 +315,15 @@ where
         },
         None => provider.stream(request).await,
     };
-    let mut stream = stream_result?;
+    let mut stream = match stream_result {
+        Ok(stream) => {
+            if let Some(lifecycle) = hosted_dispatch_lifecycle {
+                lifecycle.mark_dispatched().map_err(anyhow::Error::from)?;
+            }
+            stream
+        }
+        Err(error) => return Err(error),
+    };
     if hosted_enabled {
         return collect_hosted_provider_turn(
             &mut stream,

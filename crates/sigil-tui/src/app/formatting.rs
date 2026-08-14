@@ -247,6 +247,7 @@ pub(super) fn plain_line_text(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
+#[cfg(test)]
 pub(super) fn hash_timeline_line(seed: u64, line: &str) -> u64 {
     let mut hash = seed;
     for byte in line.as_bytes() {

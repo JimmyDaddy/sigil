@@ -14,9 +14,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-#[cfg(not(test))]
 use crossterm::{
     cursor::MoveTo,
+    execute,
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+};
+#[cfg(not(test))]
+use crossterm::{
     cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -24,24 +28,16 @@ use crossterm::{
         KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
     },
-    execute,
-    terminal::{
-        Clear, ClearType, disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
-    },
+    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
 #[cfg(not(test))]
 use futures::StreamExt;
 #[cfg(not(test))]
+use ratatui::backend::CrosstermBackend;
 use ratatui::{
-    Terminal, TerminalOptions, Viewport,
-    backend::{Backend, CrosstermBackend},
-    layout::Position,
-};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
+    Terminal,
+    backend::Backend,
+    layout::{Position, Rect},
 };
 #[cfg(not(test))]
 use sigil_kernel::TerminalKeyboardEnhancement;
@@ -54,8 +50,6 @@ use sigil_runtime::support::SupportBuildInfo;
 use sigil_updater::BuildMetadata;
 
 #[cfg(not(test))]
-use crate::terminal_backend::CachedCursorBackend;
-#[cfg(not(test))]
 use crate::ui;
 use crate::{
     app::{AppAction, AppState},
@@ -63,23 +57,16 @@ use crate::{
     clipboard::{self, ClipboardCopyOutcome},
     mouse::AppMouseOutcome,
     runner::{self, WorkerCommand, WorkerMessage},
-    ui::{LayoutSnapshot, theme},
+    ui::LayoutSnapshot,
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 const BACKGROUND_TASK_WAKE_INTERVAL: Duration = Duration::from_millis(250);
-const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
 #[cfg(not(test))]
 const EVENT_BATCH_LIMIT: usize = 64;
-// Keep restored scrollback seeding small enough that startup reaches the first
-// interactive frame quickly even when the previous session has a long timeline.
-const SCROLLBACK_SEED_CHUNK_LINES: usize = 256;
-#[cfg(not(test))]
-const MAX_SCROLLBACK_INSERT_ROWS: usize = u16::MAX as usize;
 const SPINNER_FRAME_MILLIS: u128 = 120;
 
 #[cfg(not(test))]
-type TuiTerminal = Terminal<CachedCursorBackend<CrosstermBackend<io::Stdout>>>;
+type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 #[cfg(not(test))]
 pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
@@ -161,14 +148,12 @@ fn run_tui_with_initial_session(
     app.set_update_build_info(update_info);
 
     let mut cleanup = TerminalCleanupGuard::new();
+    let panic_hook = TuiPanicHookGuard::install();
     enable_raw_mode()?;
     cleanup.raw_mode_enabled = true;
-    let inline_viewport_height = current_inline_viewport_height()?;
     let mut stdout = io::stdout();
-    // Start from a clean screen: the inline viewport keeps prior terminal output above
-    // the TUI, which would otherwise mix shell history with the interface.
-    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
-    let panic_hook = TuiPanicHookGuard::install();
+    enter_terminal_presentation(&mut stdout)?;
+    cleanup.alternate_screen_active = true;
 
     let keyboard_enhancement_enabled = enable_keyboard_enhancement_for_policy(
         app.terminal_keyboard_enhancement_policy(),
@@ -195,15 +180,13 @@ fn run_tui_with_initial_session(
         execute!(stdout, EnableMouseCapture)?;
         cleanup.mouse_capture_active = true;
     }
-    let (mut terminal, mut active_inline_viewport_height) =
-        terminal_with_inline_fallback(stdout, inline_viewport_height)?;
+    let mut terminal = terminal_fullscreen(stdout)?;
     let result = panic::catch_unwind(AssertUnwindSafe(
         || match tokio::runtime::Handle::try_current() {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| {
                     handle.block_on(run_app(
                         &mut terminal,
-                        &mut active_inline_viewport_height,
                         &mut app,
                         &mut worker,
                         &mut mouse_capture_active,
@@ -221,7 +204,6 @@ fn run_tui_with_initial_session(
                     .context("failed to build TUI event runtime")?;
                 event_runtime.block_on(run_app(
                     &mut terminal,
-                    &mut active_inline_viewport_height,
                     &mut app,
                     &mut worker,
                     &mut mouse_capture_active,
@@ -232,12 +214,21 @@ fn run_tui_with_initial_session(
     ));
     cleanup.mouse_capture_active = mouse_capture_active;
     cleanup.focus_change_active = focus_change_active;
+    // The panic hook has already restored the primary screen before catch_unwind observes the
+    // payload. Clearing through the stale Terminal in that case would erase the panic report from
+    // the primary screen. Ordinary Result errors have not run the hook and still need finalizing.
+    let presentation_cleanup_result = if result.is_err() {
+        Ok(())
+    } else {
+        finalize_terminal_presentation(&mut terminal)
+    };
     let cleanup_result = cleanup.restore();
     panic_hook.restore();
     let result = match result {
         Ok(result) => result,
         Err(payload) => panic::resume_unwind(payload),
     };
+    presentation_cleanup_result.context("failed to clear the TUI viewport before exit")?;
     cleanup_result?;
     result?;
     print!("{}", render_tui_exit_resume_hint(&app, config.as_deref()));
@@ -254,6 +245,7 @@ enum InitialSessionTarget<'a> {
 #[cfg(not(test))]
 struct TerminalCleanupGuard {
     raw_mode_enabled: bool,
+    alternate_screen_active: bool,
     keyboard_enhancement_enabled: bool,
     bracketed_paste_enabled: bool,
     mouse_capture_active: bool,
@@ -265,6 +257,7 @@ impl TerminalCleanupGuard {
     fn new() -> Self {
         Self {
             raw_mode_enabled: false,
+            alternate_screen_active: false,
             keyboard_enhancement_enabled: false,
             bracketed_paste_enabled: false,
             mouse_capture_active: false,
@@ -275,6 +268,18 @@ impl TerminalCleanupGuard {
     fn restore(&mut self) -> io::Result<()> {
         let mut stdout = io::stdout();
         let mut first_error = None;
+        if self.mouse_capture_active {
+            remember_cleanup_error(execute!(stdout, DisableMouseCapture), &mut first_error);
+            self.mouse_capture_active = false;
+        }
+        if self.focus_change_active {
+            remember_cleanup_error(execute!(stdout, DisableFocusChange), &mut first_error);
+            self.focus_change_active = false;
+        }
+        if self.bracketed_paste_enabled {
+            remember_cleanup_error(execute!(stdout, DisableBracketedPaste), &mut first_error);
+            self.bracketed_paste_enabled = false;
+        }
         if self.keyboard_enhancement_enabled {
             remember_cleanup_error(
                 execute!(stdout, PopKeyboardEnhancementFlags),
@@ -282,23 +287,15 @@ impl TerminalCleanupGuard {
             );
             self.keyboard_enhancement_enabled = false;
         }
-        if self.bracketed_paste_enabled {
-            remember_cleanup_error(execute!(stdout, DisableBracketedPaste), &mut first_error);
-            self.bracketed_paste_enabled = false;
+        if self.alternate_screen_active {
+            remember_cleanup_error(leave_terminal_presentation(&mut stdout), &mut first_error);
+            self.alternate_screen_active = false;
         }
-        if self.focus_change_active {
-            remember_cleanup_error(execute!(stdout, DisableFocusChange), &mut first_error);
-            self.focus_change_active = false;
-        }
-        if self.mouse_capture_active {
-            remember_cleanup_error(execute!(stdout, DisableMouseCapture), &mut first_error);
-            self.mouse_capture_active = false;
-        }
-        remember_cleanup_error(execute!(stdout, Show), &mut first_error);
         if self.raw_mode_enabled {
             remember_cleanup_error(disable_raw_mode(), &mut first_error);
             self.raw_mode_enabled = false;
         }
+        remember_cleanup_error(execute!(stdout, Show), &mut first_error);
         first_error.map_or(Ok(()), Err)
     }
 }
@@ -363,12 +360,42 @@ impl Drop for TuiPanicHookGuard {
 #[cfg(not(test))]
 fn restore_terminal_escape_state() {
     let mut stdout = io::stdout();
-    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-    let _ = execute!(stdout, DisableBracketedPaste);
-    let _ = execute!(stdout, DisableFocusChange);
     let _ = execute!(stdout, DisableMouseCapture);
-    let _ = execute!(stdout, Show);
+    let _ = execute!(stdout, DisableFocusChange);
+    let _ = execute!(stdout, DisableBracketedPaste);
+    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    let _ = leave_terminal_presentation(&mut stdout);
     let _ = disable_raw_mode();
+    let _ = execute!(stdout, Show);
+}
+
+fn finalize_terminal_presentation<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    let backend = terminal.backend_mut();
+    let _ = backend.hide_cursor();
+    // `Terminal::clear()` preserves the cursor by calling `Backend::get_cursor_position()`. The
+    // Crossterm implementation answers that call with a CPR request, which can race EventStream or
+    // time out once the application loop has stopped. Exit cleanup must be write-only.
+    backend.clear()?;
+    backend.set_cursor_position(Position::ORIGIN)?;
+    backend.flush()
+}
+
+fn enter_terminal_presentation<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {
+    // Some terminals preserve the previous alternate-screen buffer or expose primary-screen
+    // history while an alternate-screen application is active. Ratatui starts with a logically
+    // blank back buffer, so it will not overwrite those physically stale blank cells on its first
+    // diff. Establish a known empty presentation with write-only commands before the first frame.
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        Clear(ClearType::Purge),
+        Clear(ClearType::All),
+        MoveTo(0, 0)
+    )
+}
+
+fn leave_terminal_presentation<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {
+    execute!(writer, LeaveAlternateScreen)
 }
 
 #[cfg(not(test))]
@@ -405,86 +432,22 @@ fn enable_bracketed_paste<W: io::Write>(writer: &mut W) -> io::Result<bool> {
 }
 
 #[cfg(not(test))]
-fn current_inline_viewport_height() -> Result<u16> {
-    let (_, height) = crossterm::terminal::size()?;
-    Ok(height.max(12))
-}
-
-#[cfg(not(test))]
-fn terminal_with_inline_fallback(
-    stdout: io::Stdout,
-    inline_viewport_height: u16,
-) -> Result<(TuiTerminal, Option<u16>)> {
-    let backend = CrosstermBackend::new(stdout);
-    let inline_result = CachedCursorBackend::capture(backend).and_then(|backend| {
-        Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(inline_viewport_height),
-            },
-        )
-    });
-    match inline_result {
-        Ok(terminal) => Ok((terminal, Some(inline_viewport_height))),
-        Err(inline_error) => {
-            let backend = CachedCursorBackend::with_position(
-                CrosstermBackend::new(io::stdout()),
-                ratatui::layout::Position::ORIGIN,
-            );
-            let terminal = Terminal::new(backend).with_context(|| {
-                format!(
-                    "inline viewport unavailable ({inline_error}); failed to initialize fallback terminal"
-                )
-            })?;
-            Ok((terminal, None))
-        }
-    }
-}
-
-fn inline_viewport_growth(configured_height: Option<u16>, terminal_height: u16) -> Option<u16> {
-    configured_height
-        .filter(|configured| terminal_height > *configured)
-        .map(|_| terminal_height)
-}
-
-fn native_scrollback_available(inline_viewport_height: Option<u16>) -> bool {
-    inline_viewport_height.is_some()
-}
-
-#[cfg(not(test))]
-fn rebuild_inline_terminal(terminal: &mut TuiTerminal, height: u16) -> Result<()> {
-    terminal.backend_mut().clear()?;
-    terminal
-        .backend_mut()
-        .set_cursor_position(Position::ORIGIN)?;
-    Backend::flush(terminal.backend_mut())?;
-
-    let backend =
-        CachedCursorBackend::with_position(CrosstermBackend::new(io::stdout()), Position::ORIGIN);
-    let replacement = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(height),
-        },
-    )?;
-    *terminal = replacement;
-    Ok(())
+fn terminal_fullscreen(stdout: io::Stdout) -> Result<TuiTerminal> {
+    Terminal::new(CrosstermBackend::new(stdout))
+        .context("failed to initialize the full-screen terminal")
 }
 
 #[cfg(not(test))]
 async fn run_app(
     terminal: &mut TuiTerminal,
-    inline_viewport_height: &mut Option<u16>,
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     mouse_capture_active: &mut bool,
     focus_change_active: &mut bool,
 ) -> Result<()> {
-    // From this point onward the event stream is the sole reader of terminal input. Capability
-    // probes and the real cursor capture have already completed; ratatui resize reads are served
-    // by the cached backend and transcript insertion uses scrolling regions.
+    // From this point onward the event stream is the sole reader of terminal input. Full-screen
+    // rendering never queries the cursor and never writes transcript rows into native scrollback.
     let mut terminal_events = EventStream::new();
-    let mut scrollback = ScrollbackSyncState::default();
     let mut needs_render = true;
     let mut last_spinner_tick = live_spinner_tick();
     let mut latest_frame_area = Rect::default();
@@ -533,16 +496,9 @@ async fn run_app(
         }
 
         let size = terminal.size()?;
-        if let Some(next_height) = inline_viewport_growth(*inline_viewport_height, size.height) {
-            rebuild_inline_terminal(terminal, next_height)?;
-            *inline_viewport_height = Some(next_height);
-            dirty = true;
-        } else {
-            terminal.autoresize()?;
-        }
+        terminal.autoresize()?;
         let frame_area = terminal.get_frame().area();
         dirty |= app.set_terminal_size(frame_area.width, frame_area.height);
-        dirty |= scrollback.has_pending_seed() && should_sync_terminal_scrollback(app);
 
         let spinner_tick = live_spinner_tick();
         if app.runtime.is_busy && spinner_tick != last_spinner_tick {
@@ -550,9 +506,6 @@ async fn run_app(
         }
 
         if dirty {
-            if native_scrollback_available(*inline_viewport_height) {
-                sync_terminal_scrollback(terminal, app, &mut scrollback)?;
-            }
             terminal.draw(|frame| {
                 latest_frame_area = frame.area();
                 ui::render(frame, app);
@@ -579,7 +532,7 @@ async fn run_app(
         let wake = {
             let terminal_event = terminal_events.next();
             let worker_message = next_worker_message(worker);
-            match next_wake_deadline(app, &scrollback) {
+            match next_wake_deadline(app) {
                 Some(deadline) => tokio::select! {
                     event = terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
                         Err(std::io::Error::new(
@@ -1593,477 +1546,14 @@ fn next_mouse_capture_action(active: bool, desired: bool) -> Option<bool> {
     Some(desired)
 }
 
-#[derive(Debug, Clone, Default)]
-struct ScrollbackSyncState {
-    session_id: Option<String>,
-    revision: u64,
-    line_count: usize,
-    entry_count: usize,
-    sequence_hash: u64,
-    pending_seed: Option<ScrollbackSeedProgress>,
-}
-
-impl ScrollbackSyncState {
-    fn has_pending_seed(&self) -> bool {
-        self.pending_seed.is_some()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ScrollbackSeedProgress {
-    session_id: String,
-    next_line_index: usize,
-    prefix_hash: u64,
-}
-
-#[derive(Debug, Clone)]
-struct PreparedScrollbackSync {
-    line_batches: Vec<Vec<Line<'static>>>,
-    next_state: ScrollbackSyncState,
-    rebase_frontier: bool,
-    rebase_frontier_floor: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScrollbackSyncPlan {
-    Seed {
-        insert_separator: bool,
-        from_index: usize,
-        to_index: usize,
-        total_line_count: usize,
-    },
-    Append {
-        from_index: usize,
-    },
-    Noop,
-}
-
-#[cfg(not(test))]
-fn sync_terminal_scrollback(
-    terminal: &mut TuiTerminal,
-    app: &mut AppState,
-    sync_state: &mut ScrollbackSyncState,
-) -> Result<()> {
-    let Some(prepared) = prepare_scrollback_sync(app, sync_state) else {
-        return Ok(());
-    };
-    let frontier_update = scrollback_frontier_update(&prepared);
-    for batch in prepared.line_batches {
-        insert_scrollback_lines(terminal, batch)?;
-    }
-    if let Some((entry_count, rebase)) = frontier_update
-        && let Some(session_id) = prepared.next_state.session_id.clone()
-    {
-        app.set_native_scrollback_frontier(session_id, entry_count, rebase);
-    }
-    *sync_state = prepared.next_state;
-    Ok(())
-}
-
-fn scrollback_frontier_update(prepared: &PreparedScrollbackSync) -> Option<(usize, bool)> {
-    if prepared.rebase_frontier {
-        let emitted_current_projection =
-            prepared.line_batches.iter().any(|batch| !batch.is_empty());
-        return Some((
-            if emitted_current_projection {
-                prepared
-                    .next_state
-                    .entry_count
-                    .max(prepared.rebase_frontier_floor)
-            } else {
-                0
-            },
-            true,
-        ));
-    }
-    prepared
-        .line_batches
-        .iter()
-        .any(|batch| !batch.is_empty())
-        .then_some((prepared.next_state.entry_count, false))
-}
-
-fn should_sync_terminal_scrollback(app: &AppState) -> bool {
-    !app.runtime.is_busy
-        && !app.is_setup_mode()
-        && !app.is_config_mode()
-        && app.terminal_scrollback_active()
-}
-
-fn next_wake_deadline(app: &AppState, scrollback: &ScrollbackSyncState) -> Option<Duration> {
+fn next_wake_deadline(app: &AppState) -> Option<Duration> {
     if app.runtime.is_busy {
         Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
-    } else if scrollback.has_pending_seed() && should_sync_terminal_scrollback(app) {
-        Some(SCROLLBACK_SEED_POLL_INTERVAL)
     } else if app.has_pending_background_tasks() {
         Some(BACKGROUND_TASK_WAKE_INTERVAL)
     } else {
         None
     }
-}
-
-#[cfg(test)]
-fn tested_next_wake_deadline(app: &AppState, scrollback: &ScrollbackSyncState) -> Option<Duration> {
-    next_wake_deadline(app, scrollback)
-}
-
-fn prepare_scrollback_sync(
-    app: &AppState,
-    sync_state: &ScrollbackSyncState,
-) -> Option<PreparedScrollbackSync> {
-    prepare_scrollback_sync_with_chunk_size(app, sync_state, SCROLLBACK_SEED_CHUNK_LINES)
-}
-
-fn prepare_scrollback_sync_with_chunk_size(
-    app: &AppState,
-    sync_state: &ScrollbackSyncState,
-    chunk_size: usize,
-) -> Option<PreparedScrollbackSync> {
-    if !should_sync_terminal_scrollback(app) {
-        return None;
-    }
-    let next_line_count = app.scrollback_line_count();
-    let next_entry_count = app.scrollback_entry_count();
-    let synced_entry_count = sync_state.entry_count.min(app.timeline_entry_count());
-    if sync_state.session_id.as_deref() == Some(app.session_id.as_str())
-        && sync_state.revision == app.timeline_revision()
-        && sync_state.pending_seed.is_none()
-        && sync_state.entry_count >= next_entry_count
-        && sync_state.entry_count == synced_entry_count
-        && sync_state.sequence_hash == app.timeline_entry_prefix_hash(synced_entry_count)
-    {
-        return None;
-    }
-
-    let session_changed = sync_state.session_id.as_deref() != Some(app.session_id.as_str());
-    let owned_entry_count = if sync_state.entry_count == 0 && sync_state.line_count > 0 {
-        app.timeline_entry_count_at_or_before_line(sync_state.line_count)
-    } else {
-        sync_state.entry_count
-    };
-    let bounded_owned_entry_count = owned_entry_count.min(app.timeline_entry_count());
-    let mapped_owned_line = app.scrollback_line_count_for_entry_count(bounded_owned_entry_count);
-    let owned_sequence_hash = app.timeline_entry_prefix_hash(bounded_owned_entry_count);
-    let pending_seed_projection_changed = sync_state.pending_seed.as_ref().is_some_and(|pending| {
-        pending.session_id != app.session_id
-            || pending.next_line_index > next_line_count
-            || pending.prefix_hash != app.scrollback_prefix_hash(pending.next_line_index)
-    });
-    let projection_changed = !session_changed
-        && (owned_entry_count != bounded_owned_entry_count
-            || sync_state.sequence_hash != owned_sequence_hash
-            || pending_seed_projection_changed);
-    let shared_len = mapped_owned_line.min(next_line_count);
-    let shared_hash = app.scrollback_prefix_hash(shared_len);
-    let plan = if sync_state.pending_seed.is_some() && !projection_changed {
-        plan_scrollback_sync_with_chunk_size(
-            sync_state,
-            app.session_id.as_str(),
-            next_line_count,
-            shared_hash,
-            chunk_size,
-        )
-    } else if session_changed {
-        ScrollbackSyncPlan::Noop
-    } else if projection_changed && next_line_count > 0 {
-        // The terminal may already contain an older projection of this session, and those rows
-        // cannot be retracted. Start a bounded, separator-delimited projection epoch instead of
-        // advancing over replacement or newly durable entries without writing them.
-        ScrollbackSyncPlan::Seed {
-            insert_separator: sync_state.line_count > 0,
-            from_index: 0,
-            to_index: chunk_size.max(1).min(next_line_count),
-            total_line_count: next_line_count,
-        }
-    } else if projection_changed {
-        ScrollbackSyncPlan::Noop
-    } else if next_entry_count > owned_entry_count {
-        ScrollbackSyncPlan::Append {
-            from_index: mapped_owned_line,
-        }
-    } else {
-        ScrollbackSyncPlan::Noop
-    };
-    let mut line_batches = Vec::new();
-    let mut next_state = sync_state.clone();
-    next_state.session_id = Some(app.session_id.clone());
-    next_state.revision = app.timeline_revision();
-    next_state.pending_seed = None;
-
-    match plan {
-        ScrollbackSyncPlan::Seed {
-            insert_separator,
-            from_index,
-            to_index,
-            total_line_count,
-        } => {
-            if insert_separator {
-                line_batches.push(vec![scrollback_separator(app), Line::raw(String::new())]);
-            }
-            let seeded = app.scrollback_lines_range(from_index, to_index);
-            if !seeded.is_empty() {
-                line_batches.push(seeded);
-            }
-            next_state.pending_seed =
-                (to_index < total_line_count).then(|| ScrollbackSeedProgress {
-                    session_id: app.session_id.clone(),
-                    next_line_index: to_index,
-                    prefix_hash: app.scrollback_prefix_hash(to_index),
-                });
-            next_state.line_count = to_index;
-            next_state.entry_count = app.timeline_entry_count_at_or_before_line(to_index);
-            next_state.sequence_hash = app.timeline_entry_prefix_hash(next_state.entry_count);
-        }
-        ScrollbackSyncPlan::Append { from_index } => {
-            let appended = app.scrollback_lines_from(from_index);
-            if !appended.is_empty() {
-                line_batches.push(appended);
-            }
-            next_state.line_count = next_line_count;
-            next_state.entry_count = next_entry_count;
-            next_state.sequence_hash = app.timeline_entry_prefix_hash(next_entry_count);
-        }
-        ScrollbackSyncPlan::Noop => {
-            if session_changed {
-                next_state.line_count = next_line_count;
-                next_state.entry_count = next_entry_count;
-                next_state.sequence_hash = app.timeline_entry_prefix_hash(next_entry_count);
-            } else if projection_changed {
-                next_state.line_count = 0;
-                next_state.entry_count = 0;
-                next_state.sequence_hash = app.timeline_entry_prefix_hash(0);
-            } else {
-                // Native scrollback owns complete transcript entries. Reflow maps that stable
-                // entry boundary into the new line domain without replaying it; height growth can
-                // reduce the current cutoff but cannot reclaim entries already emitted.
-                next_state.line_count = mapped_owned_line;
-                next_state.entry_count = bounded_owned_entry_count;
-                next_state.sequence_hash = owned_sequence_hash;
-            }
-        }
-    }
-
-    Some(PreparedScrollbackSync {
-        line_batches,
-        next_state,
-        rebase_frontier: session_changed || projection_changed,
-        rebase_frontier_floor: if projection_changed {
-            bounded_owned_entry_count.max(app.native_scrollback_entry_count())
-        } else {
-            0
-        },
-    })
-}
-
-#[cfg(test)]
-fn plan_scrollback_sync(
-    sync_state: &ScrollbackSyncState,
-    session_id: &str,
-    next_line_count: usize,
-    shared_hash: u64,
-) -> ScrollbackSyncPlan {
-    plan_scrollback_sync_with_chunk_size(
-        sync_state,
-        session_id,
-        next_line_count,
-        shared_hash,
-        SCROLLBACK_SEED_CHUNK_LINES,
-    )
-}
-
-fn plan_scrollback_sync_with_chunk_size(
-    sync_state: &ScrollbackSyncState,
-    session_id: &str,
-    next_line_count: usize,
-    shared_hash: u64,
-    chunk_size: usize,
-) -> ScrollbackSyncPlan {
-    let chunk_size = chunk_size.max(1);
-    if let Some(pending_seed) = &sync_state.pending_seed {
-        let pending_seed_matches = sync_state.session_id.as_deref() == Some(session_id)
-            && pending_seed.session_id == session_id
-            && pending_seed.next_line_index == sync_state.line_count
-            && pending_seed.next_line_index <= next_line_count;
-        if pending_seed_matches && pending_seed.next_line_index < next_line_count {
-            let to_index = pending_seed
-                .next_line_index
-                .saturating_add(chunk_size)
-                .min(next_line_count);
-            return ScrollbackSyncPlan::Seed {
-                insert_separator: false,
-                from_index: pending_seed.next_line_index,
-                to_index,
-                total_line_count: next_line_count,
-            };
-        }
-    }
-
-    let session_changed = sync_state.session_id.as_deref() != Some(session_id);
-    if session_changed {
-        return ScrollbackSyncPlan::Noop;
-    }
-    if next_line_count > sync_state.line_count && shared_hash == sync_state.sequence_hash {
-        return ScrollbackSyncPlan::Append {
-            from_index: sync_state.line_count,
-        };
-    }
-    ScrollbackSyncPlan::Noop
-}
-
-#[cfg(not(test))]
-fn insert_scrollback_lines(terminal: &mut TuiTerminal, lines: Vec<Line<'static>>) -> Result<()> {
-    if lines.is_empty() {
-        return Ok(());
-    }
-
-    let width = terminal.size()?.width.max(1) as usize;
-    let rows = lines
-        .iter()
-        .flat_map(|line| scrollback_wrapped_rows(line, width))
-        .collect::<Vec<_>>();
-    for chunk in rows.chunks(MAX_SCROLLBACK_INSERT_ROWS) {
-        let height = chunk.len().max(1) as u16;
-        terminal.insert_before(height, |buf| {
-            render_scrollback_rows(buf, chunk);
-        })?;
-    }
-    Ok(())
-}
-
-fn scrollback_plain_line(line: &Line<'_>) -> String {
-    line.spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>()
-}
-
-fn scrollback_wrapped_rows(line: &Line<'_>, width: usize) -> Vec<(String, Style)> {
-    let plain = scrollback_plain_line(line);
-    let style = scrollback_row_style(line);
-    wrap_scrollback_text(&plain, width)
-        .into_iter()
-        .map(|row| (row, style))
-        .collect()
-}
-
-fn scrollback_row_style(line: &Line<'_>) -> Style {
-    line.spans
-        .iter()
-        .find(|span| !span.content.trim().is_empty())
-        .map(|span| {
-            let mut style = Style::default();
-            if let Some(color) = span.style.fg {
-                style = style.fg(color);
-            }
-            if span.style.add_modifier.contains(Modifier::BOLD) {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            style
-        })
-        .unwrap_or_default()
-}
-
-fn wrap_scrollback_text(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() || width == 0 {
-        return vec![text.to_owned()];
-    }
-
-    let mut rows = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-
-    for grapheme in text.graphemes(true) {
-        let Some(grapheme_width) = crate::ui::terminal_grapheme_width(grapheme) else {
-            continue;
-        };
-        if grapheme_width > width {
-            if !current.is_empty() {
-                rows.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            rows.push("?".to_owned());
-            continue;
-        }
-        if !current.is_empty() && current_width + grapheme_width > width {
-            rows.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push_str(grapheme);
-        current_width += grapheme_width;
-    }
-
-    if !current.is_empty() || rows.is_empty() {
-        rows.push(current);
-    }
-
-    rows
-}
-
-fn render_scrollback_rows(buf: &mut Buffer, rows: &[(String, Style)]) {
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: buf.area.width,
-        height: buf.area.height,
-    };
-    for (y, (row, style)) in rows.iter().enumerate().take(area.height as usize) {
-        let rendered = padded_scrollback_row(row, area.width as usize);
-        let cell = &mut buf[(0, y as u16)];
-        cell.set_symbol(&rendered);
-        cell.set_style(*style);
-        // `Terminal::insert_before` sends every logical cell in the first inserted row directly
-        // to the backend. The first cell already prints exactly one full physical row, so the
-        // remaining logical cells must not emit spaces and trigger terminal auto-wrap.
-        for x in 1..area.width {
-            buf[(x, y as u16)].set_symbol("");
-        }
-    }
-}
-
-fn padded_scrollback_row(row: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let mut rendered = String::new();
-    let mut rendered_width = 0usize;
-    for grapheme in row.graphemes(true) {
-        let Some(grapheme_width) = crate::ui::terminal_grapheme_width(grapheme) else {
-            continue;
-        };
-        if rendered_width.saturating_add(grapheme_width) > width {
-            if rendered_width == 0 && grapheme_width > width {
-                rendered.push('?');
-                rendered_width = 1;
-            }
-            break;
-        }
-        rendered.push_str(grapheme);
-        rendered_width = rendered_width.saturating_add(grapheme_width);
-    }
-    rendered.push_str(&" ".repeat(width.saturating_sub(rendered_width)));
-    rendered
-}
-
-fn scrollback_separator(app: &AppState) -> Line<'static> {
-    let theme = theme::resolve_for_app(app);
-    let palette = &theme.palette;
-    Line::from(vec![
-        Span::styled("---- session ", Style::default().fg(palette.text_muted)),
-        Span::styled(
-            app.session_id.chars().take(8).collect::<String>(),
-            Style::default()
-                .fg(palette.accent_info)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(
-                " {} / {} ----",
-                app.runtime.provider_name, app.runtime.model_name
-            ),
-            Style::default().fg(palette.text_muted),
-        ),
-    ])
 }
 
 fn render_tui_exit_resume_hint(app: &AppState, explicit_config: Option<&Path>) -> String {

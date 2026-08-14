@@ -1131,7 +1131,7 @@ struct VisibleTimelineRows {
 }
 
 fn visible_timeline_rows(live_area: Rect, app: &AppState) -> Option<VisibleTimelineRows> {
-    if !app.terminal_scrollback_active() || live_area.width == 0 || live_area.height == 0 {
+    if !app.main_timeline_active() || live_area.width == 0 || live_area.height == 0 {
         return None;
     }
     let inner = inset_rect(live_area, 1, 0);

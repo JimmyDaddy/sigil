@@ -40,7 +40,6 @@ pub(crate) use timeline::{
 pub(crate) use tool_card::tool_activity_view;
 
 pub(crate) use checkpoint_restore::checkpoint_restore_max_scroll;
-pub(crate) use live_panel::LIVE_PANEL_BOTTOM_PADDING;
 pub(crate) use status_indicator::{
     FocusKind, StatusKind, focus_symbol, status_kind_from_label, status_symbol,
 };

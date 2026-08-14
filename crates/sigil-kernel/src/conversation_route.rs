@@ -421,14 +421,14 @@ pub struct PlanReviewDraftContext {
 /// free-text plans are never guessed into durable artifacts.
 #[must_use]
 pub fn plan_review_system_prompt_contract_material() -> &'static str {
-    "You are running a read-only plan review for the current request. Research the workspace with the read-only tools advertised in this request, then submit one validated plan draft by calling submit_plan_draft with schema_version 2, a summary, executable steps (each with a stable step_id, title, role, depends_on, mode and isolation), target paths relative to the workspace, and suggested checks. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
+    "You are running a read-only plan review for the current request. Perform only a small, targeted amount of workspace research with the read-only tools advertised in this request; reuse evidence already present in the session and do not restart broad reconnaissance. Then submit one validated plan draft by calling submit_plan_draft with schema_version 2, a summary, executable steps (each with a stable step_id, title, role, depends_on, mode and isolation), target paths relative to the workspace, and suggested checks. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
 }
 
 /// Stable host-owned contract injected when an automatic plan review run finished without a
 /// typed draft; the retry is bounded to one additional turn.
 #[must_use]
 pub fn plan_review_no_draft_retry_contract_material() -> &'static str {
-    "The plan review run did not submit a typed plan draft. Automatic plan review requires a valid submit_plan_draft call with at least one executable step before returning a final answer. Re-run the read-only research if needed and call submit_plan_draft with schema_version 2, a summary, executable steps, target paths and suggested checks. If you truthfully cannot produce an executable plan for this request, return a short final explanation of why, and the host will close the review without creating a task."
+    "The research phase is complete and this is the single submit-only finalization turn. Do not request more workspace research or repeat reconnaissance. Use the evidence already recorded in the session and call submit_plan_draft with schema_version 2, a summary, at least one executable step, target paths and suggested checks. The only tool available in this turn is submit_plan_draft. If the recorded evidence is truthfully insufficient to produce an executable plan, return one short final explanation, and the host will close the review without creating a task."
 }
 
 /// Derives the retry-stable child session reference for one plan review attempt.

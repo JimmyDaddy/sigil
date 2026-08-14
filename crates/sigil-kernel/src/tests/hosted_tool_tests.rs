@@ -1,7 +1,10 @@
 use super::*;
 use std::{
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::Result;
@@ -9,12 +12,13 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 
 use crate::{
-    Agent, AgentHostedTurn, AgentHostedTurnPreparer, AgentRunInput, AgentRunOptions,
-    CompactionConfig, CompletionRequest, EventHandler, FinalizedHostedTurn,
-    HostedCitationCandidate, HostedFinalizationContext, HostedSourceCandidate, HostedToolLimits,
-    HostedToolRequest, HostedToolSupport, InteractionMode, MemoryConfig, PermissionConfig,
-    Provider, ProviderCapabilities, ReasoningStreamSupport, RunCancellationOwner, RunEvent,
-    SecretString, Session, ToolRegistry,
+    Agent, AgentHostedTurn, AgentHostedTurnDispatchLifecycle, AgentHostedTurnPreparer,
+    AgentRunInput, AgentRunOptions, CompactionConfig, CompletionRequest, EventHandler,
+    FinalizedHostedTurn, HostedCitationCandidate, HostedFinalizationContext, HostedSourceCandidate,
+    HostedToolLimits, HostedToolRequest, HostedToolSupport, HostedToolTerminalStatus,
+    InteractionMode, MemoryConfig, NoopEventHandler, PermissionConfig, Provider,
+    ProviderCapabilities, ReasoningStreamSupport, RunCancellationOwner, RunEvent, SecretString,
+    Session, ToolRegistry,
 };
 
 fn hosted_request() -> HostedToolRequest {
@@ -385,6 +389,148 @@ impl AgentHostedTurnPreparer for SkipHostedTurnPreparer {
     async fn prepare_turn(&self) -> Result<Option<AgentHostedTurn>> {
         Ok(None)
     }
+}
+
+#[derive(Default)]
+struct RecordingHostedDispatchLifecycle {
+    dispatched: AtomicUsize,
+    finishes: Mutex<Vec<HostedToolTerminalStatus>>,
+}
+
+impl AgentHostedTurnDispatchLifecycle for RecordingHostedDispatchLifecycle {
+    fn mark_dispatched(&self) -> Result<(), HostedTurnError> {
+        self.dispatched.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn finish(&self, status: HostedToolTerminalStatus) -> Result<(), HostedTurnError> {
+        self.finishes.lock().expect("finish lock").push(status);
+        Ok(())
+    }
+}
+
+struct FixedHostedTurnPreparer {
+    lifecycle: Arc<RecordingHostedDispatchLifecycle>,
+    cancel_owner: Option<Arc<RunCancellationOwner>>,
+    invalidate_request: bool,
+}
+
+#[async_trait]
+impl AgentHostedTurnPreparer for FixedHostedTurnPreparer {
+    async fn prepare_turn(&self) -> Result<Option<AgentHostedTurn>> {
+        let mut request = hosted_request();
+        if self.invalidate_request {
+            request.request_fingerprint.push_str("-drifted");
+        }
+        if let Some(owner) = &self.cancel_owner {
+            owner.request_cancel();
+        }
+        Ok(Some(AgentHostedTurn {
+            hosted_tools: vec![request],
+            evidence_processor: Arc::new(VisibilityCheckingProcessor {
+                events: Arc::new(Mutex::new(Vec::new())),
+            }),
+            dispatch_lifecycle: self.lifecycle.clone(),
+        }))
+    }
+}
+
+struct CountingHostedProvider {
+    stream_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for CountingHostedProvider {
+    fn name(&self) -> &str {
+        RawHostedProvider.name()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        RawHostedProvider.capabilities()
+    }
+
+    fn hosted_web_search_capability(&self, model_name: &str) -> HostedWebSearchCapability {
+        RawHostedProvider.hosted_web_search_capability(model_name)
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        RawHostedProvider.stream(request).await
+    }
+}
+
+#[tokio::test]
+async fn hosted_pre_wire_validation_refunds_provisional_dispatch() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let lifecycle = Arc::new(RecordingHostedDispatchLifecycle::default());
+    let stream_calls = Arc::new(AtomicUsize::new(0));
+    let mut session = Session::new("raw-hosted", "model");
+    Agent::new(
+        CountingHostedProvider {
+            stream_calls: Arc::clone(&stream_calls),
+        },
+        ToolRegistry::new(),
+    )
+    .run_with_input(
+        &mut session,
+        AgentRunInput::user("search").with_hosted_turn_preparer(Arc::new(
+            FixedHostedTurnPreparer {
+                lifecycle: Arc::clone(&lifecycle),
+                cancel_owner: None,
+                invalidate_request: true,
+            },
+        )),
+        hosted_options(workspace.path()),
+        &mut NoopEventHandler,
+    )
+    .await
+    .expect_err("invalid hosted request must fail before provider dispatch");
+
+    assert_eq!(stream_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(lifecycle.dispatched.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        lifecycle.finishes.lock().expect("finish lock").as_slice(),
+        [HostedToolTerminalStatus::RequestFailed]
+    );
+}
+
+#[tokio::test]
+async fn hosted_local_cancellation_refunds_provisional_dispatch() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let lifecycle = Arc::new(RecordingHostedDispatchLifecycle::default());
+    let stream_calls = Arc::new(AtomicUsize::new(0));
+    let owner = Arc::new(RunCancellationOwner::new());
+    let mut session = Session::new("raw-hosted", "model");
+    Agent::new(
+        CountingHostedProvider {
+            stream_calls: Arc::clone(&stream_calls),
+        },
+        ToolRegistry::new(),
+    )
+    .run_with_input(
+        &mut session,
+        AgentRunInput::user("search")
+            .with_cancellation(owner.handle())
+            .with_hosted_turn_preparer(Arc::new(FixedHostedTurnPreparer {
+                lifecycle: Arc::clone(&lifecycle),
+                cancel_owner: Some(owner),
+                invalidate_request: false,
+            })),
+        hosted_options(workspace.path()),
+        &mut NoopEventHandler,
+    )
+    .await
+    .expect_err("cancelled hosted request must stop before provider dispatch");
+
+    assert_eq!(stream_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(lifecycle.dispatched.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        lifecycle.finishes.lock().expect("finish lock").as_slice(),
+        [HostedToolTerminalStatus::Cancelled]
+    );
 }
 
 struct PlainProvider;

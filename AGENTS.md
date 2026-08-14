@@ -46,7 +46,7 @@ CLI 与 HTTP 只承担自动化、调试和 adapter 职责。
 - `apps/desktop`：Tauri 2 + React 桌面壳；renderer 只通过 allowlist command/event 消费收窄 DTO，不持有 bearer、路径、process 或 generic HTTP/filesystem 能力
 - `crates/sigil-mcp`：stdio MCP client 与工具适配
 - `crates/sigil-runtime`：Desktop/TUI/CLI 共享的 provider、tool registry 与 run options 装配
-- `crates/sigil-cli`：薄 CLI、调试入口、自动化入口
+- `crates/sigil`：薄 CLI、调试入口、自动化入口
 - `crates/sigil-tui`：终端产品表面
 - `dev/governance`：开发规范
 - `dev/docs`：架构与技术方案

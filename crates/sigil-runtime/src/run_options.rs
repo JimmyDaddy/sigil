@@ -143,8 +143,8 @@ fn plan_review_deny_scope() -> ToolRegistryScope {
             "terminal_start",
             "terminal_input",
             "terminal_stop",
-            "web_fetch",
-            "web_search",
+            "webfetch",
+            "websearch",
             "mcp_call",
         ],
         [
@@ -295,4 +295,17 @@ fn workspace_partition_key(workspace_root: &std::path::Path) -> String {
     hasher.update(workspace_root.to_string_lossy().as_bytes());
     let digest = hasher.finalize();
     format!("workspace-{digest:x}")
+}
+
+#[cfg(test)]
+mod plan_review_scope_tests {
+    use super::*;
+
+    #[test]
+    fn plan_review_deny_scope_uses_registered_web_tool_names() {
+        let scope = plan_review_deny_scope();
+
+        assert!(scope.allows("webfetch"));
+        assert!(scope.allows("websearch"));
+    }
 }
