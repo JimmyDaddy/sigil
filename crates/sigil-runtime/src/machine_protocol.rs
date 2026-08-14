@@ -76,6 +76,8 @@ pub enum MachineRunStatus {
     /// An automatic or explicit plan review committed a draft; execution waits for a typed plan
     /// decision and nothing was auto-accepted or executed.
     AwaitingPlanDecision,
+    /// The run durably requested typed user input and can be resumed by an interactive adapter.
+    AwaitingUserInput,
 }
 
 /// Stable terminal result returned by JSON and JSONL output modes.
@@ -212,6 +214,8 @@ pub enum MachineExitCode {
     Cancelled = 130,
     /// The run stopped at a pending plan decision; no execution happened.
     AwaitingPlanDecision = 3,
+    /// The run stopped at a durable user-input request; no default answer was invented.
+    AwaitingUserInput = 4,
 }
 
 impl MachineExitCode {
@@ -229,6 +233,7 @@ impl MachineExitCode {
             MachineRunStatus::Failed => Self::ExecutionFailed,
             MachineRunStatus::Cancelled => Self::Cancelled,
             MachineRunStatus::AwaitingPlanDecision => Self::AwaitingPlanDecision,
+            MachineRunStatus::AwaitingUserInput => Self::AwaitingUserInput,
         }
     }
 

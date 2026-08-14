@@ -30,6 +30,7 @@ pub enum ConversationRunTerminalStatusV1 {
     Cancelled,
     Interrupted,
     Blocked,
+    AwaitingUserInput,
 }
 
 /// Recovery-critical start boundary for one adapter-owned foreground conversation run.

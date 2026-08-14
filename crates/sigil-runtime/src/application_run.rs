@@ -1764,6 +1764,8 @@ pub enum ApplicationRunTerminalStatus {
     Interrupted,
     /// A required delegation contract was not satisfied.
     Blocked,
+    /// The physical run stopped safely after durably requesting user input.
+    AwaitingUserInput,
 }
 
 /// Successful terminal output from one shared application run.
@@ -1941,6 +1943,9 @@ impl ApplicationRunExecution {
                     }
                     ApplicationRunTerminalStatus::Blocked => {
                         ConversationRunTerminalStatusV1::Blocked
+                    }
+                    ApplicationRunTerminalStatus::AwaitingUserInput => {
+                        ConversationRunTerminalStatusV1::AwaitingUserInput
                     }
                 };
                 let summary = match &terminal_event {
@@ -5268,11 +5273,19 @@ fn validate_execution_contract(
 fn application_terminal_projection(
     output: &AgentRunOutput,
 ) -> (ApplicationRunTerminalStatus, PublicRunEventKind) {
-    match output.disposition {
+    match &output.disposition {
         AgentRunDisposition::FinalAnswer => (
             ApplicationRunTerminalStatus::Succeeded,
             PublicRunEventKind::RunFinished {
                 final_text: output.result.final_text.clone(),
+            },
+        ),
+        AgentRunDisposition::AwaitingUserInput(request) => (
+            ApplicationRunTerminalStatus::AwaitingUserInput,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: request.identity.request_id.as_str().to_owned(),
+                generation: request.identity.generation,
+                request_hash: request.request_hash.clone(),
             },
         ),
         AgentRunDisposition::Interrupted => (

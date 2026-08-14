@@ -963,6 +963,7 @@ pub enum HttpConversationDisplayStatus {
     Cancelled,
     Interrupted,
     Blocked,
+    AwaitingUserInput,
 }
 
 /// Provider-neutral message author.
@@ -1777,7 +1778,7 @@ map_enum!(ConversationDisplaySourceV1 => HttpConversationDisplaySource {
 });
 map_enum!(ConversationDisplayStatusV1 => HttpConversationDisplayStatus {
     Recorded, Requested, WaitingForApproval, Approved, Denied, Completed, Succeeded, Failed,
-    Cancelled, Interrupted, Blocked
+    Cancelled, Interrupted, Blocked, AwaitingUserInput
 });
 map_enum!(ConversationDisplayMessageRoleV1 => HttpConversationDisplayMessageRole {
     User, Assistant

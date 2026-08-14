@@ -219,6 +219,11 @@ pub enum ControlEntry {
     ToolArtifactTombstonePlan(ToolArtifactTombstonePlannedV1),
     ToolEgress(Box<ToolEgressEntry>),
     McpElicitation(Box<McpElicitationEntry>),
+    UserInputRequested(Box<crate::UserInputRequestedV1>),
+    UserInputDecisionAccepted(Box<crate::UserInputDecisionAcceptedV1>),
+    UserInputContinuationClaimed(crate::UserInputContinuationClaimedV1),
+    UserInputContinuationStarted(crate::UserInputContinuationStartedV1),
+    UserInputResolved(crate::UserInputResolvedV1),
     ToolPreviewCaptured(ToolPreviewSnapshot),
     SkillIndexCaptured(SkillIndexSnapshot),
     SkillLoaded(SkillLoadEntry),
@@ -340,6 +345,11 @@ impl ControlEntry {
             Self::TaskContinuationSelected(entry) => entry.validate_shape(),
             Self::TaskRunTargetSelected(entry) => entry.validate_shape(),
             Self::TaskGuidanceMaterialized(entry) => entry.validate_shape(),
+            Self::UserInputRequested(entry) => entry.validate(),
+            Self::UserInputDecisionAccepted(entry) => entry.validate_shape(),
+            Self::UserInputContinuationClaimed(entry) => entry.validate(),
+            Self::UserInputContinuationStarted(entry) => entry.validate(),
+            Self::UserInputResolved(entry) => entry.validate(),
             _ => Ok(()),
         }
     }

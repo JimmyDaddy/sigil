@@ -378,6 +378,9 @@ pub(in crate::runner) struct RunTaskResult {
 }
 
 pub(in crate::runner) enum RunTaskPayload {
+    AwaitingUserInput {
+        request: sigil_kernel::UserInputRequestRefV1,
+    },
     Chat {
         result: std::result::Result<AgentRunResult, String>,
         plan_mode: bool,

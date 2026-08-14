@@ -278,6 +278,7 @@ fn protocol_provisional_id(
             })
         }
         PublicRunEventKind::RunFinished { .. }
+        | PublicRunEventKind::RunAwaitingUserInput { .. }
         | PublicRunEventKind::RunFailed { .. }
         | PublicRunEventKind::RouteRecoveryRequired { .. }
         | PublicRunEventKind::RunCancelled => Some(ConversationLiveProvisionalSlotV1::Terminal),
@@ -290,6 +291,7 @@ fn protocol_provisional_id(
         | PublicRunEventKind::TaskBatchChanged { .. }
         | PublicRunEventKind::TaskStepChanged { .. }
         | PublicRunEventKind::IntegrationLaneChanged { .. }
+        | PublicRunEventKind::UserInputChanged { .. }
         | PublicRunEventKind::TextDelta { .. }
         | PublicRunEventKind::ReasoningDelta { .. }
         | PublicRunEventKind::Usage { .. }
@@ -425,6 +427,30 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
         } => {
             *plan_review_id = safe_persistence_text(plan_review_id);
             *plan_id = safe_persistence_text(plan_id);
+        }
+        PublicRunEventKind::UserInputChanged { request, .. } => {
+            request.prompt = safe_persistence_text(&request.prompt);
+            for question in &mut request.questions {
+                question.id = safe_persistence_text(&question.id);
+                question.header = safe_persistence_text(&question.header);
+                question.question = safe_persistence_text(&question.question);
+                question.description = question.description.as_deref().map(safe_persistence_text);
+                let options = match &mut question.field {
+                    sigil_kernel::UserInputFieldKindV1::SingleSelect { options, .. }
+                    | sigil_kernel::UserInputFieldKindV1::MultiSelect { options, .. } => {
+                        Some(options)
+                    }
+                    _ => None,
+                };
+                if let Some(options) = options {
+                    for option in options {
+                        option.id = safe_persistence_text(&option.id);
+                        option.label = safe_persistence_text(&option.label);
+                        option.description =
+                            option.description.as_deref().map(safe_persistence_text);
+                    }
+                }
+            }
         }
         PublicRunEventKind::TaskPhaseChanged {
             task_id, status, ..
@@ -615,6 +641,7 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
         }
         PublicRunEventKind::TerminalLifecycle { .. } => {}
         PublicRunEventKind::RunCancelled
+        | PublicRunEventKind::RunAwaitingUserInput { .. }
         | PublicRunEventKind::RouteRecoveryRequired { .. }
         | PublicRunEventKind::TextDelta { .. }
         | PublicRunEventKind::ReasoningDelta { .. }
@@ -1457,10 +1484,12 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
         | PublicRunEventKind::RunStarted { .. }
         | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::RunFinished { .. }
+        | PublicRunEventKind::RunAwaitingUserInput { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
         | PublicRunEventKind::TaskRoutingChanged { .. }
         | PublicRunEventKind::ConversationRouteChanged { .. }
         | PublicRunEventKind::PlanReviewChanged { .. }
+        | PublicRunEventKind::UserInputChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
         | PublicRunEventKind::TaskPlanUpdated { .. }
         | PublicRunEventKind::TaskBatchChanged { .. }

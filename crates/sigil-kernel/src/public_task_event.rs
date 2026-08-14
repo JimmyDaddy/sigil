@@ -31,6 +31,7 @@ pub enum PublicConversationPhase {
     Chat,
     Planning,
     AwaitingPlanDecision,
+    AwaitingUserInput,
     Task,
     Terminal,
 }
@@ -42,6 +43,7 @@ impl PublicConversationPhase {
             Self::Chat => "chat",
             Self::Planning => "planning",
             Self::AwaitingPlanDecision => "awaiting_plan_decision",
+            Self::AwaitingUserInput => "awaiting_user_input",
             Self::Task => "task",
             Self::Terminal => "terminal",
         }
@@ -204,12 +206,38 @@ pub struct PublicTaskEventProjector {
     step_attempts:
         BTreeMap<(String, u32, String), (TaskParticipantAttemptId, TaskParticipantAttemptStatus)>,
     plan_reviews: BTreeMap<crate::PlanReviewId, crate::PlanId>,
+    user_inputs: crate::UserInputProjectionV1,
 }
 
 impl PublicTaskEventProjector {
     /// Projects one control entry into zero or more public task events.
     #[must_use]
     pub fn project_control(&mut self, control: &ControlEntry) -> Vec<PublicRunEventKind> {
+        if let Some(entry) = crate::UserInputLifecycleEntryV1::from_control(control) {
+            let identity = entry.identity().clone();
+            let request_hash = entry.request_hash().to_owned();
+            if let Err(error) = self.user_inputs.apply(entry) {
+                return vec![PublicRunEventKind::RunFailed {
+                    error: format!("invalid durable user input lifecycle: {error}"),
+                }];
+            }
+            let Some(request) = self
+                .user_inputs
+                .request(&identity)
+                .map(crate::UserInputRequestStateV1::public_view)
+            else {
+                return vec![PublicRunEventKind::RunFailed {
+                    error: "durable user input lifecycle lost its projected request".to_owned(),
+                }];
+            };
+            return vec![PublicRunEventKind::UserInputChanged {
+                request_id: identity.request_id.as_str().to_owned(),
+                generation: identity.generation,
+                request_hash,
+                status: request.status,
+                request: Box::new(request),
+            }];
+        }
         match control {
             ControlEntry::ConversationRouteDecisionRecorded(entry) => {
                 vec![PublicRunEventKind::ConversationRouteChanged {

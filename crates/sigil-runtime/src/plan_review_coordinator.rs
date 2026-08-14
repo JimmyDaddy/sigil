@@ -316,6 +316,15 @@ impl PlanReviewCoordinator {
                     return complete_plan_review_run(&cancellation, outcome);
                 }
                 AgentRunDisposition::FinalAnswer => None,
+                AgentRunDisposition::AwaitingUserInput(_) => {
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Failed(
+                            "plan review research exposed an unsupported user-input suspension"
+                                .to_owned(),
+                        ),
+                    );
+                }
                 AgentRunDisposition::Interrupted
                     if host_imposed_research_cap
                         && output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns =>
@@ -426,6 +435,9 @@ impl PlanReviewCoordinator {
                 plan_review_draft_ready_outcome(&child_session, &action.plan_id)?
             }
             AgentRunDisposition::FinalAnswer => PlanReviewRunOutcome::CompletedWithoutDraft,
+            AgentRunDisposition::AwaitingUserInput(_) => PlanReviewRunOutcome::Failed(
+                "plan review finalization exposed an unsupported user-input suspension".to_owned(),
+            ),
             AgentRunDisposition::Interrupted => PlanReviewRunOutcome::Interrupted(
                 "plan review finalization was interrupted before a draft".to_owned(),
             ),

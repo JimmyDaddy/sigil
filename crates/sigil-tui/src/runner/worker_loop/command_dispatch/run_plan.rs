@@ -293,6 +293,9 @@ where
                                     provider_logical_run_id: Some(provider_logical_run_id.clone()),
                                     agent_result_continuation_thread_ids: Vec::new(),
                                 },
+                                AgentRunDisposition::AwaitingUserInput(request) => {
+                                    RunTaskPayload::AwaitingUserInput { request }
+                                }
                                 AgentRunDisposition::StartDurableTask(action) => {
                                     let projection = run_session.task_state_projection();
                                     let task = projection.tasks.get(&action.task_id).cloned();
@@ -516,6 +519,14 @@ where
                         &run_elicitation_audit_buffer,
                     ) {
                         payload = match payload {
+                            RunTaskPayload::AwaitingUserInput { .. } => RunTaskPayload::Chat {
+                                result: Err(error),
+                                plan_mode,
+                                plan_review: false,
+                                queue_id: None,
+                                provider_logical_run_id: Some(provider_logical_run_id.clone()),
+                                agent_result_continuation_thread_ids: Vec::new(),
+                            },
                             RunTaskPayload::Chat {
                                 plan_mode,
                                 plan_review,

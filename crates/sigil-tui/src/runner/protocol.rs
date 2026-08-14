@@ -679,6 +679,10 @@ pub enum WorkerMessage {
         result: AgentRunResult,
         entries: Vec<SessionLogEntry>,
     },
+    UserInputRequested {
+        request: sigil_kernel::PublicUserInputRequestV1,
+        entries: Vec<SessionLogEntry>,
+    },
     PlanRejected {
         entry: PlanDecisionRecordedEntry,
         entries: Vec<SessionLogEntry>,

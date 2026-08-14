@@ -473,6 +473,21 @@ impl AppState {
                     ),
                 );
             }
+            WorkerMessage::UserInputRequested { request, entries } => {
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.last_notice = Some("input required".to_owned());
+                self.push_event(
+                    "user_input:requested",
+                    format!(
+                        "{} generation {}",
+                        request.identity.request_id.as_str(),
+                        request.identity.generation
+                    ),
+                );
+            }
             WorkerMessage::PlanRejected { entry, entries } => {
                 self.runtime.is_busy = false;
                 self.approval.pending = None;

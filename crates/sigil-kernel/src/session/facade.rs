@@ -395,6 +395,7 @@ impl Session {
             SessionLogEntry::ToolResultV3(result) => result.validate()?,
             SessionLogEntry::Control(control) => {
                 control.validate_durable_contract()?;
+                self.validate_user_input_controls(std::iter::once(control))?;
                 if let ControlEntry::ToolArtifactRead(receipt) = control {
                     receipt.validate()?;
                 }
@@ -562,6 +563,56 @@ impl Session {
         Ok(())
     }
 
+    /// Atomically closes a suspended `request_user_input` tool call and starts its logical
+    /// continuation. Ordinary tool-result bundles cannot carry lifecycle controls; this narrow
+    /// writer exists so a crash cannot expose an answer result without the matching continuation
+    /// claim/start, or vice versa.
+    pub(crate) fn append_user_input_tool_settlement_bundle(
+        &mut self,
+        result: ToolResultRecordedV3,
+        lifecycle: Vec<crate::UserInputLifecycleEntryV1>,
+        execution: ToolExecutionEntry,
+    ) -> Result<()> {
+        if lifecycle.is_empty() {
+            bail!("user input continuation bundle requires lifecycle entries");
+        }
+        result.validate()?;
+        execution.validate()?;
+        if result.tool_name != crate::REQUEST_USER_INPUT_TOOL_NAME
+            || execution.tool_name != crate::REQUEST_USER_INPUT_TOOL_NAME
+            || execution.call_id != result.call_id
+            || execution.status != ToolExecutionStatus::Completed
+        {
+            bail!("user input continuation bundle does not close the exact internal tool call");
+        }
+        let mut projection = self.user_input_projection()?;
+        for entry in &lifecycle {
+            if entry.identity().session_scope_id.as_str() != self.session_scope_id() {
+                bail!("user input lifecycle entry belongs to a different session scope");
+            }
+            projection.apply(entry.clone())?;
+        }
+        let mut entries = lifecycle
+            .into_iter()
+            .map(crate::UserInputLifecycleEntryV1::into_control)
+            .map(SessionLogEntry::Control)
+            .collect::<Vec<_>>();
+        entries.push(SessionLogEntry::ToolResultV3(result));
+        entries.push(SessionLogEntry::Control(ControlEntry::ToolExecution(
+            Box::new(execution),
+        )));
+        let events = self
+            .store
+            .as_ref()
+            .map(|store| store.append_session_entry_events(&entries))
+            .transpose()?;
+        self.entries.extend(entries);
+        if let Some(events) = events {
+            self.advance_durable_session_entry_count(&events);
+        }
+        Ok(())
+    }
+
     /// RFC-0062 9.4: appends one generation-guarded availability transition. The expected
     /// generation is the caller's responsibility; helper scans are available on the caller side.
     pub fn append_artifact_availability_transition(
@@ -632,6 +683,35 @@ impl Session {
 
     pub fn append_control(&mut self, control: ControlEntry) -> Result<()> {
         self.append(SessionLogEntry::Control(control))
+    }
+
+    /// Rebuilds the authoritative durable user-input lifecycle projection.
+    pub fn user_input_projection(&self) -> Result<crate::UserInputProjectionV1> {
+        crate::UserInputProjectionV1::from_session_entries(&self.entries)
+    }
+
+    /// Atomically validates and appends one ordered durable user-input lifecycle batch.
+    ///
+    /// Shape validation alone is insufficient for these records: request generation, exact
+    /// binding, accepted decision, continuation claim, and terminal resolution are reducer
+    /// invariants. This API applies the complete candidate batch before writing any entry.
+    pub fn append_user_input_lifecycle(
+        &mut self,
+        entries: Vec<crate::UserInputLifecycleEntryV1>,
+    ) -> Result<()> {
+        if entries.is_empty() {
+            bail!("user input lifecycle append batch must not be empty");
+        }
+        let mut projection = self.user_input_projection()?;
+        for entry in &entries {
+            projection.apply(entry.clone())?;
+        }
+        self.append_controls(
+            entries
+                .into_iter()
+                .map(crate::UserInputLifecycleEntryV1::into_control)
+                .collect(),
+        )
     }
 
     /// Appends one ordered control-state transition as a single writer batch.
@@ -841,6 +921,7 @@ impl Session {
         controls
             .iter()
             .try_for_each(ControlEntry::validate_durable_contract)?;
+        self.validate_user_input_controls(controls.iter())?;
         let entries = controls
             .into_iter()
             .map(SessionLogEntry::Control)
@@ -863,6 +944,7 @@ impl Session {
         control: ControlEntry,
     ) -> Result<Option<StoredEvent>> {
         control.validate_durable_contract()?;
+        self.validate_user_input_controls(std::iter::once(&control))?;
         let entry = SessionLogEntry::Control(control);
         let event = self
             .store
@@ -874,6 +956,30 @@ impl Session {
             self.advance_durable_session_entry_count(std::slice::from_ref(event));
         }
         Ok(event)
+    }
+
+    fn validate_user_input_controls<'a>(
+        &self,
+        controls: impl IntoIterator<Item = &'a ControlEntry>,
+    ) -> Result<()> {
+        let lifecycle_entries = controls
+            .into_iter()
+            .filter_map(crate::UserInputLifecycleEntryV1::from_control)
+            .collect::<Vec<_>>();
+        if lifecycle_entries.is_empty() {
+            return Ok(());
+        }
+        if lifecycle_entries
+            .iter()
+            .any(|entry| entry.identity().session_scope_id.as_str() != self.session_scope_id())
+        {
+            bail!("user input lifecycle entry belongs to a different session scope");
+        }
+        let mut projection = self.user_input_projection()?;
+        for entry in lifecycle_entries {
+            projection.apply(entry)?;
+        }
+        Ok(())
     }
 
     /// Returns a clone of the durable store for a blocking-I/O bridge.

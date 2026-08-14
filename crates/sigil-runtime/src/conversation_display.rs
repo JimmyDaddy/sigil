@@ -125,6 +125,7 @@ pub enum ConversationDisplayStatusV1 {
     Cancelled,
     Interrupted,
     Blocked,
+    AwaitingUserInput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1886,6 +1887,9 @@ fn map_terminal_status(
         ConversationRunTerminalStatusV1::Cancelled => ConversationDisplayStatusV1::Cancelled,
         ConversationRunTerminalStatusV1::Interrupted => ConversationDisplayStatusV1::Interrupted,
         ConversationRunTerminalStatusV1::Blocked => ConversationDisplayStatusV1::Blocked,
+        ConversationRunTerminalStatusV1::AwaitingUserInput => {
+            ConversationDisplayStatusV1::AwaitingUserInput
+        }
         _ => bail!("unsupported conversation run terminal status"),
     })
 }

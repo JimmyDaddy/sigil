@@ -35,22 +35,23 @@ use crate::{
     ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, REQUEST_PLAN_REVIEW_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
-    ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle,
-    RunCancellationOwner, RunEvent, RuntimeContextCandidates, SUBMIT_PLAN_DRAFT_TOOL_NAME,
-    SecretString, Session, SessionLogEntry, SessionRef, SessionStreamRecord, SourceCacheStatus,
-    SourceFreshness, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
-    TOOL_ARTIFACT_READ_SCHEMA_VERSION, TaskContinuationHandoffBinding, TaskGuidanceApplyReason,
-    TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskParticipantAttemptId,
-    TaskParticipantContext, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry,
-    TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision,
-    ToolArtifactReadOutcome, ToolArtifactReadRecordedV1, ToolArtifactRefV1, ToolArtifactSelectorV1,
-    ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
-    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
-    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    REQUEST_USER_INPUT_TOOL_NAME, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
+    ResponseHandle, RunCancellationOwner, RunEvent, RuntimeContextCandidates,
+    SUBMIT_PLAN_DRAFT_TOOL_NAME, SecretString, Session, SessionLogEntry, SessionRef,
+    SessionStreamRecord, SourceCacheStatus, SourceFreshness, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    TASK_PLAN_UPDATE_TOOL_NAME, TOOL_ARTIFACT_READ_SCHEMA_VERSION, TaskContinuationHandoffBinding,
+    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskHandoffId, TaskId,
+    TaskParticipantAttemptId, TaskParticipantContext, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding,
+    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus,
+    Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolArtifactReadOutcome, ToolArtifactReadRecordedV1,
+    ToolArtifactRefV1, ToolArtifactSelectorV1, ToolCall, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
+    ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
+    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
+    VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
     conversation_route_decision_id_for_source, conversation_route_routing_contract_material,
     direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_review,
     plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
@@ -12842,6 +12843,97 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
         output.outcome.terminal_reason,
         AgentRunTerminalReason::PlanReviewHandoff
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_user_input_suspends_with_durable_request_and_cancels_extra_calls() -> Result<()> {
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![
+            (
+                "call-input".to_owned(),
+                REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                serde_json::json!({
+                    "prompt": "Choose the compatibility boundary before implementation.",
+                    "questions": [{
+                        "id": "compatibility",
+                        "header": "Compatibility",
+                        "question": "Which compatibility target should be preserved?",
+                        "required": true,
+                        "field": {
+                            "kind": "single_select",
+                            "options": [
+                                {"id": "current", "label": "Current release"},
+                                {"id": "legacy", "label": "Legacy sessions"}
+                            ],
+                            "allow_other": false
+                        }
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "call-extra".to_owned(),
+                "unknown".to_owned(),
+                "{}".to_owned(),
+            ),
+        ]]),
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-user-input", "mock-model");
+    let logical_run_id = "user-input-root";
+    let input = AgentRunInput::user("implement the migration")
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn: ConversationTurnRef::new(
+                    session.session_scope_id(),
+                    "source-message",
+                    logical_run_id,
+                )?,
+                routing_policy: TaskRoutingPolicy::Manual,
+                route_capability: AutomaticRouteCapability::Unsupported,
+                writable_memory_routing: false,
+                task_handoff: None,
+                plan_review: None,
+                task_continuation: None,
+            },
+        )));
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
+        .await?;
+
+    let AgentRunDisposition::AwaitingUserInput(reference) = output.disposition else {
+        panic!("request_user_input should suspend the run");
+    };
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::AwaitingUserInput
+    );
+    let state = session
+        .user_input_projection()?
+        .request(&reference.identity)
+        .cloned()
+        .expect("durable request should be projected");
+    assert_eq!(
+        state.requested.request.prompt,
+        "Choose the compatibility boundary before implementation."
+    );
+    assert!(
+        settled_tool_results(&session)
+            .iter()
+            .all(|(call_id, _)| call_id != "call-input")
+    );
+    assert_single_settled_result(&session, "call-extra", "suspended");
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.call_id == "call-input"
+                && execution.status == ToolExecutionStatus::Started
+    )));
     Ok(())
 }
 

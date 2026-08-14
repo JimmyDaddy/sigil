@@ -181,6 +181,7 @@ durable_event_types! {
     PlanPermissionGranted => ("plan_permission_granted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ConversationRouteDecisionRecorded => ("conversation_route_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanReviewAttempt => ("plan_review_attempt", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    UserInputLifecycleChanged => ("user_input_lifecycle_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskCreatedFromPlan => ("task_created_from_plan", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     MutationPrepared => ("mutation_prepared", RecoveryCritical, Critical, DirectJson, "mutation_prepared"),
     MutationCommitted => ("mutation_committed", RecoveryCritical, Critical, DirectJson, "mutation_committed"),
@@ -519,6 +520,7 @@ pub enum TypedDomainEvent {
     TaskStatusChanged(ControlEntry),
     TaskHandoffRequested(TaskHandoffRequestedEntry),
     TaskHandoffResolved(TaskHandoffResolvedEntry),
+    UserInputLifecycleChanged(ControlEntry),
     AgentThread(ControlEntry),
     TerminalTask(TerminalTaskEntry),
     ChangeSetProposed(ChangeSet),
@@ -802,6 +804,13 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 bail!("task handoff resolved event carried a different control payload");
             };
             TypedDomainEvent::TaskHandoffResolved(entry)
+        }
+        DurableEventType::UserInputLifecycleChanged => {
+            let control = decode_control_entry(&event)?;
+            if crate::UserInputLifecycleEntryV1::from_control(&control).is_none() {
+                bail!("user input lifecycle event carried a different control payload");
+            }
+            TypedDomainEvent::UserInputLifecycleChanged(control)
         }
         DurableEventType::SessionEntryRecorded => {
             if let Some(control) = maybe_decode_control_entry(&event)? {
@@ -1377,6 +1386,11 @@ pub enum PublicRunEventKind {
     RunFinished {
         final_text: String,
     },
+    RunAwaitingUserInput {
+        request_id: String,
+        generation: u32,
+        request_hash: String,
+    },
     TaskRunFinished {
         task_id: String,
         status: String,
@@ -1395,6 +1409,13 @@ pub enum PublicRunEventKind {
         plan_review_id: String,
         plan_id: String,
         status: crate::PublicPlanReviewStatus,
+    },
+    UserInputChanged {
+        request_id: String,
+        generation: u32,
+        request_hash: String,
+        status: crate::UserInputStatusV1,
+        request: Box<crate::PublicUserInputRequestV1>,
     },
     TaskPhaseChanged {
         task_id: Option<String>,
@@ -1673,6 +1694,11 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ToolArtifactTombstonePlan(_) => "tool_artifact_tombstone_plan",
         ControlEntry::ToolEgress(_) => "tool_egress",
         ControlEntry::McpElicitation(_) => "mcp_elicitation",
+        ControlEntry::UserInputRequested(_) => "user_input_requested",
+        ControlEntry::UserInputDecisionAccepted(_) => "user_input_decision_accepted",
+        ControlEntry::UserInputContinuationClaimed(_) => "user_input_continuation_claimed",
+        ControlEntry::UserInputContinuationStarted(_) => "user_input_continuation_started",
+        ControlEntry::UserInputResolved(_) => "user_input_resolved",
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",
         ControlEntry::SkillIndexCaptured(_) => "skill_index_captured",
         ControlEntry::SkillLoaded(_) => "skill_loaded",

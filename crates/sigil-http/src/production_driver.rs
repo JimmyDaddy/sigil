@@ -5645,6 +5645,7 @@ fn http_terminal_from_application_result(
             ApplicationRunTerminalStatus::Succeeded => HttpRunTerminalOutcome::Finished,
             ApplicationRunTerminalStatus::Interrupted => HttpRunTerminalOutcome::Interrupted,
             ApplicationRunTerminalStatus::Blocked => HttpRunTerminalOutcome::Failed,
+            ApplicationRunTerminalStatus::AwaitingUserInput => HttpRunTerminalOutcome::Paused,
         },
         Err(_) => HttpRunTerminalOutcome::Failed,
     }

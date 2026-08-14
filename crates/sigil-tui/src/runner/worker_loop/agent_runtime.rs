@@ -511,6 +511,10 @@ pub(in crate::runner) fn agent_result_continuation_run_result(
 ) -> std::result::Result<sigil_kernel::AgentRunResult, String> {
     match output.disposition {
         AgentRunDisposition::FinalAnswer => Ok(output.result),
+        AgentRunDisposition::AwaitingUserInput(_) => Err(
+            "agent result continuation requested user input outside the foreground conversation"
+                .to_owned(),
+        ),
         AgentRunDisposition::Interrupted => {
             Err("agent result continuation was interrupted before a final answer".to_owned())
         }
@@ -724,6 +728,9 @@ where
                         provider_logical_run_id: None,
                         agent_result_continuation_thread_ids: Vec::new(),
                     },
+                    AgentRunDisposition::AwaitingUserInput(request) => {
+                        RunTaskPayload::AwaitingUserInput { request }
+                    }
                     AgentRunDisposition::StartDurableTask(action) => {
                         let projection = run_session.task_state_projection();
                         let task = projection.tasks.get(&action.task_id).cloned();
@@ -917,6 +924,14 @@ where
             append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer)
         {
             payload = match payload {
+                RunTaskPayload::AwaitingUserInput { .. } => RunTaskPayload::Chat {
+                    result: Err(error),
+                    plan_mode: false,
+                    plan_review: false,
+                    queue_id: Some(queue_id.clone()),
+                    provider_logical_run_id: None,
+                    agent_result_continuation_thread_ids: Vec::new(),
+                },
                 RunTaskPayload::Chat {
                     plan_mode,
                     plan_review,

@@ -342,6 +342,7 @@ fn run_status(execution: &ModelEvalRunExecution) -> RunStatus {
             Some(ApplicationRunTerminalStatus::Succeeded) => RunStatus::Completed,
             Some(ApplicationRunTerminalStatus::Blocked) => RunStatus::Blocked,
             Some(ApplicationRunTerminalStatus::Interrupted) => RunStatus::Interrupted,
+            Some(ApplicationRunTerminalStatus::AwaitingUserInput) => RunStatus::Interrupted,
             None => RunStatus::Failed,
         },
         ModelEvalRunExecutionStatus::PreparationFailed

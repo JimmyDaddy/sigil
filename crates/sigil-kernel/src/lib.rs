@@ -55,6 +55,7 @@ pub mod task_orchestrator;
 pub mod terminal_task;
 pub mod time;
 pub mod tool;
+pub mod user_input;
 pub mod verification;
 pub mod web_budget;
 pub mod write_isolation;
@@ -766,6 +767,23 @@ pub use tool::{
     ToolRegistryScope, ToolResult, ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolSpec,
     ToolSubject, ToolSubjectKind, ToolSubjectScope, WeakToolRegistry,
     declared_tool_permission_plan,
+};
+pub use user_input::{
+    LogicalRunId, MAX_USER_INPUT_ANSWER_BYTES, MAX_USER_INPUT_DESCRIPTION_CHARS,
+    MAX_USER_INPUT_OPTIONS, MAX_USER_INPUT_PROMPT_CHARS, MAX_USER_INPUT_QUESTIONS,
+    MAX_USER_INPUT_REQUEST_BYTES, MAX_USER_INPUT_REQUESTS_PER_ROOT_RUN, MAX_USER_INPUT_TEXT_CHARS,
+    PublicUserInputAnswerReceiptV1, PublicUserInputDecisionKindV1, PublicUserInputRequestV1,
+    REQUEST_USER_INPUT_TOOL_NAME, SessionScopeId, USER_INPUT_SCHEMA_VERSION, UserInputActionV1,
+    UserInputAnswerV1, UserInputAnswerValueV1, UserInputClaimId, UserInputCommandId,
+    UserInputContinuationBindingV1, UserInputContinuationClaimedV1,
+    UserInputContinuationPreparationV1, UserInputContinuationStartedV1,
+    UserInputDecisionAcceptedV1, UserInputDecisionCommandV1, UserInputDecisionReceiptV1,
+    UserInputDecisionV1, UserInputDurableDecisionV1, UserInputFieldKindV1, UserInputIdentityV1,
+    UserInputLifecycleEntryV1, UserInputOptionV1, UserInputProjectionV1, UserInputPurposeV1,
+    UserInputQuestionV1, UserInputRequestId, UserInputRequestRefV1, UserInputRequestStateV1,
+    UserInputRequestV1, UserInputRequestedV1, UserInputResolutionV1, UserInputResolvedV1,
+    UserInputSourceV1, UserInputStatusV1, accept_user_input_decision,
+    prepare_user_input_continuation, request_user_input_tool_spec,
 };
 pub use verification::{
     ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,

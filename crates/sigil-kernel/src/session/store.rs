@@ -1075,6 +1075,11 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
             DurableEventType::ConversationRouteDecisionRecorded
         }
         ControlEntry::PlanReviewAttempt(_) => DurableEventType::PlanReviewAttempt,
+        ControlEntry::UserInputRequested(_)
+        | ControlEntry::UserInputDecisionAccepted(_)
+        | ControlEntry::UserInputContinuationClaimed(_)
+        | ControlEntry::UserInputContinuationStarted(_)
+        | ControlEntry::UserInputResolved(_) => DurableEventType::UserInputLifecycleChanged,
         ControlEntry::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
         ControlEntry::TaskHandoffRequested(_) => DurableEventType::TaskHandoffRequested,
         ControlEntry::TaskHandoffResolved(_) => DurableEventType::TaskHandoffResolved,

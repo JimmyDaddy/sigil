@@ -75,8 +75,9 @@ mod run_lifecycle;
 mod task_guidance;
 mod task_handoff;
 mod task_plan;
-mod tool_audit;
+pub(crate) mod tool_audit;
 mod tool_results;
+mod user_input;
 use approval_policy::{
     active_plan_approval_authority, interactive_external_directory_approval_override,
     plan_approval_decision_override, tool_session_grant_decision_override,
@@ -137,6 +138,11 @@ use tool_results::emit_tool_result;
 use tool_results::{
     agent_tool_result_satisfies_delegation, append_invalid_tool_input_result,
     emit_tool_result_batch, record_tool_run_outcome,
+};
+use user_input::{
+    RequestUserInputContext, append_request_user_input_error,
+    append_tool_ignored_after_user_input_request, handle_request_user_input_call,
+    request_user_input_call_is_accepted,
 };
 
 const TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT: usize = 6;
@@ -307,6 +313,7 @@ pub struct TaskSynthesisContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRunDisposition {
     FinalAnswer,
+    AwaitingUserInput(crate::UserInputRequestRefV1),
     StartPlanReview(StartPlanReviewAction),
     PlanReviewDraftSubmitted(PlanReviewDraftSubmittedAction),
     StartDurableTask(StartDurableTaskAction),
@@ -377,6 +384,7 @@ pub struct AgentRunInput {
     pub purpose: Option<AgentRunPurpose>,
     agent_invocation_grant: Option<crate::AgentInvocationGrant>,
     logical_run_id: Option<String>,
+    source_thread_id: Option<crate::AgentThreadId>,
     cancellation: Option<RunCancellationHandle>,
     cancellation_terminal_authority: bool,
     source_capability_nonce: Option<String>,
@@ -434,6 +442,7 @@ impl fmt::Debug for AgentRunInput {
                     .map(crate::AgentInvocationGrant::fingerprint),
             )
             .field("logical_run_id", &self.logical_run_id)
+            .field("source_thread_id", &self.source_thread_id)
             .field("cancellation", &self.cancellation)
             .field(
                 "user_url_capability_registrar",
@@ -487,6 +496,7 @@ impl AgentRunInput {
             purpose: None,
             agent_invocation_grant: None,
             logical_run_id: None,
+            source_thread_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
@@ -519,6 +529,7 @@ impl AgentRunInput {
             purpose: None,
             agent_invocation_grant: None,
             logical_run_id: None,
+            source_thread_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
@@ -550,6 +561,7 @@ impl AgentRunInput {
             purpose: None,
             agent_invocation_grant: None,
             logical_run_id: None,
+            source_thread_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: None,
@@ -803,6 +815,13 @@ impl AgentRunInput {
     #[must_use]
     pub fn with_logical_run_id(mut self, logical_run_id: impl Into<String>) -> Self {
         self.logical_run_id = Some(logical_run_id.into());
+        self
+    }
+
+    /// Binds host-owned user-input requests to the concrete agent thread that emitted them.
+    #[must_use]
+    pub fn with_source_thread_id(mut self, source_thread_id: crate::AgentThreadId) -> Self {
+        self.source_thread_id = Some(source_thread_id);
         self
     }
 
@@ -1317,6 +1336,7 @@ pub enum AgentRunTerminalReason {
     FinalAnswerBlocked,
     TaskRoutingUnsatisfied,
     RoutingFreeTextFallback,
+    AwaitingUserInput,
     TaskHandoff,
     PlanReviewHandoff,
 }
@@ -1339,6 +1359,7 @@ impl AgentRunTerminalReason {
             Self::FinalAnswerBlocked => "final_answer_blocked",
             Self::TaskRoutingUnsatisfied => "task_routing_unsatisfied",
             Self::RoutingFreeTextFallback => "routing_free_text_fallback",
+            Self::AwaitingUserInput => "awaiting_user_input",
             Self::TaskHandoff => "task_handoff",
             Self::PlanReviewHandoff => "plan_review_handoff",
         }
@@ -1859,6 +1880,7 @@ where
             purpose,
             agent_invocation_grant,
             logical_run_id,
+            source_thread_id,
             cancellation,
             cancellation_terminal_authority,
             source_capability_nonce,
@@ -1971,6 +1993,15 @@ where
         };
         let is_task_participant =
             matches!(purpose.as_ref(), Some(AgentRunPurpose::TaskParticipant(_)));
+        if tools
+            .spec_for(crate::REQUEST_USER_INPUT_TOOL_NAME)
+            .is_some()
+        {
+            return Err(anyhow!(
+                "tool registry collides with reserved internal tool {}",
+                crate::REQUEST_USER_INPUT_TOOL_NAME
+            ));
+        }
         if routing_decision_pending {
             for reserved in [
                 REQUEST_TASK_PLANNING_TOOL_NAME,
@@ -2204,6 +2235,17 @@ where
         if logical_run_id.trim().is_empty() {
             return Err(anyhow!("agent logical run id is empty"));
         }
+        let source_thread_id = match source_thread_id {
+            Some(source_thread_id) => source_thread_id,
+            None => crate::AgentThreadId::new("main")?,
+        };
+        let root_logical_run_id = purpose
+            .as_ref()
+            .and_then(|purpose| match purpose {
+                AgentRunPurpose::Conversation(context) => Some(context.root_run_id.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| logical_run_id.clone());
         if let Some(delegate) = agent_delegate.as_deref_mut() {
             delegate.set_root_logical_run_id(Some(&logical_run_id));
         }
@@ -2363,7 +2405,10 @@ where
                     .filter(|spec| !suppressed_tool_names.contains(&spec.name))
                     .collect::<Vec<_>>()
             };
-            if !task_routing_decision_pending {
+            if !task_routing_decision_pending && !participant_finalization_turn {
+                if matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_))) {
+                    tool_specs.push(crate::request_user_input_tool_spec());
+                }
                 if let Some(context) = task_plan_update.as_ref() {
                     tool_specs.push(task_plan_update_tool_spec_for_worktree(
                         context.worktree_availability,
@@ -2697,6 +2742,13 @@ where
                             task_guidance_apply_call_is_accepted(context, call)
                         })
                     });
+                let accepted_user_input_in_batch = !task_routing_decision_pending
+                    && !accepted_task_plan_in_batch
+                    && !accepted_plan_draft_in_batch
+                    && !accepted_task_guidance_in_batch
+                    && completed_calls
+                        .iter()
+                        .any(request_user_input_call_is_accepted);
                 if let Some(delegate) = agent_delegate.as_deref_mut() {
                     delegate.set_join_batch_eligibility(&completed_calls);
                 }
@@ -2707,6 +2759,7 @@ where
                 let mut accepted_plan_review = None;
                 let mut accepted_direct_conversation = false;
                 let mut accepted_task_guidance = false;
+                let mut accepted_user_input = None;
                 let mut assistant_batch_results: Vec<(crate::ToolCall, ToolResult)> = Vec::new();
                 let mut execution_calls = completed_calls;
                 if task_routing_decision_pending && writable_memory_routing {
@@ -2719,6 +2772,18 @@ where
                 for call in execution_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
+                    if accepted_user_input_in_batch
+                        && (call.name != crate::REQUEST_USER_INPUT_TOOL_NAME
+                            || accepted_user_input.is_some())
+                    {
+                        append_tool_ignored_after_user_input_request(
+                            session,
+                            &mut outcome,
+                            &call,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
                     if accepted_task_continuation_in_batch
                         && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
                         && (call.name != CONTINUE_EXISTING_TASK_TOOL_NAME
@@ -3002,6 +3067,30 @@ where
                         )?;
                         continue;
                     }
+                    if call.name == crate::REQUEST_USER_INPUT_TOOL_NAME {
+                        let model_name = session.model_name().to_owned();
+                        match handle_request_user_input_call(
+                            session,
+                            handler,
+                            &call,
+                            RequestUserInputContext {
+                                root_logical_run_id: &root_logical_run_id,
+                                source_thread_id: &source_thread_id,
+                                provider_name: self.provider.name(),
+                                model_name: &model_name,
+                            },
+                        ) {
+                            Ok(request) => accepted_user_input = Some(request),
+                            Err(error) => append_request_user_input_error(
+                                session,
+                                &mut outcome,
+                                &call,
+                                &error,
+                                &mut assistant_batch_results,
+                            )?,
+                        }
+                        continue;
+                    }
                     if call.name == TASK_PLAN_UPDATE_TOOL_NAME {
                         let Some(context) = task_plan_update.as_ref() else {
                             let mut result = ToolResult::error(
@@ -3182,6 +3271,19 @@ where
                             .context(format!("host join cleanup also failed: {cleanup_error:#}")));
                     }
                     return Err(error);
+                }
+                if let Some(request) = accepted_user_input {
+                    outcome.terminal_reason = AgentRunTerminalReason::AwaitingUserInput;
+                    outcome.tool_calls = total_tool_calls;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::AwaitingUserInput(request),
+                    });
                 }
                 let settled_join_context = match agent_delegate.as_deref_mut() {
                     Some(delegate) => delegate.settle_join_dependencies(session, handler).await?,

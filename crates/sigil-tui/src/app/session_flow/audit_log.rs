@@ -65,6 +65,31 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
 
 pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> String {
     match control {
+        ControlEntry::UserInputRequested(entry) => format!(
+            "[ctl] user input {} generation {} requested",
+            entry.request.identity.request_id.as_str(),
+            entry.request.identity.generation
+        ),
+        ControlEntry::UserInputDecisionAccepted(entry) => format!(
+            "[ctl] user input {} generation {} decision accepted",
+            entry.identity.request_id.as_str(),
+            entry.identity.generation
+        ),
+        ControlEntry::UserInputContinuationClaimed(entry) => format!(
+            "[ctl] user input {} generation {} continuation claimed",
+            entry.identity.request_id.as_str(),
+            entry.identity.generation
+        ),
+        ControlEntry::UserInputContinuationStarted(entry) => format!(
+            "[ctl] user input {} generation {} continuation started",
+            entry.identity.request_id.as_str(),
+            entry.identity.generation
+        ),
+        ControlEntry::UserInputResolved(entry) => format!(
+            "[ctl] user input {} generation {} resolved",
+            entry.identity.request_id.as_str(),
+            entry.identity.generation
+        ),
         ControlEntry::ToolArtifactAvailabilityChanged(change) => format!(
             "[ctl] artifact {} {:?} -> {:?} (generation {})",
             change.artifact_ref.artifact_id, change.previous, change.next, change.generation

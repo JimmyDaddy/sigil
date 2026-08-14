@@ -1957,6 +1957,34 @@ where
             .record_durably_appended_controls(state.session.detached_durable_controls.drain(..));
         state.session.current = Some(task_result.session);
         match task_result.payload {
+            RunTaskPayload::AwaitingUserInput { request } => {
+                let projected = state
+                    .session
+                    .current
+                    .as_ref()
+                    .and_then(|session| session.user_input_projection().ok())
+                    .and_then(|projection| projection.request(&request.identity).cloned());
+                match projected {
+                    Some(projected) if projected.requested.request_hash == request.request_hash => {
+                        let entries = state
+                            .session
+                            .current
+                            .as_ref()
+                            .map(|session| session.entries().to_vec())
+                            .unwrap_or_default();
+                        let _ = message_tx.send(WorkerMessage::UserInputRequested {
+                            request: projected.public_view(),
+                            entries,
+                        });
+                    }
+                    _ => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "run suspended for user input, but its durable request is unavailable"
+                                .to_owned(),
+                        ));
+                    }
+                }
+            }
             RunTaskPayload::Chat {
                 result: Ok(run_result),
                 plan_mode,

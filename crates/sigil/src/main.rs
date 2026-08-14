@@ -1829,6 +1829,9 @@ where
                 ApplicationRunTerminalStatus::Succeeded => MachineRunStatus::Succeeded,
                 ApplicationRunTerminalStatus::Interrupted
                 | ApplicationRunTerminalStatus::Blocked => MachineRunStatus::Failed,
+                ApplicationRunTerminalStatus::AwaitingUserInput => {
+                    MachineRunStatus::AwaitingUserInput
+                }
             };
             // RFC-0063 9.3: a headless run that committed a plan draft without a decision must
             // terminate as `awaiting_plan_decision`, never auto-accept or execute.
@@ -2257,6 +2260,22 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
             stderr: format!("[notice] {message}\n"),
             ..RenderedOutput::default()
         },
+        PublicRunEventKind::UserInputChanged {
+            request,
+            status: sigil_kernel::UserInputStatusV1::Requested,
+            ..
+        } => {
+            let questions = request
+                .questions
+                .iter()
+                .map(|question| format!("- {}", question.question))
+                .collect::<Vec<_>>()
+                .join("\n");
+            RenderedOutput {
+                stderr: format!("[input:required] {}\n{questions}\n", request.prompt),
+                ..RenderedOutput::default()
+            }
+        }
         PublicRunEventKind::RouteRecoveryRequired { code, .. } => {
             let message = match code {
                 sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired => {
@@ -2293,10 +2312,12 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
         | PublicRunEventKind::RunStarted { .. }
         | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::RunFinished { .. }
+        | PublicRunEventKind::RunAwaitingUserInput { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
         | PublicRunEventKind::TaskRoutingChanged { .. }
         | PublicRunEventKind::ConversationRouteChanged { .. }
         | PublicRunEventKind::PlanReviewChanged { .. }
+        | PublicRunEventKind::UserInputChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
         | PublicRunEventKind::TaskPlanUpdated { .. }
         | PublicRunEventKind::TaskBatchChanged { .. }
