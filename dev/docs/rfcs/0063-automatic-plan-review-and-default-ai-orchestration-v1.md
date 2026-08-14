@@ -1,6 +1,6 @@
 # RFC-0063 Automatic Plan Review and Default AI Orchestration V1
 
-状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5；2026-08-14 的真实 PlanReview session 复盘与收敛修复见 §13.8；real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
+状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5；2026-08-14 的真实 PlanReview session 复盘与收敛修复见 §13.8；Plan Review workbench、revision guidance/recovery 与 isolated finalizer 增补见 §13.9；real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
 
 创建日期：2026-08-03
 
@@ -17,6 +17,7 @@
 - [RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1](0053-autonomous-task-routing-and-parallel-agent-orchestration-v1.md)
 - [RFC-0057 Cache-stable Compaction and Conversation Continuity V3](0057-cache-stable-compaction-and-conversation-continuity-v3.md)
 - [RFC-0058 Event-driven Worker and Incremental Durable-session Projection V1](0058-event-driven-worker-and-incremental-durable-session-projection-v1.md)
+- [RFC-0064 Durable User Input Requests V1](0064-durable-user-input-requests-v1.md)
 
 ## 1. Summary
 
@@ -1175,6 +1176,182 @@ implementation-in-progress；本轮不替代 §12 的 real-model campaign 与 De
 `python3 scripts/test-tui-stateful-pty-acceptance.py`（45/45）与 `git diff --check` 全部通过。
 需要 checksum-pinned DeepSeek V4 tokenizer 的 real-binary stateful PTY campaign 本机未执行，不能由
 上述 deterministic terminal replay 冒充。
+
+## 13.9 Plan Review workbench, revision guidance and finalizer isolation amendment（2026-08-15）
+
+session `5aeeb257-83fb-41c5-809b-68edcc0be15a` 暴露出 §13.8 收敛修复仍未覆盖的产品与生命周期缺口：
+
+- DraftReady 只在 12-row live panel 显示 compact summary、3 个 step title 与
+  `plan details truncated`；用户在 Run/Revise 前无法审阅完整方案；
+- TUI 把 `r` / `s` / `Esc` 作为 pending-plan 全局快捷键，空 composer 中 printable key 被吞，`Esc`
+  还直接等价 Reject；
+- Revise 不先收集 guidance，而是复用原 objective 和固定 reason；
+- research child 与 submit-only finalization 仍共享 conversation/history，使 finalizer 在只允许
+  `submit_plan_draft` 时继续调用 research tool，最终表现为 `unknown tool grep`；
+- revision Started 后 Failed/Interrupted 会让 latest attempt 覆盖原 DraftReady plan，原 plan actions 消失；
+  terminal attempt identity 又被复用，retry 无法形成新 execution attempt。
+
+本节是 RFC-0063 的规范性增补；与旧 §7/§9/§11 冲突时，以本节为准。
+
+### 13.9.1 Dedicated Plan Review workbench
+
+Planning/Researching 仍是 conversation live progress；DraftReady 后，plan 成为 shell 主内容模式，不再是
+status band 或 renderer-local modal。TUI/桌面端都保留 compact card 作为入口，但 Run/Save/Revise/Reject
+只能从能访问完整 detail 的 review workbench 发起。
+
+TUI 响应式规则：
+
+- plan 内容有效宽度至少 96 columns 时保留 info rail；不足时自动折叠 rail；
+- 高度不超过 11 rows 时 workbench takeover，临时隐藏 composer 与 rail；退出 workbench 后恢复；
+- 正文独立滚动，action bar 固定；resize 后 clamp scroll/action focus，不以终端 cursor 作为状态源；
+- `Enter` 从 compact card 打开 workbench，workbench 内确认当前选中 action；
+- `Up/Down/PageUp/PageDown/Home/End` 滚动，`Tab/Shift-Tab` 或 `Left/Right` 选择 action；
+- `Esc` 只关闭 workbench，不产生 domain decision；Reject 必须显式选中并确认；
+- workbench 关闭且 composer 可编辑时，printable character 必须进入 composer；`Shift-Tab` 可重开当前
+  pending plan。
+
+TUI durable projection 与 local navigation state 分离。reload/reconnect 只重建 plan/status/actions，scroll、
+focus 与 temporary close 状态重新初始化。`PendingPlanApproval` 不再作为 detail authority；它至多保存 plan
+identity 与 transient UI state。
+
+### 13.9.2 Complete plan detail contract
+
+public surface 分两层：
+
+```rust
+pub struct PublicPlanReviewSummaryV1 {
+    pub active_plan: Option<PublicActivePlanSummaryV1>,
+    pub revision: Option<PublicPlanRevisionSummaryV1>,
+    pub attempt_status: PlanReviewAttemptStatus,
+    pub source: PlanReviewSource,
+}
+
+pub struct PlanReviewDetailV1 {
+    pub plan_id: PlanId,
+    pub plan_hash: String,
+    pub workspace_snapshot_id: String,
+    pub source: PlanReviewSource,
+    pub summary: BoundedPlanSummary,
+    pub steps: Vec<PlanReviewStepDetailV1>,
+    pub target_paths: Vec<String>,
+    pub suggested_checks: Vec<String>,
+    pub risk: PlanRisk,
+    pub notes: Vec<String>,
+    pub lineage: PlanLineageV1,
+    pub legacy_markdown: Option<String>,
+}
+```
+
+step detail 至少包含 title、detail、role、mode、isolation、depends_on、target paths 与 suggested checks。
+TUI 与 Desktop 必须消费同一个 kernel converter，不能分别从 session records 猜字段。
+
+完整 summary 在 typed draft validation 时最多 2 KiB；超过上限拒绝 draft，不在 durable artifact 中静默
+截断。conversation/SSE compact summary 仍可限制为 160 chars，但必须设置 `summary_truncated=true`，并
+以 Unicode scalar/grapheme-safe 方式产生显式省略标记。
+
+本地 bearer 认证 HTTP 增加：
+
+```text
+GET /sessions/{session_id}/plans/{plan_id}?expected_plan_hash=...
+```
+
+响应绑定 `session_id + plan_id + plan_hash`，hash mismatch/stale/cross-session 均 fail closed；immutable
+detail 返回 ETag。Desktop strict DTO/Tauri IPC/React type 与 OpenAPI 同步，TUI 直接调用同一 kernel detail
+service。legacy plan 只允许 bounded `legacy_markdown` fallback，不伪造 structured step fields。
+
+### 13.9.3 Revision lifecycle
+
+Revise 首先使用 [RFC-0064](0064-durable-user-input-requests-v1.md) 创建 host-owned
+`RevisionGuidance` request；guidance 提交前不得 append `RevisionRequested` 或 dispatch provider。
+answer acceptance 与 `PlanRevisionRequestedV1` 在同一 application mutation/transaction 中落盘。
+
+identity 分离：
+
+```text
+revision_request_id       一次用户修改意图，retry-stable
+attempt_id + ordinal      每次真实 execution，retry 必须新建
+resulting_plan_id         成功 draft 的 immutable identity
+```
+
+canonical projection 同时保留：
+
+```text
+active_plan: DraftReady base plan
+revision:
+  awaiting_guidance | queued | researching | waiting_for_input |
+  finalizing | failed | cancelled | succeeded
+```
+
+candidate attempt 不得替换 `active_plan`。revision pending/running 时暂停 Run/Save，但允许 Review original、
+Answer/Cancel revision；Failed/Interrupted/Cancelled/CompletedWithoutDraft/
+SubmitOnlyProtocolViolation 必须 append terminal revision close 并恢复 base plan 的
+Run/Save/Revise/Reject。成功 draft 通过 base plan id/hash、revision request id 与 attempt identity 做
+lineage 校验后，才原子切换 active plan。retry 保留 guidance/revision request，创建新 attempt ordinal；
+不得复用 terminal attempt。
+
+`SavedOnly`、`RevisionRequested` 与所有 draft-less terminal status 的 allowed actions 由同一 reducer 按
+active-plan/revision state 推导；public converter 不能仅因 latest attempt 是 DraftReady 就输出四个动作。
+
+### 13.9.4 Fresh submit-only finalizer
+
+research 与 finalization 是两个隔离 child execution context：
+
+- research child 只读、bounded turn，可使用 RFC-0064 提问；
+- finalizer 使用 fresh child session/request，不继承 research assistant/tool messages、provider continuation
+  handle 或普通 hosted preparer；
+- host 传入 bounded evidence bundle：base plan/reference、revision guidance、research result summaries、
+  artifact refs/hashes、workspace snapshot、remaining frontier；不得回填无界 tool transcript；
+- finalizer 模型可见工具只有 `submit_plan_draft`，且系统契约明确本 turn 必须且只能提交一次；
+- 任意其他 tool call 在 dispatch 前转为 typed `SubmitOnlyProtocolViolation`，不得进入 registry 的
+  unknown-tool 路径，更不得执行；
+- host 最多创建一次 fresh corrective finalizer attempt。再次违反协议或未提交 draft即关闭 attempt/
+  revision，恢复 base plan；
+- child draft 已 durable、parent commit 未完成时，recovery 从 child artifact 执行 exact parent commit，
+  不 replay provider generation。
+
+research result 与 evidence bundle 必须按 RFC-0057/0059/0062 的 bounded projection + durable artifact
+原则构造；finalizer 不通过继续增长 research transcript 来“保留证据”。
+
+### 13.9.5 Migration and recovery
+
+current schema 采用 clean-cut current-only records。旧 session 中只有单一 revision attempt 的数据通过
+read-only compatibility projection 映射为：
+
+- 最近一个有效 DraftReady plan => `active_plan`；
+- 后续 Failed/Interrupted/Cancelled/CompletedWithoutDraft attempt => terminal `revision` summary；
+- base plan actions 按 stale/decision facts恢复；
+- 无法证明 base lineage 或出现冲突 terminal facts => typed unsupported/corrupt projection，禁止自动猜测。
+
+session `5aeeb257-83fb-41c5-809b-68edcc0be15a` 必须成为固定回归 fixture：旧 base DraftReady 仍可完整
+review；finalizer 的 `grep` calls 被映射为 submit-only violation；revision terminal failure 后 base actions
+恢复；Retry revision 先请求 guidance，再创建新 attempt identity。
+
+### 13.9.6 Implementation slices and validation ledger
+
+增补实施分为三个可独立验收但不可冒充整体完成的 slice：
+
+- `R63.A`：完整 Plan detail converter/HTTP/DTO + TUI/Desktop workbench 与键位/响应式布局；
+- `R63.B`：RFC-0064 revision guidance、active-plan/revision 双投影、全失败恢复与 retry identity；
+- `R63.C`：fresh finalizer、submit-only typed violation、child-to-parent crash recovery 与 legacy fixture。
+
+除 §14 既有 gate 外，至少增加：
+
+```bash
+cargo test -p sigil-kernel plan_review_detail
+cargo test -p sigil-runtime plan_revision
+cargo test -p sigil-http plan_detail
+cargo test -p sigil-desktop plan_detail
+cargo test -p sigil-tui plan_workbench
+pnpm --dir apps/desktop check
+./scripts/generate-desktop-contract.sh --check
+python3 scripts/test-tui-stateful-pty-acceptance.py
+./scripts/check-touched.sh --tier full
+```
+
+必须覆盖 tiny/wide/resize、Esc 非 Reject、printable key 不被吞、detail hash/ETag、reload/reconnect、所有
+revision terminal branch、retry new attempt、non-submit no-dispatch、child durable draft crash gap、真实
+`sigil serve` strict DTO 与 Desktop E2E。上述三 slice 与 RFC-0064 release validation 未全部通过前，
+RFC-0063 保持 `implementation-in-progress`。
 
 ## 14. Validation plan
 

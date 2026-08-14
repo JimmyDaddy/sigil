@@ -1061,10 +1061,26 @@ DraftReady / CompletedWithoutDraft / Failed / Interrupted / Cancelled）：模�
 `PlanDraftCreated`，只读 research 与 draft 提交都在 child session 内；`/plan` 与自动 review
 共享同一个 PlanReviewCoordinator。plan decision（Run / Save / Revise / Reject）绑定 exact plan
 id/hash，Run 直接走 RFC-0018 的 `TaskCreatedFromPlan` 前缀，不重放 planner；Revise 启动新一轮
-attempt。公开投影只暴露 bounded plan review surface（plan id/hash、status、summary、counts、
-risk、allowed actions、source、stale），不暴露 prompt、路径、ref 或 authority。HTTP
+attempt。RFC-0063 §13.9 后，Revise 先通过 RFC-0064 收集 durable guidance；base plan 与 revision
+substate 同时投影，candidate 成功前不覆盖 base plan，所有 terminal failure 都恢复 base actions。
+公开 conversation 投影只暴露 bounded plan review summary（active plan、revision、status、counts、
+risk、allowed actions、source、stale），完整 plan document 通过绑定 plan id/hash 的 authenticated
+detail contract 读取；detail 包含 structured step/detail/dependency/path/check/risk/lineage，但不暴露
+prompt、private ref 或 authority。HTTP
 `POST /sessions/{id}/plan-decision` 与 Desktop `desktop_plan_decision` IPC 复用同一 typed
-command receipt 的幂等语义；React plan card 与 TUI pending plan card 消费同一投影。
+command receipt 的幂等语义；React/TUI compact card 只作为入口，DraftReady 后由 dedicated Plan Review
+workbench 提供完整审阅。research 与 submit-only finalizer 使用隔离 child context；finalizer 不继承
+research tool history/continuation，只消费 bounded evidence bundle，非 `submit_plan_draft` 调用在 dispatch
+前以 typed protocol violation 终止。
+
+RFC-0064 定义普通 agent、PlanReview 与 interactive planner 的 durable user-input protocol。模型只能通过
+bounded `request_user_input` typed tool 创建问题；host 先 append `UserInputRequestedV1`，再以
+`AgentRunDisposition::AwaitingUserInput` 结束 physical worker并保留 suspended logical ownership。
+answer command 绑定 session/run/request/generation/hash/command identity，durable accepted 后由 supervisor
+CAS claim 并恰好一次启动带 exact synthetic tool result 的 continuation，不 replay 原 provider turn。
+pending request 无 wall-clock timeout，restart/switch/reconnect 从同一 projection 恢复；background agent
+question 进入 root attention queue。approval、MCP elicitation 与 secret input 保持各自 authority：MCP 只
+共享 bounded form renderer，断线后不 replay answer；secret 明文不进入 session 或模型 tool result。
 
 三路 eval corpus（`dev/evals/model-fixtures/orchestration-v1`，rfc-0063-orchestration-v1）冻结为
 20 Chat / 15 PlanReview / 15 DirectTask，report schema v2 的 gate 按类推导
