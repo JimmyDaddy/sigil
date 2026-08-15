@@ -274,6 +274,15 @@ impl AgentToolRuntime {
                 child_messages,
             ))
             .with_agent_invocation_grant(grant.clone());
+        let child_input =
+            if matches!(parsed.mode, AgentInvocationMode::Background) && safe_detachable_registry {
+                child_input.with_user_input_continuation_context(
+                    root_logical_run_id.clone(),
+                    thread_id.clone(),
+                )
+            } else {
+                child_input
+            };
         let mut child_options = build_role_run_options(
             &self.root_config,
             options.workspace_root.clone(),

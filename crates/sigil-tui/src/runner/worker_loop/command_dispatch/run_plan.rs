@@ -1070,6 +1070,19 @@ where
                                 )
                                 .and_then(|attempt| attempt.pending_user_input.as_deref().cloned())
                         })
+                        .or_else(|| {
+                            sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+                                session.entries(),
+                            )
+                            .ok()?
+                            .pending()
+                            .find(|route| {
+                                route.request.identity.request_id.as_str() == request_id
+                                    && route.request.identity.generation == generation
+                                    && route.request.request_hash == expected_request_hash
+                            })
+                            .map(|route| route.request.clone())
+                        })
                 });
                 let Some(exact) = exact else {
                     let _ = message_tx.send(WorkerMessage::Notice(
@@ -1103,6 +1116,78 @@ where
                             continue;
                         }
                     };
+                let background_child_route =
+                    state.session.current.as_ref().is_some_and(|session| {
+                        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+                            session.entries(),
+                        )
+                        .ok()
+                        .and_then(|projection| {
+                            projection
+                                .route_for_request(&exact.identity, &exact.request_hash)
+                                .cloned()
+                        })
+                        .is_some_and(|route| {
+                            route.status == sigil_kernel::AgentRouteStatus::Requested
+                        })
+                    });
+                if background_child_route {
+                    let effective_config = state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| effective_orchestration_root_config(root_config, session))
+                        .unwrap_or_else(|| root_config.clone());
+                    let command = sigil_kernel::UserInputDecisionCommandV1 {
+                        identity: exact.identity,
+                        request_hash: exact.request_hash,
+                        command_id,
+                        decision,
+                    };
+                    let mut delegate = sigil_runtime::AgentToolRuntime::new(
+                        state.agent.supervisor.clone(),
+                        effective_config,
+                        agent.tool_registry().clone(),
+                    )
+                    .with_background_runs(state.agent.background_runs.clone());
+                    let mut handler = ChannelEventHandler::new(message_tx.clone());
+                    let result = {
+                        let Some(session) = state.session.current.as_mut() else {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(
+                                "session state is unavailable for background child input"
+                                    .to_owned(),
+                            ));
+                            continue;
+                        };
+                        runtime.block_on(delegate.apply_background_user_input_decision(
+                            session,
+                            command,
+                            options,
+                            &mut handler,
+                        ))
+                    };
+                    match result {
+                        Ok(result) => {
+                            let entries = state
+                                .session
+                                .current
+                                .as_ref()
+                                .map(|session| session.entries().to_vec())
+                                .unwrap_or_default();
+                            let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+                                request: result.receipt.request,
+                                continuation_started: result.continuation_started,
+                                entries,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                "background child input decision failed: {error:#}"
+                            )));
+                        }
+                    }
+                    continue;
+                }
                 if matches!(
                     &exact.source,
                     sigil_kernel::UserInputSourceV1::PlanRevision { .. }

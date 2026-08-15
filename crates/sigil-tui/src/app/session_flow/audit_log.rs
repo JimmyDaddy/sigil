@@ -90,6 +90,12 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.identity.request_id.as_str(),
             entry.identity.generation
         ),
+        ControlEntry::AgentUserInputRoute(route) => format!(
+            "[ctl] agent input route {} source {} {:?}",
+            route.route_id.as_str(),
+            route.source_thread_id.as_str(),
+            route.status
+        ),
         ControlEntry::ToolArtifactAvailabilityChanged(change) => format!(
             "[ctl] artifact {} {:?} -> {:?} (generation {})",
             change.artifact_ref.artifact_id, change.previous, change.next, change.generation

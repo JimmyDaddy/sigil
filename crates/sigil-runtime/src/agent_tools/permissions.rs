@@ -213,6 +213,29 @@ pub(super) fn apply_child_permission_constraints(
     );
 }
 
+/// Rebuilds the narrowest executable policy for a recovered child that was admitted only because
+/// its frozen tool surface was local and read-only. Durable grant records are intentionally not
+/// promoted back into runtime capability; recovery therefore denies network and agent delegation
+/// and re-applies both the parent and current profile policies.
+pub(super) fn apply_recovered_readonly_child_constraints(
+    child: &mut AgentRunOptions,
+    parent: &AgentRunOptions,
+    profile: PermissionConfig,
+) {
+    let mut readonly = parent.permission_config.clone();
+    readonly.mode = PermissionMode::ReadOnly;
+    readonly.external_directory.enabled = false;
+    readonly.external_directory.default_mode = ApprovalMode::Deny;
+    readonly.external_directory.rules.clear();
+    child.permission_config = parent.permission_config.clone();
+    child.permission_context = parent.permission_context.clone();
+    child
+        .permission_context
+        .delegated_policy_constraints
+        .extend([readonly, profile]);
+    child.permission_context.network_policy = NetworkPolicy::Deny;
+}
+
 fn strictest_network_policy(left: NetworkPolicy, right: NetworkPolicy) -> NetworkPolicy {
     match (left, right) {
         (NetworkPolicy::Deny, _) | (_, NetworkPolicy::Deny) => NetworkPolicy::Deny,

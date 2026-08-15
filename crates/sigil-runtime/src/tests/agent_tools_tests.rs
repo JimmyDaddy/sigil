@@ -1572,6 +1572,82 @@ impl Provider for ParentReadAgentResultProvider {
 
 struct StaticProviderFactory;
 
+struct UserInputThenTextProviderFactory {
+    calls: Arc<AtomicUsize>,
+}
+
+struct UserInputThenTextProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AgentToolProviderFactory for UserInputThenTextProviderFactory {
+    async fn build_provider(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+        _profile_id: &sigil_kernel::AgentProfileId,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(UserInputThenTextProvider {
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+}
+
+#[async_trait]
+impl Provider for UserInputThenTextProvider {
+    fn name(&self) -> &str {
+        "user-input-then-text"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            let args = json!({
+                "prompt": "Choose the compatibility boundary.",
+                "questions": [{
+                    "id": "compatibility",
+                    "header": "Compatibility",
+                    "question": "Which compatibility target should be preserved?",
+                    "required": true,
+                    "field": {
+                        "kind": "single_select",
+                        "options": [
+                            {"id": "current", "label": "Current release"},
+                            {"id": "legacy", "label": "Legacy sessions"}
+                        ],
+                        "allow_other": false
+                    }
+                }]
+            })
+            .to_string();
+            return Ok(boxed_provider_chunks(vec![
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-child-input".to_owned(),
+                    name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                    args_json: args,
+                }),
+                ProviderChunk::Done,
+            ]));
+        }
+        assert!(
+            request_contains_tool_result(&request, "call-child-input"),
+            "resumed child request must carry the settled user-input tool result"
+        );
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::TextDelta("continued after root answer".to_owned()),
+            ProviderChunk::Done,
+        ]))
+    }
+}
+
 struct ApprovalRequestProviderFactory;
 
 struct ApprovalRequestProvider;
@@ -3665,6 +3741,202 @@ async fn spawn_agents_background_returns_immediately_and_collects_the_whole_batc
         "runtime collection leaves result-ready continuation scheduling to the host surface"
     );
     assert!(supervisor.active_profile_ids().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_child_user_input_routes_to_root_and_resumes_exactly_once() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut background_runs = AgentToolBackgroundRuns::default();
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor(&config)?,
+        config.clone(),
+        registry.clone(),
+        Arc::new(UserInputThenTextProviderFactory {
+            calls: Arc::clone(&calls),
+        }),
+    )
+    .with_background_runs(background_runs.clone());
+    runtime.set_root_logical_run_id(Some("root-background-input"));
+    let temp = tempfile::tempdir()?;
+    let workspace = isolated_agent_tool_test_workspace(temp.path())?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("parent", "model", store)?;
+    let options = run_options(workspace);
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let spawn_call = ToolCall {
+        id: "call-background-input".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect compatibility",
+            "prompt": "inspect compatibility",
+            "mode": "background"
+        })
+        .to_string(),
+    };
+    runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &spawn_call,
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("background spawn handled");
+    let thread_id = chat_agent_thread_id_for_call(
+        &spawn_call.id,
+        &sigil_kernel::AgentProfileId::new("explore")?,
+    )?;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            runtime
+                .collect_finished_background_runs(&mut session, &mut handler)
+                .await?;
+            if session
+                .agent_thread_state_projection()
+                .user_input_routes
+                .values()
+                .any(|route| route.status == sigil_kernel::AgentRouteStatus::Requested)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .expect("background thread")
+            .status,
+        AgentThreadStatus::Blocked
+    );
+    let route =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
+            .pending()
+            .next()
+            .cloned()
+            .expect("root attention route");
+    // Simulate a full process restart after the child suspended. No process-local handle,
+    // provider, supervisor reservation, or parent Session object survives this boundary.
+    drop(runtime);
+    drop(session);
+    background_runs = AgentToolBackgroundRuns::default();
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("parent", "model", parent_store)?;
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor(&config)?,
+        config,
+        registry,
+        Arc::new(UserInputThenTextProviderFactory {
+            calls: Arc::clone(&calls),
+        }),
+    )
+    .with_background_runs(background_runs.clone());
+    runtime.set_root_logical_run_id(Some("root-background-input"));
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: route.request.identity.clone(),
+        request_hash: route.request.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("answer-background-input")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "compatibility".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::SingleSelect {
+                    option_id: Some("legacy".to_owned()),
+                    other: None,
+                },
+            }],
+        },
+    };
+    let decision = runtime
+        .apply_background_user_input_decision(&mut session, command.clone(), &options, &mut handler)
+        .await?;
+    assert!(decision.continuation_started);
+    assert_eq!(
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
+            .route(&route.route_id)
+            .expect("registered route")
+            .status,
+        sigil_kernel::AgentRouteStatus::Registered
+    );
+    assert!(
+        runtime
+            .apply_background_user_input_decision(&mut session, command, &options, &mut handler,)
+            .await
+            .is_err(),
+        "the same root answer cannot register a second live continuation"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            runtime
+                .collect_finished_background_runs(&mut session, &mut handler)
+                .await?;
+            if !background_runs.has_any() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
+            .route(&route.route_id)
+            .expect("resolved route")
+            .status,
+        sigil_kernel::AgentRouteStatus::Resolved
+    );
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .expect("completed background thread")
+            .status,
+        AgentThreadStatus::Completed
+    );
+    let child_path = route.child_session_ref.resolve(temp.path());
+    let child_store = JsonlSessionStore::new(child_path)?;
+    let child = Session::load_from_store("parent", "model", child_store)?;
+    let child_request = child
+        .user_input_projection()?
+        .request(&route.request.identity)
+        .cloned()
+        .expect("authoritative child request");
+    assert_eq!(
+        child_request
+            .resolution
+            .expect("child resolution")
+            .resolution,
+        sigil_kernel::UserInputResolutionV1::Consumed
+    );
+    assert_eq!(
+        child
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(control)
+                    if matches!(
+                        sigil_kernel::UserInputLifecycleEntryV1::from_control(control),
+                        Some(sigil_kernel::UserInputLifecycleEntryV1::ContinuationStarted(_))
+                    )
+            ))
+            .count(),
+        1
+    );
     Ok(())
 }
 

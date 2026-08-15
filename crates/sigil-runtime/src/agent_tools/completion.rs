@@ -154,25 +154,33 @@ impl AgentToolRuntime {
                             .validate_usage_budget(&thread.budget_scope_id, &output.usage)
                             .err()
                             .map(|error| format!("{error:#}"));
-                        let result = self
-                            .supervisor
-                            .record_chat_child_result(
+                        let result = match output.disposition {
+                            BackgroundChatAgentDisposition::Finished {
+                                materialized,
+                                status,
+                            } => self.supervisor.record_chat_child_result(
                                 session,
                                 handler,
                                 &thread,
-                                output.status,
-                                &output.materialized,
+                                status,
+                                &materialized,
                                 &output.outcome,
                                 Some(output.usage),
+                            ),
+                            BackgroundChatAgentDisposition::AwaitingUserInput { .. } => {
+                                Err(anyhow!(
+                                    "join-before-final child unexpectedly requested user input"
+                                ))
+                            }
+                        }
+                        .and_then(|()| {
+                            self.supervisor.record_chat_mailbox_consumed(
+                                session,
+                                handler,
+                                &thread,
+                                &output.consumed_mailbox_route_ids,
                             )
-                            .and_then(|()| {
-                                self.supervisor.record_chat_mailbox_consumed(
-                                    session,
-                                    handler,
-                                    &thread,
-                                    &output.consumed_mailbox_route_ids,
-                                )
-                            });
+                        });
                         if result.is_ok()
                             && let Some(warning) = budget_warning
                         {

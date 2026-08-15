@@ -224,6 +224,7 @@ pub enum ControlEntry {
     UserInputContinuationClaimed(crate::UserInputContinuationClaimedV1),
     UserInputContinuationStarted(crate::UserInputContinuationStartedV1),
     UserInputResolved(crate::UserInputResolvedV1),
+    AgentUserInputRoute(crate::AgentUserInputRouteEntryV1),
     ToolPreviewCaptured(ToolPreviewSnapshot),
     SkillIndexCaptured(SkillIndexSnapshot),
     SkillLoaded(SkillLoadEntry),
@@ -350,6 +351,7 @@ impl ControlEntry {
             Self::UserInputContinuationClaimed(entry) => entry.validate(),
             Self::UserInputContinuationStarted(entry) => entry.validate(),
             Self::UserInputResolved(entry) => entry.validate(),
+            Self::AgentUserInputRoute(entry) => entry.validate(),
             _ => Ok(()),
         }
     }

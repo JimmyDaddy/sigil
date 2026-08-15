@@ -89,10 +89,16 @@ pub fn application_user_input_request_view(
         return Ok(state.public_view());
     }
     let plan_reviews = sigil_kernel::PlanReviewProjection::from_entries(&entries);
-    plan_reviews
+    if let Some(request) = plan_reviews
         .attempt_for_pending_user_input(identity, request_hash)
         .and_then(|attempt| attempt.pending_user_input.as_deref())
         .cloned()
+    {
+        return Ok(request);
+    }
+    sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&entries)?
+        .route_for_request(identity, request_hash)
+        .map(|route| route.request.clone())
         .context("user input detail references an unknown request")
 }
 
@@ -124,10 +130,21 @@ pub fn application_user_input_request_view_by_key(
         return Ok(request);
     }
     let plan_reviews = sigil_kernel::PlanReviewProjection::from_entries(&entries);
-    plan_reviews
+    if let Some(request) = plan_reviews
         .attempt_for_pending_user_input_key(&request_id, generation, expected_request_hash)
         .and_then(|attempt| attempt.pending_user_input.as_deref())
         .cloned()
+    {
+        return Ok(request);
+    }
+    sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&entries)?
+        .pending()
+        .find(|route| {
+            route.request.identity.request_id == request_id
+                && route.request.identity.generation == generation
+                && route.request.request_hash == expected_request_hash
+        })
+        .map(|route| route.request.clone())
         .context("user input detail references an unknown request generation")
 }
 
@@ -142,6 +159,13 @@ pub fn application_session_has_unresolved_user_input(
     let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
     let projection = sigil_kernel::UserInputProjectionV1::from_session_entries(&entries)?;
     if projection.pending().next().is_some() {
+        return Ok(true);
+    }
+    if sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&entries)?
+        .pending()
+        .next()
+        .is_some()
+    {
         return Ok(true);
     }
     let plan_reviews = sigil_kernel::PlanReviewProjection::from_entries(&entries);

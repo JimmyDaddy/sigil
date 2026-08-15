@@ -98,6 +98,7 @@ mod runtime;
 mod shared;
 mod spawn;
 mod surface;
+mod user_input;
 
 pub use background::{AgentToolBackgroundEventSink, AgentToolBackgroundRuns};
 pub use runtime::{AgentToolProviderFactory, AgentToolRuntime, ManualAgentInvocationResult};
@@ -106,13 +107,15 @@ pub use surface::{
     register_agent_tools_with_registry_and_mode, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
+pub use user_input::BackgroundAgentUserInputDecisionResult;
 
 type JoinedChatAgentFuture =
     Pin<Box<dyn Future<Output = Result<background::BackgroundChatAgentResult>> + Send>>;
 
 use background::{
-    AgentBatchMemberContext, BackgroundChatAgentHandle, BackgroundChatAgentTask,
-    BackgroundChatAgentThreadRecord, JoinedChatAgentHandle, run_background_chat_agent,
+    AgentBatchMemberContext, BackgroundChatAgentDisposition, BackgroundChatAgentHandle,
+    BackgroundChatAgentTask, BackgroundChatAgentThreadRecord, JoinedChatAgentHandle,
+    run_background_chat_agent,
 };
 use chat::close_agent_from_args;
 #[cfg(test)]
@@ -124,7 +127,8 @@ use handlers::{
 };
 pub(crate) use permissions::tool_registry_is_safe_readonly_for_auto_spawn;
 use permissions::{
-    admit_model_agent_spawn, apply_child_permission_constraints, delegation_admission_entry,
+    admit_model_agent_spawn, apply_child_permission_constraints,
+    apply_recovered_readonly_child_constraints, delegation_admission_entry,
     mint_agent_invocation_grant, revalidate_agent_invocation_grant,
     tool_contracts_are_safe_readonly_for_auto_spawn, tool_scope_summary,
 };

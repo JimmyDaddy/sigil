@@ -2,9 +2,10 @@ use anyhow::Result;
 
 use super::*;
 use crate::{
-    AgentRunDisposition, ControlEntry, DurableEventType, EventClass, JsonlSessionStore,
-    ModelMessage, PublicConversationPhase, PublicRunEventKind, PublicTaskEventProjector, Session,
-    ToolCall, ToolExecutionStatus, TypedDomainEvent,
+    AgentProfileId, AgentRunAttemptId, AgentRunDisposition, ControlEntry, DurableEventType,
+    EventClass, JsonlSessionStore, ModelMessage, PublicConversationPhase, PublicRunEventKind,
+    PublicTaskEventProjector, Session, TaskIsolationMode, ToolCall, ToolExecutionStatus,
+    TypedDomainEvent,
 };
 
 fn digest(byte: char) -> String {
@@ -79,6 +80,61 @@ fn submitted_decision(request: &UserInputRequestedV1) -> Result<UserInputDecisio
         },
         20,
     )
+}
+
+fn agent_user_input_route(request: &UserInputRequestedV1) -> Result<AgentUserInputRouteEntryV1> {
+    Ok(AgentUserInputRouteEntryV1 {
+        schema_version: AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION,
+        route_id: AgentRouteId::new("agent_input_route_1")?,
+        source_thread_id: request.request.identity.source_thread_id.clone(),
+        source_attempt_id: AgentRunAttemptId::new("attempt_1")?,
+        profile_id: AgentProfileId::new("explore")?,
+        parent_thread_id: AgentThreadId::new("root")?,
+        batch_id: None,
+        budget_scope_id: TaskId::new("chat_scope_1")?,
+        isolation: TaskIsolationMode::SharedReadOnly,
+        child_session_ref: SessionRef::new_relative("children/agents/child.jsonl")?,
+        request: UserInputRequestStateV1 {
+            requested: request.clone(),
+            status: UserInputStatusV1::Requested,
+            decision: None,
+            claim: None,
+            continuation: None,
+            resolution: None,
+        }
+        .public_view(),
+        status: AgentRouteStatus::Requested,
+        updated_at_unix_ms: 10,
+    })
+}
+
+#[test]
+fn agent_user_input_route_replay_preserves_binding_and_terminal_state() -> Result<()> {
+    let request = text_request("child_request", 1)?;
+    let route = agent_user_input_route(&request)?;
+    let mut projection = AgentUserInputRouteProjectionV1::default();
+    projection.apply(route.clone())?;
+    assert_eq!(projection.pending().count(), 1);
+
+    let mut registered = route.clone();
+    registered.status = AgentRouteStatus::Registered;
+    registered.updated_at_unix_ms = 20;
+    projection.apply(registered.clone())?;
+    assert_eq!(projection.pending().count(), 0);
+
+    let mut resolved = registered;
+    resolved.status = AgentRouteStatus::Resolved;
+    resolved.updated_at_unix_ms = 30;
+    projection.apply(resolved.clone())?;
+    assert_eq!(projection.route(&resolved.route_id), Some(&resolved));
+
+    let mut changed_binding = resolved.clone();
+    changed_binding.child_session_ref = SessionRef::new_relative("children/agents/other.jsonl")?;
+    assert!(projection.apply(changed_binding).is_err());
+    let mut reopened = resolved;
+    reopened.status = AgentRouteStatus::Requested;
+    assert!(projection.apply(reopened).is_err());
+    Ok(())
 }
 
 #[test]

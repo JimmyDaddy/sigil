@@ -2538,6 +2538,28 @@ where
             message_tx,
         );
         if !completed_agent_threads.is_empty() {
+            let pending_agent_input = state.session.current.as_ref().and_then(|session| {
+                sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+                    session.entries(),
+                )
+                .ok()
+                .and_then(|projection| {
+                    projection
+                        .pending()
+                        .filter(|route| completed_agent_threads.contains(&route.source_thread_id))
+                        .max_by_key(|route| route.request.requested_at_unix_ms)
+                        .map(|route| route.request.clone())
+                })
+            });
+            if let Some(request) = pending_agent_input {
+                let entries = state
+                    .session
+                    .current
+                    .as_ref()
+                    .map(|session| session.entries().to_vec())
+                    .unwrap_or_default();
+                let _ = message_tx.send(WorkerMessage::UserInputRequested { request, entries });
+            }
             let new_continuation_threads = agent_result_continuation_new_thread_ids(
                 state.session.current.as_ref(),
                 &completed_agent_threads,

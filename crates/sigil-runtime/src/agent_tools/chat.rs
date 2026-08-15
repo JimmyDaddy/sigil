@@ -151,20 +151,35 @@ impl AgentToolRuntime {
         let thread_id = thread.thread_id.clone();
         match background.handle.finish().await {
             Ok(Ok(output)) => {
+                self.supervisor
+                    .close_registered_chat_child_user_input_routes(
+                        session,
+                        handler,
+                        &thread_id,
+                        AgentRouteStatus::Resolved,
+                    )?;
                 let budget_warning = self
                     .supervisor
                     .validate_usage_budget(&thread.budget_scope_id, &output.usage)
                     .err()
                     .map(|error| format!("{error:#}"));
-                self.supervisor.record_chat_child_result(
-                    session,
-                    handler,
-                    &thread,
-                    output.status,
-                    &output.materialized,
-                    &output.outcome,
-                    Some(output.usage),
-                )?;
+                match output.disposition {
+                    BackgroundChatAgentDisposition::Finished {
+                        materialized,
+                        status,
+                    } => self.supervisor.record_chat_child_result(
+                        session,
+                        handler,
+                        &thread,
+                        status,
+                        &materialized,
+                        &output.outcome,
+                        Some(output.usage),
+                    )?,
+                    BackgroundChatAgentDisposition::AwaitingUserInput { request } => self
+                        .supervisor
+                        .record_chat_child_waiting_for_input(session, handler, &thread, *request)?,
+                }
                 self.supervisor.record_chat_mailbox_consumed(
                     session,
                     handler,
@@ -182,6 +197,13 @@ impl AgentToolRuntime {
                 )));
             }
             Ok(Err(error)) => {
+                self.supervisor
+                    .close_registered_chat_child_user_input_routes(
+                        session,
+                        handler,
+                        &thread_id,
+                        AgentRouteStatus::Stale,
+                    )?;
                 if let Some(blocked) = error.downcast_ref::<BackgroundApprovalRequired>() {
                     self.supervisor.record_chat_child_blocked_for_approval(
                         session,
@@ -208,6 +230,13 @@ impl AgentToolRuntime {
                 }
             }
             Err(error) => {
+                self.supervisor
+                    .close_registered_chat_child_user_input_routes(
+                        session,
+                        handler,
+                        &thread_id,
+                        AgentRouteStatus::Stale,
+                    )?;
                 let reason = format!("background child agent join failed: {error}");
                 self.supervisor.record_chat_child_failure(
                     session,

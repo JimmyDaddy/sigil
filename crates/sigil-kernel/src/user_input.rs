@@ -6,12 +6,13 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentThreadId, ControlEntry, PlanId, Session, SessionLogEntry, TaskId, ToolAccess,
-    ToolArtifactSensitivity, ToolCategory, ToolExecutionStatus, ToolPreviewCapability, ToolResult,
-    ToolResultMeta, ToolResultRecordedV3, ToolSpec,
+    AgentRouteId, AgentRouteStatus, AgentThreadId, ControlEntry, PlanId, Session, SessionLogEntry,
+    SessionRef, TaskId, ToolAccess, ToolArtifactSensitivity, ToolCategory, ToolExecutionStatus,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec,
 };
 
 pub const USER_INPUT_SCHEMA_VERSION: u16 = 1;
+pub const AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION: u16 = 1;
 pub const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 pub const MAX_USER_INPUT_QUESTIONS: usize = 3;
 pub const MAX_USER_INPUT_REQUESTS_PER_ROOT_RUN: usize = 3;
@@ -1611,6 +1612,170 @@ pub struct PublicUserInputRequestV1 {
     pub answer_receipt: Option<PublicUserInputAnswerReceiptV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<UserInputResolutionV1>,
+}
+
+/// Durable parent-session mirror for one child-agent user-input request.
+///
+/// The child session remains the only authority for request lifecycle and answer values. The
+/// parent mirror contains only the already-public bounded form plus the relative child-session
+/// reference needed to route an exact decision. Appending a terminal route update removes the
+/// request from root attention without copying the private answer into the parent session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentUserInputRouteEntryV1 {
+    pub schema_version: u16,
+    pub route_id: AgentRouteId,
+    pub source_thread_id: AgentThreadId,
+    pub source_attempt_id: crate::AgentRunAttemptId,
+    pub profile_id: crate::AgentProfileId,
+    pub parent_thread_id: AgentThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<crate::AgentBatchId>,
+    pub budget_scope_id: crate::TaskId,
+    pub isolation: crate::TaskIsolationMode,
+    pub child_session_ref: SessionRef,
+    pub request: PublicUserInputRequestV1,
+    pub status: AgentRouteStatus,
+    pub updated_at_unix_ms: u64,
+}
+
+impl AgentUserInputRouteEntryV1 {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION {
+            bail!(
+                "unsupported agent user-input route schema version {}",
+                self.schema_version
+            );
+        }
+        self.request.identity.validate()?;
+        validate_sha256(
+            "agent user-input route request hash",
+            &self.request.request_hash,
+        )?;
+        if self.request.identity.source_thread_id != self.source_thread_id {
+            bail!("agent user-input route source thread does not match its request identity");
+        }
+        if !matches!(self.request.source, UserInputSourceV1::Agent) {
+            bail!("agent user-input route must reference an agent-owned request");
+        }
+        if !matches!(
+            self.status,
+            AgentRouteStatus::Registered
+                | AgentRouteStatus::Requested
+                | AgentRouteStatus::Resolved
+                | AgentRouteStatus::Cancelled
+                | AgentRouteStatus::Stale
+        ) {
+            bail!("agent user-input route has an unsupported lifecycle status");
+        }
+        if self.status == AgentRouteStatus::Requested
+            && self.request.status != UserInputStatusV1::Requested
+        {
+            bail!("open agent user-input route must mirror a requested child input");
+        }
+        Ok(())
+    }
+}
+
+/// Append-only projection of child-agent requests mirrored into one root attention queue.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentUserInputRouteProjectionV1 {
+    routes: BTreeMap<AgentRouteId, AgentUserInputRouteEntryV1>,
+}
+
+impl AgentUserInputRouteProjectionV1 {
+    pub fn from_session_entries(entries: &[SessionLogEntry]) -> Result<Self> {
+        let mut projection = Self::default();
+        for entry in entries {
+            let SessionLogEntry::Control(ControlEntry::AgentUserInputRoute(route)) = entry else {
+                continue;
+            };
+            projection.apply(route.clone())?;
+        }
+        Ok(projection)
+    }
+
+    pub fn apply(&mut self, entry: AgentUserInputRouteEntryV1) -> Result<()> {
+        entry.validate()?;
+        let previous = self.routes.get(&entry.route_id);
+        if let Some(previous) = previous {
+            if previous.source_thread_id != entry.source_thread_id
+                || previous.source_attempt_id != entry.source_attempt_id
+                || previous.profile_id != entry.profile_id
+                || previous.parent_thread_id != entry.parent_thread_id
+                || previous.batch_id != entry.batch_id
+                || previous.budget_scope_id != entry.budget_scope_id
+                || previous.isolation != entry.isolation
+                || previous.child_session_ref != entry.child_session_ref
+                || previous.request.identity != entry.request.identity
+                || previous.request.request_hash != entry.request.request_hash
+            {
+                bail!("agent user-input route update changes its immutable binding");
+            }
+            if route_status_is_terminal(previous.status) && previous != &entry {
+                bail!("terminal agent user-input route cannot transition again");
+            }
+            let valid_transition = previous.status == entry.status
+                || matches!(
+                    (previous.status, entry.status),
+                    (AgentRouteStatus::Requested, AgentRouteStatus::Registered)
+                        | (AgentRouteStatus::Requested, AgentRouteStatus::Resolved)
+                        | (AgentRouteStatus::Requested, AgentRouteStatus::Cancelled)
+                        | (AgentRouteStatus::Requested, AgentRouteStatus::Stale)
+                        | (AgentRouteStatus::Registered, AgentRouteStatus::Resolved)
+                        | (AgentRouteStatus::Registered, AgentRouteStatus::Cancelled)
+                        | (AgentRouteStatus::Registered, AgentRouteStatus::Stale)
+                );
+            if !valid_transition {
+                bail!("agent user-input route transition is invalid");
+            }
+        } else if entry.status != AgentRouteStatus::Requested {
+            bail!("agent user-input route must begin in requested state");
+        }
+        self.routes.insert(entry.route_id.clone(), entry);
+        Ok(())
+    }
+
+    pub fn route(&self, route_id: &AgentRouteId) -> Option<&AgentUserInputRouteEntryV1> {
+        self.routes.get(route_id)
+    }
+
+    pub fn route_for_request(
+        &self,
+        identity: &UserInputIdentityV1,
+        request_hash: &str,
+    ) -> Option<&AgentUserInputRouteEntryV1> {
+        self.routes.values().find(|route| {
+            route.request.identity == *identity && route.request.request_hash == request_hash
+        })
+    }
+
+    pub fn pending(&self) -> impl Iterator<Item = &AgentUserInputRouteEntryV1> {
+        self.routes
+            .values()
+            .filter(|route| route.status == AgentRouteStatus::Requested)
+    }
+
+    pub fn routes_for_thread(
+        &self,
+        thread_id: &AgentThreadId,
+    ) -> impl Iterator<Item = &AgentUserInputRouteEntryV1> {
+        self.routes
+            .values()
+            .filter(move |route| &route.source_thread_id == thread_id)
+    }
+}
+
+fn route_status_is_terminal(status: AgentRouteStatus) -> bool {
+    matches!(
+        status,
+        AgentRouteStatus::Resolved
+            | AgentRouteStatus::Rejected
+            | AgentRouteStatus::Expired
+            | AgentRouteStatus::Cancelled
+            | AgentRouteStatus::Stale
+            | AgentRouteStatus::Closed
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

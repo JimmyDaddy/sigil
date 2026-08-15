@@ -1785,6 +1785,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::AgentThreadDisplayName(_) => "agent_thread_display_name",
         ControlEntry::AgentApprovalRoute(_) => "agent_approval_route",
         ControlEntry::AgentElicitationRoute(_) => "agent_elicitation_route",
+        ControlEntry::AgentUserInputRoute(_) => "agent_user_input_route",
         ControlEntry::AgentRunAttemptStarted(_) => "agent_run_attempt_started",
         ControlEntry::AgentRunHeartbeat(_) => "agent_run_heartbeat",
         ControlEntry::AgentRunInterrupted(_) => "agent_run_interrupted",

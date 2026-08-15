@@ -198,11 +198,20 @@ impl BackgroundChatAgentThreadRecord {
     }
 }
 
+pub(super) enum BackgroundChatAgentDisposition {
+    Finished {
+        materialized: AgentResultMaterialization,
+        status: TaskChildSessionStatus,
+    },
+    AwaitingUserInput {
+        request: Box<sigil_kernel::PublicUserInputRequestV1>,
+    },
+}
+
 pub(super) struct BackgroundChatAgentResult {
-    pub(super) materialized: AgentResultMaterialization,
+    pub(super) disposition: BackgroundChatAgentDisposition,
     pub(super) outcome: AgentRunOutcome,
     pub(super) usage: AgentUsageSummary,
-    pub(super) status: TaskChildSessionStatus,
     pub(super) consumed_mailbox_route_ids: Vec<AgentRouteId>,
 }
 
@@ -262,6 +271,13 @@ impl AgentToolBackgroundRuns {
         handle.handle.mark_registered();
         handles.insert(thread_id, handle);
         Ok(())
+    }
+
+    pub(super) fn remove_registration(
+        &self,
+        thread_id: &AgentThreadId,
+    ) -> Option<BackgroundChatAgentHandle> {
+        self.handles.lock().ok()?.remove(thread_id)
     }
 
     /// Atomically registers a detached batch before any member can pass its provider-start gate.
@@ -468,6 +484,22 @@ pub(super) async fn run_background_chat_agent(
     };
     let mut consumed_mailbox_route_ids = Vec::new();
 
+    resolve_started_background_user_input_continuations(&mut child_session)?;
+
+    if let Some(result) = background_user_input_result(
+        &child_session,
+        &latest_output,
+        consumed_mailbox_route_ids.clone(),
+    )? {
+        emit_background_agent_status(
+            event_sink.as_ref(),
+            &thread_id,
+            AgentThreadStatus::Blocked,
+            Some("blocked_needs_user_input".to_owned()),
+        );
+        return Ok(result);
+    }
+
     loop {
         let mut prompts = Vec::new();
         while let Ok(message) = mailbox_rx.try_recv() {
@@ -508,6 +540,20 @@ pub(super) async fn run_background_chat_agent(
                 return Err(error);
             }
         };
+        resolve_started_background_user_input_continuations(&mut child_session)?;
+        if let Some(result) = background_user_input_result(
+            &child_session,
+            &latest_output,
+            consumed_mailbox_route_ids.clone(),
+        )? {
+            emit_background_agent_status(
+                event_sink.as_ref(),
+                &thread_id,
+                AgentThreadStatus::Blocked,
+                Some("blocked_needs_user_input".to_owned()),
+            );
+            return Ok(result);
+        }
     }
 
     let materialized = materialize_child_agent_final_answer(
@@ -527,12 +573,62 @@ pub(super) async fn run_background_chat_agent(
         None,
     );
     Ok(BackgroundChatAgentResult {
-        materialized,
+        disposition: BackgroundChatAgentDisposition::Finished {
+            materialized,
+            status,
+        },
         outcome,
         usage,
-        status,
         consumed_mailbox_route_ids,
     })
+}
+
+fn resolve_started_background_user_input_continuations(session: &mut Session) -> Result<()> {
+    let pending = session
+        .user_input_projection()?
+        .pending()
+        .filter(|state| state.status == sigil_kernel::UserInputStatusV1::ContinuationStarted)
+        .map(|state| {
+            sigil_kernel::UserInputLifecycleEntryV1::Resolved(sigil_kernel::UserInputResolvedV1 {
+                schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+                identity: state.requested.request.identity.clone(),
+                request_hash: state.requested.request_hash.clone(),
+                resolution: sigil_kernel::UserInputResolutionV1::Consumed,
+                resolved_at_unix_ms: unix_time_ms(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if !pending.is_empty() {
+        session.append_user_input_lifecycle(pending)?;
+    }
+    Ok(())
+}
+
+fn background_user_input_result(
+    child_session: &Session,
+    output: &sigil_kernel::AgentRunOutput,
+    consumed_mailbox_route_ids: Vec<AgentRouteId>,
+) -> Result<Option<BackgroundChatAgentResult>> {
+    let sigil_kernel::AgentRunDisposition::AwaitingUserInput(reference) = &output.disposition
+    else {
+        return Ok(None);
+    };
+    let projection = child_session.user_input_projection()?;
+    let request = projection
+        .request(&reference.identity)
+        .filter(|state| state.requested.request_hash == reference.request_hash)
+        .map(sigil_kernel::UserInputRequestStateV1::public_view)
+        .ok_or_else(|| {
+            anyhow!("background child suspended without its durable user-input request")
+        })?;
+    Ok(Some(BackgroundChatAgentResult {
+        disposition: BackgroundChatAgentDisposition::AwaitingUserInput {
+            request: Box::new(request),
+        },
+        outcome: output.outcome.clone(),
+        usage: usage_summary_from_stats(child_session.stats()),
+        consumed_mailbox_route_ids,
+    }))
 }
 
 struct BackgroundChatChildEventHandler {

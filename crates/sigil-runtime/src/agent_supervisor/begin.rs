@@ -5,9 +5,9 @@ use sigil_kernel::{
     AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentResultPolicy,
     AgentRole, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
     AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentTrustState, ControlEntry, EventHandler, IsolatedWorkspaceBackend, Session,
-    TaskIsolationMode, WorkspaceRootSnapshot, WriteIsolationMode, stable_workspace_id,
-    task_step_owner_agent_id,
+    AgentTrustState, AgentUserInputRouteEntryV1, ControlEntry, EventHandler,
+    IsolatedWorkspaceBackend, Session, TaskIsolationMode, WorkspaceRootSnapshot,
+    WriteIsolationMode, stable_workspace_id, task_step_owner_agent_id,
 };
 
 use crate::AgentProfileIndexContext;
@@ -21,6 +21,100 @@ use super::{
 };
 
 impl AgentSupervisor {
+    /// Re-acquires process-local ownership for a durable background chat thread suspended on
+    /// user input. The immutable route binding is checked against the parent thread projection
+    /// before a new physical attempt and mailbox are registered.
+    pub fn resume_chat_child_thread<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        route: &AgentUserInputRouteEntryV1,
+        role: AgentRole,
+    ) -> Result<AgentChatChildThread>
+    where
+        H: EventHandler + Send + ?Sized,
+    {
+        route.validate()?;
+        if route.status != sigil_kernel::AgentRouteStatus::Requested {
+            bail!("agent user-input route is no longer pending");
+        }
+        let projection = session.agent_thread_state_projection();
+        let thread = projection
+            .threads
+            .get(&route.source_thread_id)
+            .context("agent user-input route references an unknown thread")?;
+        if !matches!(
+            thread.status,
+            AgentThreadStatus::Blocked | AgentThreadStatus::Interrupted
+        ) || thread.profile_id.as_ref() != Some(&route.profile_id)
+            || thread.parent_thread_id.as_ref() != Some(&route.parent_thread_id)
+            || thread.batch_id != route.batch_id
+            || thread.thread_session_ref.as_ref() != Some(&route.child_session_ref)
+            || thread.invocation_mode != Some(AgentInvocationMode::Background)
+            || !thread.attempts.contains_key(&route.source_attempt_id)
+        {
+            bail!(
+                "agent user-input route does not match its suspended thread: status={:?}, profile_match={}, parent_match={}, batch_match={}, session_match={}, mode={:?}, source_attempt_present={}",
+                thread.status,
+                thread.profile_id.as_ref() == Some(&route.profile_id),
+                thread.parent_thread_id.as_ref() == Some(&route.parent_thread_id),
+                thread.batch_id == route.batch_id,
+                thread.thread_session_ref.as_ref() == Some(&route.child_session_ref),
+                thread.invocation_mode,
+                thread.attempts.contains_key(&route.source_attempt_id),
+            );
+        }
+        let run_context = thread
+            .run_context
+            .as_ref()
+            .context("suspended agent thread lost its run context")?;
+        let attempt_id = AgentRunAttemptId::new(format!(
+            "attempt_{}",
+            short_digest(&hash_text(&format!(
+                "{}\0{}\0{}\0resume",
+                route.route_id.as_str(),
+                route.request.identity.generation,
+                route.request.request_hash,
+            )))
+        ))?;
+        let (mailbox_tx, mailbox_rx) = mpsc::channel();
+        self.reserve_thread(
+            &route.source_thread_id,
+            &attempt_id,
+            &route.profile_id,
+            &route.budget_scope_id,
+            role,
+            AgentInvocationMode::Background,
+            1,
+            Some(mailbox_tx),
+        )
+        .map_err(anyhow::Error::msg)?;
+        if let Err(error) = append_thread_running_and_attempt(
+            session,
+            handler,
+            &route.source_thread_id,
+            &attempt_id,
+            run_context.provider.clone(),
+            run_context.model.clone(),
+            AgentInvocationMode::Background,
+            "background agent resumed after user input",
+        ) {
+            self.release_thread(&route.source_thread_id);
+            return Err(error);
+        }
+        Ok(AgentChatChildThread {
+            thread_id: route.source_thread_id.clone(),
+            attempt_id,
+            batch_id: route.batch_id.clone(),
+            profile_id: route.profile_id.clone(),
+            parent_thread_id: route.parent_thread_id.clone(),
+            child_session_ref: route.child_session_ref.clone(),
+            budget_scope_id: route.budget_scope_id.clone(),
+            isolation: route.isolation,
+            mailbox_rx: Some(mailbox_rx),
+        })
+    }
+
     pub fn begin_task_child_thread<H>(
         &self,
         session: &mut Session,

@@ -890,6 +890,7 @@ pub fn conversation_display_page_from_records(
     let mut task_control = ConversationTaskControlProjection::default();
     let mut plan_review = PlanReviewDisplayProjection::default();
     let mut user_input = UserInputProjectionV1::default();
+    let mut agent_user_input = sigil_kernel::AgentUserInputRouteProjectionV1::default();
     let mut total_items = 0_u64;
     let mut eligible_items = 0_u64;
     let mut cursor_boundary_found = decoded_cursor.is_none();
@@ -903,6 +904,11 @@ pub fn conversation_display_page_from_records(
             && let Some(entry) = UserInputLifecycleEntryV1::from_control(&control)
         {
             user_input.apply(entry)?;
+        }
+        if let Some(SessionLogEntry::Control(ControlEntry::AgentUserInputRoute(route))) =
+            record.session_log_entry()?
+        {
+            agent_user_input.apply(route)?;
         }
         let mut projected = project_record(
             record,
@@ -988,6 +994,11 @@ pub fn conversation_display_page_from_records(
     let projected_user_input = durable_user_input
         .into_iter()
         .chain(plan_review_user_input)
+        .chain(
+            agent_user_input
+                .pending()
+                .map(|route| route.request.clone()),
+        )
         .max_by_key(|request| request.requested_at_unix_ms);
     Ok(ConversationDisplayPageV1 {
         schema_version: CONVERSATION_DISPLAY_SCHEMA_VERSION,
@@ -2245,6 +2256,8 @@ pub fn public_user_input_from_entries(
     entries: &[sigil_kernel::SessionLogEntry],
 ) -> Result<Option<sigil_kernel::PublicUserInputRequestV1>> {
     let user_input = sigil_kernel::UserInputProjectionV1::from_session_entries(entries)?;
+    let agent_user_input =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(entries)?;
     let mut plan_review = PlanReviewDisplayProjection::default();
     for entry in entries {
         plan_review.apply_entry(entry.clone());
@@ -2253,6 +2266,11 @@ pub fn public_user_input_from_entries(
         .pending()
         .map(sigil_kernel::UserInputRequestStateV1::public_view)
         .chain(plan_review.pending_user_input())
+        .chain(
+            agent_user_input
+                .pending()
+                .map(|route| route.request.clone()),
+        )
         .max_by_key(|request| request.requested_at_unix_ms))
 }
 

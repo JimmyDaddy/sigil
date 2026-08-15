@@ -204,10 +204,14 @@ pub(in crate::runner) fn agent_result_continuation_new_thread_ids(
     thread_ids
         .iter()
         .filter(|thread_id| {
-            projection
-                .as_ref()
-                .and_then(|projection| projection.statuses.get(*thread_id))
-                .is_none()
+            session
+                .map(Session::agent_thread_state_projection)
+                .and_then(|threads| threads.threads.get(*thread_id).cloned())
+                .is_some_and(|thread| thread.result.is_some())
+                && projection
+                    .as_ref()
+                    .and_then(|projection| projection.statuses.get(*thread_id))
+                    .is_none()
         })
         .cloned()
         .collect()

@@ -1521,6 +1521,8 @@ pub struct AgentThreadStateProjection {
     pub batch_replay_order: Vec<AgentBatchId>,
     pub approval_routes: BTreeMap<AgentRouteId, AgentApprovalRouteEntry>,
     pub elicitation_routes: BTreeMap<AgentRouteId, AgentElicitationRouteEntry>,
+    #[serde(default)]
+    pub user_input_routes: BTreeMap<AgentRouteId, crate::AgentUserInputRouteEntryV1>,
     pub message_routes: BTreeMap<AgentRouteId, AgentThreadMessageRoutedEntry>,
     pub mailbox_messages: BTreeMap<AgentRouteId, AgentMailboxMessageEntry>,
     pub closed_routes: BTreeMap<AgentRouteId, AgentRouteClosedEntry>,
@@ -1617,6 +1619,11 @@ impl AgentThreadStateProjection {
                 .elicitation_routes
                 .values()
                 .filter(|route| !route.status.is_terminal())
+                .count() as u64
+            + self
+                .user_input_routes
+                .values()
+                .filter(|route| !route.status.is_terminal())
                 .count() as u64;
         summary
     }
@@ -1647,6 +1654,10 @@ impl AgentThreadStateProjection {
             }
             ControlEntry::AgentElicitationRoute(entry) => {
                 self.elicitation_routes
+                    .insert(entry.route_id.clone(), entry.clone());
+            }
+            ControlEntry::AgentUserInputRoute(entry) => {
+                self.user_input_routes
                     .insert(entry.route_id.clone(), entry.clone());
             }
             ControlEntry::AgentRunAttemptStarted(entry) => {
@@ -1936,6 +1947,9 @@ impl AgentThreadStateProjection {
                 route.status = AgentRouteStatus::Closed;
             }
             if let Some(route) = self.elicitation_routes.get_mut(route_id) {
+                route.status = AgentRouteStatus::Closed;
+            }
+            if let Some(route) = self.user_input_routes.get_mut(route_id) {
                 route.status = AgentRouteStatus::Closed;
             }
             if let Some(route) = self.message_routes.get_mut(route_id) {
