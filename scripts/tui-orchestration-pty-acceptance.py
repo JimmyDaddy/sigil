@@ -1200,6 +1200,23 @@ def submit_user_prompt(runner: object, prompt: str) -> None:
     runner.send("\r")
 
 
+def approve_review_first_plan(runner: object, timeout: float) -> None:
+    runner.wait_until(
+        lambda text: "Plan ready" in text,
+        timeout,
+        "review-first plan card",
+        final_screen=True,
+    )
+    runner.send("\r")
+    runner.wait_until(
+        lambda text: "Plan Review" in text and "Run" in text and "Reject" in text,
+        timeout,
+        "complete plan review workbench",
+        final_screen=True,
+    )
+    runner.send("\r")
+
+
 def click_screen_text(runner: object, screen: str, needle: str) -> None:
     for row, line in enumerate(screen.splitlines(), start=1):
         column = line.find(needle)
@@ -1333,15 +1350,9 @@ def main() -> int:
         runner.start()
         SUPPORT.wait_for_main_tui(runner, deadline.remaining())
         submit_user_prompt(runner, USER_PROMPT)
-        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
-        # route reviews a plan before any task starts; approve it with Enter.
-        runner.wait_until(
-            lambda text: "Plan ready" in text,
-            deadline.remaining(),
-            "review-first plan card",
-            final_screen=True,
-        )
-        runner.send("\r")
+        # RFC-0063 ReviewFirst baseline: open the complete workbench first, then explicitly
+        # confirm its selected Run action. A single Enter must never skip plan review.
+        approve_review_first_plan(runner, deadline.remaining())
         session_path, audit = wait_for_audit(
             session_dir,
             runner,
@@ -1365,15 +1376,7 @@ def main() -> int:
         validate_audit(audit, fixture)
 
         submit_user_prompt(runner, APPROVAL_USER_PROMPT)
-        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
-        # route reviews a plan before any task starts; approve it with Enter.
-        runner.wait_until(
-            lambda text: "Plan ready" in text,
-            deadline.remaining(),
-            "review-first plan card",
-            final_screen=True,
-        )
-        runner.send("\r")
+        approve_review_first_plan(runner, deadline.remaining())
 
         runner.wait_until(
             lambda text: ("Approve action?" in text or "Review file changes" in text)
@@ -1407,15 +1410,7 @@ def main() -> int:
         checkpoint_workspace(workspace, env, "record approved write fixture")
 
         submit_user_prompt(runner, CONTINUE_USER_PROMPT)
-        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
-        # route reviews a plan before any task starts; approve it with Enter.
-        runner.wait_until(
-            lambda text: "Plan ready" in text,
-            deadline.remaining(),
-            "review-first plan card",
-            final_screen=True,
-        )
-        runner.send("\r")
+        approve_review_first_plan(runner, deadline.remaining())
 
         wait_for_fixture_request(
             fixture,
@@ -1473,15 +1468,7 @@ def main() -> int:
         validate_continue_audit(continue_audit, fixture)
 
         submit_user_prompt(runner, CANCEL_USER_PROMPT)
-        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
-        # route reviews a plan before any task starts; approve it with Enter.
-        runner.wait_until(
-            lambda text: "Plan ready" in text,
-            deadline.remaining(),
-            "review-first plan card",
-            final_screen=True,
-        )
-        runner.send("\r")
+        approve_review_first_plan(runner, deadline.remaining())
 
         wait_for_fixture_request(
             fixture,
@@ -1513,15 +1500,7 @@ def main() -> int:
         )
 
         submit_user_prompt(runner, INTEGRATION_USER_PROMPT)
-        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
-        # route reviews a plan before any task starts; approve it with Enter.
-        runner.wait_until(
-            lambda text: "Plan ready" in text,
-            deadline.remaining(),
-            "review-first plan card",
-            final_screen=True,
-        )
-        runner.send("\r")
+        approve_review_first_plan(runner, deadline.remaining())
 
         session_path, review_audit = wait_for_audit(
             session_dir,
@@ -1581,15 +1560,7 @@ def main() -> int:
                 raise AcceptanceError(f"reviewed integration did not promote {path}")
 
         submit_user_prompt(runner, TERMINAL_USER_PROMPT)
-        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
-        # route reviews a plan before any task starts; approve it with Enter.
-        runner.wait_until(
-            lambda text: "Plan ready" in text,
-            deadline.remaining(),
-            "review-first plan card",
-            final_screen=True,
-        )
-        runner.send("\r")
+        approve_review_first_plan(runner, deadline.remaining())
 
         runner.wait_until(
             lambda text: ("Approve action?" in text or "Review file changes" in text)
