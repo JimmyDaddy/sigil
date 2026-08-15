@@ -1698,6 +1698,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::UserInputDecisionAccepted(_) => "user_input_decision_accepted",
         ControlEntry::UserInputContinuationClaimed(_) => "user_input_continuation_claimed",
         ControlEntry::UserInputContinuationStarted(_) => "user_input_continuation_started",
+        ControlEntry::UserInputContinuationReleased(_) => "user_input_continuation_released",
         ControlEntry::UserInputResolved(_) => "user_input_resolved",
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",
         ControlEntry::SkillIndexCaptured(_) => "skill_index_captured",

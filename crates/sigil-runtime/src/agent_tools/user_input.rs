@@ -110,14 +110,7 @@ impl AgentToolRuntime {
         // the answer becomes durable in the child session.
         let receipt =
             sigil_kernel::accept_user_input_decision(&mut child, command, unix_time_ms())?;
-        let physical_attempt_id = format!(
-            "agent-input-{}",
-            short_digest(&hash_text(&format!(
-                "{}\0{}",
-                route.route_id.as_str(),
-                route.request.request_hash
-            )))
-        );
+        let physical_attempt_id = sigil_kernel::new_provider_physical_attempt_id();
         let preparation = sigil_kernel::prepare_user_input_continuation(
             &mut child,
             &route.request.identity,
@@ -151,6 +144,7 @@ impl AgentToolRuntime {
                         route.source_thread_id.clone(),
                     ),
             )
+            .with_initial_provider_physical_attempt_id(physical_attempt_id)
             .with_cancellation(cancellation_handle);
         let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
         let run_thread = thread_record.clone();

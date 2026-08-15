@@ -478,6 +478,7 @@ pub(super) async fn run_background_chat_agent(
     {
         Ok(output) => output,
         Err(error) => {
+            reconcile_failed_background_user_input_continuations(&mut child_session)?;
             emit_background_agent_error_status(event_sink.as_ref(), &thread_id, &error);
             return Err(error);
         }
@@ -536,6 +537,7 @@ pub(super) async fn run_background_chat_agent(
         {
             Ok(output) => output,
             Err(error) => {
+                reconcile_failed_background_user_input_continuations(&mut child_session)?;
                 emit_background_agent_error_status(event_sink.as_ref(), &thread_id, &error);
                 return Err(error);
             }
@@ -581,6 +583,29 @@ pub(super) async fn run_background_chat_agent(
         usage,
         consumed_mailbox_route_ids,
     })
+}
+
+fn reconcile_failed_background_user_input_continuations(session: &mut Session) -> Result<()> {
+    let pending = session
+        .user_input_projection()?
+        .pending()
+        .filter(|state| state.status == sigil_kernel::UserInputStatusV1::ContinuationStarted)
+        .map(|state| {
+            (
+                state.requested.request.identity.clone(),
+                state.requested.request_hash.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (identity, request_hash) in pending {
+        sigil_kernel::reconcile_user_input_continuation_after_failed_run(
+            session,
+            &identity,
+            &request_hash,
+            unix_time_ms(),
+        )?;
+    }
+    Ok(())
 }
 
 fn resolve_started_background_user_input_continuations(session: &mut Session) -> Result<()> {

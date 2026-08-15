@@ -397,6 +397,7 @@ pub struct AgentRunInput {
     hosted_turn_preparer: Option<Arc<dyn AgentHostedTurnPreparer>>,
     pending_input_provider: Option<Arc<dyn PendingConversationInputProvider>>,
     initial_frozen_provider_request: Option<FrozenProviderRequestMaterial>,
+    initial_provider_physical_attempt_id: Option<crate::ProviderPhysicalAttemptId>,
     max_output_tokens: Option<u32>,
     suppressed_tool_names: Vec<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
@@ -469,6 +470,10 @@ impl fmt::Debug for AgentRunInput {
                     .as_ref()
                     .map(|request| request.fingerprint()),
             )
+            .field(
+                "initial_provider_physical_attempt_id",
+                &self.initial_provider_physical_attempt_id,
+            )
             .field("max_output_tokens", &self.max_output_tokens)
             .field("suppressed_tool_names", &self.suppressed_tool_names)
             .field(
@@ -515,6 +520,7 @@ impl AgentRunInput {
             hosted_turn_preparer: None,
             pending_input_provider: None,
             initial_frozen_provider_request: None,
+            initial_provider_physical_attempt_id: None,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
@@ -550,6 +556,7 @@ impl AgentRunInput {
             hosted_turn_preparer: None,
             pending_input_provider: None,
             initial_frozen_provider_request: None,
+            initial_provider_physical_attempt_id: None,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
@@ -584,6 +591,7 @@ impl AgentRunInput {
             hosted_turn_preparer: None,
             pending_input_provider: None,
             initial_frozen_provider_request: None,
+            initial_provider_physical_attempt_id: None,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
@@ -775,6 +783,19 @@ impl AgentRunInput {
         request: FrozenProviderRequestMaterial,
     ) -> Self {
         self.initial_frozen_provider_request = Some(request);
+        self
+    }
+
+    /// Binds the first provider send barrier to a preallocated physical-attempt identity.
+    ///
+    /// This is used by durable user-input continuations so their lifecycle and provider audit
+    /// refer to the same attempt. The identifier is consumed by the first provider turn only.
+    #[must_use]
+    pub fn with_initial_provider_physical_attempt_id(
+        mut self,
+        physical_attempt_id: crate::ProviderPhysicalAttemptId,
+    ) -> Self {
+        self.initial_provider_physical_attempt_id = Some(physical_attempt_id);
         self
     }
 
@@ -1925,6 +1946,7 @@ where
             hosted_turn_preparer,
             pending_input_provider,
             mut initial_frozen_provider_request,
+            mut initial_provider_physical_attempt_id,
             max_output_tokens,
             suppressed_tool_names,
             web_task_tree_budget,
@@ -2589,6 +2611,8 @@ where
                     }
                 };
             let provider_turn_result = {
+                let current_provider_physical_attempt_id =
+                    initial_provider_physical_attempt_id.take();
                 let mut provider_event_handler =
                     RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending);
                 match initial_frozen_request {
@@ -2602,8 +2626,13 @@ where
                             total_tool_calls,
                             &mut provider_event_handler,
                             cancellation.as_ref(),
-                            current_hosted_processor.as_ref(),
-                            current_hosted_dispatch_lifecycle.as_ref(),
+                            provider_stream::ProviderTurnDispatchContext {
+                                hosted_processor: current_hosted_processor.as_ref(),
+                                hosted_dispatch_lifecycle: current_hosted_dispatch_lifecycle
+                                    .as_ref(),
+                                initial_physical_attempt_id: current_provider_physical_attempt_id
+                                    .as_deref(),
+                            },
                         )
                         .await
                     }
@@ -2617,8 +2646,13 @@ where
                             total_tool_calls,
                             &mut provider_event_handler,
                             cancellation.as_ref(),
-                            current_hosted_processor.as_ref(),
-                            current_hosted_dispatch_lifecycle.as_ref(),
+                            provider_stream::ProviderTurnDispatchContext {
+                                hosted_processor: current_hosted_processor.as_ref(),
+                                hosted_dispatch_lifecycle: current_hosted_dispatch_lifecycle
+                                    .as_ref(),
+                                initial_physical_attempt_id: current_provider_physical_attempt_id
+                                    .as_deref(),
+                            },
                         )
                         .await
                     }

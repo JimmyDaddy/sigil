@@ -98,6 +98,28 @@ where
                     continue;
                 }
 
+                if let Some(current) = state.session.current.as_ref() {
+                    match sigil_runtime::application_run::application_session_has_unresolved_user_input(
+                        &state.session.log_path,
+                        current.session_scope_id(),
+                    ) {
+                        Ok(true) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(
+                                "answer, decline, or cancel the pending input before starting another turn"
+                                    .to_owned(),
+                            ));
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                "failed to verify the pending input frontier: {error:#}"
+                            )));
+                            continue;
+                        }
+                    }
+                }
+
                 let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),

@@ -1896,7 +1896,6 @@ impl ApplicationRunExecution {
             let request = match user_input::start_application_user_input_continuation(
                 &mut self.session,
                 context,
-                &self.run_id,
             ) {
                 Ok(request) => request,
                 Err(error) => {
@@ -1916,13 +1915,9 @@ impl ApplicationRunExecution {
             if let Err(error) =
                 bridge.emit(user_input::application_user_input_changed_event(request))
             {
-                let resolution = user_input::resolve_application_user_input_continuation(
+                let resolution = user_input::reconcile_failed_application_user_input_continuation(
                     &mut self.session,
                     context,
-                    sigil_kernel::UserInputResolutionV1::Failed {
-                        failure_class: "continuation_event_delivery_failed".to_owned(),
-                        retryable: true,
-                    },
                 );
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
                 append_application_conversation_terminal(
@@ -2011,13 +2006,9 @@ impl ApplicationRunExecution {
                 }
             }
             (Some(context), Err(error)) => {
-                match user_input::resolve_application_user_input_continuation(
+                match user_input::reconcile_failed_application_user_input_continuation(
                     &mut self.session,
                     context,
-                    sigil_kernel::UserInputResolutionV1::Failed {
-                        failure_class: "continuation_execution_failed".to_owned(),
-                        retryable: true,
-                    },
                 ) {
                     Ok(request) => {
                         if let Err(event_error) =

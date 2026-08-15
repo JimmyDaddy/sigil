@@ -85,6 +85,11 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.identity.request_id.as_str(),
             entry.identity.generation
         ),
+        ControlEntry::UserInputContinuationReleased(entry) => format!(
+            "[ctl] user input {} generation {} continuation released",
+            entry.identity.request_id.as_str(),
+            entry.identity.generation
+        ),
         ControlEntry::UserInputResolved(entry) => format!(
             "[ctl] user input {} generation {} resolved",
             entry.identity.request_id.as_str(),

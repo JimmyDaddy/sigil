@@ -310,10 +310,18 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
     assert!(matches!(
         state.resolution.map(|entry| entry.resolution),
         Some(UserInputResolutionV1::Failed {
-            retryable: true,
+            retryable: false,
             ..
         })
     ));
+    assert!(
+        crate::application_run::application_recoverable_user_input_decision(
+            &binding.session_log_path,
+            &binding.session_scope_id,
+        )?
+        .is_none(),
+        "an unclassified transport outcome must not replay a possibly consumed answer"
+    );
     assert_eq!(
         recovered
             .entries()

@@ -790,6 +790,38 @@ impl UserInputContinuationStartedV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInputContinuationReleaseReasonV1 {
+    AttemptNotDispatched,
+    ConfirmedNoModelConsumption,
+}
+
+/// Durable proof that one continuation attempt may be retried without consuming the answer twice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct UserInputContinuationReleasedV1 {
+    pub schema_version: u16,
+    pub identity: UserInputIdentityV1,
+    pub request_hash: String,
+    pub claim_id: UserInputClaimId,
+    pub physical_attempt_id: String,
+    pub reason: UserInputContinuationReleaseReasonV1,
+    pub released_at_unix_ms: u64,
+}
+
+impl UserInputContinuationReleasedV1 {
+    pub fn validate(&self) -> Result<()> {
+        validate_lifecycle_identity(self.schema_version, &self.identity, &self.request_hash)?;
+        validate_bounded_text(
+            "released user input physical attempt id",
+            &self.physical_attempt_id,
+            128,
+            false,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UserInputResolutionV1 {
@@ -829,6 +861,7 @@ pub enum UserInputLifecycleEntryV1 {
     DecisionAccepted(Box<UserInputDecisionAcceptedV1>),
     ContinuationClaimed(UserInputContinuationClaimedV1),
     ContinuationStarted(UserInputContinuationStartedV1),
+    ContinuationReleased(UserInputContinuationReleasedV1),
     Resolved(UserInputResolvedV1),
 }
 
@@ -839,6 +872,7 @@ impl UserInputLifecycleEntryV1 {
             Self::DecisionAccepted(entry) => &entry.identity,
             Self::ContinuationClaimed(entry) => &entry.identity,
             Self::ContinuationStarted(entry) => &entry.identity,
+            Self::ContinuationReleased(entry) => &entry.identity,
             Self::Resolved(entry) => &entry.identity,
         }
     }
@@ -849,6 +883,7 @@ impl UserInputLifecycleEntryV1 {
             Self::DecisionAccepted(entry) => &entry.request_hash,
             Self::ContinuationClaimed(entry) => &entry.request_hash,
             Self::ContinuationStarted(entry) => &entry.request_hash,
+            Self::ContinuationReleased(entry) => &entry.request_hash,
             Self::Resolved(entry) => &entry.request_hash,
         }
     }
@@ -859,6 +894,7 @@ impl UserInputLifecycleEntryV1 {
             Self::DecisionAccepted(entry) => entry.validate_shape(),
             Self::ContinuationClaimed(entry) => entry.validate(),
             Self::ContinuationStarted(entry) => entry.validate(),
+            Self::ContinuationReleased(entry) => entry.validate(),
             Self::Resolved(entry) => entry.validate(),
         }
     }
@@ -875,6 +911,9 @@ impl UserInputLifecycleEntryV1 {
             ControlEntry::UserInputContinuationStarted(entry) => {
                 Some(Self::ContinuationStarted(entry.clone()))
             }
+            ControlEntry::UserInputContinuationReleased(entry) => {
+                Some(Self::ContinuationReleased(entry.clone()))
+            }
             ControlEntry::UserInputResolved(entry) => Some(Self::Resolved(entry.clone())),
             _ => None,
         }
@@ -886,6 +925,7 @@ impl UserInputLifecycleEntryV1 {
             Self::DecisionAccepted(entry) => ControlEntry::UserInputDecisionAccepted(entry),
             Self::ContinuationClaimed(entry) => ControlEntry::UserInputContinuationClaimed(entry),
             Self::ContinuationStarted(entry) => ControlEntry::UserInputContinuationStarted(entry),
+            Self::ContinuationReleased(entry) => ControlEntry::UserInputContinuationReleased(entry),
             Self::Resolved(entry) => ControlEntry::UserInputResolved(entry),
         }
     }
@@ -1005,6 +1045,7 @@ impl UserInputProjectionV1 {
             UserInputLifecycleEntryV1::DecisionAccepted(entry) => self.apply_decision(*entry),
             UserInputLifecycleEntryV1::ContinuationClaimed(entry) => self.apply_claim(entry),
             UserInputLifecycleEntryV1::ContinuationStarted(entry) => self.apply_started(entry),
+            UserInputLifecycleEntryV1::ContinuationReleased(entry) => self.apply_released(entry),
             UserInputLifecycleEntryV1::Resolved(entry) => self.apply_resolved(entry),
         }
     }
@@ -1146,6 +1187,31 @@ impl UserInputProjectionV1 {
         }
         state.status = UserInputStatusV1::ContinuationStarted;
         state.continuation = Some(entry);
+        Ok(())
+    }
+
+    fn apply_released(&mut self, entry: UserInputContinuationReleasedV1) -> Result<()> {
+        let state = self
+            .requests
+            .get_mut(&entry.identity)
+            .context("user input continuation release references an unknown request")?;
+        validate_exact_request_binding(state, &entry.request_hash)?;
+        let started = state
+            .continuation
+            .as_ref()
+            .context("user input continuation release requires a started attempt")?;
+        if state.status != UserInputStatusV1::ContinuationStarted
+            || state
+                .claim
+                .as_ref()
+                .is_none_or(|claim| claim.claim_id != entry.claim_id)
+            || started.claim_id != entry.claim_id
+            || started.physical_attempt_id != entry.physical_attempt_id
+        {
+            bail!("user input continuation release does not match the live attempt");
+        }
+        state.status = UserInputStatusV1::ContinuationClaimed;
+        state.continuation = None;
         Ok(())
     }
 
@@ -1370,8 +1436,8 @@ pub fn accept_user_input_decision(
     })
 }
 
-/// Reconstructs the exact retry-stable command for one durably accepted answer that has not yet
-/// started its continuation.
+/// Reconstructs the exact retry-stable command for one durably accepted answer whose continuation
+/// has not yet been resolved.
 ///
 /// Answer values are read only from private session truth and are never added to the public
 /// projection. MCP requests intentionally return no recovery command because their durable policy
@@ -1396,11 +1462,15 @@ pub fn recoverable_user_input_decision_from_entries(
 ) -> Result<Option<UserInputDecisionCommandV1>> {
     let projection = UserInputProjectionV1::from_session_entries(entries)?;
     let mut recoverable = projection.pending().filter(|state| {
-        state.status == UserInputStatusV1::DecisionAccepted
-            && !matches!(
-                state.requested.request.source,
-                UserInputSourceV1::Mcp { .. }
-            )
+        matches!(
+            state.status,
+            UserInputStatusV1::DecisionAccepted
+                | UserInputStatusV1::ContinuationClaimed
+                | UserInputStatusV1::ContinuationStarted
+        ) && !matches!(
+            state.requested.request.source,
+            UserInputSourceV1::Mcp { .. }
+        )
     });
     let Some(state) = recoverable.next() else {
         return Ok(None);
@@ -1468,7 +1538,7 @@ pub fn prepare_user_input_continuation(
     now_unix_ms: u64,
 ) -> Result<UserInputContinuationPreparationV1> {
     let projection = session.user_input_projection()?;
-    let state = projection
+    let mut state = projection
         .request(identity)
         .cloned()
         .context("user input continuation references an unknown request")?;
@@ -1492,17 +1562,31 @@ pub fn prepare_user_input_continuation(
         }) {
             bail!("started user input continuation is missing its settled tool result");
         }
-        return Ok(UserInputContinuationPreparationV1 {
-            request: state.public_view(),
-            continuation: started.clone(),
-            already_started: true,
-        });
+        if started.physical_attempt_id == physical_attempt_id {
+            return Ok(UserInputContinuationPreparationV1 {
+                request: state.public_view(),
+                continuation: started.clone(),
+                already_started: true,
+            });
+        }
+        if !reconcile_started_user_input_continuation_for_retry(session, &state, now_unix_ms)? {
+            bail!(
+                "user input continuation cannot be replayed because provider consumption is not safely absent"
+            );
+        }
+        state = session
+            .user_input_projection()?
+            .request(identity)
+            .cloned()
+            .context("reconciled user input continuation lost its request")?;
     }
-    if state.status != UserInputStatusV1::DecisionAccepted
-        || !state
-            .decision
-            .as_ref()
-            .is_some_and(|decision| decision.decision.is_submitted())
+    if !matches!(
+        state.status,
+        UserInputStatusV1::DecisionAccepted | UserInputStatusV1::ContinuationClaimed
+    ) || !state
+        .decision
+        .as_ref()
+        .is_some_and(|decision| decision.decision.is_submitted())
     {
         bail!("user input request is not ready for continuation");
     }
@@ -1524,8 +1608,15 @@ pub fn prepare_user_input_continuation(
         .continuation
         .as_ref()
         .context("agent user input lost its continuation binding")?;
-    let call = exact_user_input_tool_call(session, binding)?;
-    let claim_id = UserInputClaimId::new(stable_continuation_id("claim", identity, request_hash)?)?;
+    let claim_id = state
+        .claim
+        .as_ref()
+        .map(|claim| claim.claim_id.clone())
+        .unwrap_or(UserInputClaimId::new(stable_continuation_id(
+            "claim",
+            identity,
+            request_hash,
+        )?)?);
     let continuation_logical_run_id =
         user_input_continuation_logical_run_id(identity, request_hash)?;
     let claim = UserInputContinuationClaimedV1 {
@@ -1545,6 +1636,21 @@ pub fn prepare_user_input_continuation(
         physical_attempt_id: physical_attempt_id.to_owned(),
         started_at_unix_ms: now_unix_ms,
     };
+    if state.status == UserInputStatusV1::ContinuationClaimed {
+        session.append_user_input_lifecycle(vec![
+            UserInputLifecycleEntryV1::ContinuationStarted(started.clone()),
+        ])?;
+        let projected = session.user_input_projection()?;
+        let current = projected
+            .request(identity)
+            .context("restarted user input continuation was not projected")?;
+        return Ok(UserInputContinuationPreparationV1 {
+            request: current.public_view(),
+            continuation: started,
+            already_started: false,
+        });
+    }
+    let call = exact_user_input_tool_call(session, binding)?;
     let result = submitted_answer_tool_result(&state, &call)?;
     let (recorded, _) = ToolResultRecordedV3::capture(
         &result,
@@ -1575,6 +1681,113 @@ pub fn prepare_user_input_continuation(
         continuation: started,
         already_started: false,
     })
+}
+
+fn reconcile_started_user_input_continuation_for_retry(
+    session: &mut Session,
+    state: &UserInputRequestStateV1,
+    now_unix_ms: u64,
+) -> Result<bool> {
+    let started = state
+        .continuation
+        .as_ref()
+        .context("user input continuation recovery requires a started attempt")?;
+    let attempt = match session.provider_physical_attempt_projection() {
+        Ok(projection) => projection.attempt(&started.physical_attempt_id).cloned(),
+        Err(error) if session.durable_store().is_none() => {
+            return Err(error
+                .context("in-memory user input continuation cannot prove a safe provider retry"));
+        }
+        Err(error) => {
+            return Err(error.context(
+                "user input continuation recovery could not verify provider attempt evidence",
+            ));
+        }
+    };
+    let release_reason = match attempt
+        .as_ref()
+        .and_then(|attempt| attempt.terminal.as_ref())
+    {
+        None if attempt.is_none() => {
+            Some(UserInputContinuationReleaseReasonV1::AttemptNotDispatched)
+        }
+        Some(terminal)
+            if terminal.outcome
+                == crate::ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption =>
+        {
+            Some(UserInputContinuationReleaseReasonV1::ConfirmedNoModelConsumption)
+        }
+        _ => None,
+    };
+    if let Some(reason) = release_reason {
+        session.append_user_input_lifecycle(vec![
+            UserInputLifecycleEntryV1::ContinuationReleased(UserInputContinuationReleasedV1 {
+                schema_version: USER_INPUT_SCHEMA_VERSION,
+                identity: state.requested.request.identity.clone(),
+                request_hash: state.requested.request_hash.clone(),
+                claim_id: started.claim_id.clone(),
+                physical_attempt_id: started.physical_attempt_id.clone(),
+                reason,
+                released_at_unix_ms: now_unix_ms,
+            }),
+        ])?;
+        return Ok(true);
+    }
+    let resolution = match attempt
+        .as_ref()
+        .and_then(|attempt| attempt.terminal.as_ref())
+    {
+        Some(terminal) if terminal.outcome == crate::ProviderPhysicalAttemptOutcome::Completed => {
+            UserInputResolutionV1::Consumed
+        }
+        Some(terminal) => UserInputResolutionV1::Failed {
+            failure_class: format!("provider_attempt_{:?}", terminal.outcome).to_lowercase(),
+            retryable: false,
+        },
+        None => UserInputResolutionV1::Failed {
+            failure_class: "provider_attempt_outcome_uncertain".to_owned(),
+            retryable: false,
+        },
+    };
+    session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Resolved(
+        UserInputResolvedV1 {
+            schema_version: USER_INPUT_SCHEMA_VERSION,
+            identity: state.requested.request.identity.clone(),
+            request_hash: state.requested.request_hash.clone(),
+            resolution,
+            resolved_at_unix_ms: now_unix_ms,
+        },
+    )])?;
+    Ok(false)
+}
+
+/// Reconciles a failed continuation run against its exact provider physical-attempt evidence.
+///
+/// A missing send barrier or a terminal that proves no model consumption releases the existing
+/// claim for an exact-command retry. Completed attempts resolve the answer as consumed. Any
+/// uncertain or output-bearing failure resolves fail-closed and is never replayed automatically.
+pub fn reconcile_user_input_continuation_after_failed_run(
+    session: &mut Session,
+    identity: &UserInputIdentityV1,
+    request_hash: &str,
+    now_unix_ms: u64,
+) -> Result<PublicUserInputRequestV1> {
+    let state = session
+        .user_input_projection()?
+        .request(identity)
+        .cloned()
+        .context("failed user input continuation references an unknown request")?;
+    if state.requested.request_hash != request_hash {
+        bail!("failed user input continuation does not bind the exact request hash");
+    }
+    if state.status == UserInputStatusV1::ContinuationStarted {
+        let _ = reconcile_started_user_input_continuation_for_retry(session, &state, now_unix_ms)?;
+    }
+    session
+        .user_input_projection()?
+        .request(identity)
+        .map(UserInputRequestStateV1::public_view)
+        .context("reconciled user input continuation lost its request")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

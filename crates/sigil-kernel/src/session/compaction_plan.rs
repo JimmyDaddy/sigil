@@ -470,8 +470,13 @@ fn prepare_fold_candidates(
 
 fn pending_tool_or_approval_call_ids(records: &[SessionStreamRecord]) -> Result<BTreeSet<String>> {
     let mut pending = BTreeSet::new();
+    let mut session_entries = Vec::new();
     for record in records {
-        match session_entry_from_stored_event(record.stored_event())? {
+        let entry = session_entry_from_stored_event(record.stored_event())?;
+        if let Some(entry) = entry.as_ref() {
+            session_entries.push(entry.clone());
+        }
+        match entry {
             Some(SessionLogEntry::Control(ControlEntry::ToolApproval(approval))) => {
                 match approval.action {
                     ToolApprovalAuditAction::Requested => {
@@ -497,6 +502,12 @@ fn pending_tool_or_approval_call_ids(records: &[SessionStreamRecord]) -> Result<
                 }
             }
             Some(_) | None => {}
+        }
+    }
+    let user_inputs = crate::UserInputProjectionV1::from_session_entries(&session_entries)?;
+    for state in user_inputs.pending() {
+        if let Some(binding) = state.requested.request.continuation.as_ref() {
+            pending.insert(binding.tool_call_id.clone());
         }
     }
     Ok(pending)
@@ -586,9 +597,10 @@ fn classify_turn_groups(
         });
         if has_pending_call {
             for index in &indexes {
-                protect(
-                    protected,
-                    &messages[*index],
+                // Active ownership is the strongest reason: unlike an ordinary unmatched tool
+                // pair, approval and user-input suspension must remain a visible raw frontier.
+                protected.insert(
+                    messages[*index].event.clone(),
                     CompactionFoldProtectionReason::ActiveToolOrApproval,
                 );
             }

@@ -10991,6 +10991,63 @@ async fn agent_bounds_confirmed_pre_dispatch_connect_retries() -> Result<()> {
 }
 
 #[tokio::test]
+async fn bound_initial_physical_attempt_uses_exact_identity_and_disables_hidden_retry() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        ConnectRetryProvider {
+            connect_failures: usize::MAX,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-connect-retry", "mock-model").with_store(store);
+    let mut handler = RecordingEventHandler::default();
+    let physical_attempt_id = "provider-attempt-bound-user-input";
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("hi")
+                .with_initial_provider_physical_attempt_id(physical_attempt_id.to_owned()),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("a bound continuation attempt must return control instead of hidden retry");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let projection = session.provider_physical_attempt_projection()?;
+    let attempt = projection
+        .attempt(physical_attempt_id)
+        .expect("the preallocated physical identity should cross the send barrier");
+    assert!(matches!(
+        attempt.terminal.as_ref(),
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption,
+            rejection: Some(ProviderRequestRejection::ConnectFailedBeforeDispatch),
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_cancellation_during_connect_backoff_starts_no_new_attempt() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");

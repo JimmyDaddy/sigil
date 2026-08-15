@@ -1079,6 +1079,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         | ControlEntry::UserInputDecisionAccepted(_)
         | ControlEntry::UserInputContinuationClaimed(_)
         | ControlEntry::UserInputContinuationStarted(_)
+        | ControlEntry::UserInputContinuationReleased(_)
         | ControlEntry::UserInputResolved(_) => DurableEventType::UserInputLifecycleChanged,
         ControlEntry::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
         ControlEntry::TaskHandoffRequested(_) => DurableEventType::TaskHandoffRequested,

@@ -417,7 +417,7 @@ where
     }
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
-    let physical_attempt_id = format!("tui-user-input-{run_id}");
+    let physical_attempt_id = sigil_kernel::new_provider_physical_attempt_id();
     let preparation = sigil_kernel::prepare_user_input_continuation(
         session,
         &identity,
@@ -471,6 +471,7 @@ where
                 AgentRunInput::without_persisted_user_message(Vec::new())
                     .with_logical_run_id(continuation_logical_run_id.as_str())
                     .with_user_input_continuation_context(root_logical_run_id, source_thread_id)
+                    .with_initial_provider_physical_attempt_id(physical_attempt_id)
                     .with_tool_artifact_read_budget(tool_artifact_read_budget)
                     .with_cancellation(cancellation_handle),
                 options,
@@ -529,15 +530,30 @@ where
                 },
             ),
         };
-        let settlement = run_session.append_user_input_lifecycle(vec![
-            sigil_kernel::UserInputLifecycleEntryV1::Resolved(sigil_kernel::UserInputResolvedV1 {
-                schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
-                identity,
-                request_hash,
-                resolution,
-                resolved_at_unix_ms: current_unix_time_ms(),
-            }),
-        ]);
+        let settlement = if matches!(
+            resolution,
+            sigil_kernel::UserInputResolutionV1::Failed { .. }
+        ) {
+            sigil_kernel::reconcile_user_input_continuation_after_failed_run(
+                &mut run_session,
+                &identity,
+                &request_hash,
+                current_unix_time_ms(),
+            )
+            .map(|_| ())
+        } else {
+            run_session.append_user_input_lifecycle(vec![
+                sigil_kernel::UserInputLifecycleEntryV1::Resolved(
+                    sigil_kernel::UserInputResolvedV1 {
+                        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+                        identity,
+                        request_hash,
+                        resolution,
+                        resolved_at_unix_ms: current_unix_time_ms(),
+                    },
+                ),
+            ])
+        };
         let payload = match settlement {
             Ok(()) => payload,
             Err(error) => RunTaskPayload::Chat {

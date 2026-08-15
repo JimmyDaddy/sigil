@@ -279,3 +279,94 @@ fn adaptive_tail_never_splits_a_waiting_approval_from_its_active_turn() -> Resul
     );
     Ok(())
 }
+
+#[test]
+fn adaptive_tail_pins_a_suspended_user_input_tool_turn() -> Result<()> {
+    let (_temp, mut session) = store_backed_session()?;
+    for index in 0..3 {
+        append_complete_turn(&mut session, &index.to_string(), 16)?;
+    }
+    session.append_user_message(ModelMessage::user("ask before choosing the migration mode"))?;
+    let mut assistant = ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "user-input-call".to_owned(),
+            name: crate::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    );
+    assistant.id = "user-input-assistant".to_owned();
+    session.append_assistant_message(assistant)?;
+    let identity = crate::UserInputIdentityV1 {
+        session_scope_id: crate::SessionScopeId::new(session.session_scope_id())?,
+        root_logical_run_id: crate::LogicalRunId::new("compaction-root")?,
+        source_thread_id: crate::AgentThreadId::new("main")?,
+        request_id: crate::UserInputRequestId::new("compaction-request")?,
+        generation: 1,
+        source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+    };
+    let request = crate::UserInputRequestedV1::new(crate::UserInputRequestV1 {
+        schema_version: crate::USER_INPUT_SCHEMA_VERSION,
+        identity,
+        source: crate::UserInputSourceV1::Agent,
+        purpose: crate::UserInputPurposeV1::Clarification,
+        prompt: "Choose one migration mode".to_owned(),
+        questions: vec![crate::UserInputQuestionV1 {
+            id: "mode".to_owned(),
+            header: "Mode".to_owned(),
+            question: "Which migration mode should be used?".to_owned(),
+            description: None,
+            required: true,
+            field: crate::UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 128,
+            },
+        }],
+        allowed_actions: vec![crate::UserInputActionV1::Submit],
+        requested_at_unix_ms: 10,
+        continuation: Some(crate::UserInputContinuationBindingV1 {
+            assistant_message_id: "user-input-assistant".to_owned(),
+            tool_call_id: "user-input-call".to_owned(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+    })?;
+    session.append_user_input_lifecycle(vec![crate::UserInputLifecycleEntryV1::Requested(
+        Box::new(request),
+    )])?;
+
+    let stream = records(&session)?;
+    let active_message_ids = stream
+        .iter()
+        .rev()
+        .filter(|record| {
+            matches!(
+                session_entry_from_stored_event(record.stored_event()),
+                Ok(Some(
+                    SessionLogEntry::User(_) | SessionLogEntry::Assistant(_)
+                ))
+            )
+        })
+        .take(2)
+        .map(|record| record.event_id().to_owned())
+        .collect::<BTreeSet<_>>();
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &stream,
+        small_adaptive_policy(),
+        8 * 1024,
+        None,
+    )?;
+
+    assert!(active_message_ids.iter().all(|id| {
+        plan.protected_events.iter().any(|entry| {
+            entry.event.event_id == *id
+                && entry.reason == CompactionFoldProtectionReason::ActiveToolOrApproval
+        })
+    }));
+    assert!(
+        active_message_ids
+            .iter()
+            .all(|id| !plan.folded_event_ids.contains(id))
+    );
+    Ok(())
+}

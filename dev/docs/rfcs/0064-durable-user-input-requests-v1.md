@@ -509,14 +509,21 @@ turn 抢占 pending continuation。
   client 保留队首 `user_input`；ordinary、PlanReview 与 background route 按 exact identity/hash 去重。TUI
   用 `Ctrl-N/P` 切换且保留逐请求草稿，Desktop 同时挂载各请求表单并提供显式 Previous/Next；MCP live
   elicitation 不进入 durable queue。
+- continuation lifecycle 现在预分配真实 provider physical-attempt id，首个 provider send barrier 必须使用
+  同一 id，且该绑定禁止 provider loop 在背后创建第二个 connect retry attempt。恢复器只有在 attempt 尚未
+  创建或 terminal 明确为 `ConfirmedNoModelConsumption` 时才 append `ContinuationReleased` 并回到原 claim；
+  `Completed` 记为 consumed，output-bearing、protocol rejected、unfinished 或 transport uncertain 均 fail
+  closed 且禁止自动重放 answer。ordinary、PlanReview、TUI 与 background child 都使用同一证据规则；
+- unresolved `request_user_input` 的 assistant/tool frontier 已作为 `ActiveToolOrApproval` 进入 V3 compaction
+  protection，TUI app 与 worker admission 也都拒绝 pending attention owner 期间插入无关 foreground turn。
+  deterministic tests 覆盖 answer-before-start、started-before-send crash、exact physical id、hidden retry 禁止、
+  transport uncertain fail-closed 与 suspended turn compaction pin。
 
 仍未关闭的 release blocker：
 
-1. `ContinuationStarted` 后、provider dispatch evidence 尚未落地时的 crash window 仍需与 RFC-0058 physical
-   attempt recovery 完整收敛；
-2. unresolved request 的 compaction pin/property campaign、真实 TUI PTY、真实 `sigil serve` + Desktop E2E、
+1. unresolved request 的 compaction property/chaos campaign、真实 TUI PTY、真实 `sigil serve` + Desktop E2E、
    real-model campaign 尚未全部执行；
-3. migration/compatibility 与 release notes/Doctor 仍需在 release closure slice 完成。
+2. migration/compatibility 与 release notes/Doctor 仍需在 release closure slice 完成。
 
 因此本节只记录当前事实，不放宽 §16 acceptance，也不把已通过定向 restart/transport 回归的能力外推为
 release 全链路完成。

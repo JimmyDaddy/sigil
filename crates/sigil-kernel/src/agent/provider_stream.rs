@@ -29,6 +29,13 @@ pub(super) struct ProviderTurnOutput {
     pub(super) hosted_finalized: Option<crate::FinalizedHostedTurn>,
 }
 
+pub(super) struct ProviderTurnDispatchContext<'a> {
+    pub(super) hosted_processor: Option<&'a std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
+    pub(super) hosted_dispatch_lifecycle:
+        Option<&'a std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
+    pub(super) initial_physical_attempt_id: Option<&'a str>,
+}
+
 pub(super) async fn collect_provider_turn<H>(
     provider: &dyn Provider,
     session: &mut Session,
@@ -38,8 +45,7 @@ pub(super) async fn collect_provider_turn<H>(
     _total_tool_calls: usize,
     handler: &mut H,
     cancellation: Option<&crate::RunCancellationHandle>,
-    hosted_processor: Option<&std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
-    hosted_dispatch_lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
+    dispatch: ProviderTurnDispatchContext<'_>,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
@@ -49,7 +55,7 @@ where
             Ok(request) => request,
             Err(error) => {
                 finish_undispatched_hosted_turn(
-                    hosted_dispatch_lifecycle,
+                    dispatch.hosted_dispatch_lifecycle,
                     crate::HostedToolTerminalStatus::RequestFailed,
                 )?;
                 return Err(error);
@@ -64,8 +70,7 @@ where
         _total_tool_calls,
         handler,
         cancellation,
-        hosted_processor,
-        hosted_dispatch_lifecycle,
+        dispatch,
     )
     .await
 }
@@ -84,12 +89,16 @@ pub(super) async fn collect_frozen_provider_turn<H>(
     _total_tool_calls: usize,
     handler: &mut H,
     cancellation: Option<&crate::RunCancellationHandle>,
-    hosted_processor: Option<&std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
-    hosted_dispatch_lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
+    dispatch: ProviderTurnDispatchContext<'_>,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
 {
+    let ProviderTurnDispatchContext {
+        hosted_processor,
+        hosted_dispatch_lifecycle,
+        initial_physical_attempt_id,
+    } = dispatch;
     let request_template = frozen_request.request().clone();
     let hosted_enabled = !request_template.hosted_tools.is_empty();
     let pre_wire_validation = (|| -> Result<()> {
@@ -131,19 +140,29 @@ where
             provider_name: request.provider_name.clone(),
             model_name: request.model_name.clone(),
         };
-        let mut physical_attempt =
-            match ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request)
+        let mut physical_attempt = match match initial_physical_attempt_id {
+            Some(physical_attempt_id) => {
+                ProviderPhysicalAttemptAudit::start_with_id(
+                    session,
+                    logical_run_id,
+                    &frozen_request,
+                    physical_attempt_id,
+                )
                 .await
-            {
-                Ok(attempt) => attempt,
-                Err(error) => {
-                    finish_undispatched_hosted_turn(
-                        hosted_dispatch_lifecycle,
-                        crate::HostedToolTerminalStatus::RequestFailed,
-                    )?;
-                    return Err(error);
-                }
-            };
+            }
+            None => {
+                ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request).await
+            }
+        } {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                finish_undispatched_hosted_turn(
+                    hosted_dispatch_lifecycle,
+                    crate::HostedToolTerminalStatus::RequestFailed,
+                )?;
+                return Err(error);
+            }
+        };
         let mut generation_observed = false;
         let result = collect_provider_turn_after_send_barrier(
             provider,
@@ -199,6 +218,7 @@ where
             (Err(_error), Ok(()))
                 if rejection
                     == Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch)
+                    && initial_physical_attempt_id.is_none()
                     && connect_retries < MAX_PRE_DISPATCH_CONNECT_RETRIES =>
             {
                 let delay =

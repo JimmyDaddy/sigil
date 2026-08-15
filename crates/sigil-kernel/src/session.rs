@@ -218,7 +218,7 @@ pub use provider_attempt::{
     ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
     ProviderPhysicalAttemptPurpose, ProviderPhysicalAttemptStartedEntry,
     ProviderPhysicalAttemptState, ProviderPhysicalAttemptTerminalEntry,
-    SemanticCompactionGeneration, generate_semantic_compaction,
+    SemanticCompactionGeneration, generate_semantic_compaction, new_provider_physical_attempt_id,
 };
 pub use provider_continuation::{
     MAX_PROVIDER_CONTINUATION_RESOLUTION_PROTECTED_REFS,

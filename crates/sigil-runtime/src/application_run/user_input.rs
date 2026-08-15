@@ -67,6 +67,7 @@ pub(super) struct ApplicationUserInputContinuationContext {
     pub(super) identity: sigil_kernel::UserInputIdentityV1,
     pub(super) request_hash: String,
     pub(super) supervisor_instance_id: String,
+    pub(super) physical_attempt_id: sigil_kernel::ProviderPhysicalAttemptId,
 }
 
 /// Reads one exact immutable public user-input request from a durable session.
@@ -178,7 +179,7 @@ pub fn application_session_has_unresolved_user_input(
 }
 
 /// Returns the exact private recovery command for one accepted answer whose continuation has not
-/// started yet.
+/// resolved yet.
 ///
 /// The command is reconstructed from scope-checked durable truth; public adapters never receive
 /// the answer values. `None` means there is no ordinary replayable accepted answer in this
@@ -432,6 +433,7 @@ pub async fn prepare_application_user_input_decision(
         &request.request_hash,
     )
     .map_err(ApplicationRunPrepareError::execution)?;
+    let physical_attempt_id = sigil_kernel::new_provider_physical_attempt_id();
     let input = AgentRunInput::without_persisted_user_message(Vec::new())
         .with_runtime_context(runtime_context)
         .with_logical_run_id(continuation_logical_run_id.as_str())
@@ -439,6 +441,7 @@ pub async fn prepare_application_user_input_decision(
             request.identity.root_logical_run_id.as_str(),
             request.identity.source_thread_id.clone(),
         )
+        .with_initial_provider_physical_attempt_id(physical_attempt_id.clone())
         .with_cancellation(cancellation_handle.clone())
         .with_pending_input_provider(Arc::new(
             crate::pending_input::DurableQueuePendingInputProvider,
@@ -506,6 +509,7 @@ pub async fn prepare_application_user_input_decision(
                 identity: request.identity,
                 request_hash: request.request_hash,
                 supervisor_instance_id: services.supervisor_instance_id.to_string(),
+                physical_attempt_id,
             }),
             route_transition,
             _session_lease: Arc::clone(&session_lease),
@@ -531,20 +535,31 @@ pub async fn prepare_application_user_input_decision(
 pub(super) fn start_application_user_input_continuation(
     session: &mut Session,
     context: &ApplicationUserInputContinuationContext,
-    physical_attempt_id: &str,
 ) -> Result<sigil_kernel::PublicUserInputRequestV1> {
     let preparation = sigil_kernel::prepare_user_input_continuation(
         session,
         &context.identity,
         &context.request_hash,
         &context.supervisor_instance_id,
-        physical_attempt_id,
+        &context.physical_attempt_id,
         current_unix_time_ms(),
     )?;
-    if preparation.continuation.physical_attempt_id != physical_attempt_id {
+    if preparation.continuation.physical_attempt_id != context.physical_attempt_id {
         bail!("user-input continuation is already bound to another physical attempt");
     }
     Ok(preparation.request)
+}
+
+pub(super) fn reconcile_failed_application_user_input_continuation(
+    session: &mut Session,
+    context: &ApplicationUserInputContinuationContext,
+) -> Result<sigil_kernel::PublicUserInputRequestV1> {
+    sigil_kernel::reconcile_user_input_continuation_after_failed_run(
+        session,
+        &context.identity,
+        &context.request_hash,
+        current_unix_time_ms(),
+    )
 }
 
 pub(super) fn resolve_application_user_input_continuation(

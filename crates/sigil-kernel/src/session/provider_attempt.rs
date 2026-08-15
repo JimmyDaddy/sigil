@@ -26,6 +26,15 @@ pub const MAX_PROVIDER_PHYSICAL_ATTEMPT_REFERENCE_BYTES: usize = 16 * 1024;
 /// Stable identity of one provider physical attempt.
 pub type ProviderPhysicalAttemptId = String;
 
+/// Allocates one provider physical-attempt identity before its durable send barrier is written.
+///
+/// Continuation coordinators use this to bind their own append-only lifecycle to the exact
+/// provider attempt that will later cross the send barrier. Allocation alone authorizes no I/O.
+#[must_use]
+pub fn new_provider_physical_attempt_id() -> ProviderPhysicalAttemptId {
+    format!("provider-attempt-{}", Uuid::new_v4())
+}
+
 /// Maximum assistant text retained in memory from one semantic-compaction model request.
 pub const MAX_SEMANTIC_COMPACTION_GENERATION_BYTES: usize =
     super::compaction_sidecar::MAX_SEMANTIC_COMPACTION_OUTPUT_BYTES;
@@ -642,11 +651,28 @@ impl ProviderPhysicalAttemptAudit {
         logical_run_id: &str,
         frozen_request: &crate::FrozenProviderRequestMaterial,
     ) -> Result<Self> {
-        Self::start_with_purpose(
+        Self::start_with_purpose_and_id(
             session,
             logical_run_id,
             frozen_request,
             ProviderPhysicalAttemptPurpose::ConversationGeneration,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_id(
+        session: &Session,
+        logical_run_id: &str,
+        frozen_request: &crate::FrozenProviderRequestMaterial,
+        physical_attempt_id: &str,
+    ) -> Result<Self> {
+        Self::start_with_purpose_and_id(
+            session,
+            logical_run_id,
+            frozen_request,
+            ProviderPhysicalAttemptPurpose::ConversationGeneration,
+            Some(physical_attempt_id),
         )
         .await
     }
@@ -657,6 +683,20 @@ impl ProviderPhysicalAttemptAudit {
         frozen_request: &crate::FrozenProviderRequestMaterial,
         purpose: ProviderPhysicalAttemptPurpose,
     ) -> Result<Self> {
+        Self::start_with_purpose_and_id(session, logical_run_id, frozen_request, purpose, None)
+            .await
+    }
+
+    async fn start_with_purpose_and_id(
+        session: &Session,
+        logical_run_id: &str,
+        frozen_request: &crate::FrozenProviderRequestMaterial,
+        purpose: ProviderPhysicalAttemptPurpose,
+        requested_physical_attempt_id: Option<&str>,
+    ) -> Result<Self> {
+        if let Some(physical_attempt_id) = requested_physical_attempt_id {
+            validate_identity("provider physical attempt id", physical_attempt_id)?;
+        }
         let Some(store) = session.durable_store() else {
             return Ok(Self::InMemory {
                 cache_layout_proof: frozen_request.cache_layout_proof(None)?,
@@ -679,7 +719,9 @@ impl ProviderPhysicalAttemptAudit {
         };
         let cache_layout_proof =
             Some(frozen_request.cache_layout_proof(prior_cache_layout.as_ref())?);
-        let physical_attempt_id = format!("provider-attempt-{}", Uuid::new_v4());
+        let physical_attempt_id = requested_physical_attempt_id
+            .map(str::to_owned)
+            .unwrap_or_else(new_provider_physical_attempt_id);
         let start_event_id = Uuid::new_v4().to_string();
         let entry = ProviderPhysicalAttemptStartedEntry {
             schema_version: PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION,

@@ -404,11 +404,7 @@ impl PlanReviewCoordinator {
                         | sigil_kernel::UserInputStatusV1::ContinuationClaimed
                         | sigil_kernel::UserInputStatusV1::ContinuationStarted
                 ) {
-                let physical_attempt_id = format!(
-                    "plan-review-input-{}-{}",
-                    request.attempt_id.as_str(),
-                    state.requested.request.identity.generation
-                );
+                let physical_attempt_id = sigil_kernel::new_provider_physical_attempt_id();
                 let prepared = sigil_kernel::prepare_user_input_continuation(
                     &mut child_session,
                     &state.requested.request.identity,
@@ -449,25 +445,26 @@ impl PlanReviewCoordinator {
             )
         };
         if let Some((identity, request_hash)) = continuation_resolution.as_ref() {
-            let resolution = if research.as_ref().is_some_and(Result::is_ok) {
-                sigil_kernel::UserInputResolutionV1::Consumed
+            if research.as_ref().is_some_and(Result::is_ok) {
+                child_session.append_user_input_lifecycle(vec![
+                    sigil_kernel::UserInputLifecycleEntryV1::Resolved(
+                        sigil_kernel::UserInputResolvedV1 {
+                            schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+                            identity: identity.clone(),
+                            request_hash: request_hash.clone(),
+                            resolution: sigil_kernel::UserInputResolutionV1::Consumed,
+                            resolved_at_unix_ms: now_ms(),
+                        },
+                    ),
+                ])?;
             } else {
-                sigil_kernel::UserInputResolutionV1::Failed {
-                    failure_class: "plan_review_research_continuation_failed".to_owned(),
-                    retryable: true,
-                }
-            };
-            child_session.append_user_input_lifecycle(vec![
-                sigil_kernel::UserInputLifecycleEntryV1::Resolved(
-                    sigil_kernel::UserInputResolvedV1 {
-                        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
-                        identity: identity.clone(),
-                        request_hash: request_hash.clone(),
-                        resolution,
-                        resolved_at_unix_ms: now_ms(),
-                    },
-                ),
-            ])?;
+                sigil_kernel::reconcile_user_input_continuation_after_failed_run(
+                    &mut child_session,
+                    identity,
+                    request_hash,
+                    now_ms(),
+                )?;
+            }
         }
         let recovery_cause = match research {
             None => skip_research_cause,
@@ -2243,6 +2240,7 @@ fn plan_review_continuation_input(
         continuation.identity.root_logical_run_id.as_str(),
         continuation.identity.source_thread_id.clone(),
     )
+    .with_initial_provider_physical_attempt_id(continuation.physical_attempt_id.clone())
     .with_child_cancellation(cancellation.clone())
     .with_run_purpose(AgentRunPurpose::PlanReview(
         sigil_kernel::PlanReviewPurposeContext {

@@ -624,7 +624,7 @@ fn decision_and_continuation_are_idempotent_and_settle_the_exact_tool_call() -> 
         &request.request.identity,
         &request.request_hash,
         "supervisor_2",
-        "physical_2",
+        "physical_1",
         40,
     )?;
     assert!(replayed.already_started);
@@ -647,6 +647,93 @@ fn decision_and_continuation_are_idempotent_and_settle_the_exact_tool_call() -> 
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
             if execution.call_id == "call_1"
                 && execution.status == ToolExecutionStatus::Completed
+    )));
+    Ok(())
+}
+
+#[test]
+fn continuation_recovery_releases_an_attempt_that_never_crossed_the_send_barrier() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("test", "model").with_store(store);
+    let mut assistant = ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "call_1".to_owned(),
+            name: REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    );
+    assistant.id = "assistant_1".to_owned();
+    session.append_assistant_message(assistant)?;
+    let request = text_request_for_session(&session, "recover_before_send", 1)?;
+    session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Requested(Box::new(
+        request.clone(),
+    ))])?;
+    accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: request.request.identity.clone(),
+            request_hash: request.request_hash.clone(),
+            command_id: UserInputCommandId::new("recover_before_send_command")?,
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![UserInputAnswerV1 {
+                    question_id: "scope".to_owned(),
+                    value: UserInputAnswerValueV1::Text {
+                        value: "safe retry".to_owned(),
+                    },
+                }],
+            },
+        },
+        20,
+    )?;
+    let first = prepare_user_input_continuation(
+        &mut session,
+        &request.request.identity,
+        &request.request_hash,
+        "supervisor_1",
+        "provider-attempt-before-crash",
+        30,
+    )?;
+    assert_eq!(first.request.status, UserInputStatusV1::ContinuationStarted);
+    assert!(recoverable_user_input_decision(&session)?.is_some());
+
+    let released = reconcile_user_input_continuation_after_failed_run(
+        &mut session,
+        &request.request.identity,
+        &request.request_hash,
+        35,
+    )?;
+    assert_eq!(released.status, UserInputStatusV1::ContinuationClaimed);
+    assert!(recoverable_user_input_decision(&session)?.is_some());
+
+    let recovered = prepare_user_input_continuation(
+        &mut session,
+        &request.request.identity,
+        &request.request_hash,
+        "supervisor_2",
+        "provider-attempt-after-restart",
+        40,
+    )?;
+    assert!(!recovered.already_started);
+    assert_eq!(
+        recovered.continuation.physical_attempt_id,
+        "provider-attempt-after-restart"
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::ToolResultV3(result) if result.call_id == "call_1"))
+            .count(),
+        1
+    );
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::UserInputContinuationReleased(released))
+            if released.physical_attempt_id == "provider-attempt-before-crash"
+                && released.reason
+                    == UserInputContinuationReleaseReasonV1::AttemptNotDispatched
     )));
     Ok(())
 }
