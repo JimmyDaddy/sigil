@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "source_session_id": "5aeeb257-83fb-41c5-809b-68edcc0be15a",
+  "redacted": true,
+  "source": {
+    "session_scope_id": "legacy-session-redacted",
+    "message_id": "legacy-message-redacted",
+    "logical_run_id": "legacy-run-redacted",
+    "route_decision_id": "fb362a51-8058-5a63-9227-705818429d29",
+    "plan_review_id": "831c460a-1c25-51a4-8033-acb13631f091"
+  },
+  "base": {
+    "attempt_id": "10cbe752-cd28-5ea5-846c-7839a8217031",
+    "plan_id": "0aa3e34b-9483-514e-a464-8604cba2d30b",
+    "plan_hash": "sha256:3333d88a8c0c71dcef0082921034a8d1b8feb1bac7e29adff96396a0946def42",
+    "summary": "Redacted six-step maintenance plan retained for legacy recovery.",
+    "step_title": "Audit the durable maintenance path",
+    "draft_ready_at_ms": 1786730214987,
+    "revision_requested_at_ms": 1786730244007
+  },
+  "revision": {
+    "attempt_id": "549419f1-c480-5e69-bdb9-f67df0ee9adb",
+    "plan_id": "fc477517-1ae3-58e5-b882-3759f5b019b2",
+    "started_at_ms": 1786730244015,
+    "terminal_at_ms": 1786730294794,
+    "terminal_status": "interrupted",
+    "terminal_reason": "run_interrupted"
+  },
+  "legacy_finalizer_evidence": {
+    "attempted_tool": "grep",
+    "legacy_error": "unknown tool grep",
+    "current_classification": "submit_only_protocol_violation"
+  },
+  "expected": {
+    "active_plan_status": "draft_ready",
+    "revision_status": "failed",
+    "retry_requires_guidance": true
+  }
+}

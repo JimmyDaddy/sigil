@@ -27,8 +27,10 @@ use crate::conversation_display::{
     ConversationLiveProvisionalSlotV1, MAX_CONVERSATION_DISPLAY_CONTENT_BYTES,
     MAX_CONVERSATION_DISPLAY_PAGE_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_SIZE,
     MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS, MAX_CONVERSATION_TASK_CONTROL_ITEMS,
-    MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES, conversation_display_page,
-    conversation_display_page_from_records, conversation_live_provisional_id,
+    MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES, PlanReviewCompatibilityStatusV1,
+    conversation_display_page, conversation_display_page_from_records,
+    conversation_live_provisional_id, plan_review_compatibility_from_entries,
+    public_plan_review_from_entries,
 };
 
 fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
@@ -1465,5 +1467,272 @@ fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Res
         sigil_kernel::PublicPlanReviewStatus::Cancelled
     );
     assert!(cancelled.allowed_actions.is_empty());
+    Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyPlanReviewFixtureV1 {
+    schema_version: u16,
+    source_session_id: String,
+    redacted: bool,
+    source: LegacyPlanReviewSourceFixtureV1,
+    base: LegacyPlanReviewBaseFixtureV1,
+    revision: LegacyPlanReviewRevisionFixtureV1,
+    legacy_finalizer_evidence: LegacyPlanReviewFinalizerFixtureV1,
+    expected: LegacyPlanReviewExpectedFixtureV1,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyPlanReviewSourceFixtureV1 {
+    session_scope_id: String,
+    message_id: String,
+    logical_run_id: String,
+    route_decision_id: String,
+    plan_review_id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyPlanReviewBaseFixtureV1 {
+    attempt_id: String,
+    plan_id: String,
+    plan_hash: String,
+    summary: String,
+    step_title: String,
+    draft_ready_at_ms: u64,
+    revision_requested_at_ms: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyPlanReviewRevisionFixtureV1 {
+    attempt_id: String,
+    plan_id: String,
+    started_at_ms: u64,
+    terminal_at_ms: u64,
+    terminal_status: sigil_kernel::PlanReviewAttemptStatus,
+    terminal_reason: sigil_kernel::PlanReviewTerminalReason,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyPlanReviewFinalizerFixtureV1 {
+    attempted_tool: String,
+    legacy_error: String,
+    current_classification: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyPlanReviewExpectedFixtureV1 {
+    active_plan_status: sigil_kernel::PublicPlanReviewStatus,
+    revision_status: sigil_kernel::PublicPlanRevisionStatusV1,
+    retry_requires_guidance: bool,
+}
+
+fn legacy_plan_review_fixture_entries() -> Result<(
+    LegacyPlanReviewFixtureV1,
+    Vec<sigil_kernel::SessionLogEntry>,
+)> {
+    let fixture: LegacyPlanReviewFixtureV1 = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../dev/fixtures/plan-review-legacy-v1/session-5aeeb257-83fb-41c5-809b-68edcc0be15a.json"
+    )))?;
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        &fixture.source.session_scope_id,
+        &fixture.source.message_id,
+        &fixture.source.logical_run_id,
+    )?;
+    let route_decision_id =
+        sigil_kernel::ConversationRouteDecisionId::new(fixture.source.route_decision_id.clone())?;
+    let review_id = sigil_kernel::PlanReviewId::new(fixture.source.plan_review_id.clone())?;
+    let base_attempt_id = sigil_kernel::PlanReviewAttemptId::new(fixture.base.attempt_id.clone())?;
+    let base_plan_id = sigil_kernel::PlanId::new(fixture.base.plan_id.clone())?;
+    let revision_attempt_id =
+        sigil_kernel::PlanReviewAttemptId::new(fixture.revision.attempt_id.clone())?;
+    let revision_plan_id = sigil_kernel::PlanId::new(fixture.revision.plan_id.clone())?;
+    let attempt = |attempt_id: sigil_kernel::PlanReviewAttemptId,
+                   plan_id: sigil_kernel::PlanId,
+                   status: sigil_kernel::PlanReviewAttemptStatus,
+                   terminal_reason: Option<sigil_kernel::PlanReviewTerminalReason>,
+                   recorded_at_ms: u64| {
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanReviewAttempt(
+            sigil_kernel::PlanReviewAttemptEntry {
+                plan_review_id: review_id.clone(),
+                attempt_id: attempt_id.clone(),
+                plan_id,
+                source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
+                source_turn: source_turn.clone(),
+                route_decision_id: Some(route_decision_id.clone()),
+                child_session_ref: sigil_kernel::plan_review_child_session_ref(
+                    &review_id,
+                    &attempt_id,
+                ),
+                finalizer_session_ref: None,
+                revision_request_id: None,
+                attempt_ordinal: 1,
+                base_plan_id: None,
+                base_plan_hash: None,
+                workspace_snapshot_id: None,
+                pending_user_input: None,
+                status,
+                terminal_reason,
+                recorded_at_ms,
+            },
+        ))
+    };
+    let entries = vec![
+        attempt(
+            base_attempt_id.clone(),
+            base_plan_id.clone(),
+            sigil_kernel::PlanReviewAttemptStatus::Started,
+            None,
+            fixture.base.draft_ready_at_ms.saturating_sub(1),
+        ),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDraftCreated(
+            sigil_kernel::PlanDraftCreatedEntry {
+                plan_id: base_plan_id.clone(),
+                schema_version: 2,
+                source: sigil_kernel::PlanSourceRef {
+                    session_ref: None,
+                    run_id: Some(fixture.source.logical_run_id.clone()),
+                    final_message_id: None,
+                    source_turn: Some(source_turn.clone()),
+                    route_decision_id: Some(route_decision_id.clone()),
+                    plan_review_id: Some(review_id.clone()),
+                },
+                plan_hash: fixture.base.plan_hash.clone(),
+                summary: fixture.base.summary.clone(),
+                inline_text: None,
+                steps: vec![sigil_kernel::PlanDraftStep {
+                    step_id: "legacy-step-1".to_owned(),
+                    title: fixture.base.step_title.clone(),
+                    display_name: None,
+                    detail: Some("Redacted legacy plan detail remains reviewable.".to_owned()),
+                    role: None,
+                    depends_on: Vec::new(),
+                    intent_aliases: Vec::new(),
+                    mode: None,
+                    isolation: None,
+                    target_paths: vec!["crates/sigil-kernel/src/session".to_owned()],
+                    suggested_checks: Vec::new(),
+                    risk: Some("medium".to_owned()),
+                    notes: vec!["fixture content is redacted".to_owned()],
+                }],
+                intent_proposal: None,
+                target_paths: vec!["crates/sigil-kernel/src/session".to_owned()],
+                suggested_checks: Vec::new(),
+                risk: Some("medium".to_owned()),
+                notes: vec!["fixture content is redacted".to_owned()],
+                workspace_snapshot_id: None,
+                created_at_ms: fixture.base.draft_ready_at_ms.saturating_sub(1),
+            },
+        )),
+        attempt(
+            base_attempt_id,
+            base_plan_id.clone(),
+            sigil_kernel::PlanReviewAttemptStatus::DraftReady,
+            None,
+            fixture.base.draft_ready_at_ms,
+        ),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDecisionRecorded(
+            sigil_kernel::PlanDecisionRecordedEntry {
+                plan_id: base_plan_id,
+                plan_hash: fixture.base.plan_hash.clone(),
+                decision: sigil_kernel::PlanDecision::RevisionRequested,
+                decided_by: sigil_kernel::PlanDecisionActor::User,
+                decided_at_ms: fixture.base.revision_requested_at_ms,
+                reason: Some("legacy revise plan".to_owned()),
+            },
+        )),
+        attempt(
+            revision_attempt_id.clone(),
+            revision_plan_id.clone(),
+            sigil_kernel::PlanReviewAttemptStatus::Started,
+            None,
+            fixture.revision.started_at_ms,
+        ),
+        attempt(
+            revision_attempt_id,
+            revision_plan_id,
+            fixture.revision.terminal_status,
+            Some(fixture.revision.terminal_reason),
+            fixture.revision.terminal_at_ms,
+        ),
+    ];
+    Ok((fixture, entries))
+}
+
+#[test]
+fn legacy_session_5aeeb257_restores_the_base_plan_and_failed_revision() -> Result<()> {
+    let (fixture, entries) = legacy_plan_review_fixture_entries()?;
+    assert_eq!(fixture.schema_version, 1);
+    assert_eq!(
+        fixture.source_session_id,
+        "5aeeb257-83fb-41c5-809b-68edcc0be15a"
+    );
+    assert!(fixture.redacted);
+    assert_eq!(fixture.legacy_finalizer_evidence.attempted_tool, "grep");
+    assert_eq!(
+        fixture.legacy_finalizer_evidence.legacy_error,
+        "unknown tool grep"
+    );
+    assert_eq!(
+        fixture.legacy_finalizer_evidence.current_classification,
+        sigil_kernel::PlanReviewTerminalReason::SubmitOnlyProtocolViolation.as_str()
+    );
+
+    assert_eq!(
+        plan_review_compatibility_from_entries(&entries),
+        PlanReviewCompatibilityStatusV1::LegacyRecovered
+    );
+    let review = public_plan_review_from_entries(&entries, None)
+        .context("legacy review should remain publicly reviewable")?;
+    assert_eq!(review.status, fixture.expected.active_plan_status);
+    assert_eq!(review.plan_id, fixture.base.plan_id);
+    assert_eq!(
+        review.plan_hash.as_deref(),
+        Some(fixture.base.plan_hash.as_str())
+    );
+    assert!(
+        review
+            .allowed_actions
+            .contains(&sigil_kernel::PublicPlanAction::Revise)
+    );
+    assert!(fixture.expected.retry_requires_guidance);
+    let revision = review
+        .revision
+        .context("legacy terminal revision should remain visible")?;
+    assert_eq!(revision.status, fixture.expected.revision_status);
+    assert_eq!(
+        revision.attempt_id.as_deref(),
+        Some(fixture.revision.attempt_id.as_str())
+    );
+    assert_eq!(
+        revision.terminal_reason.as_deref(),
+        Some(fixture.revision.terminal_reason.as_str())
+    );
+    Ok(())
+}
+
+#[test]
+fn ambiguous_legacy_revision_lineage_fails_closed() -> Result<()> {
+    let (_fixture, mut entries) = legacy_plan_review_fixture_entries()?;
+    let Some(sigil_kernel::SessionLogEntry::Control(
+        sigil_kernel::ControlEntry::PlanReviewAttempt(candidate),
+    )) = entries.get_mut(4)
+    else {
+        anyhow::bail!("legacy fixture lost its candidate start");
+    };
+    candidate.source_turn =
+        sigil_kernel::ConversationTurnRef::new("other-session", "other-message", "other-run")?;
+
+    assert_eq!(
+        plan_review_compatibility_from_entries(&entries),
+        PlanReviewCompatibilityStatusV1::UnsupportedLegacy
+    );
+    let review = public_plan_review_from_entries(&entries, None)
+        .context("unsupported legacy terminal should remain visible without authority")?;
+    assert_eq!(
+        review.status,
+        sigil_kernel::PublicPlanReviewStatus::Interrupted
+    );
+    assert!(review.allowed_actions.is_empty());
     Ok(())
 }

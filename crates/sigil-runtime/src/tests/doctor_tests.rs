@@ -14,6 +14,62 @@ use super::*;
 use crate::doctor::mcp::command_status_with_search_path;
 
 #[test]
+fn doctor_reports_current_plan_review_compatibility_without_mutating_sessions() -> Result<()> {
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session-current-plan.jsonl"))?;
+    let mut session = sigil_kernel::Session::new("provider", "model").with_store(store);
+    let source = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        "doctor-plan-message",
+        "doctor-plan-run",
+    )?;
+    let review_id = sigil_kernel::plan_review_id_for_source(&source);
+    let attempt_id = sigil_kernel::plan_review_attempt_id_for_review(&review_id);
+    session.append_control(sigil_kernel::ControlEntry::PlanReviewAttempt(
+        sigil_kernel::PlanReviewAttemptEntry {
+            plan_review_id: review_id.clone(),
+            attempt_id: attempt_id.clone(),
+            plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_id),
+            source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+            source_turn: source,
+            route_decision_id: None,
+            child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
+            finalizer_session_ref: None,
+            revision_request_id: None,
+            attempt_ordinal: 1,
+            base_plan_id: None,
+            base_plan_hash: None,
+            workspace_snapshot_id: None,
+            pending_user_input: None,
+            status: sigil_kernel::PlanReviewAttemptStatus::Started,
+            terminal_reason: None,
+            recorded_at_ms: 1,
+        },
+    ))?;
+    let before = fs::read(temp.path().join("session-current-plan.jsonl"))?;
+
+    let mut report = DoctorReport::default();
+    check_plan_review_compatibility(&mut report, temp.path());
+
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.name == "session:plan_review_compatibility")
+        .expect("plan review compatibility check should be present");
+    assert_eq!(check.status, DoctorStatus::Ok);
+    assert_eq!(
+        check.message,
+        "current=1, legacy_read_only_recovered=0, unsupported_legacy=0"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("session-current-plan.jsonl"))?,
+        before,
+        "Doctor compatibility inspection must stay read-only"
+    );
+    Ok(())
+}
+
+#[test]
 fn internal_web_snapshot_is_offline_unprobed_and_does_not_claim_public_activation() {
     let mut report = DoctorReport::default();
     append_web_doctor_snapshot(&mut report, &WebDoctorSnapshot::internal_only());

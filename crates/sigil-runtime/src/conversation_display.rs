@@ -1988,6 +1988,27 @@ struct PlanReviewDisplayProjection {
         std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::UserInputResolutionV1>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanReviewCompatibilityStatusV1 {
+    NoPlanReview,
+    Current,
+    LegacyRecovered,
+    UnsupportedLegacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyPlanRevisionRecovery {
+    base_attempt_index: usize,
+    terminal_attempt_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LegacyPlanRevisionCompatibility {
+    None,
+    Recovered(LegacyPlanRevisionRecovery),
+    Unsupported,
+}
+
 impl PlanReviewDisplayProjection {
     fn apply_entry(&mut self, entry: sigil_kernel::SessionLogEntry) {
         match entry {
@@ -2063,8 +2084,17 @@ impl PlanReviewDisplayProjection {
         self,
         current_workspace_snapshot_id: Option<&str>,
     ) -> Option<sigil_kernel::PublicPlanReview> {
-        let latest = self.attempts.iter().next_back()?;
-        let active_attempt = if latest.revision_request_id.is_some()
+        let latest_index = self.attempts.len().checked_sub(1)?;
+        let latest = &self.attempts[latest_index];
+        let legacy_revision = self.legacy_revision_compatibility(latest_index);
+        let legacy_recovery = match &legacy_revision {
+            LegacyPlanRevisionCompatibility::Recovered(recovery) => Some(recovery),
+            LegacyPlanRevisionCompatibility::None
+            | LegacyPlanRevisionCompatibility::Unsupported => None,
+        };
+        let active_attempt = if let Some(recovery) = legacy_recovery {
+            &self.attempts[recovery.base_attempt_index]
+        } else if latest.revision_request_id.is_some()
             && latest.status != sigil_kernel::PlanReviewAttemptStatus::DraftReady
         {
             latest.base_plan_id.as_ref().and_then(|base_plan_id| {
@@ -2125,7 +2155,9 @@ impl PlanReviewDisplayProjection {
             && !revision_running
             && !guidance_pending
         {
-            match latest_decision {
+            match legacy_recovery.map_or(latest_decision, |_| {
+                Some(sigil_kernel::PlanDecision::RevisionFailed)
+            }) {
                 Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
                 Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
                     sigil_kernel::PublicPlanAction::Run,
@@ -2160,7 +2192,34 @@ impl PlanReviewDisplayProjection {
             allowed_actions,
             source: active_attempt.source.into(),
             stale,
-            revision: if let Some(request_id) = latest.revision_request_id.as_ref() {
+            revision: if let Some(recovery) = legacy_recovery {
+                let terminal = &self.attempts[recovery.terminal_attempt_index];
+                Some(sigil_kernel::PublicPlanRevisionSummaryV1 {
+                    request_id: format!("legacy-plan-revision-{}", terminal.attempt_id.as_str()),
+                    attempt_id: Some(terminal.attempt_id.as_str().to_owned()),
+                    attempt_ordinal: Some(1),
+                    status: match terminal.status {
+                        sigil_kernel::PlanReviewAttemptStatus::Cancelled => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Cancelled
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::CompletedWithoutDraft
+                        | sigil_kernel::PlanReviewAttemptStatus::Failed
+                        | sigil_kernel::PlanReviewAttemptStatus::Interrupted => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Failed
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::Started
+                        | sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+                        | sigil_kernel::PlanReviewAttemptStatus::Finalizing
+                        | sigil_kernel::PlanReviewAttemptStatus::DraftReady => {
+                            unreachable!("legacy recovery only accepts terminal attempts")
+                        }
+                    },
+                    terminal_reason: terminal
+                        .terminal_reason
+                        .map(|reason| reason.as_str().to_owned())
+                        .or_else(|| Some("legacy_revision_failed".to_owned())),
+                })
+            } else if let Some(request_id) = latest.revision_request_id.as_ref() {
                 Some(sigil_kernel::PublicPlanRevisionSummaryV1 {
                     request_id: request_id.as_str().to_owned(),
                     attempt_id: Some(latest.attempt_id.as_str().to_owned()),
@@ -2234,6 +2293,126 @@ impl PlanReviewDisplayProjection {
                     })
             },
         })
+    }
+
+    fn legacy_revision_compatibility(
+        &self,
+        latest_index: usize,
+    ) -> LegacyPlanRevisionCompatibility {
+        let Some(terminal) = self.attempts.get(latest_index) else {
+            return LegacyPlanRevisionCompatibility::None;
+        };
+        let has_matching_legacy_base = self.attempts[..latest_index].iter().any(|attempt| {
+            attempt.plan_review_id == terminal.plan_review_id
+                && attempt.plan_id != terminal.plan_id
+                && attempt.source == terminal.source
+                && attempt.source_turn == terminal.source_turn
+                && attempt.route_decision_id == terminal.route_decision_id
+                && attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                && self.drafts.get(&attempt.plan_id).is_some_and(|draft| {
+                    self.decisions
+                        .get(&attempt.plan_id)
+                        .and_then(|entries| entries.last())
+                        .is_some_and(|decision| {
+                            decision.decision == sigil_kernel::PlanDecision::RevisionRequested
+                                && decision.plan_hash == draft.plan_hash
+                        })
+                })
+        });
+        let has_legacy_signal = terminal.revision_request_id.is_none()
+            && terminal.base_plan_id.is_none()
+            && terminal.base_plan_hash.is_none()
+            && terminal.status.is_terminal()
+            && !self.drafts.contains_key(&terminal.plan_id)
+            && has_matching_legacy_base;
+        if !has_legacy_signal {
+            return LegacyPlanRevisionCompatibility::None;
+        }
+
+        let Some(candidate_start_index) = self.attempts.iter().position(|attempt| {
+            attempt.attempt_id == terminal.attempt_id
+                && attempt.plan_id == terminal.plan_id
+                && attempt.status == sigil_kernel::PlanReviewAttemptStatus::Started
+        }) else {
+            return LegacyPlanRevisionCompatibility::Unsupported;
+        };
+        if candidate_start_index >= latest_index
+            || self.attempts[candidate_start_index..=latest_index]
+                .iter()
+                .any(|attempt| {
+                    attempt.attempt_id != terminal.attempt_id
+                        || attempt.plan_id != terminal.plan_id
+                        || attempt.plan_review_id != terminal.plan_review_id
+                        || attempt.source != terminal.source
+                        || attempt.source_turn != terminal.source_turn
+                        || attempt.route_decision_id != terminal.route_decision_id
+                        || attempt.revision_request_id.is_some()
+                        || attempt.base_plan_id.is_some()
+                        || attempt.base_plan_hash.is_some()
+                })
+        {
+            return LegacyPlanRevisionCompatibility::Unsupported;
+        }
+
+        let mut candidates = self.attempts[..candidate_start_index]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, attempt)| {
+                if attempt.plan_review_id != terminal.plan_review_id
+                    || attempt.source != terminal.source
+                    || attempt.source_turn != terminal.source_turn
+                    || attempt.route_decision_id != terminal.route_decision_id
+                    || attempt.status != sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                {
+                    return None;
+                }
+                let draft = self.drafts.get(&attempt.plan_id)?;
+                let decision = self
+                    .decisions
+                    .get(&attempt.plan_id)
+                    .and_then(|entries| entries.last())?;
+                (decision.decision == sigil_kernel::PlanDecision::RevisionRequested
+                    && decision.plan_hash == draft.plan_hash
+                    && decision.decided_at_ms
+                        <= self.attempts[candidate_start_index].recorded_at_ms)
+                    .then_some((decision.decided_at_ms, index))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| candidate.0);
+        let Some((latest_decision_at, base_attempt_index)) = candidates.pop() else {
+            return LegacyPlanRevisionCompatibility::Unsupported;
+        };
+        if candidates
+            .last()
+            .is_some_and(|candidate| candidate.0 == latest_decision_at)
+        {
+            return LegacyPlanRevisionCompatibility::Unsupported;
+        }
+        LegacyPlanRevisionCompatibility::Recovered(LegacyPlanRevisionRecovery {
+            base_attempt_index,
+            terminal_attempt_index: latest_index,
+        })
+    }
+}
+
+pub(crate) fn plan_review_compatibility_from_entries(
+    entries: &[sigil_kernel::SessionLogEntry],
+) -> PlanReviewCompatibilityStatusV1 {
+    let mut projection = PlanReviewDisplayProjection::default();
+    for entry in entries {
+        projection.apply_entry(entry.clone());
+    }
+    let Some(latest_index) = projection.attempts.len().checked_sub(1) else {
+        return PlanReviewCompatibilityStatusV1::NoPlanReview;
+    };
+    match projection.legacy_revision_compatibility(latest_index) {
+        LegacyPlanRevisionCompatibility::None => PlanReviewCompatibilityStatusV1::Current,
+        LegacyPlanRevisionCompatibility::Recovered(_) => {
+            PlanReviewCompatibilityStatusV1::LegacyRecovered
+        }
+        LegacyPlanRevisionCompatibility::Unsupported => {
+            PlanReviewCompatibilityStatusV1::UnsupportedLegacy
+        }
     }
 }
 

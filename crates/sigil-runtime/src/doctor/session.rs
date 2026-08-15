@@ -189,6 +189,61 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
     }
 }
 
+pub(super) fn check_plan_review_compatibility(report: &mut DoctorReport, session_dir: &Path) {
+    let Ok(mut paths) = session_log_paths(session_dir) else {
+        return;
+    };
+    paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
+    let mut current = 0usize;
+    let mut legacy_recovered = 0usize;
+    let mut unsupported_legacy = 0usize;
+    for path in paths {
+        if session_stream_too_large_for_doctor(&path) {
+            continue;
+        }
+        let Ok(records) = JsonlSessionStore::read_event_records(&path) else {
+            continue;
+        };
+        let entries = records
+            .iter()
+            .filter_map(|record| {
+                sigil_kernel::conversation_transcript_entry_from_record(record)
+                    .ok()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        match crate::conversation_display::plan_review_compatibility_from_entries(&entries) {
+            crate::conversation_display::PlanReviewCompatibilityStatusV1::NoPlanReview => {}
+            crate::conversation_display::PlanReviewCompatibilityStatusV1::Current => current += 1,
+            crate::conversation_display::PlanReviewCompatibilityStatusV1::LegacyRecovered => {
+                legacy_recovered += 1;
+            }
+            crate::conversation_display::PlanReviewCompatibilityStatusV1::UnsupportedLegacy => {
+                unsupported_legacy += 1;
+            }
+        }
+    }
+    let message = format!(
+        "current={current}, legacy_read_only_recovered={legacy_recovered}, unsupported_legacy={unsupported_legacy}"
+    );
+    if unsupported_legacy > 0 {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "session:plan_review_compatibility",
+            message,
+            Some(
+                "preserve the affected session for audit and start a new plan review; Sigil will not guess ambiguous legacy revision lineage",
+            ),
+        );
+    } else {
+        report.push(
+            DoctorStatus::Ok,
+            "session:plan_review_compatibility",
+            message,
+        );
+    }
+}
+
 pub(super) fn check_session_route_compatibility(
     report: &mut DoctorReport,
     session_dir: &Path,
