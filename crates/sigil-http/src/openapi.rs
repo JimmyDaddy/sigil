@@ -1916,6 +1916,7 @@ pub fn http_openapi_document() -> Value {
                         "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] },
                         "task_control": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTaskControl" }, { "type": "null" }] },
                         "plan_review": { "oneOf": [{ "$ref": "#/components/schemas/PlanReview" }, { "type": "null" }] },
+                        "user_inputs": { "type": "array", "maxItems": 64, "items": { "$ref": "#/components/schemas/UserInputRequest" } },
                         "user_input": { "oneOf": [{ "$ref": "#/components/schemas/UserInputRequest" }, { "type": "null" }] }
                     }
                 },

@@ -948,6 +948,8 @@ pub struct DesktopConversationDisplayPage {
     #[serde(default)]
     pub plan_review: Option<DesktopPlanReview>,
     #[serde(default)]
+    pub user_inputs: Vec<DesktopUserInputRequest>,
+    #[serde(default)]
     pub user_input: Option<DesktopUserInputRequest>,
 }
 

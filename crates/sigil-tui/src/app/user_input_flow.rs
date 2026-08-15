@@ -16,6 +16,17 @@ impl AppState {
             .as_ref()
             .is_some_and(|form| form.open);
         self.composer.pending_user_input.as_ref()?;
+        if key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('p'))
+            && self.composer.pending_user_input_queue.len() > 1
+        {
+            self.cycle_pending_user_input(if key.code == KeyCode::Char('n') {
+                1
+            } else {
+                -1
+            });
+            return Some(None);
+        }
         if !open {
             if key.code == KeyCode::BackTab && key.modifiers == KeyModifiers::SHIFT {
                 if let Some(form) = self.composer.pending_user_input.as_mut() {
@@ -392,6 +403,7 @@ impl AppState {
         self.set_pending_user_input_with_recovery(request, None);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_pending_user_input_recovery(
         &mut self,
         request: sigil_kernel::PublicUserInputRequestV1,
@@ -417,11 +429,13 @@ impl AppState {
                 })
                 .unwrap_or(UserInputFormAction::Submit)
         };
-        self.composer.pending_user_input = Some(PendingUserInputForm {
+        let form = PendingUserInputForm {
             view,
             request: Some(request),
             source: UserInputFormSource::DurableAgent,
             recovery_command,
+            queue_position: 1,
+            queue_length: 1,
             open: true,
             focused_question: 0,
             focus_actions: selected_action == UserInputFormAction::Resume,
@@ -429,7 +443,8 @@ impl AppState {
             drafts,
             scroll: 0,
             scroll_extent: Default::default(),
-        });
+        };
+        self.upsert_pending_user_input(form);
     }
 
     pub(in crate::app) fn set_pending_mcp_user_input(
@@ -447,6 +462,8 @@ impl AppState {
             request: None,
             source: UserInputFormSource::Mcp { server_name },
             recovery_command: None,
+            queue_position: 1,
+            queue_length: 1,
             open: true,
             focused_question: 0,
             focus_actions: false,
@@ -484,7 +501,11 @@ impl AppState {
         if let Some(mut pending) = self.pending_mcp_elicitation.take() {
             pending.send(response.clone());
         }
-        self.composer.pending_user_input = None;
+        self.composer.pending_user_input = self
+            .composer
+            .pending_user_input_queue
+            .get(self.composer.pending_user_input_queue_index)
+            .cloned();
         self.active_pane = super::PaneFocus::Composer;
         let notice = match response.action {
             sigil_runtime::McpElicitationAction::Accept => {
@@ -508,7 +529,129 @@ impl AppState {
 
     pub(in crate::app) fn clear_pending_user_input(&mut self) {
         self.composer.pending_user_input = None;
+        self.composer.pending_user_input_queue.clear();
+        self.composer.pending_user_input_queue_index = 0;
         self.pending_mcp_elicitation = None;
+    }
+
+    pub(in crate::app) fn set_pending_user_inputs(
+        &mut self,
+        requests: Vec<sigil_kernel::PublicUserInputRequestV1>,
+        recovery_command: Option<sigil_kernel::UserInputDecisionCommandV1>,
+    ) {
+        self.composer.pending_user_input = None;
+        self.composer.pending_user_input_queue.clear();
+        self.composer.pending_user_input_queue_index = 0;
+        for request in requests {
+            let recovery = recovery_command
+                .as_ref()
+                .filter(|command| command.identity == request.identity)
+                .cloned();
+            self.set_pending_user_input_with_recovery(request, recovery);
+        }
+    }
+
+    fn upsert_pending_user_input(&mut self, mut form: PendingUserInputForm) {
+        let Some(request) = form.request.as_ref() else {
+            self.composer.pending_user_input = Some(form);
+            return;
+        };
+        let identity = request.identity.clone();
+        let hash = request.request_hash.clone();
+        let mut mcp_active = None;
+        if let Some(active) = self.composer.pending_user_input.take() {
+            if matches!(&active.source, UserInputFormSource::Mcp { .. }) {
+                mcp_active = Some(active);
+            } else if let Some(index) =
+                self.composer
+                    .pending_user_input_queue
+                    .iter()
+                    .position(|queued| {
+                        queued.request.as_ref().is_some_and(|queued_request| {
+                            queued_request.identity
+                                == active
+                                    .request
+                                    .as_ref()
+                                    .expect("durable form request")
+                                    .identity
+                                && queued_request.request_hash
+                                    == active
+                                        .request
+                                        .as_ref()
+                                        .expect("durable form request")
+                                        .request_hash
+                        })
+                    })
+            {
+                self.composer.pending_user_input_queue[index] = active;
+            }
+        }
+        if let Some(index) = self
+            .composer
+            .pending_user_input_queue
+            .iter()
+            .position(|queued| {
+                queued.request.as_ref().is_some_and(|queued_request| {
+                    queued_request.identity == identity && queued_request.request_hash == hash
+                })
+            })
+        {
+            self.composer.pending_user_input_queue[index] = form;
+        } else {
+            self.composer.pending_user_input_queue.push(form);
+            self.composer
+                .pending_user_input_queue
+                .sort_by(|left, right| {
+                    let left = left.request.as_ref().expect("durable queue request");
+                    let right = right.request.as_ref().expect("durable queue request");
+                    left.requested_at_unix_ms
+                        .cmp(&right.requested_at_unix_ms)
+                        .then_with(|| left.identity.cmp(&right.identity))
+                });
+        }
+        let len = self.composer.pending_user_input_queue.len();
+        for (index, queued) in self
+            .composer
+            .pending_user_input_queue
+            .iter_mut()
+            .enumerate()
+        {
+            queued.queue_position = index + 1;
+            queued.queue_length = len;
+        }
+        self.composer.pending_user_input_queue_index = self
+            .composer
+            .pending_user_input_queue_index
+            .min(len.saturating_sub(1));
+        form = self.composer.pending_user_input_queue[self.composer.pending_user_input_queue_index]
+            .clone();
+        self.composer.pending_user_input = mcp_active.or(Some(form));
+    }
+
+    fn cycle_pending_user_input(&mut self, delta: isize) {
+        let len = self.composer.pending_user_input_queue.len();
+        if len < 2 {
+            return;
+        }
+        if let Some(active) = self.composer.pending_user_input.take() {
+            let index = self.composer.pending_user_input_queue_index.min(len - 1);
+            self.composer.pending_user_input_queue[index] = active;
+        }
+        let current = self.composer.pending_user_input_queue_index.min(len - 1);
+        self.composer.pending_user_input_queue_index = if delta > 0 {
+            (current + 1) % len
+        } else {
+            (current + len - 1) % len
+        };
+        self.composer.pending_user_input = Some(
+            self.composer.pending_user_input_queue[self.composer.pending_user_input_queue_index]
+                .clone(),
+        );
+        self.last_notice = Some(format!(
+            "input request {} of {}",
+            self.composer.pending_user_input_queue_index + 1,
+            len
+        ));
     }
 }
 

@@ -32,12 +32,17 @@ pub(super) fn render_user_input_form(
             Constraint::Length(2),
         ])
         .split(area);
+    let title = match &form.source {
+        UserInputFormSource::DurableAgent if form.queue_length > 1 => format!(
+            "Input required {} of {} · Ctrl-N/P switch",
+            form.queue_position, form.queue_length
+        ),
+        UserInputFormSource::DurableAgent => "Input required".to_owned(),
+        UserInputFormSource::Mcp { .. } => "MCP input required".to_owned(),
+    };
     let header = Text::from(vec![
         Line::from(Span::styled(
-            match &form.source {
-                UserInputFormSource::DurableAgent => "Input required",
-                UserInputFormSource::Mcp { .. } => "MCP input required",
-            },
+            title,
             Style::default()
                 .fg(theme.palette.accent_warning)
                 .add_modifier(Modifier::BOLD),

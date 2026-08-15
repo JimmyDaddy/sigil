@@ -2802,6 +2802,7 @@ export interface components {
             through_session_stream_sequence: components["schemas"]["DecimalSequence"];
             total_items: components["schemas"]["DecimalSequence"];
             user_input?: components["schemas"]["UserInputRequest"] | null;
+            user_inputs?: components["schemas"]["UserInputRequest"][];
         };
         ConversationDisplaySkillReference: {
             id: string;

@@ -1798,8 +1798,18 @@ fn validate_conversation_display_page(
             return Err(DesktopClientError::InvalidResponse);
         }
     }
+    for request in &page.user_inputs {
+        validate_user_input_request(request)?;
+    }
     if let Some(request) = page.user_input.as_ref() {
         validate_user_input_request(request)?;
+        if page
+            .user_inputs
+            .first()
+            .is_some_and(|first| first != request)
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
     }
     let Some(task) = page.task_control.as_ref() else {
         return Ok(());

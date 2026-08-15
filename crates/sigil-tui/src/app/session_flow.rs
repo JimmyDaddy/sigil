@@ -308,32 +308,23 @@ impl AppState {
         let recovery_command = sigil_kernel::recoverable_user_input_decision_from_entries(
             &self.session_browser.current_entries,
         );
-        match sigil_runtime::conversation_display::public_user_input_from_entries(
+        match sigil_runtime::conversation_display::public_user_inputs_from_entries(
             &self.session_browser.current_entries,
         ) {
-            Ok(Some(request)) if request.status == sigil_kernel::UserInputStatusV1::Requested => {
-                self.set_pending_user_input(request);
-            }
-            Ok(Some(request))
-                if request.status == sigil_kernel::UserInputStatusV1::DecisionAccepted =>
-            {
-                match recovery_command {
-                    Ok(Some(command)) => {
-                        self.set_pending_user_input_recovery(request, command);
+            Ok(requests) => match recovery_command {
+                Ok(command) => {
+                    let has_recovery = command.is_some();
+                    self.set_pending_user_inputs(requests, command);
+                    if has_recovery {
                         self.last_notice =
                             Some("an accepted answer is ready to resume; choose Resume".to_owned());
                     }
-                    Ok(None) => {
-                        self.last_notice =
-                            Some("accepted input requires an external recovery owner".to_owned());
-                    }
-                    Err(error) => {
-                        self.last_notice =
-                            Some(format!("accepted input recovery is unavailable: {error}"));
-                    }
                 }
-            }
-            Ok(_) => {}
+                Err(error) => {
+                    self.last_notice =
+                        Some(format!("accepted input recovery is unavailable: {error}"));
+                }
+            },
             Err(error) => {
                 self.last_notice = Some(format!("user input recovery unavailable: {error}"));
             }

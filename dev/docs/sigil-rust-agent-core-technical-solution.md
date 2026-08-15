@@ -1078,8 +1078,10 @@ bounded `request_user_input` typed tool 创建问题；host 先 append `UserInpu
 `AgentRunDisposition::AwaitingUserInput` 结束 physical worker并保留 suspended logical ownership。
 answer command 绑定 session/run/request/generation/hash/command identity，durable accepted 后由 supervisor
 CAS claim 并恰好一次启动带 exact synthetic tool result 的 continuation，不 replay 原 provider turn。
-pending request 无 wall-clock timeout，restart/switch/reconnect 从同一 projection 恢复；background agent
-question 进入 root attention queue。approval、MCP elicitation 与 secret input 保持各自 authority：MCP 只
+pending request 无 wall-clock timeout，restart/switch/reconnect 从同一 projection 恢复；ordinary、
+PlanReview 与 background agent question 进入同一个 bounded、oldest-first root attention queue，按 exact
+identity/hash 去重，旧单请求 client 只投影队首。TUI/ Desktop 切换时保留逐请求草稿。approval、MCP
+elicitation 与 secret input 保持各自 authority：MCP 只
 共享 bounded form renderer，断线后不 replay answer；secret 明文不进入 session 或模型 tool result。
 
 三路 eval corpus（`dev/evals/model-fixtures/orchestration-v1`，rfc-0063-orchestration-v1）冻结为

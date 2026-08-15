@@ -527,7 +527,7 @@ impl AppState {
             } => {
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
-                self.clear_pending_user_input();
+                self.restore_durable_attention_surfaces();
                 if continuation_started {
                     self.runtime.is_busy = true;
                     self.last_notice = Some("answer accepted; agent continuing".to_owned());

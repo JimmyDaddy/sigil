@@ -505,6 +505,10 @@ turn 抢占 pending continuation。
 - stdio 与 Streamable HTTP MCP form 已收敛到同一 bounded normalized contract；TUI 把它转换为同一个
   `UserInputFormViewModel`，复用 agent question renderer/键位/校验，支持 multi-select。未知或 nested shape
   显式返回 `UnsupportedFormShape`，MCP owner 断开/被清理时只发送 Cancel，绝不生成 durable replay command。
+- canonical conversation snapshot 现在同时投影 bounded、oldest-first `user_inputs` attention queue，并为旧
+  client 保留队首 `user_input`；ordinary、PlanReview 与 background route 按 exact identity/hash 去重。TUI
+  用 `Ctrl-N/P` 切换且保留逐请求草稿，Desktop 同时挂载各请求表单并提供显式 Previous/Next；MCP live
+  elicitation 不进入 durable queue。
 
 仍未关闭的 release blocker：
 

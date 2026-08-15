@@ -754,6 +754,7 @@ export interface ConversationDisplayPage {
   };
   taskControl?: ConversationTaskControl;
   planReview?: ConversationPlanReview;
+  userInputs?: UserInputRequest[];
   userInput?: UserInputRequest;
 }
 

@@ -2311,6 +2311,13 @@
                 "type": "null"
               }
             ]
+          },
+          "user_inputs": {
+            "items": {
+              "$ref": "#/components/schemas/UserInputRequest"
+            },
+            "maxItems": 64,
+            "type": "array"
           }
         },
         "required": [

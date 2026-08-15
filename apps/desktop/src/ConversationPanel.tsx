@@ -213,7 +213,25 @@ export function ConversationPanel({
   const [planDetailFailure, setPlanDetailFailure] = useState(false);
   const [planDecisionBusy, setPlanDecisionBusy] = useState(false);
   const [planDecisionFailure, setPlanDecisionFailure] = useState(false);
-  const [durableUserInput, setDurableUserInput] = useState<UserInputRequest>();
+  const [durableUserInputs, setDurableUserInputs] = useState<UserInputRequest[]>([]);
+  const [selectedUserInputKey, setSelectedUserInputKey] = useState<string>();
+  const durableUserInput = durableUserInputs.find(
+    (request) => userInputKey(request) === selectedUserInputKey,
+  ) ?? durableUserInputs[0];
+  const reconcileDurableUserInputs = (page: ConversationDisplayPage) => {
+    const requests = page.userInputs?.length
+      ? page.userInputs
+      : page.userInput === undefined
+        ? []
+        : [page.userInput];
+    setDurableUserInputs(requests);
+    setSelectedUserInputKey((current) => current !== undefined
+      && requests.some((request) => userInputKey(request) === current)
+      ? current
+      : requests[0] === undefined
+        ? undefined
+        : userInputKey(requests[0]));
+  };
   const [userInputBusy, setUserInputBusy] = useState(false);
   const [userInputFailure, setUserInputFailure] = useState(false);
   const exactPlanDetail = planDetail !== undefined
@@ -454,7 +472,8 @@ export function ConversationPanel({
     setPlanDetailFailure(false);
     setPlanDecisionBusy(false);
     setPlanDecisionFailure(false);
-    setDurableUserInput(undefined);
+    setDurableUserInputs([]);
+    setSelectedUserInputKey(undefined);
     setUserInputBusy(false);
     setUserInputFailure(false);
     setTaskIntegrationReview(undefined);
@@ -641,7 +660,7 @@ export function ConversationPanel({
             });
             setDurableTaskControl(canonicalPage.taskControl);
             setDurablePlanReview(canonicalPage.planReview);
-            setDurableUserInput(canonicalPage.userInput);
+            reconcileDurableUserInputs(canonicalPage);
             setPlanDecisionFailure(false);
             setDisplayError(false);
             return;
@@ -1209,7 +1228,7 @@ export function ConversationPanel({
           });
           setDurableTaskControl(page.taskControl);
           setDurablePlanReview(page.planReview);
-          setDurableUserInput(page.userInput);
+          reconcileDurableUserInputs(page);
           if (canonicalPageCoversTerminal(page, {
             runId: pendingRunId,
             status: observed?.status,
@@ -1727,7 +1746,11 @@ export function ConversationPanel({
         notify({ message: t("planRevisionStarted"), tone: "info" });
       }
       if (summary.userInputRequest !== undefined) {
-        setDurableUserInput(summary.userInputRequest);
+        setDurableUserInputs((current) => [
+          ...current.filter((request) => userInputKey(request) !== userInputKey(summary.userInputRequest!)),
+          summary.userInputRequest!,
+        ]);
+        setSelectedUserInputKey(userInputKey(summary.userInputRequest));
       }
       if (summary.action !== "revise") {
         setDurablePlanReview(undefined);
@@ -1768,8 +1791,11 @@ export function ConversationPanel({
     }
   };
 
-  const submitUserInputDecision = async (decision: UserInputDecision) => {
-    const request = durableUserInput;
+  const submitUserInputDecision = async (
+    decision: UserInputDecision,
+    selectedRequest: UserInputRequest | undefined = durableUserInput,
+  ) => {
+    const request = selectedRequest;
     if (request === undefined || request.status !== "requested" || userInputBusy) return;
     setUserInputBusy(true);
     setUserInputFailure(false);
@@ -1783,7 +1809,9 @@ export function ConversationPanel({
         decision,
         permissionMode,
       );
-      setDurableUserInput(undefined);
+      setDurableUserInputs((current) => current.filter(
+        (candidate) => userInputKey(candidate) !== userInputKey(request),
+      ));
       setDisplayReload((value) => value + 1);
       setContinuityReload((value) => value + 1);
     } catch {
@@ -1795,9 +1823,11 @@ export function ConversationPanel({
     }
   };
 
-  const resumeAcceptedUserInput = async () => {
+  const resumeAcceptedUserInput = async (
+    selectedRequest: UserInputRequest | undefined = durableUserInput,
+  ) => {
     if (
-      durableUserInput?.status !== "decision_accepted"
+      selectedRequest?.status !== "decision_accepted"
       || userInputBusy
       || onResumeAcceptedUserInput === undefined
     ) return;
@@ -2228,18 +2258,38 @@ export function ConversationPanel({
         />
       )}
 
-      {durableUserInput === undefined || durableUserInput.status === "resolved" ? null : (
-        <UserInputCard
-          key={`${durableUserInput.identity.requestId}:${durableUserInput.identity.generation}`}
-          request={durableUserInput}
-          busy={userInputBusy}
-          failure={userInputFailure}
-          onDecision={(decision) => void submitUserInputDecision(decision)}
-          onResume={onResumeAcceptedUserInput === undefined
-            ? undefined
-            : () => void resumeAcceptedUserInput()}
-        />
-      )}
+      {durableUserInputs.map((request, index) => {
+        const selected = durableUserInput !== undefined
+          && userInputKey(request) === userInputKey(durableUserInput);
+        if (request.status === "resolved") return null;
+        return (
+          <div key={userInputKey(request)} hidden={!selected}>
+            <UserInputCard
+              request={request}
+              busy={selected && userInputBusy}
+              failure={selected && userInputFailure}
+              queuePosition={index + 1}
+              queueLength={durableUserInputs.length}
+              onPrevious={index === 0
+                ? undefined
+                : () => setSelectedUserInputKey(userInputKey(durableUserInputs[index - 1]))}
+              onNext={index + 1 >= durableUserInputs.length
+                ? undefined
+                : () => setSelectedUserInputKey(userInputKey(durableUserInputs[index + 1]))}
+              onDecision={(decision) => {
+                setSelectedUserInputKey(userInputKey(request));
+                void submitUserInputDecision(decision, request);
+              }}
+              onResume={onResumeAcceptedUserInput === undefined
+                ? undefined
+                : () => {
+                    setSelectedUserInputKey(userInputKey(request));
+                    void resumeAcceptedUserInput(request);
+                  }}
+            />
+          </div>
+        );
+      })}
 
       {durablePlanReview === undefined ? null : (
         <PlanCard
@@ -2963,6 +3013,17 @@ function integrationReviewTaskProjection(
 
 function isTerminal(status: RunSummary["status"]): boolean {
   return ["finished", "failed", "cancelled", "paused", "interrupted"].includes(status);
+}
+
+function userInputKey(request: UserInputRequest): string {
+  return JSON.stringify([
+    request.identity.sessionScopeId,
+    request.identity.rootLogicalRunId,
+    request.identity.sourceThreadId,
+    request.identity.requestId,
+    request.identity.generation,
+    request.requestHash,
+  ]);
 }
 
 function terminalStatusForEvent(event: TimelineEvent): RunSummary["status"] | undefined {

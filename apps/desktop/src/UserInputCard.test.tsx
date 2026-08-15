@@ -60,4 +60,31 @@ describe("UserInputCard recovery", () => {
     await user.click(screen.getByRole("button", { name: "Resume saved answer" }));
     expect(onResume).toHaveBeenCalledTimes(1);
   });
+
+  it("surfaces bounded attention queue navigation without changing request authority", async () => {
+    const user = userEvent.setup();
+    const onPrevious = vi.fn();
+    const onNext = vi.fn();
+    render(
+      <LocaleProvider>
+        <UserInputCard
+          request={acceptedRequest()}
+          busy={false}
+          failure={false}
+          queuePosition={2}
+          queueLength={3}
+          onPrevious={onPrevious}
+          onNext={onNext}
+          onDecision={vi.fn()}
+          onResume={vi.fn()}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.getByText("Question 2 of 3")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Previous" }));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(onPrevious).toHaveBeenCalledTimes(1);
+    expect(onNext).toHaveBeenCalledTimes(1);
+  });
 });

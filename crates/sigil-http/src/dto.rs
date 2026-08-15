@@ -1271,6 +1271,8 @@ pub struct HttpConversationDisplayPage {
     pub task_control: Option<HttpConversationTaskControl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_review: Option<HttpPlanReview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_inputs: Vec<HttpUserInputRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input: Option<HttpUserInputRequest>,
 }
@@ -1345,6 +1347,7 @@ impl HttpConversationDisplayPage {
             live_provisional_anchor: None,
             task_control: page.task_control.map(Into::into),
             plan_review: page.plan_review.map(Into::into),
+            user_inputs: page.user_inputs.into_iter().map(Into::into).collect(),
             user_input: page.user_input.map(Into::into),
         }
     }

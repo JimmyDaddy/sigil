@@ -5690,3 +5690,51 @@ fn user_input_form_page_keys_use_the_rendered_scroll_extent() -> Result<()> {
     assert_eq!(app.pending_user_input().expect("pending input").scroll, 0);
     Ok(())
 }
+
+#[test]
+fn user_input_attention_queue_switches_by_exact_identity_and_preserves_drafts() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let first = pending_text_user_input_request()?;
+    let mut second = pending_text_user_input_request()?;
+    second.identity.request_id = sigil_kernel::UserInputRequestId::new("second-request")?;
+    second.identity.source_thread_id = sigil_kernel::AgentThreadId::new("background-child")?;
+    second.identity.source_binding_hash = format!("sha256:{}", "d".repeat(64));
+    second.request_hash = format!("sha256:{}", "e".repeat(64));
+    second.requested_at_unix_ms = first.requested_at_unix_ms + 1;
+
+    app.set_pending_user_input(first.clone());
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))?;
+    app.set_pending_user_input(second.clone());
+    assert_eq!(
+        app.pending_user_input()
+            .expect("first request")
+            .queue_length,
+        2
+    );
+    assert_eq!(
+        app.pending_user_input()
+            .and_then(|form| form.request.as_ref())
+            .map(|request| &request.identity),
+        Some(&first.identity)
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert_eq!(
+        app.pending_user_input()
+            .and_then(|form| form.request.as_ref())
+            .map(|request| &request.identity),
+        Some(&second.identity)
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
+    assert!(matches!(
+        app.pending_user_input().expect("first request").drafts.as_slice(),
+        [crate::app::UserInputDraftValue::Text(value)] if value == "a"
+    ));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert!(matches!(
+        app.pending_user_input().expect("second request").drafts.as_slice(),
+        [crate::app::UserInputDraftValue::Text(value)] if value == "b"
+    ));
+    Ok(())
+}

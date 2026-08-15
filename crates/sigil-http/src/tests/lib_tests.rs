@@ -2016,6 +2016,7 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
         live_provisional_anchor: None,
         task_control: None,
         plan_review: None,
+        user_inputs: Vec::new(),
         user_input: None,
     });
 
@@ -2187,6 +2188,7 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
             stale: false,
             revision: None,
         }),
+        user_inputs: Vec::new(),
         user_input: None,
     });
 

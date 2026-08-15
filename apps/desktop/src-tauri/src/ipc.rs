@@ -1351,6 +1351,7 @@ pub(crate) struct DesktopConversationDisplayPage {
     pub(crate) task_control: Option<DesktopConversationTaskControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) plan_review: Option<DesktopPlanReview>,
+    pub(crate) user_inputs: Vec<DesktopUserInputRequestSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) user_input: Option<DesktopUserInputRequestSummary>,
 }
@@ -2876,6 +2877,7 @@ impl From<NativeConversationDisplayPage> for DesktopConversationDisplayPage {
             }),
             task_control: value.task_control.map(Into::into),
             plan_review: value.plan_review.map(Into::into),
+            user_inputs: value.user_inputs.into_iter().map(Into::into).collect(),
             user_input: value.user_input.map(Into::into),
         }
     }

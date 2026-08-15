@@ -19,11 +19,25 @@ interface UserInputCardProps {
   request: UserInputRequest;
   busy: boolean;
   failure: boolean;
+  queuePosition?: number;
+  queueLength?: number;
+  onPrevious?: () => void;
+  onNext?: () => void;
   onDecision: (decision: UserInputDecision) => void;
   onResume?: () => void;
 }
 
-export function UserInputCard({ request, busy, failure, onDecision, onResume }: UserInputCardProps) {
+export function UserInputCard({
+  request,
+  busy,
+  failure,
+  queuePosition,
+  queueLength,
+  onPrevious,
+  onNext,
+  onDecision,
+  onResume,
+}: UserInputCardProps) {
   const { t } = useLocale();
   const [drafts, setDrafts] = useState<Record<string, DraftValue>>({});
   const [validation, setValidation] = useState<string>();
@@ -68,6 +82,18 @@ export function UserInputCard({ request, busy, failure, onDecision, onResume }: 
         </div>
         <span className="user-input-status">{t(`userInputPurpose_${request.purpose}`)}</span>
       </header>
+
+      {(queueLength ?? 0) > 1 ? (
+        <nav className="plan-card-actions" aria-label={t("userInputQueueLabel")}>
+          <Button type="button" variant="secondary" disabled={busy || onPrevious === undefined} onClick={onPrevious}>
+            {t("userInputPrevious")}
+          </Button>
+          <span>{t("userInputQueuePosition", { position: queuePosition ?? 1, total: queueLength ?? 1 })}</span>
+          <Button type="button" variant="secondary" disabled={busy || onNext === undefined} onClick={onNext}>
+            {t("userInputNext")}
+          </Button>
+        </nav>
+      ) : null}
 
       {waitingForContinuation ? (
         <div className="user-input-recovery" role="status">

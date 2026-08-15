@@ -366,6 +366,9 @@ pub struct ConversationDisplayPageV1 {
     pub task_control: Option<ConversationTaskControlV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_review: Option<sigil_kernel::PublicPlanReview>,
+    /// Stable, oldest-first attention queue. `user_input` remains the first item for v1 clients.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_inputs: Vec<sigil_kernel::PublicUserInputRequestV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input: Option<sigil_kernel::PublicUserInputRequestV1>,
 }
@@ -986,20 +989,18 @@ pub fn conversation_display_page_from_records(
         None
     };
 
-    let plan_review_user_input = plan_review.pending_user_input();
-    let durable_user_input = user_input
-        .pending()
-        .max_by_key(|state| state.requested.request.requested_at_unix_ms)
-        .map(sigil_kernel::UserInputRequestStateV1::public_view);
-    let projected_user_input = durable_user_input
-        .into_iter()
-        .chain(plan_review_user_input)
-        .chain(
-            agent_user_input
-                .pending()
-                .map(|route| route.request.clone()),
-        )
-        .max_by_key(|request| request.requested_at_unix_ms);
+    let projected_user_inputs = stable_pending_user_inputs(
+        user_input
+            .pending()
+            .map(sigil_kernel::UserInputRequestStateV1::public_view)
+            .chain(plan_review.pending_user_input())
+            .chain(
+                agent_user_input
+                    .pending()
+                    .map(|route| route.request.clone()),
+            ),
+    );
+    let projected_user_input = projected_user_inputs.first().cloned();
     Ok(ConversationDisplayPageV1 {
         schema_version: CONVERSATION_DISPLAY_SCHEMA_VERSION,
         session_scope_id: expected_scope.to_owned(),
@@ -1011,6 +1012,7 @@ pub fn conversation_display_page_from_records(
         has_more,
         task_control: task_control.current(),
         plan_review: plan_review.into_public(current_workspace_snapshot_id),
+        user_inputs: projected_user_inputs,
         user_input: projected_user_input,
     })
 }
@@ -2249,12 +2251,10 @@ pub fn public_plan_review_from_entries(
     projection.into_public(current_workspace_snapshot_id)
 }
 
-/// Projects the newest unresolved attention request from ordinary session truth or a suspended
-/// PlanReview child mirror. Product surfaces use this on reload instead of keeping renderer-local
-/// question authority.
-pub fn public_user_input_from_entries(
+/// Projects every unresolved attention request in stable oldest-first order.
+pub fn public_user_inputs_from_entries(
     entries: &[sigil_kernel::SessionLogEntry],
-) -> Result<Option<sigil_kernel::PublicUserInputRequestV1>> {
+) -> Result<Vec<sigil_kernel::PublicUserInputRequestV1>> {
     let user_input = sigil_kernel::UserInputProjectionV1::from_session_entries(entries)?;
     let agent_user_input =
         sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(entries)?;
@@ -2262,16 +2262,48 @@ pub fn public_user_input_from_entries(
     for entry in entries {
         plan_review.apply_entry(entry.clone());
     }
-    Ok(user_input
-        .pending()
-        .map(sigil_kernel::UserInputRequestStateV1::public_view)
-        .chain(plan_review.pending_user_input())
-        .chain(
-            agent_user_input
-                .pending()
-                .map(|route| route.request.clone()),
-        )
-        .max_by_key(|request| request.requested_at_unix_ms))
+    Ok(stable_pending_user_inputs(
+        user_input
+            .pending()
+            .map(sigil_kernel::UserInputRequestStateV1::public_view)
+            .chain(plan_review.pending_user_input())
+            .chain(
+                agent_user_input
+                    .pending()
+                    .map(|route| route.request.clone()),
+            ),
+    ))
+}
+
+/// Compatibility projection for v1 product surfaces that only understand one request.
+///
+/// The selected request is the first entry in the canonical oldest-first attention queue.
+pub fn public_user_input_from_entries(
+    entries: &[sigil_kernel::SessionLogEntry],
+) -> Result<Option<sigil_kernel::PublicUserInputRequestV1>> {
+    Ok(public_user_inputs_from_entries(entries)?.into_iter().next())
+}
+
+fn stable_pending_user_inputs(
+    requests: impl IntoIterator<Item = sigil_kernel::PublicUserInputRequestV1>,
+) -> Vec<sigil_kernel::PublicUserInputRequestV1> {
+    const MAX_ATTENTION_REQUESTS: usize = 64;
+    let mut deduplicated = BTreeMap::new();
+    for request in requests {
+        deduplicated.insert(
+            (request.identity.clone(), request.request_hash.clone()),
+            request,
+        );
+    }
+    let mut requests = deduplicated.into_values().collect::<Vec<_>>();
+    requests.sort_by(|left, right| {
+        left.requested_at_unix_ms
+            .cmp(&right.requested_at_unix_ms)
+            .then_with(|| left.identity.cmp(&right.identity))
+            .then_with(|| left.request_hash.cmp(&right.request_hash))
+    });
+    requests.truncate(MAX_ATTENTION_REQUESTS);
+    requests
 }
 
 fn compact_plan_review_summary(summary: &str) -> (String, bool) {
@@ -2292,4 +2324,56 @@ fn compact_plan_review_summary(summary: &str) -> (String, bool) {
         .collect::<String>();
     compact.push('…');
     (compact, true)
+}
+
+#[cfg(test)]
+mod attention_queue_tests {
+    use super::stable_pending_user_inputs;
+
+    fn request(
+        request_id: &str,
+        source_thread_id: &str,
+        requested_at_unix_ms: u64,
+    ) -> anyhow::Result<sigil_kernel::PublicUserInputRequestV1> {
+        Ok(sigil_kernel::PublicUserInputRequestV1 {
+            identity: sigil_kernel::UserInputIdentityV1 {
+                session_scope_id: sigil_kernel::SessionScopeId::new("scope")?,
+                root_logical_run_id: sigil_kernel::LogicalRunId::new("root")?,
+                source_thread_id: sigil_kernel::AgentThreadId::new(source_thread_id)?,
+                request_id: sigil_kernel::UserInputRequestId::new(request_id)?,
+                generation: 1,
+                source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+            },
+            request_hash: format!(
+                "sha256:{}",
+                request_id
+                    .chars()
+                    .next()
+                    .unwrap_or('b')
+                    .to_string()
+                    .repeat(64)
+            ),
+            source: sigil_kernel::UserInputSourceV1::Agent,
+            purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+            prompt: request_id.to_owned(),
+            questions: Vec::new(),
+            allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
+            requested_at_unix_ms,
+            status: sigil_kernel::UserInputStatusV1::Requested,
+            answer_receipt: None,
+            resolution: None,
+        })
+    }
+
+    #[test]
+    fn pending_attention_queue_is_oldest_first_and_deduplicated_by_exact_binding()
+    -> anyhow::Result<()> {
+        let newer = request("b", "child-b", 20)?;
+        let older = request("a", "child-a", 10)?;
+        let queue = stable_pending_user_inputs([newer.clone(), older.clone(), older]);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].identity.request_id.as_str(), "a");
+        assert_eq!(queue[1].identity.request_id.as_str(), "b");
+        Ok(())
+    }
 }

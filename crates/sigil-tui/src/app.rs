@@ -309,6 +309,8 @@ pub(crate) struct PendingUserInputForm {
     pub(crate) request: Option<sigil_kernel::PublicUserInputRequestV1>,
     pub(crate) source: UserInputFormSource,
     pub(crate) recovery_command: Option<sigil_kernel::UserInputDecisionCommandV1>,
+    pub(crate) queue_position: usize,
+    pub(crate) queue_length: usize,
     pub(crate) open: bool,
     pub(crate) focused_question: usize,
     pub(crate) focus_actions: bool,
