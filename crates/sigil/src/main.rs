@@ -201,6 +201,11 @@ enum Commands {
     ModelEvalRouteContract {
         #[arg(long = "case", default_value = "orchestration-v1")]
         cases: Vec<String>,
+        #[arg(
+            long = "provider-system-fingerprint",
+            help = "Exact system fingerprint captured by the release-owner live provider probe"
+        )]
+        provider_system_fingerprint: String,
         #[arg(long)]
         output: PathBuf,
     },
@@ -569,12 +574,17 @@ async fn run_main(cli: Cli) -> Result<u8> {
             )
             .await?;
         }
-        Commands::ModelEvalRouteContract { cases, output } => {
+        Commands::ModelEvalRouteContract {
+            cases,
+            provider_system_fingerprint,
+            output,
+        } => {
             model_eval_route_contract_command(
                 &config_path,
                 &cwd,
                 &BuildInfo::current(),
                 cases,
+                provider_system_fingerprint,
                 output,
             )?;
         }
@@ -604,6 +614,7 @@ fn model_eval_route_contract_command(
     launch_cwd: &Path,
     build_info: &BuildInfo,
     cases: Vec<String>,
+    provider_system_fingerprint: String,
     output: PathBuf,
 ) -> Result<()> {
     let fixture_roots = resolve_model_eval_fixture_roots(launch_cwd, &cases)?;
@@ -616,6 +627,7 @@ fn model_eval_route_contract_command(
         &sigil_runtime::model_eval::ModelEvalRouteContractBuildRequest {
             config_path: config_path.to_path_buf(),
             fixture_roots,
+            provider_system_fingerprint,
         },
     )?;
     if contract.sigil_commit != build_info.git_hash {

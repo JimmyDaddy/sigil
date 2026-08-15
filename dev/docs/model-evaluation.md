@@ -23,8 +23,9 @@ fails before output-directory creation or provider dispatch.
 
 ## Run an RFC-0053 orchestration candidate campaign
 
-O8c uses the frozen `orchestration-v1` corpus: 20 negative cases and 10 positive cases, with at
-least three homogeneous repetitions per case. Verify that the committed corpus has not drifted:
+O8c uses the frozen `orchestration-v1` corpus: 20 Chat, 15 PlanReview, and 15 DirectTask cases,
+with at least three homogeneous repetitions per case. Verify that the committed corpus has not
+drifted:
 
 ```bash
 node dev/evals/generate-orchestration-corpus.mjs --check
@@ -40,6 +41,7 @@ target/release/sigil \
   --config ~/.sigil/sigil.toml \
   model-eval-route-contract \
   --case orchestration-v1 \
+  --provider-system-fingerprint <live-system-fingerprint> \
   --output .repo-local-dev/evals/route.toml
 ```
 
@@ -50,6 +52,12 @@ candidate binary. The routing digest binds both the model-visible semantic routi
 the internal `request_task_planning` schema; the planner digest binds the planner system/user
 contract, and the system digest also binds the participant execution contract. The host does not
 use a prompt keyword classifier. The embedded CLI/runtime commit identities must agree.
+
+`<live-system-fingerprint>` must come from a release-owner provider probe against the same official
+route. It is an explicit observation, not a tokenizer-parity constant or a model-alias inference.
+The campaign re-derives the complete contract from the exact candidate binary, config, corpus,
+prompts, and tool profiles before provider dispatch; only that exact DeepSeek candidate receives the
+evaluation-only DirectTask capability needed to qualify a rollout before its sidecar exists.
 
 The provider kind, endpoint family, canonical model version, routing/planner/system prompt digests,
 tool/profile contract digest, Sigil commit, and build must all come from the same candidate build

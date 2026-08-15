@@ -18,10 +18,7 @@ use sigil_kernel::{
     task_participant_system_prompt_contract_material, task_plan_update_tool_spec,
     task_planner_prompt_contract_material,
 };
-use sigil_provider_deepseek::{
-    DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT, DEFAULT_DEEPSEEK_V4_FLASH_MODEL,
-    DeepSeekProviderConfig,
-};
+use sigil_provider_deepseek::{DEFAULT_DEEPSEEK_V4_FLASH_MODEL, DeepSeekProviderConfig};
 
 use super::{
     LoadedModelEvalFixture, MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION,
@@ -47,6 +44,11 @@ const DEEPSEEK_CANONICAL_MODEL_NAME: &str = "DeepSeek-V4-Flash";
 pub struct ModelEvalRouteContractBuildRequest {
     pub config_path: PathBuf,
     pub fixture_roots: Vec<PathBuf>,
+    /// Exact provider fingerprint observed by a release-owner live probe.
+    ///
+    /// This must not be inferred from the tokenizer parity profile: the hosted backend may roll
+    /// independently while retaining the same model and tokenizer artifacts.
+    pub provider_system_fingerprint: String,
 }
 
 /// Derives a truthful route contract from the exact candidate binary, isolated evaluation
@@ -60,6 +62,7 @@ pub struct ModelEvalRouteContractBuildRequest {
 pub fn build_model_eval_orchestration_route_contract(
     request: &ModelEvalRouteContractBuildRequest,
 ) -> Result<ModelEvalOrchestrationRouteContractV1> {
+    validate_provider_system_fingerprint(&request.provider_system_fingerprint)?;
     let source_config = RootConfig::load(&request.config_path)
         .context("route contract source config preflight failed")?;
     let loaded = crate::provider_connections::load_provider_connections(&source_config);
@@ -165,7 +168,8 @@ pub fn build_model_eval_orchestration_route_contract(
         provider_kind: provider_kind.to_owned(),
         endpoint_family: DEEPSEEK_ENDPOINT_FAMILY.to_owned(),
         canonical_model_version: format!(
-            "{DEEPSEEK_CANONICAL_MODEL_NAME}@{DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT}"
+            "{DEEPSEEK_CANONICAL_MODEL_NAME}@{}",
+            request.provider_system_fingerprint
         ),
         routing_prompt_digest,
         planner_prompt_digest,
@@ -174,6 +178,18 @@ pub fn build_model_eval_orchestration_route_contract(
         sigil_commit,
         sigil_build: ORCHESTRATION_RUNTIME_BUILD_ID.to_owned(),
     })
+}
+
+fn validate_provider_system_fingerprint(value: &str) -> Result<()> {
+    if value.trim() != value
+        || value.is_empty()
+        || value.chars().count() > 512
+        || value.chars().any(char::is_control)
+        || value.contains('@')
+    {
+        bail!("route-contract provider system fingerprint is invalid");
+    }
+    Ok(())
 }
 
 /// Publishes a newly derived contract without replacing an existing candidate artifact.

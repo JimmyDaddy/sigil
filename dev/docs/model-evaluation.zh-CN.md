@@ -22,21 +22,37 @@ credential 使用。缺少环境变量时 campaign 会在创建输出目录和 p
 
 ## 执行 RFC-0053 orchestration 候选评测
 
-O8c 使用冻结的 `orchestration-v1` corpus：20 个 negative case、10 个 positive case，每个 case
-至少 3 次同质 repetition。执行前先确认 committed corpus 未漂移：
+O8c 使用冻结的 `orchestration-v1` corpus：20 个 Chat、15 个 PlanReview、15 个 DirectTask
+case，每个 case 至少 3 次同质 repetition。执行前先确认 committed corpus 未漂移：
 
 ```bash
 node dev/evals/generate-orchestration-corpus.mjs --check
 ```
 
-候选 release owner 还必须为冻结 binary 准备一个 route contract。它不是普通配置，也不能从
-model alias 或评测结果反推；其中 provider kind、endpoint family、canonical model version、
+候选 release owner 还必须先从同一官方 route 的 provider probe 取得真实
+`system_fingerprint`，再用冻结 binary 准备 route contract：
+
+```bash
+mkdir -p .repo-local-dev/evals
+target/release/sigil \
+  --config ~/.sigil/sigil.toml \
+  model-eval-route-contract \
+  --case orchestration-v1 \
+  --provider-system-fingerprint <live-system-fingerprint> \
+  --output .repo-local-dev/evals/route.toml
+```
+
+这个 fingerprint 是 release-owner 的显式 live observation，不能从 tokenizer parity 常量或
+model alias 推导。route contract 不是普通配置，也不能从评测结果反推；其中 provider kind、
+endpoint family、canonical model version、
 routing/planner/system prompt digest、tool/profile contract digest、Sigil commit 与 build 必须来自
 同一候选构建的发布元数据。占位值、旧 build 的 digest 或可漂移 alias 会让报告失去 rollout
 资格。routing digest 同时绑定模型可见的语义路由 system prompt 与内部
 `request_task_planning` schema；planner digest 绑定 planner 的 system/user contract，system
-digest 还绑定 participant execution contract；host 不使用 prompt 关键词分类器。文件使用以下
-V1 字段：
+digest 还绑定 participant execution contract；host 不使用 prompt 关键词分类器。campaign 在
+provider dispatch 前会根据 exact candidate binary、config、完整 corpus、prompts 与 tool
+profiles 重新推导并比对 contract；只有这个完全匹配的 DeepSeek candidate 才获得用于 sidecar
+生成前资格验证的 evaluation-only DirectTask capability。文件使用以下 V1 字段：
 
 ```toml
 schema_version = 1

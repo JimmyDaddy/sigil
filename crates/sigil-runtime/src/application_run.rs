@@ -654,6 +654,9 @@ pub struct ApplicationRunServices {
     /// RFC-0062 14.1: process-scoped scratch lease registry shared by every run surface so
     /// tool/terminal leases, session-delete cleanup and TTL GC observe the same authority.
     scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+    /// Release-candidate model eval may exercise DirectTask before a rollout sidecar exists.
+    /// Production adapters cannot set this crate-private evidence override.
+    model_eval_route_qualified: bool,
 }
 
 /// Process-local typed control for persistent terminal tasks admitted by one prepared run.
@@ -737,6 +740,7 @@ impl ApplicationRunServices {
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
             scratch_control: None,
+            model_eval_route_qualified: false,
         }
     }
 
@@ -753,6 +757,7 @@ impl ApplicationRunServices {
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
             scratch_control: None,
+            model_eval_route_qualified: false,
         }
     }
 
@@ -763,6 +768,11 @@ impl ApplicationRunServices {
         builder: Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
     ) -> Self {
         self.task_role_provider_builder = Some(builder);
+        self
+    }
+
+    pub(crate) fn with_model_eval_route_qualification(mut self) -> Self {
+        self.model_eval_route_qualified = true;
         self
     }
 
@@ -3124,7 +3134,8 @@ async fn prepare_application_run_internal(
         provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
         // DirectTask additionally requires an attached task executor; without one the route
         // stays at the ReviewFirst baseline so plan review remains usable.
-        route_qualified: crate::route_qualification_evidence(&root_config)
+        route_qualified: (crate::route_qualification_evidence(&root_config)
+            || services.model_eval_route_qualified)
             && task_execution.is_some(),
     });
     if queued_first_request.is_none() && agent_invocation.is_none() {

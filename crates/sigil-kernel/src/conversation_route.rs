@@ -628,7 +628,7 @@ pub fn submit_plan_draft_tool_spec() -> ToolSpec {
                             "target_paths": {"type": "array", "items": {"type": "string"}},
                             "suggested_checks": {"type": "array", "items": {"oneOf": [
                                 {"type": "string"},
-                                {"type": "object", "properties": {"check_spec_id": {"type": "string"}, "command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "effect": {"type": "string", "enum": ["read_only", "write"]}, "source_line": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
+                                {"type": "object", "properties": {"check_spec_id": {"type": "string"}, "command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "effect": {"type": "string", "enum": ["read_only", "workspace_write"]}, "source_line": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
                             ]}},
                             "risk": {"type": "string"},
                             "notes": {"type": "array", "items": {"type": "string"}},
@@ -675,7 +675,7 @@ pub fn submit_plan_draft_tool_spec() -> ToolSpec {
                             "command": {"type": "string"},
                             "args": {"type": "array", "items": {"type": "string"}},
                             "cwd": {"type": "string"},
-                            "effect": {"type": "string", "enum": ["read_only", "write"]},
+                            "effect": {"type": "string", "enum": ["read_only", "workspace_write"]},
                             "source_line": {"type": "string"}
                         }, "required": ["command"], "additionalProperties": false}
                     ]}

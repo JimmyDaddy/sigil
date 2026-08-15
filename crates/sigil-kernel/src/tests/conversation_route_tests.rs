@@ -355,7 +355,10 @@ fn submit_plan_draft_validates_strict_schema() -> Result<()> {
             {"step_id": "s1", "title": "Update coordinator", "role": "executor", "depends_on": [], "mode": "write", "isolation": "sequential_workspace_write", "target_paths": ["src/coordinator.rs"]}
         ],
         "target_paths": ["src/coordinator.rs"],
-        "suggested_checks": ["cargo test"],
+        "suggested_checks": [
+            "cargo test",
+            {"command": "cargo", "args": ["check"], "effect": "workspace_write"}
+        ],
         "risk": "medium",
         "notes": ["keep api stable"]
     }"#;
@@ -366,7 +369,16 @@ fn submit_plan_draft_validates_strict_schema() -> Result<()> {
     assert_eq!(entry.steps.len(), 1);
     assert_eq!(entry.summary, "Refactor the coordinator");
     assert_eq!(entry.target_paths, vec!["src/coordinator.rs"]);
-    assert_eq!(entry.suggested_checks.len(), 1);
+    assert_eq!(entry.suggested_checks.len(), 2);
+    assert_eq!(
+        entry
+            .suggested_checks
+            .iter()
+            .find(|check| check.check_spec_id == "cargo-check")
+            .expect("structured check is retained")
+            .effect,
+        crate::ToolEffect::WorkspaceWrite
+    );
 
     let wrong_version = r#"{"schema_version": 1, "summary": "x", "steps": [{"title": "s"}], "target_paths": ["a"], "suggested_checks": []}"#;
     assert!(

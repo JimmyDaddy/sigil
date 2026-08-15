@@ -305,7 +305,8 @@ pub async fn run_model_eval_campaign(
     services: &ApplicationRunServices,
 ) -> Result<ModelEvalCampaignExecution> {
     let started_at_unix_ms = unix_time_ms()?;
-    let (fixtures, orchestration_corpus_digest) = preflight_campaign(&request)?;
+    let (fixtures, orchestration_corpus_digest, route_qualified_for_evaluation) =
+        preflight_campaign(&request)?;
     let planned_runs = fixtures
         .len()
         .checked_mul(request.repetitions as usize)
@@ -356,7 +357,8 @@ pub async fn run_model_eval_campaign(
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let run_services = model_eval_run_services(&materialized, services);
+            let run_services =
+                model_eval_run_services(&materialized, services, route_qualified_for_evaluation);
             let mut execution = execute_model_eval_run(
                 &materialized,
                 repetition,
@@ -399,13 +401,19 @@ pub async fn run_model_eval_campaign(
 fn model_eval_run_services(
     fixture: &MaterializedModelEvalFixture,
     services: &ApplicationRunServices,
+    route_qualified_for_evaluation: bool,
 ) -> ApplicationRunServices {
     if fixture.orchestration.is_none() {
         return services.clone();
     }
-    services.clone().with_task_role_provider_builder(Arc::new(
+    let services = services.clone().with_task_role_provider_builder(Arc::new(
         crate::agent_supervisor::task_role_runtime::RuntimeTaskRoleProviderBuilder,
-    ))
+    ));
+    if route_qualified_for_evaluation {
+        services.with_model_eval_route_qualification()
+    } else {
+        services
+    }
 }
 
 pub(crate) fn model_eval_reservation_microusd(
@@ -426,7 +434,7 @@ pub(crate) fn model_eval_reservation_microusd(
 
 fn preflight_campaign(
     request: &ModelEvalCampaignRequest,
-) -> Result<(Vec<LoadedModelEvalFixture>, Option<String>)> {
+) -> Result<(Vec<LoadedModelEvalFixture>, Option<String>, bool)> {
     if request.fixture_roots.is_empty() || request.fixture_roots.len() > MODEL_EVAL_MAX_CASES {
         bail!(
             "model eval campaign must contain between 1 and {} cases",
@@ -502,6 +510,7 @@ fn preflight_campaign(
         .iter()
         .filter(|fixture| fixture.manifest.orchestration.is_some())
         .count();
+    let mut route_qualified_for_evaluation = false;
     let orchestration_corpus_digest = match (
         orchestration_cases,
         request.orchestration_route_contract.as_ref(),
@@ -528,10 +537,33 @@ fn preflight_campaign(
             if corpus_versions.len() != 1 {
                 bail!("orchestration campaign must use one exact corpus version");
             }
+            if contract.provider_kind == "deepseek" {
+                let (_, provider_system_fingerprint) = contract
+                    .canonical_model_version
+                    .rsplit_once('@')
+                    .context("deepseek route contract must bind a provider system fingerprint")?;
+                let expected = super::build_model_eval_orchestration_route_contract(
+                    &super::ModelEvalRouteContractBuildRequest {
+                        config_path: request.config_path.clone(),
+                        fixture_roots: request.fixture_roots.clone(),
+                        provider_system_fingerprint: provider_system_fingerprint.to_owned(),
+                    },
+                )?;
+                if &expected != contract {
+                    bail!(
+                        "orchestration route contract does not match the exact candidate binary, config, corpus, prompts, and tool profiles"
+                    );
+                }
+                route_qualified_for_evaluation = true;
+            }
             Some(orchestration_corpus_digest(&fixtures))
         }
     };
-    Ok((fixtures, orchestration_corpus_digest))
+    Ok((
+        fixtures,
+        orchestration_corpus_digest,
+        route_qualified_for_evaluation,
+    ))
 }
 
 fn validate_orchestration_route_contract(

@@ -219,6 +219,7 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     let request = ModelEvalRouteContractBuildRequest {
         config_path,
         fixture_roots: orchestration_fixture_roots(),
+        provider_system_fingerprint: "fp-live-route".to_owned(),
     };
 
     let first =
@@ -226,13 +227,33 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     let second =
         build_model_eval_orchestration_route_contract(&request).expect("derive route contract");
 
+    for invalid_fingerprint in [
+        "",
+        " fp-live-route",
+        "fp-live-route ",
+        "fp@route",
+        "fp\nroute",
+    ] {
+        let error =
+            build_model_eval_orchestration_route_contract(&ModelEvalRouteContractBuildRequest {
+                provider_system_fingerprint: invalid_fingerprint.to_owned(),
+                ..request.clone()
+            })
+            .expect_err("invalid provider fingerprint must fail before contract derivation");
+        assert!(
+            error
+                .to_string()
+                .contains("provider system fingerprint is invalid")
+        );
+    }
+
     assert_eq!(first, second);
     assert_eq!(first.provider_kind, "deepseek");
     assert_eq!(first.endpoint_family, "openai_chat_completions");
     assert!(
         first
             .canonical_model_version
-            .starts_with("DeepSeek-V4-Flash@fp_")
+            .eq("DeepSeek-V4-Flash@fp-live-route")
     );
     for digest in [
         &first.routing_prompt_digest,

@@ -276,14 +276,21 @@ fn cli_parses_hidden_model_eval_route_contract_command() -> Result<()> {
         "model-eval-route-contract",
         "--case",
         "orchestration-v1",
+        "--provider-system-fingerprint",
+        "fp-live",
         "--output",
         "/tmp/route.toml",
     ])?;
 
     assert!(matches!(
         cli.command,
-        Some(Commands::ModelEvalRouteContract { cases, output })
-            if cases == ["orchestration-v1"] && output == Path::new("/tmp/route.toml")
+        Some(Commands::ModelEvalRouteContract {
+            cases,
+            provider_system_fingerprint,
+            output,
+        }) if cases == ["orchestration-v1"]
+            && provider_system_fingerprint == "fp-live"
+            && output == Path::new("/tmp/route.toml")
     ));
     Ok(())
 }

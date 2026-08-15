@@ -1893,7 +1893,7 @@ TLS handshake EOF 在任何可确认的 provider 输出前失败，route gate �
 
 O8c 的实现与准入协议已经完成。qualification 不作为可漂移的源码布尔值保存：release owner
 必须从最终候选 binary 生成 route contract，并对同一 commit/build/config/prompt/tool/corpus
-identity 重新执行 deterministic、PTY、chaos 与目标 provider route 的 30 case × 3 真实模型
+identity 重新执行 deterministic、PTY、chaos 与目标 provider route 的当前冻结 50 case × 3 真实模型
 报告。只有报告自身产生 `qualified` route gate 时，后续 release assembly 才能生成 sidecar；
 旧候选、不同 task config（包括 `auto + explicit_request_only`）或不同 build 的成功报告都不能
 授权 `auto + proactive`。
