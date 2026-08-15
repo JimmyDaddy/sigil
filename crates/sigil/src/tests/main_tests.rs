@@ -337,7 +337,7 @@ fn model_eval_cost_and_case_preflight_are_fail_closed() -> Result<()> {
 fn model_eval_frozen_orchestration_selector_expands_exact_corpus() -> Result<()> {
     let root = unique_temp_workspace("sigil-model-eval-orchestration-corpus")?;
     let corpus_root = root.join("dev/evals/model-fixtures/orchestration-v1");
-    for (case_class, count) in [("negative", 20), ("positive", 10)] {
+    for (case_class, count) in [("negative", 20), ("positive", 30)] {
         for index in 0..count {
             fs::create_dir_all(
                 corpus_root
@@ -348,7 +348,7 @@ fn model_eval_frozen_orchestration_selector_expands_exact_corpus() -> Result<()>
     }
 
     let cases = super::resolve_model_eval_fixture_roots(&root, &["orchestration-v1".to_owned()])?;
-    assert_eq!(cases.len(), 30);
+    assert_eq!(cases.len(), 50);
     assert!(
         cases
             .iter()
@@ -362,10 +362,10 @@ fn model_eval_frozen_orchestration_selector_expands_exact_corpus() -> Result<()>
             .all(|path| path.starts_with(corpus_root.join("positive")))
     );
 
-    fs::remove_dir_all(corpus_root.join("positive/case-09"))?;
+    fs::remove_dir_all(corpus_root.join("positive/case-29"))?;
     let error = super::resolve_model_eval_fixture_roots(&root, &["orchestration-v1".to_owned()])
         .expect_err("an incomplete frozen corpus must fail closed");
-    assert!(error.to_string().contains("exactly 30 cases"));
+    assert!(error.to_string().contains("exactly 50 cases"));
     fs::remove_dir_all(root)?;
     Ok(())
 }

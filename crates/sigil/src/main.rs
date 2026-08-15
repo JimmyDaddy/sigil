@@ -813,6 +813,8 @@ fn resolve_model_eval_fixture_roots(launch_cwd: &Path, cases: &[String]) -> Resu
     Ok(fixture_roots)
 }
 
+const FROZEN_ORCHESTRATION_CASE_COUNT: usize = 50;
+
 fn resolve_frozen_orchestration_fixture_roots(fixture_root: &Path) -> Result<Vec<PathBuf>> {
     let corpus_root = fixture_root.join("orchestration-v1");
     let mut fixture_roots = Vec::new();
@@ -838,9 +840,9 @@ fn resolve_frozen_orchestration_fixture_roots(fixture_root: &Path) -> Result<Vec
         }
     }
     fixture_roots.sort();
-    if fixture_roots.len() != 30 {
+    if fixture_roots.len() != FROZEN_ORCHESTRATION_CASE_COUNT {
         anyhow::bail!(
-            "orchestration-v1 corpus must contain exactly 30 cases, found {}",
+            "orchestration-v1 corpus must contain exactly {FROZEN_ORCHESTRATION_CASE_COUNT} cases, found {}",
             fixture_roots.len()
         );
     }

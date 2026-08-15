@@ -240,27 +240,19 @@ fn captured_len(output: &Arc<Mutex<Vec<u8>>>) -> usize {
 fn wait_for_text_after(output: &Arc<Mutex<Vec<u8>>>, offset: usize, needle: &str) -> Result<()> {
     let deadline = Instant::now() + PROCESS_TIMEOUT;
     loop {
-        let captured = output
-            .lock()
-            .map(|bytes| {
-                let offset = offset.min(bytes.len());
-                String::from_utf8_lossy(&bytes[offset..]).into_owned()
-            })
-            .unwrap_or_else(|_| "<captured output unavailable>".to_owned());
-        if captured.contains(needle) {
+        let found = output.lock().is_ok_and(|bytes| {
+            let offset = offset.min(bytes.len());
+            bytes[offset..]
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        });
+        if found {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            let tail = captured
-                .chars()
-                .rev()
-                .take(2_000)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>();
+            let (captured_bytes, tail) = captured_tail(output, offset);
             return Err(anyhow!(
-                "timed out waiting for fresh {needle:?}; captured tail={tail:?}"
+                "timed out waiting for fresh {needle:?}; captured_bytes={captured_bytes}; captured tail={tail:?}"
             ));
         }
         thread::sleep(Duration::from_millis(25));
@@ -270,25 +262,37 @@ fn wait_for_text_after(output: &Arc<Mutex<Vec<u8>>>, offset: usize, needle: &str
 fn wait_for_text(output: &Arc<Mutex<Vec<u8>>>, needle: &str) -> Result<()> {
     let deadline = Instant::now() + PROCESS_TIMEOUT;
     loop {
-        let captured = captured_text(output);
-        if captured.contains(needle) {
+        let found = output.lock().is_ok_and(|bytes| {
+            bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        });
+        if found {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            let tail = captured
-                .chars()
-                .rev()
-                .take(2_000)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>();
+            let (captured_bytes, tail) = captured_tail(output, 0);
             return Err(anyhow!(
-                "timed out waiting for {needle:?}; captured tail={tail:?}"
+                "timed out waiting for {needle:?}; captured_bytes={captured_bytes}; captured tail={tail:?}"
             ));
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn captured_tail(output: &Arc<Mutex<Vec<u8>>>, offset: usize) -> (usize, String) {
+    output.lock().map_or_else(
+        |_| (0, "<captured output unavailable>".to_owned()),
+        |bytes| {
+            let offset = offset.min(bytes.len());
+            let captured = &bytes[offset..];
+            let tail_start = captured.len().saturating_sub(8 * 1024);
+            (
+                captured.len(),
+                String::from_utf8_lossy(&captured[tail_start..]).into_owned(),
+            )
+        },
+    )
 }
 
 fn write_input(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
