@@ -1,4 +1,5 @@
 use super::*;
+use ratatui::style::Color;
 
 #[test]
 fn wrapped_line_rows_counts_visual_rows() {
@@ -84,6 +85,29 @@ fn one_cell_rows_replace_unrenderable_wide_graphemes_without_phantom_rows() {
     let rows = wrap_terminal_lines(vec![Line::raw("你")], 1);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].spans[0].content.as_ref(), "?");
+}
+
+#[test]
+fn terminal_line_wrapping_preserves_embedded_line_breaks() {
+    let rows = wrap_terminal_lines(
+        vec![Line::from(vec![
+            Span::styled("alpha\nbeta\n", Style::default().fg(Color::Blue)),
+            Span::styled("gamma", Style::default().fg(Color::Green)),
+        ])],
+        20,
+    );
+    let values = rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec!["alpha", "beta", "gamma"]);
+    assert_eq!(rows[0].spans[0].style.fg, Some(Color::Blue));
+    assert_eq!(rows[2].spans[0].style.fg, Some(Color::Green));
 }
 
 #[test]

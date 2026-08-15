@@ -431,6 +431,83 @@ fn short_shell_reserves_the_pending_plan_action_above_a_tall_composer() -> anyho
 }
 
 #[test]
+fn long_plan_workbench_is_fully_reachable_at_all_supported_acceptance_sizes() -> anyhow::Result<()>
+{
+    for (width, height) in [(32, 8), (56, 12), (96, 16), (132, 34)] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.set_terminal_size(width, height);
+        let step_titles = (1..=6)
+            .map(|index| format!("Acceptance step {index}"))
+            .collect::<Vec<_>>();
+        let mut pending = PendingPlanApproval::test_fixture(
+            "plan_matrix",
+            "Long plan acceptance fixture",
+            "sha256:matrix",
+            "Every line in this long plan must remain reachable.",
+            step_titles,
+            vec!["crates/sigil-tui/src/ui/plan_workbench.rs".to_owned()],
+            vec!["cargo test -p sigil-tui".to_owned()],
+        );
+        for (step_index, step) in pending.detail.steps.iter_mut().enumerate() {
+            step.detail = Some(
+                (1..=20)
+                    .map(|line| format!("S{}L{line:02} detail", step_index + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        pending.workbench_open = true;
+        app.composer.pending_plan_approval = Some(pending);
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| render(frame, &app))?;
+        let first_page = rendered_content(&terminal);
+        assert!(
+            first_page.contains("Plan Review"),
+            "missing header at {width}x{height}"
+        );
+        assert!(
+            first_page.contains("Summary"),
+            "missing plan summary heading at {width}x{height}"
+        );
+        let max_scroll = app
+            .pending_plan_approval()
+            .expect("open plan workbench")
+            .workbench_scroll_extent
+            .get();
+        assert!(
+            max_scroll >= 100,
+            "120-line plan did not produce a reachable scroll extent at {width}x{height}: {max_scroll}"
+        );
+
+        let mut reachable = first_page;
+        for scroll in 1..=max_scroll {
+            app.composer
+                .pending_plan_approval
+                .as_mut()
+                .expect("open plan workbench")
+                .workbench_scroll = scroll;
+            terminal.draw(|frame| render(frame, &app))?;
+            reachable.push_str(&rendered_content(&terminal));
+        }
+        assert!(
+            reachable.contains("S1L01") && reachable.contains("S6L20"),
+            "scrolling did not expose the complete 120-line plan at {width}x{height}"
+        );
+        assert!(
+            reachable.contains("sha256:matrix"),
+            "End did not expose the immutable plan footer at {width}x{height}"
+        );
+        assert!(
+            reachable.contains("Run") && reachable.contains("Reject"),
+            "explicit actions disappeared at {width}x{height}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn short_shell_reserves_action_and_egress_disclosure_without_overlap() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(80, 10);

@@ -5227,6 +5227,8 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
     assert!(app.has_modal());
     assert!(app.approval.pending.is_some());
+    app.set_pending_user_input(pending_text_user_input_request()?);
+    assert!(app.pending_user_input().is_some());
 
     app.handle_worker_message(WorkerMessage::RunFinished {
         result: sigil_kernel::AgentRunResult {
@@ -5241,6 +5243,10 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert!(!app.has_modal());
     assert!(app.approval.pending.is_none());
+    assert!(
+        app.pending_user_input().is_none(),
+        "the returned durable session is authoritative after a continuation settles"
+    );
     assert_eq!(app.last_notice(), Some("agent idle"));
     assert!(
         app.events

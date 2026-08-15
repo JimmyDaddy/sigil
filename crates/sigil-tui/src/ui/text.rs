@@ -193,12 +193,27 @@ fn wrap_terminal_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     let mut rows = Vec::new();
     let mut current_spans = Vec::new();
     let mut current_width = 0usize;
+    let mut ended_with_line_break = false;
     let line_style = line.style;
     let line_alignment = line.alignment;
 
     for span in line.spans {
         let mut segment = String::new();
         for grapheme in span.content.as_ref().graphemes(true) {
+            if grapheme
+                .chars()
+                .any(|character| matches!(character, '\n' | '\r'))
+            {
+                push_styled_segment(&mut current_spans, &mut segment, span.style);
+                rows.push(wrapped_line(
+                    std::mem::take(&mut current_spans),
+                    line_style,
+                    line_alignment,
+                ));
+                current_width = 0;
+                ended_with_line_break = true;
+                continue;
+            }
             let Some(grapheme_width) = terminal_grapheme_width(grapheme) else {
                 continue;
             };
@@ -224,11 +239,12 @@ fn wrap_terminal_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
             }
             segment.push_str(grapheme);
             current_width = current_width.saturating_add(grapheme_width);
+            ended_with_line_break = false;
         }
         push_styled_segment(&mut current_spans, &mut segment, span.style);
     }
 
-    if !current_spans.is_empty() || rows.is_empty() {
+    if !current_spans.is_empty() || rows.is_empty() || ended_with_line_break {
         rows.push(wrapped_line(current_spans, line_style, line_alignment));
     }
     rows

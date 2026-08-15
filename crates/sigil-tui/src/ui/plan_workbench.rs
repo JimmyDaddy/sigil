@@ -109,12 +109,10 @@ fn render_body(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, the
 
 fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'static>> {
     let detail = &pending.detail;
-    let mut lines = vec![
-        heading("Summary", theme),
-        Line::raw(detail.summary.clone()),
-        Line::raw(String::new()),
-        heading("Steps", theme),
-    ];
+    let mut lines = vec![heading("Summary", theme)];
+    push_multiline(&mut lines, "", &detail.summary);
+    lines.push(Line::raw(String::new()));
+    lines.push(heading("Steps", theme));
     for (index, step) in detail.steps.iter().enumerate() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -127,7 +125,7 @@ fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'
             ),
         ]));
         if let Some(text) = &step.detail {
-            lines.push(indented("   ", text));
+            push_multiline(&mut lines, "   ", text);
         }
         let contract = [
             step.role.map(|value| format!("role={}", value.as_str())),
@@ -151,9 +149,11 @@ fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'
             .collect::<Vec<_>>();
         push_list(&mut lines, "   checks: ", &checks);
         if let Some(risk) = &step.risk {
-            lines.push(indented("   risk: ", risk));
+            push_multiline(&mut lines, "   risk: ", risk);
         }
-        push_list(&mut lines, "   notes: ", &step.notes);
+        for note in &step.notes {
+            push_multiline(&mut lines, "   note: ", note);
+        }
         lines.push(Line::raw(String::new()));
     }
     if !detail.target_paths.is_empty() {
@@ -172,13 +172,13 @@ fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'
     }
     if let Some(risk) = &detail.risk {
         lines.push(heading("Risk", theme));
-        lines.push(Line::raw(risk.clone()));
+        push_multiline(&mut lines, "", risk);
         lines.push(Line::raw(String::new()));
     }
     if !detail.notes.is_empty() {
         lines.push(heading("Notes", theme));
         for note in &detail.notes {
-            lines.push(indented("• ", note));
+            push_multiline(&mut lines, "• ", note);
         }
         lines.push(Line::raw(String::new()));
     }
@@ -200,6 +200,12 @@ fn heading(value: &str, theme: &Theme) -> Line<'static> {
 
 fn indented(prefix: &str, value: &str) -> Line<'static> {
     Line::raw(format!("{prefix}{value}"))
+}
+
+fn push_multiline(lines: &mut Vec<Line<'static>>, prefix: &str, value: &str) {
+    for line in value.split('\n') {
+        lines.push(indented(prefix, line.trim_end_matches('\r')));
+    }
 }
 
 fn push_list(lines: &mut Vec<Line<'static>>, prefix: &str, values: &[String]) {

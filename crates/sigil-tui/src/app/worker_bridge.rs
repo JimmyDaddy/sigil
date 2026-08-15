@@ -426,6 +426,10 @@ impl AppState {
                 self.finish_worker_streams();
                 self.last_notice = Some("agent idle".to_owned());
                 self.sync_current_session_state(entries);
+                // A user-input continuation settles its lifecycle in the returned session before
+                // this generic chat completion is published. Reconcile durable attention now so
+                // the accepted `Resume` tombstone cannot keep masking the committed final answer.
+                self.restore_durable_attention_surfaces();
                 self.refresh_session_history();
                 self.recompute_compaction_status(false);
                 self.schedule_balance_refresh();
