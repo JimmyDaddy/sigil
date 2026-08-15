@@ -30,7 +30,7 @@ pub const MODEL_EVAL_MAX_ASSERTIONS: usize = 8;
 pub const MODEL_EVAL_MAX_CHECK_TIMEOUT_MS: u64 = 60_000;
 pub const MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION: u16 = 1;
 
-const MODEL_EVAL_ALLOWED_TOOLS: &[&str] = &["edit_file", "read_file", "write_file"];
+const MODEL_EVAL_ALLOWED_TOOLS: &[&str] = &["edit_file", "glob", "grep", "read_file", "write_file"];
 
 /// Candidate-release facts that cannot be inferred safely from a provider alias or assistant text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

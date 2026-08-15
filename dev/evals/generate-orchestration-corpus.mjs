@@ -149,6 +149,12 @@ const frozenCrossLayerOrder = [
   "src/parser.rs",
 ];
 
+// Planner discovery is part of the production DirectTask and PlanReview path. Keep the fixture
+// surface read-only but complete enough to enumerate and search repository evidence instead of
+// forcing agents to guess conventional paths with read_file alone.
+const readDiscoveryTools = ["read_file", "glob", "grep"];
+const writeExecutionTools = [...readDiscoveryTools, "edit_file"];
+
 const cases = [];
 
 for (const [index, prompt] of questionPrompts.entries()) {
@@ -203,7 +209,7 @@ for (let index = 1; index <= 4; index += 1) {
     caseClass: "direct_task",
     prompt:
       "Implement the normalization change across the parser and formatter: ASCII-lowercase parsed values with str::to_ascii_lowercase, and replace the formatter's existing `record:` output with square-bracket rendering. For input `  MiXeD-42  `, the final public render_record output must be exactly `[mixed-42]`, not `[record:mixed-42]`. Coordinate the cross-module work and keep the public facade compiling.",
-    allowedTools: ["read_file", "edit_file"],
+    allowedTools: writeExecutionTools,
     sources: {
       ...unchangedSources,
       "tests/acceptance.rs": crossLayerAcceptanceTest(id),
@@ -228,7 +234,7 @@ for (const [index, prompt] of positiveResearchPrompts.entries()) {
     id: `orch-pos-parallel-research-${String(index + 1).padStart(2, "0")}`,
     caseClass: "plan_review",
     prompt,
-    allowedTools: ["read_file"],
+    allowedTools: readDiscoveryTools,
     sources: unchangedSources,
     assertions: [{ kind: "workspace_source_unchanged" }],
   });
@@ -241,7 +247,7 @@ for (let index = 1; index <= 3; index += 1) {
     id: `orch-pos-independent-modules-${String(index).padStart(2, "0")}`,
     caseClass: "direct_task",
     prompt: `Implement two independent configuration changes and coordinate them as separate workstreams: set quota::default_quota to ${quota} and timeout::default_timeout to ${timeout}. Keep the facade compiling.`,
-    allowedTools: ["read_file", "edit_file"],
+    allowedTools: writeExecutionTools,
     sources: {
       "src/lib.rs": `pub mod quota;
 pub mod timeout;
@@ -279,7 +285,7 @@ for (const [index, prompt] of directTaskPrompts.entries()) {
     id: `orch-dt-${String(index + 1).padStart(2, "0")}`,
     caseClass: "direct_task",
     prompt,
-    allowedTools: ["read_file", "edit_file"],
+    allowedTools: writeExecutionTools,
     sources: frozenCrossLayerSources,
     manifestFileOrder: frozenCrossLayerOrder,
     assertions: [
@@ -301,7 +307,7 @@ for (const [index, prompt] of planReviewPrompts.entries()) {
     id: `orch-pr-${String(index + 1).padStart(2, "0")}`,
     caseClass: "plan_review",
     prompt,
-    allowedTools: ["read_file"],
+    allowedTools: readDiscoveryTools,
     sources: frozenCrossLayerSources,
     manifestFileOrder: frozenCrossLayerOrder,
     assertions: [{ kind: "workspace_source_unchanged" }],

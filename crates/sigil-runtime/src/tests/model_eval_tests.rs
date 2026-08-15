@@ -383,6 +383,23 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
             .orchestration
             .expect("orchestration metadata");
         assert_eq!(orchestration.corpus_version, "rfc-0063-orchestration-v1");
+        if matches!(
+            orchestration.case_class,
+            sigil_kernel::OrchestrationEvalCaseClass::PlanReview
+                | sigil_kernel::OrchestrationEvalCaseClass::DirectTask
+        ) {
+            for required_tool in ["read_file", "glob", "grep"] {
+                assert!(
+                    fixture
+                        .manifest
+                        .allowed_tools
+                        .iter()
+                        .any(|tool| tool == required_tool),
+                    "fixture {} must expose the production discovery tool {required_tool}",
+                    fixture.manifest.id
+                );
+            }
+        }
         match orchestration.case_class {
             sigil_kernel::OrchestrationEvalCaseClass::Chat => chat += 1,
             sigil_kernel::OrchestrationEvalCaseClass::PlanReview => plan_review += 1,
