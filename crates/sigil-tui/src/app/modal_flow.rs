@@ -2,7 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{ModelRequestConfig, SecretString};
 use sigil_runtime::{
     DEFAULT_SETUP_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse,
-    ProviderConfigFields, ProviderStatusConfig, default_provider_config_fields,
+    McpNormalizedFormFieldKind, ProviderConfigFields, ProviderStatusConfig,
+    default_provider_config_fields, normalize_mcp_form_message, normalize_mcp_form_schema,
     normalize_provider_name, provider_api_key_env_name,
     provider_connections::{
         ModelCatalogEntry as ConnectionModelCatalogEntry,
@@ -271,54 +272,12 @@ pub(super) struct TextInputState {
     pub(super) buffer: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ElicitationFieldKind {
-    String,
-    Number,
-    Integer,
-    Boolean,
-    Enum { values: Vec<String> },
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ElicitationFieldState {
-    pub(super) name: String,
-    pub(super) label: String,
-    pub(super) description: Option<String>,
-    pub(super) required: bool,
-    pub(super) kind: ElicitationFieldKind,
-    pub(super) buffer: String,
-}
-
-#[derive(Debug)]
-pub(super) struct McpElicitationModalState {
-    pub(super) request: McpElicitationRequest,
-    pub(super) fields: Vec<ElicitationFieldState>,
-    pub(super) selected: usize,
-    response_tx: Option<crate::runner::McpElicitationResponseTx>,
-}
-
-impl McpElicitationModalState {
-    fn send_response(&mut self, response: McpElicitationResponse) {
-        if let Some(response_tx) = self.response_tx.take() {
-            let _ = response_tx.send(response);
-        }
-    }
-}
-
-impl Drop for McpElicitationModalState {
-    fn drop(&mut self) {
-        self.send_response(McpElicitationResponse::cancel());
-    }
-}
-
 #[derive(Debug)]
 pub(super) enum ModalState {
     ConnectionPicker(ConnectionPickerState),
     ModelPicker(ModelPickerState),
     SecretInput(SecretInputState),
     TextInput(TextInputState),
-    McpElicitation(McpElicitationModalState),
     McpOAuth(super::mcp_oauth_flow::McpOAuthModalState),
     CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
     IntentStack(Box<super::intent_stack_flow::IntentStackModalState>),
@@ -374,7 +333,6 @@ impl AppState {
             ModalState::ModelPicker(state) => Some(state.target.title()),
             ModalState::SecretInput(state) => Some(state.target.title()),
             ModalState::TextInput(state) => Some(state.target.title()),
-            ModalState::McpElicitation(_) => Some("MCP Elicitation"),
             ModalState::McpOAuth(_) => Some("MCP Authentication"),
             ModalState::CheckpointRestore(_) => Some("Restore Checkpoint"),
             ModalState::IntentStack(_) => Some("Intent Stack"),
@@ -493,31 +451,6 @@ impl AppState {
                 ]);
                 lines
             }
-            Some(ModalState::McpElicitation(state)) => {
-                let mut lines = vec![
-                    state.request.message.clone(),
-                    format!("server: {}", state.request.server_name),
-                    format!("fields: {}", state.fields.len()),
-                    "Up/Down field  Left/Right option  Space toggle  Enter accept  Ctrl-D decline  Esc cancel".to_owned(),
-                    String::new(),
-                ];
-                for (index, field) in state.fields.iter().enumerate() {
-                    let required = if field.required { " *" } else { "" };
-                    let value = elicitation_field_display_value(field);
-                    if index == state.selected {
-                        lines.push(format!("{}{}: {}|", field.label, required, value));
-                    } else {
-                        lines.push(format!("{}{}: {}", field.label, required, value));
-                    }
-                }
-                if let Some(field) = state.fields.get(state.selected)
-                    && let Some(description) = &field.description
-                {
-                    lines.push(String::new());
-                    lines.push(format!("selected: {description}"));
-                }
-                lines
-            }
             Some(ModalState::McpOAuth(state)) => super::mcp_oauth_flow::modal_lines(state),
             Some(ModalState::CheckpointRestore(_)) => Vec::new(),
             Some(ModalState::IntentStack(_)) => Vec::new(),
@@ -569,14 +502,6 @@ impl AppState {
                     state.target.prompt_label().to_owned(),
                     state.buffer.chars().count(),
                     line_index,
-                ))
-            }
-            ModalState::McpElicitation(state) => {
-                let field = state.fields.get(state.selected)?;
-                Some((
-                    field.label.clone(),
-                    elicitation_field_display_value(field).chars().count(),
-                    5 + state.selected,
                 ))
             }
             ModalState::McpOAuth(state) => state.manual_callback.as_ref().map(|buffer| {
@@ -1287,14 +1212,21 @@ impl AppState {
         request: McpElicitationRequest,
         response_tx: crate::runner::McpElicitationResponseTx,
     ) {
-        let fields = elicitation_fields_from_schema(&request.requested_schema);
+        let (view, drafts) = match mcp_user_input_form(&request) {
+            Ok(form) => form,
+            Err(error) => {
+                let server_name = request.server_name.clone();
+                let _ = response_tx.send(McpElicitationResponse::cancel());
+                let notice =
+                    format!("MCP server {server_name} requested an unsupported form: {error}");
+                self.last_notice = Some(notice.clone());
+                self.push_timeline(TimelineRole::Notice, notice.clone());
+                self.push_event("mcp:elicitation", notice);
+                return;
+            }
+        };
         let server_name = request.server_name.clone();
-        self.modal_state = Some(ModalState::McpElicitation(McpElicitationModalState {
-            request,
-            fields,
-            selected: 0,
-            response_tx: Some(response_tx),
-        }));
+        self.set_pending_mcp_user_input(view, drafts, server_name.clone(), response_tx);
         self.active_pane = PaneFocus::Activity;
         self.last_notice = Some(format!("MCP server {server_name} requested input"));
         self.push_timeline(
@@ -1305,10 +1237,6 @@ impl AppState {
     }
 
     pub(super) fn handle_modal_key_event(&mut self, key: KeyEvent) -> ModalOutcome {
-        if matches!(self.modal_state, Some(ModalState::McpElicitation(_))) {
-            return self.handle_mcp_elicitation_key_event(key);
-        }
-
         let Some(modal_state) = self.modal_state.as_mut() else {
             return ModalOutcome::None;
         };
@@ -1488,7 +1416,6 @@ impl AppState {
                 }
                 _ => ModalOutcome::None,
             },
-            ModalState::McpElicitation(_) => ModalOutcome::None,
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
@@ -1579,7 +1506,6 @@ impl AppState {
             }
             ModalState::ConnectionPicker(_)
             | ModalState::ModelPicker(_)
-            | ModalState::McpElicitation(_)
             | ModalState::CheckpointRestore(_)
             | ModalState::IntentStack(_)
             | ModalState::V2CompactionPreview(_)
@@ -1658,7 +1584,6 @@ impl AppState {
                 self.modal_state = None;
                 ModalOutcome::TextSubmitted { target, value }
             }
-            ModalState::McpElicitation(_) => self.accept_mcp_elicitation(),
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
@@ -1868,190 +1793,6 @@ impl AppState {
             }
         }
     }
-
-    fn handle_mcp_elicitation_key_event(&mut self, key: KeyEvent) -> ModalOutcome {
-        match key.code {
-            KeyCode::Esc => self.finish_mcp_elicitation(McpElicitationResponse::cancel()),
-            KeyCode::Char('d') | KeyCode::Char('D')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.finish_mcp_elicitation(McpElicitationResponse::decline())
-            }
-            KeyCode::Enter => self.accept_mcp_elicitation(),
-            KeyCode::Up => {
-                if let Some(ModalState::McpElicitation(state)) = self.modal_state.as_mut()
-                    && !state.fields.is_empty()
-                {
-                    state.selected = if state.selected == 0 {
-                        state.fields.len() - 1
-                    } else {
-                        state.selected - 1
-                    };
-                    self.last_notice = Some(format!(
-                        "editing {}",
-                        state
-                            .fields
-                            .get(state.selected)
-                            .map(|field| field.label.as_str())
-                            .unwrap_or("field")
-                    ));
-                }
-                ModalOutcome::None
-            }
-            KeyCode::Down => {
-                if let Some(ModalState::McpElicitation(state)) = self.modal_state.as_mut()
-                    && !state.fields.is_empty()
-                {
-                    state.selected = (state.selected + 1) % state.fields.len();
-                    self.last_notice = Some(format!(
-                        "editing {}",
-                        state
-                            .fields
-                            .get(state.selected)
-                            .map(|field| field.label.as_str())
-                            .unwrap_or("field")
-                    ));
-                }
-                ModalOutcome::None
-            }
-            KeyCode::Left => {
-                self.cycle_selected_elicitation_option(false);
-                ModalOutcome::None
-            }
-            KeyCode::Right => {
-                self.cycle_selected_elicitation_option(true);
-                ModalOutcome::None
-            }
-            KeyCode::Char(' ') => {
-                self.toggle_selected_elicitation_bool();
-                ModalOutcome::None
-            }
-            KeyCode::Backspace => {
-                if let Some(field) = self.selected_elicitation_field_mut()
-                    && elicitation_field_accepts_text(field)
-                {
-                    let _ = field.buffer.pop();
-                    self.last_notice = Some(format!("editing {}", field.label));
-                }
-                ModalOutcome::None
-            }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(field) = self.selected_elicitation_field_mut() {
-                    match field.kind {
-                        ElicitationFieldKind::Boolean => {
-                            if matches!(character, 't' | 'T' | 'y' | 'Y' | '1') {
-                                field.buffer = "true".to_owned();
-                            } else if matches!(character, 'f' | 'F' | 'n' | 'N' | '0') {
-                                field.buffer = "false".to_owned();
-                            }
-                        }
-                        ElicitationFieldKind::Enum { .. } => {}
-                        ElicitationFieldKind::Number | ElicitationFieldKind::Integer => {
-                            if matches!(character, '0'..='9' | '-' | '+' | '.' | 'e' | 'E') {
-                                field.buffer.push(character);
-                            }
-                        }
-                        ElicitationFieldKind::String => {
-                            if !character.is_control() {
-                                field.buffer.push(character);
-                            }
-                        }
-                    }
-                    self.last_notice = Some(format!("editing {}", field.label));
-                }
-                ModalOutcome::None
-            }
-            _ => ModalOutcome::None,
-        }
-    }
-
-    fn accept_mcp_elicitation(&mut self) -> ModalOutcome {
-        let Some(ModalState::McpElicitation(state)) = self.modal_state.as_ref() else {
-            return ModalOutcome::None;
-        };
-        let content = match elicitation_content_from_fields(&state.fields) {
-            Ok(content) => content,
-            Err(message) => {
-                self.last_notice = Some(message);
-                return ModalOutcome::None;
-            }
-        };
-        self.finish_mcp_elicitation(McpElicitationResponse::accept(content))
-    }
-
-    fn finish_mcp_elicitation(&mut self, response: McpElicitationResponse) -> ModalOutcome {
-        let Some(ModalState::McpElicitation(mut state)) = self.modal_state.take() else {
-            return ModalOutcome::None;
-        };
-        let server_name = state.request.server_name.clone();
-        let notice = match response.action {
-            sigil_runtime::McpElicitationAction::Accept => {
-                format!("submitted MCP input to {server_name}")
-            }
-            sigil_runtime::McpElicitationAction::Decline => {
-                format!("declined MCP input request from {server_name}")
-            }
-            sigil_runtime::McpElicitationAction::Cancel => {
-                format!("cancelled MCP input request from {server_name}")
-            }
-        };
-        state.send_response(response);
-        self.active_pane = PaneFocus::Composer;
-        self.push_event("mcp:elicitation", notice.clone());
-        ModalOutcome::Dismissed(notice)
-    }
-
-    fn selected_elicitation_field_mut(&mut self) -> Option<&mut ElicitationFieldState> {
-        let ModalState::McpElicitation(state) = self.modal_state.as_mut()? else {
-            return None;
-        };
-        state.fields.get_mut(state.selected)
-    }
-
-    fn cycle_selected_elicitation_option(&mut self, forward: bool) {
-        let Some(field) = self.selected_elicitation_field_mut() else {
-            return;
-        };
-        match &field.kind {
-            ElicitationFieldKind::Boolean => {
-                field.buffer = if field.buffer == "true" {
-                    "false".to_owned()
-                } else {
-                    "true".to_owned()
-                };
-            }
-            ElicitationFieldKind::Enum { values } if !values.is_empty() => {
-                let current = values
-                    .iter()
-                    .position(|value| value == &field.buffer)
-                    .unwrap_or(0);
-                let next = if forward {
-                    (current + 1) % values.len()
-                } else if current == 0 {
-                    values.len() - 1
-                } else {
-                    current - 1
-                };
-                field.buffer = values[next].clone();
-            }
-            _ => {}
-        }
-        self.last_notice = Some(format!("editing {}", field.label));
-    }
-
-    fn toggle_selected_elicitation_bool(&mut self) {
-        let Some(field) = self.selected_elicitation_field_mut() else {
-            return;
-        };
-        if matches!(field.kind, ElicitationFieldKind::Boolean) {
-            field.buffer = if field.buffer == "true" {
-                "false".to_owned()
-            } else {
-                "true".to_owned()
-            };
-            self.last_notice = Some(format!("editing {}", field.label));
-        }
-    }
 }
 
 fn model_request_config_from_draft_or_default(
@@ -2085,155 +1826,116 @@ fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> b
     }
 }
 
-fn elicitation_fields_from_schema(schema: &serde_json::Value) -> Vec<ElicitationFieldState> {
-    let required = schema
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let Some(properties) = schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return Vec::new();
-    };
-    properties
-        .iter()
-        .map(|(name, property)| {
-            let enum_values = property
-                .get("enum")
-                .and_then(serde_json::Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .filter(|values| !values.is_empty());
-            let kind = if let Some(values) = enum_values {
-                ElicitationFieldKind::Enum { values }
-            } else {
-                match property
-                    .get("type")
+fn mcp_user_input_form(
+    request: &McpElicitationRequest,
+) -> anyhow::Result<(
+    super::UserInputFormViewModel,
+    Vec<super::UserInputDraftValue>,
+)> {
+    let normalized = normalize_mcp_form_schema(&request.requested_schema)?;
+    let mut questions = Vec::with_capacity(normalized.fields.len());
+    let mut drafts = Vec::with_capacity(normalized.fields.len());
+    for field in normalized.fields {
+        let label = field.title.unwrap_or_else(|| field.name.clone());
+        let options = field
+            .options
+            .into_iter()
+            .map(|option| sigil_kernel::UserInputOptionV1 {
+                id: option.value,
+                label: option.label,
+                description: None,
+            })
+            .collect::<Vec<_>>();
+        let default = field.default.as_ref();
+        let (kind, draft) = match field.kind {
+            McpNormalizedFormFieldKind::String => (
+                sigil_kernel::UserInputFieldKindV1::Text {
+                    multiline: false,
+                    max_chars: sigil_kernel::MAX_USER_INPUT_TEXT_CHARS,
+                },
+                super::UserInputDraftValue::Text(
+                    default
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                ),
+            ),
+            McpNormalizedFormFieldKind::Number => (
+                sigil_kernel::UserInputFieldKindV1::Number,
+                super::UserInputDraftValue::Number(
+                    default.map(ToString::to_string).unwrap_or_default(),
+                ),
+            ),
+            McpNormalizedFormFieldKind::Integer => (
+                sigil_kernel::UserInputFieldKindV1::Integer,
+                super::UserInputDraftValue::Integer(
+                    default.map(ToString::to_string).unwrap_or_default(),
+                ),
+            ),
+            McpNormalizedFormFieldKind::Boolean => (
+                sigil_kernel::UserInputFieldKindV1::Boolean,
+                super::UserInputDraftValue::Boolean(default.and_then(serde_json::Value::as_bool)),
+            ),
+            McpNormalizedFormFieldKind::SingleSelect => {
+                let selected = default
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or("string")
-                {
-                    "boolean" => ElicitationFieldKind::Boolean,
-                    "integer" => ElicitationFieldKind::Integer,
-                    "number" => ElicitationFieldKind::Number,
-                    _ => ElicitationFieldKind::String,
-                }
-            };
-            let default_value = elicitation_default_value(property, &kind);
-            ElicitationFieldState {
-                name: name.clone(),
-                label: property
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(name)
-                    .to_owned(),
-                description: property
-                    .get("description")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned),
-                required: required.contains(name.as_str()),
-                kind,
-                buffer: default_value,
+                    .and_then(|value| options.iter().position(|option| option.id == value))
+                    .or_else(|| (!options.is_empty()).then_some(0));
+                (
+                    sigil_kernel::UserInputFieldKindV1::SingleSelect {
+                        options,
+                        allow_other: false,
+                    },
+                    super::UserInputDraftValue::SingleSelect {
+                        selected,
+                        other: String::new(),
+                    },
+                )
             }
-        })
-        .collect()
-}
-
-fn elicitation_default_value(property: &serde_json::Value, kind: &ElicitationFieldKind) -> String {
-    if let Some(default) = property.get("default") {
-        match default {
-            serde_json::Value::String(value) => return value.clone(),
-            serde_json::Value::Bool(value) => return value.to_string(),
-            serde_json::Value::Number(value) => return value.to_string(),
-            _ => {}
-        }
+            McpNormalizedFormFieldKind::MultiSelect => {
+                let selected = default
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                let max_selected = u32::try_from(options.len()).unwrap_or(u32::MAX);
+                (
+                    sigil_kernel::UserInputFieldKindV1::MultiSelect {
+                        options,
+                        max_selected,
+                    },
+                    super::UserInputDraftValue::MultiSelect {
+                        cursor: 0,
+                        selected,
+                    },
+                )
+            }
+        };
+        questions.push(sigil_kernel::UserInputQuestionV1 {
+            id: field.name,
+            header: label.clone(),
+            question: field
+                .description
+                .unwrap_or_else(|| format!("Provide {label}.")),
+            description: None,
+            required: field.required,
+            field: kind,
+        });
+        drafts.push(draft);
     }
-    match kind {
-        ElicitationFieldKind::Boolean => "false".to_owned(),
-        ElicitationFieldKind::Enum { values } => values.first().cloned().unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
-fn elicitation_field_display_value(field: &ElicitationFieldState) -> String {
-    match field.kind {
-        ElicitationFieldKind::Boolean if field.buffer == "true" => "true".to_owned(),
-        ElicitationFieldKind::Boolean => "false".to_owned(),
-        _ => field.buffer.clone(),
-    }
-}
-
-fn elicitation_field_accepts_text(field: &ElicitationFieldState) -> bool {
-    matches!(
-        field.kind,
-        ElicitationFieldKind::String | ElicitationFieldKind::Number | ElicitationFieldKind::Integer
-    )
-}
-
-fn elicitation_content_from_fields(
-    fields: &[ElicitationFieldState],
-) -> std::result::Result<serde_json::Value, String> {
-    let mut object = serde_json::Map::new();
-    for field in fields {
-        let value = field.buffer.trim();
-        if field.required
-            && value.is_empty()
-            && !matches!(field.kind, ElicitationFieldKind::Boolean)
-        {
-            return Err(format!("{} is required", field.label));
-        }
-        match field.kind {
-            ElicitationFieldKind::String | ElicitationFieldKind::Enum { .. } => {
-                if !value.is_empty() || field.required {
-                    object.insert(
-                        field.name.clone(),
-                        serde_json::Value::String(value.to_owned()),
-                    );
-                }
-            }
-            ElicitationFieldKind::Boolean => {
-                object.insert(
-                    field.name.clone(),
-                    serde_json::Value::Bool(field.buffer == "true"),
-                );
-            }
-            ElicitationFieldKind::Integer => {
-                if value.is_empty() {
-                    continue;
-                }
-                let parsed = value
-                    .parse::<i64>()
-                    .map_err(|_| format!("{} must be an integer", field.label))?;
-                object.insert(
-                    field.name.clone(),
-                    serde_json::Value::Number(serde_json::Number::from(parsed)),
-                );
-            }
-            ElicitationFieldKind::Number => {
-                if value.is_empty() {
-                    continue;
-                }
-                let parsed = value
-                    .parse::<f64>()
-                    .map_err(|_| format!("{} must be a number", field.label))?;
-                let number = serde_json::Number::from_f64(parsed)
-                    .ok_or_else(|| format!("{} must be a finite number", field.label))?;
-                object.insert(field.name.clone(), serde_json::Value::Number(number));
-            }
-        }
-    }
-    Ok(serde_json::Value::Object(object))
+    Ok((
+        super::UserInputFormViewModel {
+            prompt: normalize_mcp_form_message(&request.message)?,
+            questions,
+            allowed_actions: vec![
+                sigil_kernel::UserInputActionV1::Submit,
+                sigil_kernel::UserInputActionV1::Decline,
+            ],
+        },
+        drafts,
+    ))
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

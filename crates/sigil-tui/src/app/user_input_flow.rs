@@ -1,6 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{AppAction, AppState, PendingUserInputForm, UserInputDraftValue, UserInputFormAction};
+use super::{
+    AppAction, AppState, PendingMcpElicitation, PendingUserInputForm, UserInputDraftValue,
+    UserInputFormAction, UserInputFormSource, UserInputFormViewModel,
+};
 
 impl AppState {
     pub(in crate::app) fn handle_user_input_form_key_event(
@@ -79,7 +82,7 @@ impl AppState {
         match key.code {
             KeyCode::Tab if key.modifiers.is_empty() => {
                 if let Some(form) = self.composer.pending_user_input.as_mut() {
-                    if form.focused_question + 1 < form.request.questions.len() {
+                    if form.focused_question + 1 < form.view.questions.len() {
                         form.focused_question += 1;
                     } else {
                         form.focus_actions = true;
@@ -169,7 +172,7 @@ impl AppState {
         self.composer
             .pending_user_input
             .as_ref()
-            .and_then(|form| form.request.questions.get(form.focused_question))
+            .and_then(|form| form.view.questions.get(form.focused_question))
             .is_some_and(|question| {
                 matches!(
                     question.field,
@@ -198,7 +201,7 @@ impl AppState {
             form.scroll = extent;
             return;
         }
-        let denominator = form.request.questions.len().saturating_sub(1);
+        let denominator = form.view.questions.len().saturating_sub(1);
         form.scroll = if denominator == 0 {
             form.scroll.min(extent)
         } else {
@@ -210,7 +213,7 @@ impl AppState {
         let Some(form) = self.composer.pending_user_input.as_mut() else {
             return;
         };
-        let Some(question) = form.request.questions.get(form.focused_question) else {
+        let Some(question) = form.view.questions.get(form.focused_question) else {
             return;
         };
         match (&question.field, form.drafts.get_mut(form.focused_question)) {
@@ -238,7 +241,7 @@ impl AppState {
                 }
             }
             _ => {
-                let len = form.request.questions.len();
+                let len = form.view.questions.len();
                 if len > 0 {
                     form.focused_question = ((form.focused_question as isize + direction)
                         .rem_euclid(len as isize))
@@ -252,7 +255,7 @@ impl AppState {
         let Some(form) = self.composer.pending_user_input.as_mut() else {
             return false;
         };
-        let Some(question) = form.request.questions.get(form.focused_question) else {
+        let Some(question) = form.view.questions.get(form.focused_question) else {
             return false;
         };
         match (&question.field, form.drafts.get_mut(form.focused_question)) {
@@ -340,8 +343,8 @@ impl AppState {
                 )
             }
             UserInputFormAction::Submit => {
-                let mut answers = Vec::with_capacity(form.request.questions.len());
-                for (question, draft) in form.request.questions.iter().zip(&form.drafts) {
+                let mut answers = Vec::with_capacity(form.view.questions.len());
+                for (question, draft) in form.view.questions.iter().zip(&form.drafts) {
                     match user_input_answer(question, draft) {
                         Ok(Some(answer)) => answers.push(answer),
                         Ok(None) => {}
@@ -361,6 +364,13 @@ impl AppState {
                 (None, sigil_kernel::UserInputDecisionV1::RunCancelled)
             }
         };
+        if matches!(form.source, UserInputFormSource::Mcp { .. }) {
+            return self.finish_mcp_user_input(decision);
+        }
+        let request = form
+            .request
+            .as_ref()
+            .expect("durable input form must retain its authoritative request");
         self.last_notice = Some(if command_id.is_some() {
             "resuming accepted user input".to_owned()
         } else {
@@ -368,9 +378,9 @@ impl AppState {
         });
         Some(AppAction::SubmitUserInputDecision {
             command_id,
-            request_id: form.request.identity.request_id.as_str().to_owned(),
-            generation: form.request.identity.generation,
-            expected_request_hash: form.request.request_hash.clone(),
+            request_id: request.identity.request_id.as_str().to_owned(),
+            generation: request.identity.generation,
+            expected_request_hash: request.request_hash.clone(),
             decision,
         })
     }
@@ -395,46 +405,22 @@ impl AppState {
         request: sigil_kernel::PublicUserInputRequestV1,
         recovery_command: Option<sigil_kernel::UserInputDecisionCommandV1>,
     ) {
-        let drafts = request
-            .questions
-            .iter()
-            .map(|question| match &question.field {
-                sigil_kernel::UserInputFieldKindV1::Text { .. } => {
-                    UserInputDraftValue::Text(String::new())
-                }
-                sigil_kernel::UserInputFieldKindV1::Number => {
-                    UserInputDraftValue::Number(String::new())
-                }
-                sigil_kernel::UserInputFieldKindV1::Integer => {
-                    UserInputDraftValue::Integer(String::new())
-                }
-                sigil_kernel::UserInputFieldKindV1::Boolean => UserInputDraftValue::Boolean(None),
-                sigil_kernel::UserInputFieldKindV1::SingleSelect { .. } => {
-                    UserInputDraftValue::SingleSelect {
-                        selected: None,
-                        other: String::new(),
-                    }
-                }
-                sigil_kernel::UserInputFieldKindV1::MultiSelect { .. } => {
-                    UserInputDraftValue::MultiSelect {
-                        cursor: 0,
-                        selected: Vec::new(),
-                    }
-                }
-            })
-            .collect();
+        let view = UserInputFormViewModel::from(&request);
+        let drafts = empty_user_input_drafts(&view.questions);
         let selected_action = if recovery_command.is_some() {
             UserInputFormAction::Resume
         } else {
             UserInputFormAction::ORDER
                 .into_iter()
                 .find(|action| {
-                    user_input_action_available_parts(&request, recovery_command.as_ref(), *action)
+                    user_input_action_available_parts(&view, recovery_command.as_ref(), *action)
                 })
                 .unwrap_or(UserInputFormAction::Submit)
         };
         self.composer.pending_user_input = Some(PendingUserInputForm {
-            request,
+            view,
+            request: Some(request),
+            source: UserInputFormSource::DurableAgent,
             recovery_command,
             open: true,
             focused_question: 0,
@@ -446,21 +432,134 @@ impl AppState {
         });
     }
 
+    pub(in crate::app) fn set_pending_mcp_user_input(
+        &mut self,
+        view: UserInputFormViewModel,
+        drafts: Vec<UserInputDraftValue>,
+        server_name: String,
+        response_tx: crate::runner::McpElicitationResponseTx,
+    ) {
+        self.pending_mcp_elicitation = Some(PendingMcpElicitation {
+            response_tx: Some(response_tx),
+        });
+        self.composer.pending_user_input = Some(PendingUserInputForm {
+            view,
+            request: None,
+            source: UserInputFormSource::Mcp { server_name },
+            recovery_command: None,
+            open: true,
+            focused_question: 0,
+            focus_actions: false,
+            selected_action: UserInputFormAction::Submit,
+            drafts,
+            scroll: 0,
+            scroll_extent: Default::default(),
+        });
+    }
+
+    fn finish_mcp_user_input(
+        &mut self,
+        decision: sigil_kernel::UserInputDecisionV1,
+    ) -> Option<AppAction> {
+        let server_name = self
+            .composer
+            .pending_user_input
+            .as_ref()
+            .and_then(|form| match &form.source {
+                UserInputFormSource::Mcp { server_name } => Some(server_name.clone()),
+                UserInputFormSource::DurableAgent => None,
+            })?;
+        let response = match decision {
+            sigil_kernel::UserInputDecisionV1::Submitted { answers } => {
+                let content = mcp_content_from_answers(answers).ok()?;
+                sigil_runtime::McpElicitationResponse::accept(content)
+            }
+            sigil_kernel::UserInputDecisionV1::Declined => {
+                sigil_runtime::McpElicitationResponse::decline()
+            }
+            sigil_kernel::UserInputDecisionV1::RunCancelled => {
+                sigil_runtime::McpElicitationResponse::cancel()
+            }
+        };
+        if let Some(mut pending) = self.pending_mcp_elicitation.take() {
+            pending.send(response.clone());
+        }
+        self.composer.pending_user_input = None;
+        self.active_pane = super::PaneFocus::Composer;
+        let notice = match response.action {
+            sigil_runtime::McpElicitationAction::Accept => {
+                format!("submitted MCP input to {server_name}")
+            }
+            sigil_runtime::McpElicitationAction::Decline => {
+                format!("declined MCP input request from {server_name}")
+            }
+            sigil_runtime::McpElicitationAction::Cancel => {
+                format!("cancelled MCP input request from {server_name}")
+            }
+        };
+        self.last_notice = Some(notice.clone());
+        self.push_event("mcp:elicitation", notice);
+        None
+    }
+
     pub(crate) fn pending_user_input(&self) -> Option<&PendingUserInputForm> {
         self.composer.pending_user_input.as_ref()
     }
 
     pub(in crate::app) fn clear_pending_user_input(&mut self) {
         self.composer.pending_user_input = None;
+        self.pending_mcp_elicitation = None;
     }
 }
 
+fn mcp_content_from_answers(
+    answers: Vec<sigil_kernel::UserInputAnswerV1>,
+) -> Result<serde_json::Value, String> {
+    let mut content = serde_json::Map::new();
+    for answer in answers {
+        let value = match answer.value {
+            sigil_kernel::UserInputAnswerValueV1::Text { value } => {
+                serde_json::Value::String(value)
+            }
+            sigil_kernel::UserInputAnswerValueV1::Number { value } => {
+                let value = value
+                    .parse::<f64>()
+                    .map_err(|_| "MCP number answer was invalid".to_owned())?;
+                serde_json::Number::from_f64(value)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| "MCP number answer was not finite".to_owned())?
+            }
+            sigil_kernel::UserInputAnswerValueV1::Integer { value } => {
+                serde_json::Value::Number(value.into())
+            }
+            sigil_kernel::UserInputAnswerValueV1::Boolean { value } => {
+                serde_json::Value::Bool(value)
+            }
+            sigil_kernel::UserInputAnswerValueV1::SingleSelect { option_id, other } => {
+                serde_json::Value::String(option_id.or(other).ok_or_else(|| {
+                    "MCP single-select answer omitted its selected value".to_owned()
+                })?)
+            }
+            sigil_kernel::UserInputAnswerValueV1::MultiSelect { option_ids } => {
+                serde_json::Value::Array(
+                    option_ids
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                )
+            }
+        };
+        content.insert(answer.question_id, value);
+    }
+    Ok(serde_json::Value::Object(content))
+}
+
 fn user_input_action_available(form: &PendingUserInputForm, action: UserInputFormAction) -> bool {
-    user_input_action_available_parts(&form.request, form.recovery_command.as_ref(), action)
+    user_input_action_available_parts(&form.view, form.recovery_command.as_ref(), action)
 }
 
 fn user_input_action_available_parts(
-    request: &sigil_kernel::PublicUserInputRequestV1,
+    view: &UserInputFormViewModel,
     recovery_command: Option<&sigil_kernel::UserInputDecisionCommandV1>,
     action: UserInputFormAction,
 ) -> bool {
@@ -476,7 +575,39 @@ fn user_input_action_available_parts(
         UserInputFormAction::Decline => sigil_kernel::UserInputActionV1::Decline,
         UserInputFormAction::CancelRun => sigil_kernel::UserInputActionV1::CancelRun,
     };
-    request.allowed_actions.contains(&expected)
+    view.allowed_actions.contains(&expected)
+}
+
+fn empty_user_input_drafts(
+    questions: &[sigil_kernel::UserInputQuestionV1],
+) -> Vec<UserInputDraftValue> {
+    questions
+        .iter()
+        .map(|question| match &question.field {
+            sigil_kernel::UserInputFieldKindV1::Text { .. } => {
+                UserInputDraftValue::Text(String::new())
+            }
+            sigil_kernel::UserInputFieldKindV1::Number => {
+                UserInputDraftValue::Number(String::new())
+            }
+            sigil_kernel::UserInputFieldKindV1::Integer => {
+                UserInputDraftValue::Integer(String::new())
+            }
+            sigil_kernel::UserInputFieldKindV1::Boolean => UserInputDraftValue::Boolean(None),
+            sigil_kernel::UserInputFieldKindV1::SingleSelect { .. } => {
+                UserInputDraftValue::SingleSelect {
+                    selected: None,
+                    other: String::new(),
+                }
+            }
+            sigil_kernel::UserInputFieldKindV1::MultiSelect { .. } => {
+                UserInputDraftValue::MultiSelect {
+                    cursor: 0,
+                    selected: Vec::new(),
+                }
+            }
+        })
+        .collect()
 }
 
 fn user_input_answer(

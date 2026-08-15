@@ -1,5 +1,6 @@
 use super::super::modal_flow::ModalOutcome;
 use super::*;
+use crate::app::{UserInputDraftValue, UserInputFormAction, UserInputFormSource};
 use anyhow::{Context, bail};
 
 fn apply_available_connection_models(app: &mut AppState, models: &[&str]) -> Result<()> {
@@ -377,118 +378,6 @@ fn setup_picker_with_invalid_exact_draft_keeps_bundled_and_manual_entry() -> Res
 }
 
 #[test]
-fn mcp_elicitation_modal_accepts_text_input() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
-        request: McpElicitationRequest {
-            server_name: "filesystem".to_owned(),
-            message: "Need target path".to_owned(),
-            requested_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "title": "Path",
-                        "description": "Workspace-relative path"
-                    }
-                },
-                "required": ["path"]
-            }),
-        },
-        response_tx,
-    })?;
-
-    assert_eq!(app.modal_title(), Some("MCP Elicitation"));
-    let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("Need target path"));
-    assert!(lines.contains("server: filesystem"));
-    assert!(lines.contains("Path *: |"));
-
-    for character in "src/lib.rs".chars() {
-        let action =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-        assert!(action.is_none());
-    }
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert!(!app.has_modal());
-    assert_eq!(app.last_notice(), Some("submitted MCP input to filesystem"));
-    let response = futures::executor::block_on(response_rx)?;
-    assert_eq!(response.action, McpElicitationAction::Accept);
-    assert_eq!(response.content, Some(json!({ "path": "src/lib.rs" })));
-    Ok(())
-}
-
-#[test]
-fn mcp_elicitation_modal_declines_with_ctrl_d() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
-        request: McpElicitationRequest {
-            server_name: "filesystem".to_owned(),
-            message: "Need target path".to_owned(),
-            requested_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "title": "Path" }
-                }
-            }),
-        },
-        response_tx,
-    })?;
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
-
-    assert!(action.is_none());
-    assert!(!app.has_modal());
-    assert_eq!(
-        app.last_notice(),
-        Some("declined MCP input request from filesystem")
-    );
-    let response = futures::executor::block_on(response_rx)?;
-    assert_eq!(response.action, McpElicitationAction::Decline);
-    assert_eq!(response.content, None);
-    Ok(())
-}
-
-#[test]
-fn mcp_elicitation_modal_cancels_on_escape() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
-        request: McpElicitationRequest {
-            server_name: "filesystem".to_owned(),
-            message: "Need target path".to_owned(),
-            requested_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "title": "Path" }
-                }
-            }),
-        },
-        response_tx,
-    })?;
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert!(!app.has_modal());
-    assert_eq!(
-        app.last_notice(),
-        Some("cancelled MCP input request from filesystem")
-    );
-    let response = futures::executor::block_on(response_rx)?;
-    assert_eq!(response.action, McpElicitationAction::Cancel);
-    assert_eq!(response.content, None);
-    Ok(())
-}
-
-#[test]
 fn model_picker_remote_refresh_updates_open_modal_options() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
@@ -763,262 +652,6 @@ fn config_numeric_text_modal_rejects_invalid_characters() -> Result<()> {
     assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("value: |"));
-    Ok(())
-}
-
-#[test]
-fn mcp_elicitation_required_field_blocks_submission() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
-
-    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
-        request: McpElicitationRequest {
-            server_name: "filesystem".to_owned(),
-            message: "Need target path".to_owned(),
-            requested_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "title": "Path" }
-                },
-                "required": ["path"]
-            }),
-        },
-        response_tx,
-    })?;
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert!(app.has_modal());
-    assert_eq!(app.last_notice(), Some("Path is required"));
-    assert!(response_rx.try_recv().is_err());
-    Ok(())
-}
-
-#[test]
-fn mcp_elicitation_validates_numeric_fields_before_submit() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
-
-    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
-        request: McpElicitationRequest {
-            server_name: "planner".to_owned(),
-            message: "Set retries".to_owned(),
-            requested_schema: json!({
-                "type": "object",
-                "properties": {
-                    "retries": { "type": "integer", "title": "Retries" }
-                },
-                "required": ["retries"]
-            }),
-        },
-        response_tx,
-    })?;
-
-    for character in "1.5".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert!(app.has_modal());
-    assert_eq!(app.last_notice(), Some("Retries must be an integer"));
-    assert!(response_rx.try_recv().is_err());
-    Ok(())
-}
-
-#[test]
-fn mcp_elicitation_cycles_enum_and_boolean_fields() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
-        request: McpElicitationRequest {
-            server_name: "planner".to_owned(),
-            message: "Choose mode".to_owned(),
-            requested_schema: json!({
-                "type": "object",
-                "properties": {
-                    "mode": {
-                        "type": "string",
-                        "title": "Mode",
-                        "enum": ["safe", "fast"]
-                    },
-                    "confirm": {
-                        "type": "boolean",
-                        "title": "Confirm",
-                        "default": false
-                    }
-                }
-            }),
-        },
-        response_tx,
-    })?;
-
-    if app
-        .modal_input_cursor()
-        .as_ref()
-        .map(|(label, _, _)| label.as_str())
-        != Some("Mode")
-    {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    if app
-        .modal_input_cursor()
-        .as_ref()
-        .map(|(label, _, _)| label.as_str())
-        != Some("Confirm")
-    {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(!app.has_modal());
-    let response = futures::executor::block_on(response_rx)?;
-    assert_eq!(response.action, McpElicitationAction::Accept);
-    assert_eq!(
-        response.content,
-        Some(json!({
-            "mode": "fast",
-            "confirm": true
-        }))
-    );
-    Ok(())
-}
-
-#[test]
-fn mcp_elicitation_modal_validates_multiple_field_kinds_and_accepts_response() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
-        request: McpElicitationRequest {
-            server_name: "planner".to_owned(),
-            message: "Need execution parameters".to_owned(),
-            requested_schema: json!({
-                "type": "object",
-                "properties": {
-                    "mode": {
-                        "type": "string",
-                        "title": "Mode",
-                        "description": "Execution mode",
-                        "enum": ["read", "write"],
-                        "default": "read"
-                    },
-                    "force": {
-                        "type": "boolean",
-                        "title": "Force",
-                        "description": "Force overwrite",
-                        "default": false
-                    },
-                    "count": {
-                        "type": "integer",
-                        "title": "Count",
-                        "description": "Number of items"
-                    },
-                    "threshold": {
-                        "type": "number",
-                        "title": "Threshold",
-                        "description": "Retry threshold"
-                    }
-                },
-                "required": ["count"]
-            }),
-        },
-        response_tx,
-    })?;
-
-    let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("Need execution parameters"));
-    assert!(lines.contains("server: planner"));
-    assert!(lines.contains("fields: 4"));
-
-    while app
-        .modal_input_cursor()
-        .as_ref()
-        .map(|(label, _, _)| label.as_str())
-        != Some("Mode")
-    {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    assert!(app.modal_lines().join("\n").contains("Mode: read|"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("editing Mode"));
-    assert!(app.modal_lines().join("\n").contains("Mode: write|"));
-
-    while app
-        .modal_input_cursor()
-        .as_ref()
-        .map(|(label, _, _)| label.as_str())
-        != Some("Force")
-    {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
-    assert!(app.modal_lines().join("\n").contains("Force: true|"));
-
-    while app
-        .modal_input_cursor()
-        .as_ref()
-        .map(|(label, _, _)| label.as_str())
-        != Some("Count")
-    {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(app.has_modal());
-    assert_eq!(app.last_notice(), Some("Count is required"));
-
-    for character in "12".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-    while app
-        .modal_input_cursor()
-        .as_ref()
-        .map(|(label, _, _)| label.as_str())
-        != Some("Threshold")
-    {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    for character in "1e309".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-    assert!(app.modal_lines().join("\n").contains("Threshold: 1e309|"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(app.has_modal());
-    assert_eq!(app.last_notice(), Some("Threshold must be a finite number"));
-
-    for _ in 0..5 {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
-    }
-    for character in "2.5".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(!app.has_modal());
-    assert_eq!(app.last_notice(), Some("submitted MCP input to planner"));
-
-    let response = futures::executor::block_on(response_rx)?;
-    assert_eq!(response.action, McpElicitationAction::Accept);
-    assert_eq!(
-        response.content,
-        Some(json!({
-            "mode": "write",
-            "force": true,
-            "count": 12,
-            "threshold": 2.5
-        }))
-    );
     Ok(())
 }
 
@@ -1306,7 +939,7 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
                     "path": { "type": "string", "title": "Path" },
                     "retries": { "type": "integer", "title": "Retries" },
                     "threshold": { "type": "number", "title": "Threshold" },
-                    "mode": { "enum": ["safe", "fast"], "title": "Mode" }
+                    "mode": { "type": "string", "enum": ["safe", "fast"], "title": "Mode" }
                 },
                 "required": ["path"]
             }),
@@ -1318,23 +951,32 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
             .is_none()
     );
-    assert_eq!(app.last_notice(), Some("Path is required"));
-    assert!(app.has_modal());
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("Path requires an answer"));
+    assert!(app.pending_user_input().is_some());
 
-    if let Some(ModalState::McpElicitation(state)) = app.modal_state.as_mut() {
-        state
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "path")
-            .expect("path field should exist")
-            .buffer = "src/lib.rs".to_owned();
-        state
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "retries")
-            .expect("retries field should exist")
-            .buffer = "abc".to_owned();
-    }
+    let form = app
+        .composer
+        .pending_user_input
+        .as_mut()
+        .expect("MCP form should exist");
+    let path = form
+        .view
+        .questions
+        .iter()
+        .position(|question| question.id == "path")
+        .expect("path field should exist");
+    form.drafts[path] = UserInputDraftValue::Text("src/lib.rs".to_owned());
+    let retries = form
+        .view
+        .questions
+        .iter()
+        .position(|question| question.id == "retries")
+        .expect("retries field should exist");
+    form.drafts[retries] = UserInputDraftValue::Integer("abc".to_owned());
 
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
@@ -1342,20 +984,19 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
     );
     assert_eq!(app.last_notice(), Some("Retries must be an integer"));
 
-    if let Some(ModalState::McpElicitation(state)) = app.modal_state.as_mut() {
-        state
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "retries")
-            .expect("retries field should exist")
-            .buffer = "3".to_owned();
-        state
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "threshold")
-            .expect("threshold field should exist")
-            .buffer = "1e999".to_owned();
-    }
+    let form = app
+        .composer
+        .pending_user_input
+        .as_mut()
+        .expect("MCP form should exist");
+    form.drafts[retries] = UserInputDraftValue::Integer("3".to_owned());
+    let threshold = form
+        .view
+        .questions
+        .iter()
+        .position(|question| question.id == "threshold")
+        .expect("threshold field should exist");
+    form.drafts[threshold] = UserInputDraftValue::Number("1e999".to_owned());
 
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
@@ -1363,20 +1004,17 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
     );
     assert_eq!(app.last_notice(), Some("Threshold must be a finite number"));
 
-    if let Some(ModalState::McpElicitation(state)) = app.modal_state.as_mut() {
-        state
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "threshold")
-            .expect("threshold field should exist")
-            .buffer = "0.25".to_owned();
-    }
+    app.composer
+        .pending_user_input
+        .as_mut()
+        .expect("MCP form should exist")
+        .drafts[threshold] = UserInputDraftValue::Number("0.25".to_owned());
 
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
             .is_none()
     );
-    assert!(!app.has_modal());
+    assert!(app.pending_user_input().is_none());
     assert_eq!(app.last_notice(), Some("submitted MCP input to filesystem"));
 
     let response = futures::executor::block_on(response_rx)?;
@@ -1411,6 +1049,7 @@ fn mcp_elicitation_cycles_boolean_and_enum_fields() -> Result<()> {
                         "description": "Allow execution"
                     },
                     "mode": {
+                        "type": "string",
                         "enum": ["safe", "fast"],
                         "title": "Mode",
                         "description": "Execution mode"
@@ -1421,39 +1060,59 @@ fn mcp_elicitation_cycles_boolean_and_enum_fields() -> Result<()> {
         response_tx,
     })?;
 
-    let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("selected: Allow execution"));
-    assert_eq!(app.modal_input_cursor(), Some(("Confirm".to_owned(), 5, 5)));
+    let form = app
+        .pending_user_input()
+        .expect("MCP form should be visible");
+    assert!(matches!(form.source, UserInputFormSource::Mcp { .. }));
+    assert_eq!(form.view.questions[0].question, "Allow execution");
+    assert_eq!(form.focused_question, 0);
 
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?
             .is_none()
     );
-    assert!(app.modal_lines().join("\n").contains("Confirm: true|"));
+    assert!(matches!(
+        app.pending_user_input().expect("MCP form").drafts[0],
+        UserInputDraftValue::Boolean(Some(true))
+    ));
 
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?
             .is_none()
     );
-    assert_eq!(app.last_notice(), Some("editing Mode"));
-    assert!(
-        app.modal_lines()
-            .join("\n")
-            .contains("selected: Execution mode")
+    assert_eq!(
+        app.pending_user_input().expect("MCP form").focused_question,
+        1
     );
 
     assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?
             .is_none()
     );
-    assert!(app.modal_lines().join("\n").contains("Mode: fast|"));
+    assert!(matches!(
+        app.pending_user_input().expect("MCP form").drafts[1],
+        UserInputDraftValue::SingleSelect {
+            selected: Some(1),
+            ..
+        }
+    ));
 
     assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?
             .is_none()
     );
-    assert!(app.modal_lines().join("\n").contains("Mode: safe|"));
+    assert!(matches!(
+        app.pending_user_input().expect("MCP form").drafts[1],
+        UserInputDraftValue::SingleSelect {
+            selected: Some(0),
+            ..
+        }
+    ));
 
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
             .is_none()
@@ -1470,103 +1129,138 @@ fn mcp_elicitation_cycles_boolean_and_enum_fields() -> Result<()> {
 }
 
 #[test]
-fn mcp_elicitation_key_edges_cover_boolean_enum_number_and_string_input() -> Result<()> {
+fn mcp_elicitation_renders_and_submits_multi_select_values() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
     app.handle_worker_message(WorkerMessage::McpElicitationRequest {
         request: McpElicitationRequest {
             server_name: "planner".to_owned(),
-            message: "Fill fields".to_owned(),
+            message: "Choose targets".to_owned(),
             requested_schema: json!({
                 "type": "object",
                 "properties": {
-                    "confirm": { "type": "boolean", "title": "Confirm", "default": false },
-                    "mode": { "enum": ["safe", "fast"], "title": "Mode", "default": "safe" },
-                    "count": { "type": "integer", "title": "Count" },
-                    "note": { "type": "string", "title": "Note" }
-                }
+                    "targets": {
+                        "type": "array",
+                        "title": "Targets",
+                        "items": {
+                            "type": "string",
+                            "enum": ["docs", "tests"]
+                        },
+                        "default": ["docs"]
+                    }
+                },
+                "required": ["targets"]
             }),
         },
         response_tx,
     })?;
 
-    assert_eq!(app.modal_input_cursor(), Some(("Confirm".to_owned(), 5, 5)));
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))?;
-    assert!(app.modal_lines().join("\n").contains("Confirm: true|"));
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
-    assert!(app.modal_lines().join("\n").contains("Confirm: false|"));
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert!(app.modal_lines().join("\n").contains("Confirm: true|"));
+    assert!(matches!(
+        &app.pending_user_input().expect("MCP form").drafts[0],
+        UserInputDraftValue::MultiSelect { selected, .. } if selected == &["docs"]
+    ));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
-    assert!(app.modal_lines().join("\n").contains("Confirm: false|"));
-
-    for _ in 0..4 {
-        if app
-            .modal_input_cursor()
-            .as_ref()
-            .map(|(label, _, _)| label.as_str())
-            == Some("Mode")
-        {
-            break;
-        }
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    assert_eq!(
-        app.modal_input_cursor()
-            .as_ref()
-            .map(|(label, _, _)| label.as_str()),
-        Some("Mode")
-    );
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert!(app.modal_lines().join("\n").contains("Mode: fast|"));
-
-    for _ in 0..4 {
-        if app
-            .modal_input_cursor()
-            .as_ref()
-            .map(|(label, _, _)| label.as_str())
-            == Some("Count")
-        {
-            break;
-        }
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    for character in "+12".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
-    assert!(app.modal_lines().join("\n").contains("Count: +12|"));
-
-    for _ in 0..4 {
-        if app
-            .modal_input_cursor()
-            .as_ref()
-            .map(|(label, _, _)| label.as_str())
-            == Some("Note")
-        {
-            break;
-        }
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    }
-    for character in "memo".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    assert!(matches!(
+        &app.pending_user_input().expect("MCP form").drafts[0],
+        UserInputDraftValue::MultiSelect { cursor: 1, selected } if selected == &["tests"]
+    ));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    let response = futures::executor::block_on(response_rx)?;
 
+    let response = futures::executor::block_on(response_rx)?;
     assert_eq!(response.action, McpElicitationAction::Accept);
+    assert_eq!(response.content, Some(json!({ "targets": ["tests"] })));
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_rejects_unsupported_schema_without_opening_a_modal() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Need nested data".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": { "nested": { "type": "object", "properties": {} } }
+            }),
+        },
+        response_tx,
+    })?;
+
+    assert!(!app.has_modal());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("unsupported form"))
+    );
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(response.action, McpElicitationAction::Cancel);
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_escape_only_closes_the_shared_form_and_live_owner_cancels_on_drop() -> Result<()>
+{
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Need input".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": { "answer": { "type": "string", "title": "Answer" } }
+            }),
+        },
+        response_tx,
+    })?;
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(app.pending_user_input().is_some_and(|form| !form.open));
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
+    assert!(app.pending_user_input().is_some_and(|form| form.open));
+
+    app.clear_pending_user_input();
     assert_eq!(
-        response.content,
-        Some(json!({
-            "confirm": false,
-            "mode": "fast",
-            "count": 12,
-            "note": "memo"
-        }))
+        futures::executor::block_on(response_rx)?.action,
+        McpElicitationAction::Cancel
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_decline_uses_the_shared_form_action_bar() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Need input".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": { "answer": { "type": "string", "title": "Answer" } }
+            }),
+        },
+        response_tx,
+    })?;
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.pending_user_input().expect("MCP form").selected_action,
+        UserInputFormAction::Decline
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        futures::executor::block_on(response_rx)?.action,
+        McpElicitationAction::Decline
     );
     Ok(())
 }

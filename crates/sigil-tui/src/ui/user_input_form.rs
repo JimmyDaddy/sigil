@@ -6,7 +6,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{PendingUserInputForm, UserInputDraftValue, UserInputFormAction};
+use crate::app::{
+    PendingUserInputForm, UserInputDraftValue, UserInputFormAction, UserInputFormSource,
+};
 
 use super::{
     text::wrap_terminal_lines,
@@ -32,7 +34,10 @@ pub(super) fn render_user_input_form(
         .split(area);
     let header = Text::from(vec![
         Line::from(Span::styled(
-            "Input required",
+            match &form.source {
+                UserInputFormSource::DurableAgent => "Input required",
+                UserInputFormSource::Mcp { .. } => "MCP input required",
+            },
             Style::default()
                 .fg(theme.palette.accent_warning)
                 .add_modifier(Modifier::BOLD),
@@ -42,7 +47,7 @@ pub(super) fn render_user_input_form(
                 "An accepted answer is durable · Enter resumes the exact continuation · Esc close"
             } else if !form.focus_actions
                 && form
-                    .request
+                    .view
                     .questions
                     .get(form.focused_question)
                     .is_some_and(|question| {
@@ -81,7 +86,7 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
         return;
     }
     let mut lines = vec![
-        Line::raw(form.request.prompt.clone()),
+        Line::raw(form.view.prompt.clone()),
         Line::raw(String::new()),
     ];
     if form.recovery_command.is_some() {
@@ -89,7 +94,10 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
             "The answer was accepted before the previous owner stopped. Resume reuses the exact durable command and does not ask the provider to repeat the question.",
             styles::muted(&theme.palette),
         )));
-        if let Some(receipt) = form.request.answer_receipt.as_ref()
+        if let Some(receipt) = form
+            .request
+            .as_ref()
+            .and_then(|request| request.answer_receipt.as_ref())
             && !receipt.answered_question_ids.is_empty()
         {
             lines.push(Line::raw(format!(
@@ -98,9 +106,7 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
             )));
         }
     } else {
-        for (index, (question, draft)) in
-            form.request.questions.iter().zip(&form.drafts).enumerate()
-        {
+        for (index, (question, draft)) in form.view.questions.iter().zip(&form.drafts).enumerate() {
             let focused = !form.focus_actions && index == form.focused_question;
             lines.push(Line::from(vec![
                 Span::styled(
@@ -271,5 +277,5 @@ fn action_available(form: &PendingUserInputForm, action: UserInputFormAction) ->
         UserInputFormAction::Decline => sigil_kernel::UserInputActionV1::Decline,
         UserInputFormAction::CancelRun => sigil_kernel::UserInputActionV1::CancelRun,
     };
-    form.request.allowed_actions.contains(&expected)
+    form.view.allowed_actions.contains(&expected)
 }

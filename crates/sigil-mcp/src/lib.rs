@@ -102,7 +102,8 @@ use output::{append_utf8_prefix, json_type_label, to_u64, truncate_text_budget};
 
 pub use elicitation::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
-    unsupported_mcp_elicitation_handler,
+    McpNormalizedForm, McpNormalizedFormField, McpNormalizedFormFieldKind, McpNormalizedFormOption,
+    normalize_mcp_form_message, normalize_mcp_form_schema, unsupported_mcp_elicitation_handler,
 };
 pub use events::{
     McpListChangedKind, McpListChangedNotification, McpProgressNotification,

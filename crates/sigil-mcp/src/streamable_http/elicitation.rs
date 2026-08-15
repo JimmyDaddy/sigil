@@ -25,6 +25,7 @@ pub struct McpRemoteFormField {
 pub struct ValidatedMcpFormRequest {
     pub safe_message: String,
     pub fields: Vec<McpRemoteFormField>,
+    normalized_form: crate::McpNormalizedForm,
     schema: Value,
 }
 
@@ -33,6 +34,12 @@ impl ValidatedMcpFormRequest {
     #[must_use]
     pub fn requested_schema(&self) -> &Value {
         &self.schema
+    }
+
+    /// Returns the same renderer contract consumed by stdio MCP product surfaces.
+    #[must_use]
+    pub fn normalized_form(&self) -> &crate::McpNormalizedForm {
+        &self.normalized_form
     }
 
     pub fn parse(params: &Value) -> Result<Self, McpStreamableHttpError> {
@@ -117,9 +124,13 @@ impl ValidatedMcpFormRequest {
                 version,
             )?);
         }
+        let normalized_form = crate::normalize_mcp_form_schema(schema)
+            .map_err(|_| McpStreamableHttpError::InvalidForm)?;
         Ok(Self {
-            safe_message: sanitize_form_text(message),
+            safe_message: crate::normalize_mcp_form_message(message)
+                .map_err(|_| McpStreamableHttpError::InvalidForm)?,
             fields,
+            normalized_form,
             schema: schema.clone(),
         })
     }

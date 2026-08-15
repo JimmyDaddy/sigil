@@ -17,10 +17,12 @@ use sigil_kernel::{
 pub use sigil_mcp::{
     McpDeclarationLaunchMetadata, McpElicitationAction, McpElicitationHandler,
     McpElicitationRequest, McpElicitationResponse, McpListChangedKind, McpListChangedNotification,
+    McpNormalizedForm, McpNormalizedFormField, McpNormalizedFormFieldKind, McpNormalizedFormOption,
     McpOAuthRevocationOutcome, McpProcessCoverage, McpProcessLaunch, McpProcessLaunchReceipt,
     McpProcessLaunchRequest, McpProcessLauncher, McpProgressNotification, McpRuntimeEventHandler,
-    McpToolRegistrationReport, mcp_transport_static_fingerprint,
-    unsupported_mcp_elicitation_handler, unsupported_mcp_runtime_event_handler,
+    McpToolRegistrationReport, mcp_transport_static_fingerprint, normalize_mcp_form_message,
+    normalize_mcp_form_schema, unsupported_mcp_elicitation_handler,
+    unsupported_mcp_runtime_event_handler,
 };
 use sigil_provider_anthropic::{
     AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV, anthropic_capabilities,

@@ -499,16 +499,20 @@ turn 抢占 pending continuation。
   base plan，finalizer 只暴露 `submit_plan_draft`，非 submit tool call 不执行并产生 typed protocol violation；
 - OpenAPI/generated TypeScript/strict Desktop DTO/SSE event variants 已同步；Plan detail 使用 hash/ETag 绑定，
   UI action authority 来自 canonical reducer 而不是 renderer 本地猜测。
+- background child 的 pending request 已以 public bounded form + child session binding 镜像到 root session；
+  root answer 会重新加载 authoritative child session、校验原 profile/read-only surface 并启动新 physical attempt，
+  已有授权不会跨 attempt 提升；process restart 回归证明只消费一次 continuation；
+- stdio 与 Streamable HTTP MCP form 已收敛到同一 bounded normalized contract；TUI 把它转换为同一个
+  `UserInputFormViewModel`，复用 agent question renderer/键位/校验，支持 multi-select。未知或 nested shape
+  显式返回 `UnsupportedFormShape`，MCP owner 断开/被清理时只发送 Cancel，绝不生成 durable replay command。
 
 仍未关闭的 release blocker：
 
-1. background child agent request 尚未镜像到 root attention queue，也没有 durable child-session resume routing；
-2. MCP elicitation 仍是连接存活期协议，尚未只复用 normalized renderer 并证明断线后绝不 replay answer；
-3. `ContinuationStarted` 后、provider dispatch evidence 尚未落地时的 crash window 仍需与 RFC-0058 physical
+1. `ContinuationStarted` 后、provider dispatch evidence 尚未落地时的 crash window 仍需与 RFC-0058 physical
    attempt recovery 完整收敛；
-4. unresolved request 的 compaction pin/property campaign、真实 TUI PTY、真实 `sigil serve` + Desktop E2E、
+2. unresolved request 的 compaction pin/property campaign、真实 TUI PTY、真实 `sigil serve` + Desktop E2E、
    real-model campaign 尚未全部执行；
-5. migration/compatibility 与 release notes/Doctor 仍需在 release closure slice 完成。
+3. migration/compatibility 与 release notes/Doctor 仍需在 release closure slice 完成。
 
-因此本节只记录当前事实，不放宽 §16 acceptance，也不把 root/PlanReview 的局部完成外推为 background、
-MCP 或 release 全链路完成。
+因此本节只记录当前事实，不放宽 §16 acceptance，也不把已通过定向 restart/transport 回归的能力外推为
+release 全链路完成。

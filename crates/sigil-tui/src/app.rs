@@ -305,7 +305,9 @@ pub(crate) enum PlanWorkbenchAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingUserInputForm {
-    pub(crate) request: sigil_kernel::PublicUserInputRequestV1,
+    pub(crate) view: UserInputFormViewModel,
+    pub(crate) request: Option<sigil_kernel::PublicUserInputRequestV1>,
+    pub(crate) source: UserInputFormSource,
     pub(crate) recovery_command: Option<sigil_kernel::UserInputDecisionCommandV1>,
     pub(crate) open: bool,
     pub(crate) focused_question: usize,
@@ -314,6 +316,48 @@ pub(crate) struct PendingUserInputForm {
     pub(crate) drafts: Vec<UserInputDraftValue>,
     pub(crate) scroll: usize,
     pub(crate) scroll_extent: ViewportScrollExtent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserInputFormViewModel {
+    pub(crate) prompt: String,
+    pub(crate) questions: Vec<sigil_kernel::UserInputQuestionV1>,
+    pub(crate) allowed_actions: Vec<sigil_kernel::UserInputActionV1>,
+}
+
+impl From<&sigil_kernel::PublicUserInputRequestV1> for UserInputFormViewModel {
+    fn from(request: &sigil_kernel::PublicUserInputRequestV1) -> Self {
+        Self {
+            prompt: request.prompt.clone(),
+            questions: request.questions.clone(),
+            allowed_actions: request.allowed_actions.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UserInputFormSource {
+    DurableAgent,
+    Mcp { server_name: String },
+}
+
+#[derive(Debug)]
+struct PendingMcpElicitation {
+    response_tx: Option<crate::runner::McpElicitationResponseTx>,
+}
+
+impl PendingMcpElicitation {
+    fn send(&mut self, response: sigil_runtime::McpElicitationResponse) {
+        if let Some(response_tx) = self.response_tx.take() {
+            let _ = response_tx.send(response);
+        }
+    }
+}
+
+impl Drop for PendingMcpElicitation {
+    fn drop(&mut self) {
+        self.send(sigil_runtime::McpElicitationResponse::cancel());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,6 +595,7 @@ pub struct AppState {
     workspace_trust_gate_state: Option<WorkspaceTrustGateState>,
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
+    pending_mcp_elicitation: Option<PendingMcpElicitation>,
     tool_preview_snapshots: HashMap<String, ToolPreviewSnapshot>,
     // Populated only from kernel safe-persistence projections, never exact provider arguments.
     safe_tool_calls: HashMap<String, ToolCall>,
@@ -1008,6 +1053,7 @@ impl AppState {
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
+            pending_mcp_elicitation: None,
             tool_preview_snapshots: HashMap::new(),
             safe_tool_calls: HashMap::new(),
             tool_progress_execution_ids: HashMap::new(),
@@ -1139,6 +1185,7 @@ impl AppState {
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
+            pending_mcp_elicitation: None,
             tool_preview_snapshots: HashMap::new(),
             safe_tool_calls: HashMap::new(),
             tool_progress_execution_ids: HashMap::new(),

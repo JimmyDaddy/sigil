@@ -31,6 +31,85 @@ use super::{
 };
 
 #[test]
+fn stdio_and_remote_elicitation_share_one_normalized_form_contract() -> Result<()> {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "title": "Mode",
+                "oneOf": [
+                    { "const": "safe", "title": "Safe" },
+                    { "const": "fast", "title": "Fast" }
+                ],
+                "default": "safe"
+            },
+            "targets": {
+                "type": "array",
+                "title": "Targets",
+                "items": { "type": "string", "enum": ["docs", "tests"] },
+                "default": ["docs"]
+            }
+        },
+        "required": ["mode", "targets"]
+    });
+    let stdio = super::elicitation::mcp_elicitation_request(
+        "server",
+        &json!({
+            "params": {
+                "message": "Choose execution settings",
+                "requestedSchema": schema
+            }
+        }),
+    )?;
+    let remote = super::ValidatedMcpFormRequest::parse(&json!({
+        "mode": "form",
+        "message": "Choose execution settings",
+        "requestedSchema": stdio.requested_schema
+    }))
+    .map_err(anyhow::Error::msg)?;
+    let normalized = super::normalize_mcp_form_schema(remote.requested_schema())?;
+
+    assert_eq!(remote.normalized_form(), &normalized);
+    assert_eq!(normalized.fields.len(), 2);
+    assert!(matches!(
+        normalized.fields[0].kind,
+        super::McpNormalizedFormFieldKind::SingleSelect
+    ));
+    assert!(matches!(
+        normalized.fields[1].kind,
+        super::McpNormalizedFormFieldKind::MultiSelect
+    ));
+    assert_eq!(normalized.fields[0].options[0].label, "Safe");
+    Ok(())
+}
+
+#[test]
+fn stdio_elicitation_rejects_unsupported_forms_instead_of_guessing_text_fields() {
+    for schema in [
+        json!({
+            "type": "object",
+            "properties": { "nested": { "type": "object", "properties": {} } }
+        }),
+        json!({
+            "type": "object",
+            "properties": { "unknown": { "title": "No type" } }
+        }),
+        json!({
+            "type": "object",
+            "properties": { "choice": { "type": "string", "anyOf": [] } }
+        }),
+    ] {
+        let error = super::elicitation::mcp_elicitation_request(
+            "server",
+            &json!({ "params": { "requestedSchema": schema } }),
+        )
+        .expect_err("unsupported form must fail closed");
+        assert!(error.to_string().contains("UnsupportedFormShape"));
+    }
+}
+
+#[test]
 fn stdio_tool_descriptor_preserves_permission_annotations() {
     let descriptor: super::McpToolDescriptor = serde_json::from_value(json!({
         "name": "write_record",
