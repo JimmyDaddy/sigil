@@ -457,7 +457,35 @@ impl AppState {
                         .ok()
                         .flatten()
                     });
-                    self.set_pending_plan_approval_from_draft(draft, current_snapshot.as_deref());
+                    let public_review =
+                        sigil_runtime::conversation_display::public_plan_review_from_entries(
+                            &self.session_browser.current_entries,
+                            current_snapshot.as_deref(),
+                        );
+                    match sigil_kernel::plan_review_detail_from_entries(
+                        &self.session_browser.current_entries,
+                        &draft.plan_id,
+                        &draft.plan_hash,
+                    ) {
+                        Ok(detail) => {
+                            self.set_pending_plan_approval_from_detail(
+                                &detail,
+                                current_snapshot.as_deref(),
+                            );
+                            if let Some(review) = public_review.as_ref() {
+                                self.apply_pending_plan_public_review(review);
+                            } else {
+                                self.last_notice = Some(
+                                    "plan is readable, but its action projection is unavailable; actions remain disabled"
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            self.clear_pending_plan_approval();
+                            self.last_notice = Some(format!("plan detail unavailable: {error}"));
+                        }
+                    }
                 }
                 self.last_notice = if self.pending_plan_approval().is_some() {
                     Some("plan ready".to_owned())
@@ -477,10 +505,38 @@ impl AppState {
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.sync_current_session_state(entries);
+                // Reproject the plan workbench before exposing the form. A pending revision
+                // guidance request removes all plan action authority until it is resolved.
+                self.restore_durable_attention_surfaces();
                 self.refresh_session_history();
+                self.set_pending_user_input(request.clone());
                 self.last_notice = Some("input required".to_owned());
                 self.push_event(
                     "user_input:requested",
+                    format!(
+                        "{} generation {}",
+                        request.identity.request_id.as_str(),
+                        request.identity.generation
+                    ),
+                );
+            }
+            WorkerMessage::UserInputDecisionApplied {
+                request,
+                continuation_started,
+                entries,
+            } => {
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.clear_pending_user_input();
+                if continuation_started {
+                    self.runtime.is_busy = true;
+                    self.last_notice = Some("answer accepted; agent continuing".to_owned());
+                } else {
+                    self.runtime.is_busy = false;
+                    self.last_notice = Some("input request resolved".to_owned());
+                }
+                self.push_event(
+                    "user_input:decision",
                     format!(
                         "{} generation {}",
                         request.identity.request_id.as_str(),
@@ -500,8 +556,8 @@ impl AppState {
             WorkerMessage::PlanSaved { entry, entries } => {
                 self.runtime.is_busy = false;
                 self.approval.pending = None;
-                self.clear_pending_plan_approval();
                 self.sync_current_session_state(entries);
+                self.restore_durable_attention_surfaces();
                 self.refresh_session_history();
                 self.last_notice = Some(format!("plan {} saved", entry.plan_id.as_str()));
                 self.push_event("plan:saved", entry.plan_id.as_str().to_owned());

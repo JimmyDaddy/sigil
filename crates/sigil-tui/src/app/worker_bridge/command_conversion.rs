@@ -94,6 +94,19 @@ impl AppState {
                 plan_id,
                 expected_plan_hash,
             },
+            AppAction::SubmitUserInputDecision {
+                command_id,
+                request_id,
+                generation,
+                expected_request_hash,
+                decision,
+            } => WorkerCommand::SubmitUserInputDecision {
+                command_id,
+                request_id,
+                generation,
+                expected_request_hash,
+                decision,
+            },
             AppAction::InvokeInlineSkill {
                 skill_id,
                 arguments,

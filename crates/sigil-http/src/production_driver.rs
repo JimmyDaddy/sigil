@@ -53,13 +53,16 @@ use sigil_runtime::application_run::{
     ApplicationRunInteraction, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, ApplicationTaskContinuationExecution,
     ApplicationTaskContinuationRequest, ApplicationTerminalTaskControl, ApplicationTranscriptRole,
-    PreparedApplicationRun, PreparedApplicationTaskContinuation,
+    ApplicationUserInputDecisionRequest, PreparedApplicationRun,
+    PreparedApplicationTaskContinuation, PreparedApplicationUserInputDecision,
     accept_application_task_integration_review_with_attachment, application_agent_activity_view,
-    application_run_context_view, application_session_frontier_view,
+    application_recoverable_user_input_decision, application_run_context_view,
+    application_session_frontier_view, application_session_has_unresolved_user_input,
     application_session_transcript_page, application_task_integration_review_view,
-    application_verification_view, bind_application_session_with_model_ref_and_attachment,
-    bind_existing_application_session, bind_existing_application_session_with_attachment,
-    prepare_application_run, prepare_application_task_continuation,
+    application_user_input_request_view_by_key, application_verification_view,
+    bind_application_session_with_model_ref_and_attachment, bind_existing_application_session,
+    bind_existing_application_session_with_attachment, prepare_application_run,
+    prepare_application_task_continuation, prepare_application_user_input_decision,
     record_application_preparation_cancellation_with_attachment,
     rerun_application_verification_with_attachment,
 };
@@ -89,15 +92,18 @@ use crate::{
     HttpIntentStackDriverError, HttpIntentStackView, HttpLiveEventBus, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPendingApprovalDisplay, HttpPendingApprovalSubject,
     HttpPermissionMode, HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest,
-    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunAdmissionError, HttpRunContextView,
-    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpRunSnapshot,
-    HttpRunStartRequest, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
-    HttpSessionRouteRecoveryCode, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpPlanReviewDetail, HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunAdmissionError,
+    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
+    HttpRunDriverTerminalTaskCancel, HttpRunSnapshot, HttpRunStartRequest, HttpRunTerminalOutcome,
+    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRouteRecoveryCode,
+    HttpSessionRunRegistry, HttpSessionSnapshot, HttpSessionTranscriptMessage,
     HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
     HttpTaskIntegrationReviewView, HttpToolArtifactPage, HttpToolArtifactReadDriverError,
     HttpToolArtifactReadRequest, HttpToolOutputShrinkReceipt, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpTranscriptRole, HttpUserInputDecisionCommandReceipt, HttpUserInputDecisionDriverCommand,
+    HttpUserInputDecisionRequest, HttpUserInputRequest, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 
 const DEFAULT_HTTP_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -177,6 +183,14 @@ trait HttpApplicationRunPreparer: Send + Sync {
     ) -> Result<PreparedApplicationTaskContinuation> {
         Err(anyhow!("application Task continuation is unavailable"))
     }
+
+    async fn prepare_user_input(
+        &self,
+        _request: ApplicationUserInputDecisionRequest,
+        _services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationUserInputDecision> {
+        Err(anyhow!("application user input is unavailable"))
+    }
 }
 
 struct HttpSharedApplicationRunPreparer;
@@ -209,6 +223,16 @@ impl HttpApplicationRunPreparer for HttpSharedApplicationRunPreparer {
         services: ApplicationRunServices,
     ) -> Result<PreparedApplicationTaskContinuation> {
         prepare_application_task_continuation(request, &services)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn prepare_user_input(
+        &self,
+        request: ApplicationUserInputDecisionRequest,
+        services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationUserInputDecision> {
+        prepare_application_user_input_decision(request, &services)
             .await
             .map_err(anyhow::Error::new)
     }
@@ -598,11 +622,21 @@ fn publish_plan_review_revision_terminal(
                 final_text: "Plan review closed without a draft; no task was created.".to_owned(),
             }
         }
+        Ok(sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput { request }) => {
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: request.identity.request_id.as_str().to_owned(),
+                generation: request.identity.generation,
+                request_hash: request.request_hash.clone(),
+            }
+        }
         Ok(sigil_runtime::PlanReviewRunOutcome::Cancelled) => PublicRunEventKind::RunCancelled,
         Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(error))
-        | Ok(sigil_runtime::PlanReviewRunOutcome::Failed(error)) => PublicRunEventKind::RunFailed {
-            error: error.clone(),
-        },
+        | Ok(sigil_runtime::PlanReviewRunOutcome::Failed(error))
+        | Ok(sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error)) => {
+            PublicRunEventKind::RunFailed {
+                error: error.clone(),
+            }
+        }
         Err(error) => PublicRunEventKind::RunFailed {
             error: format!("{error:#}"),
         },
@@ -1108,6 +1142,7 @@ impl HttpProductionRunDriver {
         &self,
         start: HttpRunDriverStart,
         queued: Option<HttpQueuedRunPreparation>,
+        preprepared: Option<HttpPreparedApplicationRun>,
     ) -> Result<(), HttpRunDriverError> {
         let session_attachment = self
             .acquire_session_attachment(&start.session)
@@ -1158,7 +1193,7 @@ impl HttpProductionRunDriver {
             terminal_owners: Arc::clone(&self.terminal_owners),
             cancel_receiver,
         };
-        let task = self.runtime.spawn(supervisor.run());
+        let task = self.runtime.spawn(supervisor.run(preprepared));
         let active_runs = Arc::clone(&self.active_runs);
         let active_runs_ready = Arc::clone(&self.active_runs_ready);
         let terminal_owners = Arc::clone(&self.terminal_owners);
@@ -1605,6 +1640,33 @@ impl HttpRunDriver for HttpProductionRunDriver {
         })
     }
 
+    fn recoverable_session_attention_command(
+        &self,
+        session: &HttpSessionSnapshot,
+    ) -> Result<Option<HttpUserInputDecisionDriverCommand>, HttpRunDriverError> {
+        let Some(command) = application_recoverable_user_input_decision(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map_err(|error| {
+            HttpRunDriverError::new(format!("user input recovery projection failed: {error:#}"))
+        })?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(HttpUserInputDecisionDriverCommand {
+            command_id: command.command_id.as_str().to_owned(),
+            client_id: "session-recovery".to_owned(),
+            request_id: command.identity.request_id.as_str().to_owned(),
+            request: HttpUserInputDecisionRequest {
+                generation: command.identity.generation,
+                expected_request_hash: command.request_hash,
+                decision: command.decision,
+                permission_mode: None,
+            },
+        }))
+    }
+
     fn admit_run_start(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -1704,7 +1766,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
-        self.start_supervised_run(start, None)
+        self.start_supervised_run(start, None, None)
     }
 
     fn cancel_run(&self, cancel: HttpRunDriverCancel) -> Result<(), HttpRunDriverError> {
@@ -2877,7 +2939,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         self.acquire_session_attachment(&start.session)
             .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let (start, queued) = self.queued_supervisor_start(start)?;
-        self.start_supervised_run(start, Some(queued))
+        self.start_supervised_run(start, Some(queued), None)
     }
 
     fn wait_for_run_release(
@@ -3028,6 +3090,218 @@ impl HttpRunDriver for HttpProductionRunDriver {
             return Err(error);
         }
         Ok(http_receipt)
+    }
+
+    fn plan_review_detail(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        plan_id: &str,
+        expected_plan_hash: &str,
+    ) -> Result<HttpPlanReviewDetail, HttpRunDriverError> {
+        let plan_id = sigil_kernel::PlanId::new(plan_id.to_owned())
+            .map_err(|error| HttpRunDriverError::new(format!("invalid plan id: {error}")))?;
+        let entries = sigil_kernel::JsonlSessionStore::read_entries(&session.session_log_path)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("plan detail read failed: {error}"))
+            })?;
+        sigil_kernel::plan_review_detail_from_entries(&entries, &plan_id, expected_plan_hash)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("plan detail projection failed: {error:#}"))
+            })
+    }
+
+    fn user_input_request(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request_id: &str,
+        generation: u32,
+        expected_request_hash: &str,
+    ) -> Result<HttpUserInputRequest, HttpRunDriverError> {
+        application_user_input_request_view_by_key(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            request_id,
+            generation,
+            expected_request_hash,
+        )
+        .map(Into::into)
+        .map_err(|error| HttpRunDriverError::new(format!("user input detail failed: {error:#}")))
+    }
+
+    fn has_unresolved_user_input(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<bool, HttpRunDriverError> {
+        application_session_has_unresolved_user_input(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map_err(|error| {
+            HttpRunDriverError::new(format!("user input admission projection failed: {error:#}"))
+        })
+    }
+
+    fn user_input_decision(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        command: &HttpUserInputDecisionDriverCommand,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRunDriverError> {
+        let attachment = self
+            .acquire_session_attachment(session)
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let exact = application_user_input_request_view_by_key(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &command.request_id,
+            command.request.generation,
+            &command.request.expected_request_hash,
+        )
+        .map_err(|error| {
+            HttpRunDriverError::stale_user_input(format!("user input decision is stale: {error:#}"))
+        })?;
+        let run_id = sigil_kernel::user_input_continuation_logical_run_id(
+            &exact.identity,
+            &exact.request_hash,
+        )
+        .map_err(|error| HttpRunDriverError::new(format!("user input run id failed: {error}")))?
+        .as_str()
+        .to_owned();
+        let registry = self.attached_registry()?;
+        let services = self
+            .services
+            .clone()
+            .with_terminal_lifecycle_handler(Arc::new(HttpProductionTerminalLifecycleHandler {
+                durable_session_scope_id: session.durable_session_scope_id.clone(),
+                run_id: run_id.clone(),
+                registry: Arc::downgrade(&registry),
+                event_bus: Arc::clone(&self.event_bus),
+                terminal_owners: Arc::clone(&self.terminal_owners),
+            }));
+        let prepared = self
+            .runtime
+            .block_on(self.preparer.prepare_user_input(
+                ApplicationUserInputDecisionRequest {
+                    config_path: self.options.config_path.clone(),
+                    launch_cwd: self.options.launch_cwd.clone(),
+                    session_path: PathBuf::from(&session.session_log_path),
+                    session_attachment: Some(attachment),
+                    expected_session_scope_id: session.durable_session_scope_id.clone(),
+                    run_id: run_id.clone(),
+                    identity: exact.identity,
+                    request_hash: exact.request_hash,
+                    command_id:
+                        sigil_kernel::UserInputCommandId::new(command.command_id.clone()).map_err(
+                            |error| {
+                                HttpRunDriverError::new(format!(
+                                    "user input command id failed: {error}"
+                                ))
+                            },
+                        )?,
+                    decision: command.request.decision.clone(),
+                    interaction: ApplicationRunInteraction::ExternallyInteractive,
+                    permission_mode: command.request.permission_mode.map(Into::into),
+                },
+                services,
+            ))
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("user input decision failed: {error:#}"))
+            })?;
+        let (receipt, continuation, revision_request) = prepared.into_parts();
+        let plan_review_research_resume = matches!(
+            &receipt.request.source,
+            sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
+        );
+        let continuation_run_id = continuation.as_ref().map(|_| run_id.clone()).or_else(|| {
+            revision_request.as_ref().map(|request| {
+                if plan_review_research_resume {
+                    run_id.clone()
+                } else {
+                    request.child_logical_run_id()
+                }
+            })
+        });
+        if let Some(continuation) = continuation {
+            let permission_mode = command
+                .request
+                .permission_mode
+                .unwrap_or(HttpPermissionMode::Manual);
+            let run = registry
+                .register_supervised_session_run(
+                    &session.id,
+                    &run_id,
+                    permission_mode,
+                    "Continue after answering a requested question",
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+            let start = HttpRunDriverStart {
+                session: session.clone(),
+                run,
+                prompt: "Continue after answering a requested question".to_owned(),
+                model_ref: None,
+                model_selection_binding: None,
+                route_recovery_binding: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                task_continuation: None,
+            };
+            if let Err(error) = self.start_supervised_run(
+                start,
+                None,
+                Some(HttpPreparedApplicationRun::Conversation(Box::new(
+                    continuation,
+                ))),
+            ) {
+                registry.rollback_supervised_session_run_registration(&session.id, &run_id);
+                return Err(error);
+            }
+        }
+        if let Some(revision_request) = revision_request {
+            let root_config =
+                sigil_kernel::RootConfig::load(&self.options.config_path).map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "plan revision guidance config failed: {error}"
+                    ))
+                })?;
+            let workspace_root = sigil_kernel::resolve_workspace_root(
+                &self.options.config_path,
+                &self.options.launch_cwd,
+                &root_config.workspace.root,
+            );
+            if let Err(error) = self.spawn_plan_review_revision(
+                session,
+                &root_config,
+                &workspace_root,
+                revision_request,
+            ) {
+                if let sigil_kernel::UserInputSourceV1::PlanRevision {
+                    base_plan_id,
+                    base_plan_hash,
+                } = &receipt.request.source
+                    && let Err(recovery_error) = sigil_runtime::application_record_revision_failure(
+                        &root_config,
+                        Path::new(&session.session_log_path),
+                        &session.durable_session_scope_id,
+                        base_plan_id.as_str(),
+                        base_plan_hash,
+                        &format!("revision spawn failed: {error}"),
+                    )
+                {
+                    return Err(HttpRunDriverError::new(format!(
+                        "{error}; revision recovery failed: {recovery_error:#}"
+                    )));
+                }
+                return Err(error);
+            }
+        }
+        Ok(HttpUserInputDecisionCommandReceipt {
+            command_id: command.command_id.clone(),
+            client_id: command.client_id.clone(),
+            session_id: session.durable_session_scope_id.clone(),
+            request: receipt.request.into(),
+            continuation_run_id,
+            replayed: receipt.idempotent_replay,
+        })
     }
 
     fn wait_for_idle(&self, timeout: Duration) -> Result<(), HttpRunDriverError> {
@@ -3791,7 +4065,10 @@ impl HttpRunSupervisor {
         evict_http_promoted_exact_prompt(&self.start.session, queued, &self.exact_queue_prompts)
     }
 
-    async fn run(mut self) -> Result<(), HttpRunDriverError> {
+    async fn run(
+        mut self,
+        preprepared: Option<HttpPreparedApplicationRun>,
+    ) -> Result<(), HttpRunDriverError> {
         let registry = self.registry.upgrade().ok_or_else(|| {
             HttpRunDriverError::new("production registry closed before run preparation")
         })?;
@@ -3868,6 +4145,14 @@ impl HttpRunSupervisor {
         let expected_session_scope_id = self.start.session.durable_session_scope_id.clone();
         let queued = self.queued.take();
         let mut preparation = Box::pin(async move {
+            if let Some(prepared) = preprepared {
+                if queued.is_some() || task_continuation.is_some() {
+                    return Err(anyhow!(
+                        "a pre-prepared run cannot also be queued or continue a Task"
+                    ));
+                }
+                return Ok(prepared);
+            }
             match (queued, task_continuation) {
                 (Some(_), Some(_)) => Err(anyhow!("queued runs cannot continue an existing Task")),
                 (Some(queued), None) => preparer

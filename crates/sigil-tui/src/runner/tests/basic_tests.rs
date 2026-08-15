@@ -57,32 +57,39 @@ fn test_child_session_skill(agent: Option<&str>) -> SkillDescriptor {
     }
 }
 
-fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
-    format!(
-        r#"Plan:
-
-```sigil-plan-v2
-{{
-  "summary": "{summary}",
-  "steps": [
-    {{
-      "step_id": "step-1",
-      "title": "{title}",
-      "target_paths": ["{path}"]
-    }}
-  ],
-  "target_paths": ["{path}"],
-  "suggested_checks": [
-    {{
-      "check_spec_id": "cargo-test",
-      "command": "cargo",
-      "args": ["test", "-p", "sigil-kernel", "plan"]
-    }}
-  ]
-}}
-```
-"#
-    )
+fn structured_plan_tool_chunks(summary: &str, title: &str, path: &str) -> Vec<ProviderChunk> {
+    let args = serde_json::json!({
+        "schema_version": 2,
+        "summary": summary,
+        "steps": [{
+            "step_id": "step-1",
+            "title": title,
+            "role": "executor",
+            "depends_on": [],
+            "mode": "write",
+            "isolation": "sequential_workspace_write",
+            "target_paths": [path]
+        }],
+        "target_paths": [path],
+        "suggested_checks": ["cargo test -p sigil-kernel plan"]
+    })
+    .to_string();
+    vec![
+        ProviderChunk::ToolCallStart {
+            id: "submit-plan-draft".to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+        },
+        ProviderChunk::ToolCallArgsDelta {
+            id: "submit-plan-draft".to_owned(),
+            delta: args.clone(),
+        },
+        ProviderChunk::ToolCallComplete(ToolCall {
+            id: "submit-plan-draft".to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            args_json: args,
+        }),
+        ProviderChunk::Done,
+    ]
 }
 
 fn test_image_attachment() -> Result<ImageAttachment> {
@@ -277,22 +284,16 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
             }),
             ProviderChunk::Done,
         ]),
-        StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta(structured_plan_text(
-                "plan after blocked write",
-                "Inspect README.md after blocked write",
-                "README.md",
-            )),
-            ProviderChunk::Done,
-        ]),
-        StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta(structured_plan_text(
-                "plan after blocked write",
-                "Inspect README.md after blocked write",
-                "README.md",
-            )),
-            ProviderChunk::Done,
-        ]),
+        StreamPlan::Chunks(structured_plan_tool_chunks(
+            "plan after blocked write",
+            "Inspect README.md after blocked write",
+            "README.md",
+        )),
+        StreamPlan::Chunks(structured_plan_tool_chunks(
+            "plan after blocked write",
+            "Inspect README.md after blocked write",
+            "README.md",
+        )),
     ]);
     let mut registry = ToolRegistry::new();
     registry.register(std::sync::Arc::new(WriteTool));
@@ -334,7 +335,26 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
         unreachable!("recv_until only returns PlanRunFinished");
     };
     assert!(result.final_text.contains("plan after blocked write"));
-    assert!(entries.iter().any(|entry| matches!(
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.tool_name == "write_file"
+    )));
+    let child_session_path = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) => Some(
+                attempt.child_session_ref.resolve(
+                    session_log_path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new(".")),
+                ),
+            ),
+            _ => None,
+        })
+        .expect("plan review must preserve its child-session binding");
+    let child_entries = JsonlSessionStore::read_entries(child_session_path)?;
+    assert!(child_entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
             if execution.tool_name == "write_file"
@@ -361,14 +381,11 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-plan-task.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta(structured_plan_text(
-            "Update README",
-            "Update README.md",
-            "README.md",
-        )),
-        ProviderChunk::Done,
-    ])]);
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+        "Update README",
+        "Update README.md",
+        "README.md",
+    ))]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
@@ -409,9 +426,9 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     assert_eq!(start_mode, PlanTaskStartMode::CreatePaused);
     assert_eq!(entry.plan_id, draft.plan_id);
     assert_eq!(entry.plan_hash, draft.plan_hash);
-    assert_eq!(entry.task_plan_version, 0);
+    assert_eq!(entry.task_plan_version, 1);
     assert!(entry.stale_reason.is_none());
-    assert!(entry.step_mapping.is_empty());
+    assert_eq!(entry.step_mapping.len(), 1);
     let created_task_id = entry.task_id.clone();
     assert!(entries.iter().any(|entry| matches!(
         entry,
@@ -425,7 +442,7 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
                 && run.objective.contains("Execute the following user-approved structured plan")
     )));
     assert!(
-        !entries
+        entries
             .iter()
             .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
     );
@@ -451,14 +468,11 @@ fn reject_plan_command_appends_rejected_decision_and_clears_pending_projection()
         .path()
         .join(".sigil/sessions/session-plan-reject.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta(structured_plan_text(
-            "Update README",
-            "Update README.md",
-            "README.md",
-        )),
-        ProviderChunk::Done,
-    ])]);
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+        "Update README",
+        "Update README.md",
+        "README.md",
+    ))]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
@@ -515,14 +529,11 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
         .join(".sigil/sessions/session-plan-task-run-now.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![
-        StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta(structured_plan_text(
-                "Fix README typo",
-                "Update the approved README typo",
-                "README.md",
-            )),
-            ProviderChunk::Done,
-        ]),
+        StreamPlan::Chunks(structured_plan_tool_chunks(
+            "Fix README typo",
+            "Update the approved README typo",
+            "README.md",
+        )),
         StreamPlan::Pending,
     ]);
     let agent = Agent::new(provider, ToolRegistry::new());
@@ -561,10 +572,10 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
     assert_eq!(start_mode, PlanTaskStartMode::CreateAndRun);
-    assert_eq!(entry.task_plan_version, 0);
-    assert!(entry.step_mapping.is_empty());
+    assert_eq!(entry.task_plan_version, 1);
+    assert_eq!(entry.step_mapping.len(), 1);
     assert!(
-        !entries
+        entries
             .iter()
             .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
     );
@@ -591,14 +602,11 @@ fn create_task_from_plan_records_stale_reason_after_workspace_change() -> Result
         .path()
         .join(".sigil/sessions/session-plan-task-stale.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta(structured_plan_text(
-            "Update README",
-            "Update README.md",
-            "README.md",
-        )),
-        ProviderChunk::Done,
-    ])]);
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+        "Update README",
+        "Update README.md",
+        "README.md",
+    ))]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(
         root_config,
@@ -661,14 +669,11 @@ fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<
         .path()
         .join(".sigil/sessions/session-plan-task-grant.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta(structured_plan_text(
-            "Update README",
-            "Update README.md",
-            "README.md",
-        )),
-        ProviderChunk::Done,
-    ])]);
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+        "Update README",
+        "Update README.md",
+        "README.md",
+    ))]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 

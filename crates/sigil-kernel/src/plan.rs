@@ -22,7 +22,7 @@ use crate::{
 /// Stable digest prefix used for approved plan text.
 pub const PLAN_HASH_PREFIX: &str = "sha256:";
 const PLAN_INLINE_TEXT_MAX_BYTES: usize = 64 * 1024;
-const PLAN_SUMMARY_MAX_CHARS: usize = 160;
+const PLAN_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 
 /// Stable identifier for one durable plan artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -141,6 +141,142 @@ pub struct PlanDraftCreatedEntry {
     pub created_at_ms: u64,
 }
 
+/// Complete immutable detail for one structured plan-review step.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanReviewStepDetailV1 {
+    pub step_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AgentRole>,
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TaskStepMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<TaskIsolationMode>,
+    pub target_paths: Vec<String>,
+    pub suggested_checks: Vec<PlanSuggestedCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub notes: Vec<String>,
+}
+
+/// Immutable lineage required to audit the plan-review attempt that produced a detail artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanLineageV1 {
+    pub source: PlanSourceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review_id: Option<PlanReviewId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<crate::PlanReviewAttemptId>,
+    pub created_at_ms: u64,
+}
+
+/// Complete immutable plan detail shared by TUI, Desktop, and HTTP adapters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanReviewDetailV1 {
+    pub plan_id: PlanId,
+    pub plan_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_snapshot_id: Option<String>,
+    pub source: crate::PlanReviewSource,
+    pub summary: String,
+    pub steps: Vec<PlanReviewStepDetailV1>,
+    pub target_paths: Vec<String>,
+    pub suggested_checks: Vec<PlanSuggestedCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub notes: Vec<String>,
+    pub lineage: PlanLineageV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_markdown: Option<String>,
+}
+
+/// Converts one exact durable plan artifact into its complete immutable review detail.
+///
+/// # Errors
+///
+/// Returns an error for unknown identities, hash drift, conflicting attempt facts, or a plan whose
+/// source cannot be proven from the append-only lifecycle.
+pub fn plan_review_detail_from_entries(
+    entries: &[SessionLogEntry],
+    plan_id: &PlanId,
+    expected_plan_hash: &str,
+) -> Result<PlanReviewDetailV1> {
+    let artifacts = PlanArtifactProjection::from_entries(entries);
+    let draft = artifacts
+        .plans
+        .get(plan_id)
+        .ok_or_else(|| anyhow::anyhow!("plan detail references an unknown plan"))?;
+    if draft.plan_hash != expected_plan_hash {
+        bail!("plan detail does not bind the exact plan hash");
+    }
+    let mut attempts = entries.iter().filter_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+            if &attempt.plan_id == plan_id =>
+        {
+            Some(attempt)
+        }
+        _ => None,
+    });
+    let first = attempts.next();
+    let source = first
+        .map(|attempt| attempt.source)
+        .unwrap_or(crate::PlanReviewSource::ExplicitPlanCommand);
+    let latest = attempts.next_back().or(first);
+    if latest.is_some_and(|attempt| attempt.status != crate::PlanReviewAttemptStatus::DraftReady) {
+        bail!("plan detail is not bound to a DraftReady attempt");
+    }
+    let steps = draft
+        .steps
+        .iter()
+        .cloned()
+        .map(|step| PlanReviewStepDetailV1 {
+            step_id: step.step_id,
+            title: step.title,
+            display_name: step.display_name,
+            detail: step.detail,
+            role: step.role,
+            depends_on: step.depends_on,
+            mode: step.mode,
+            isolation: step.isolation,
+            target_paths: step.target_paths,
+            suggested_checks: step.suggested_checks,
+            risk: step.risk,
+            notes: step.notes,
+        })
+        .collect();
+    Ok(PlanReviewDetailV1 {
+        plan_id: draft.plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+        workspace_snapshot_id: draft.workspace_snapshot_id.clone(),
+        source,
+        summary: draft.summary.clone(),
+        steps,
+        target_paths: draft.target_paths.clone(),
+        suggested_checks: draft.suggested_checks.clone(),
+        risk: draft.risk.clone(),
+        notes: draft.notes.clone(),
+        lineage: PlanLineageV1 {
+            source: draft.source.clone(),
+            plan_review_id: latest.map(|attempt| attempt.plan_review_id.clone()),
+            attempt_id: latest.map(|attempt| attempt.attempt_id.clone()),
+            created_at_ms: draft.created_at_ms,
+        },
+        legacy_markdown: draft
+            .steps
+            .is_empty()
+            .then(|| draft.inline_text.clone())
+            .flatten(),
+    })
+}
+
 /// User decision recorded for a plan artifact.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +288,8 @@ pub enum PlanDecision {
     /// `RevisionRequested`, this is recoverable: the original plan stays actionable and a new
     /// revision of the same retry-stable identity may be requested.
     RevisionFailed,
+    /// A revision candidate was committed and atomically replaced this base plan.
+    RevisionSucceeded,
     SavedOnly,
 }
 
@@ -162,6 +300,7 @@ impl PlanDecision {
             Self::Rejected => "rejected",
             Self::RevisionRequested => "revision_requested",
             Self::RevisionFailed => "revision_failed",
+            Self::RevisionSucceeded => "revision_succeeded",
             Self::SavedOnly => "saved_only",
         }
     }
@@ -399,7 +538,7 @@ pub fn plan_draft_created_entry(
     let Some(exact_structured) = structured_plan_draft(plan_text) else {
         return Ok(None);
     };
-    let structured = safe_structured_plan_draft(exact_structured.clone());
+    let structured = safe_structured_plan_draft(exact_structured.clone())?;
     let inline_plan_text = render_structured_plan_text(&structured);
     let plan_hash = if structured == exact_structured {
         plan_text_hash(plan_text)
@@ -435,7 +574,7 @@ pub fn plan_draft_created_entry_with_plan_id(
     let Some(exact_structured) = structured_plan_draft(plan_text) else {
         return Ok(None);
     };
-    let structured = safe_structured_plan_draft(exact_structured.clone());
+    let structured = safe_structured_plan_draft(exact_structured.clone())?;
     let inline_plan_text = render_structured_plan_text(&structured);
     let plan_hash = if structured == exact_structured {
         plan_text_hash(plan_text)
@@ -541,7 +680,7 @@ pub fn submit_plan_draft_entry(
     if structured.steps.is_empty() {
         bail!("submit_plan_draft steps did not materialize into any executable step");
     }
-    let sanitized = safe_structured_plan_draft(structured);
+    let sanitized = safe_structured_plan_draft(structured)?;
     let inline_plan_text = render_structured_plan_text(&sanitized);
     let plan_hash = plan_text_hash(&inline_plan_text);
     plan_draft_entry_from_structured(
@@ -799,11 +938,11 @@ struct StructuredPlanDraft {
     notes: Vec<String>,
 }
 
-fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> StructuredPlanDraft {
-    plan.summary = crate::safe_persistence_text(&plan.summary)
-        .chars()
-        .take(PLAN_SUMMARY_MAX_CHARS)
-        .collect();
+fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> Result<StructuredPlanDraft> {
+    plan.summary = crate::safe_persistence_text(&plan.summary);
+    if plan.summary.len() > PLAN_SUMMARY_MAX_BYTES {
+        bail!("plan summary exceeds the {PLAN_SUMMARY_MAX_BYTES}-byte durable detail limit");
+    }
     plan.target_paths.retain(|path| {
         crate::safe_persistence_text(path) == *path && !plan_identifier_has_secret_marker(path)
     });
@@ -867,7 +1006,7 @@ fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> StructuredPlanDr
             .filter_map(safe_plan_suggested_check)
             .collect();
     }
-    plan
+    Ok(plan)
 }
 
 fn safe_plan_suggested_check(mut check: PlanSuggestedCheck) -> Option<PlanSuggestedCheck> {
@@ -1123,10 +1262,7 @@ fn materialize_structured_plan(
 
     let summary = nonempty_trimmed(raw.summary)
         .or_else(|| steps.first().map(|step| step.title.clone()))
-        .unwrap_or_else(|| "plan".to_owned())
-        .chars()
-        .take(PLAN_SUMMARY_MAX_CHARS)
-        .collect();
+        .unwrap_or_else(|| "plan".to_owned());
 
     StructuredPlanDraft {
         schema_version,

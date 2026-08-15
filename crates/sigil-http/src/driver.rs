@@ -12,14 +12,24 @@ use crate::dto::{
     HttpConversationRecoveryCommandAction, HttpConversationRecoveryView,
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpIntentDropExecution,
     HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackView, HttpPermissionMode,
-    HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpProviderModelRef,
-    HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot, HttpRunStartRequest,
-    HttpSessionBinding, HttpSessionRouteRecoveryView, HttpSessionSnapshot,
+    HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpPlanReviewDetail,
+    HttpProviderModelRef, HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot,
+    HttpRunStartRequest, HttpSessionBinding, HttpSessionRouteRecoveryView, HttpSessionSnapshot,
     HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTaskPauseRequest,
     HttpTerminalLifecycleView, HttpToolArtifactPage, HttpToolArtifactReadRequest,
+    HttpUserInputDecisionCommandReceipt, HttpUserInputDecisionRequest, HttpUserInputRequest,
     HttpVerificationRerunRequest, HttpVerificationView,
 };
+
+/// Exact user-input command identity delivered to the runtime-owned durable mutation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpUserInputDecisionDriverCommand {
+    pub command_id: String,
+    pub client_id: String,
+    pub request_id: String,
+    pub request: HttpUserInputDecisionRequest,
+}
 
 /// Start context delivered to the HTTP run driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +225,17 @@ pub trait HttpRunDriver: Send + Sync {
         _recovery_binding: Option<&str>,
     ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
         Err(HttpSessionOpenBindingError::Unavailable)
+    }
+
+    /// Recovers durable session-owned work after a historical session is reopened.
+    ///
+    /// The default is a no-op for synthetic drivers. Production uses this hook to resume an
+    /// accepted user-input answer without exposing its private value through HTTP.
+    fn recoverable_session_attention_command(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<Option<HttpUserInputDecisionDriverCommand>, HttpRunDriverError> {
+        Ok(None)
     }
 
     /// Purges process-local material owned by one durable session after its source was deleted.
@@ -577,6 +598,46 @@ pub trait HttpRunDriver: Send + Sync {
         Err(HttpRunDriverError::new("Plan decision is unavailable"))
     }
 
+    /// Reads the complete immutable detail for one exact durable plan artifact.
+    fn plan_review_detail(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _plan_id: &str,
+        _expected_plan_hash: &str,
+    ) -> Result<HttpPlanReviewDetail, HttpRunDriverError> {
+        Err(HttpRunDriverError::new("Plan detail is unavailable"))
+    }
+
+    /// Reads one exact immutable durable user-input request.
+    fn user_input_request(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request_id: &str,
+        _generation: u32,
+        _expected_request_hash: &str,
+    ) -> Result<HttpUserInputRequest, HttpRunDriverError> {
+        Err(HttpRunDriverError::new("User input is unavailable"))
+    }
+
+    /// Returns whether durable truth currently owns the session for user input.
+    fn has_unresolved_user_input(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<bool, HttpRunDriverError> {
+        Ok(false)
+    }
+
+    /// Applies one exact durable user-input decision and starts its continuation when required.
+    fn user_input_decision(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _command: &HttpUserInputDecisionDriverCommand,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "User input decision is unavailable",
+        ))
+    }
+
     /// Waits until every driver-owned run supervisor has completed cleanup.
     ///
     /// Synthetic drivers own no background execution by default. Production drivers override this
@@ -642,6 +703,15 @@ pub enum HttpSessionOpenBindingError {
 pub struct HttpRunDriverError {
     /// Driver-provided error message.
     pub message: String,
+    /// Stable adapter classification used for typed public recovery responses.
+    pub kind: HttpRunDriverErrorKind,
+}
+
+/// Narrow typed classes for driver rejections that callers can safely recover from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpRunDriverErrorKind {
+    General,
+    StaleUserInput,
 }
 
 /// Typed rejection surface for the canonical display query.
@@ -727,6 +797,16 @@ impl HttpRunDriverError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: HttpRunDriverErrorKind::General,
+        }
+    }
+
+    /// Creates an exact user-input binding rejection.
+    #[must_use]
+    pub fn stale_user_input(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: HttpRunDriverErrorKind::StaleUserInput,
         }
     }
 }

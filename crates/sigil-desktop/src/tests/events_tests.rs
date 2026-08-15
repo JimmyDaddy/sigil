@@ -447,10 +447,44 @@ fn terminal_lifecycle_projects_bounded_renderer_facts() {
 fn every_current_public_event_variant_deserializes_without_opaque_event_parsing() {
     let events = [
         json!({"type": "run_started", "prompt": "prompt"}),
+        json!({"type": "run_awaiting_user_input", "request_id": "request-1", "generation": 1, "request_hash": format!("sha256:{}", "a".repeat(64))}),
         json!({"type": "task_run_started", "task_id": "task-1", "objective": "objective"}),
         json!({"type": "run_finished", "final_text": "done"}),
         json!({"type": "task_run_finished", "task_id": "task-1", "status": "completed"}),
         json!({"type": "task_routing_changed", "handoff_id": "handoff-1", "status": "accepted", "task_id": "task-1"}),
+        json!({"type": "conversation_route_changed", "decision_id": "route-1", "route": "plan_review", "status": "accepted"}),
+        json!({"type": "plan_review_changed", "plan_review_id": "review-1", "plan_id": "plan-1", "status": "waiting_for_input"}),
+        json!({
+            "type": "user_input_changed",
+            "request_id": "request-1",
+            "generation": 1,
+            "request_hash": format!("sha256:{}", "a".repeat(64)),
+            "status": "requested",
+            "request": {
+                "identity": {
+                    "session_scope_id": "session-1",
+                    "root_logical_run_id": "run-1",
+                    "source_thread_id": "main",
+                    "request_id": "request-1",
+                    "generation": 1,
+                    "source_binding_hash": format!("sha256:{}", "b".repeat(64))
+                },
+                "request_hash": format!("sha256:{}", "a".repeat(64)),
+                "source": "agent",
+                "purpose": "clarification",
+                "prompt": "Choose a workspace",
+                "questions": [{
+                    "id": "workspace",
+                    "header": "Workspace",
+                    "question": "Which workspace?",
+                    "required": true,
+                    "field": {"kind": "text", "multiline": false, "max_chars": 512}
+                }],
+                "allowed_actions": ["submit", "decline", "cancel_run"],
+                "requested_at_unix_ms": 1,
+                "status": "requested"
+            }
+        }),
         json!({"type": "task_phase_changed", "task_id": "task-1", "phase": "execution", "status": "running"}),
         json!({"type": "task_plan_updated", "task_id": "task-1", "plan_version": 1, "status": "approved", "steps": []}),
         json!({"type": "task_batch_changed", "task_id": "task-1", "plan_version": 1, "batch_id": "batch-1", "active": 1, "completed": 0, "failed": 0}),

@@ -19,7 +19,7 @@ use super::{
     super::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerMessage},
     common::{
         PlannedProvider, StreamPlan, spawn_test_worker,
-        spawn_test_worker_with_role_provider_builder, test_root_config,
+        spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
     },
 };
 
@@ -254,10 +254,8 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
     root_config.task.max_parallel_changeset_steps = 3;
     root_config.task.max_subagents = 8;
 
-    let plan_text = r#"Plan:
-
-```sigil-plan-v2
-{
+    let plan_args = r#"{
+  "schema_version": 2,
   "summary": "Implement retry behavior, retry telemetry, and operator guidance",
   "intents": [
     {
@@ -326,14 +324,13 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
       "target_paths": ["operations.md"]
     }
   ],
-  "target_paths": ["retry.txt", "telemetry.txt", "operations.md"]
-}
-```
-"#;
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta(plan_text.to_owned()),
-        ProviderChunk::Done,
-    ])]);
+  "target_paths": ["retry.txt", "telemetry.txt", "operations.md"],
+  "suggested_checks": ["cargo test -p sigil-tui intent_stack"]
+}"#;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(submit_plan_draft_chunks(
+        "intent-stack-plan-draft",
+        plan_args,
+    ))]);
     let mut tools = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut tools);
     let worker = spawn_test_worker_with_role_provider_builder(

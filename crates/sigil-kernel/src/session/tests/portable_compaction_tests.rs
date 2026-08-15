@@ -1366,6 +1366,24 @@ fn continuity_anchor_does_not_reactivate_terminal_task_permissions() -> Result<(
     let plan_id = crate::PlanId::new("terminal-permission-plan")?;
     let task_id = crate::TaskId::new("terminal-permission-task")?;
     let plan_hash = crate::plan_text_hash("terminal permission plan");
+    session.append_control(crate::ControlEntry::PlanDraftCreated(
+        crate::PlanDraftCreatedEntry {
+            plan_id: plan_id.clone(),
+            schema_version: 2,
+            source: crate::PlanSourceRef::default(),
+            plan_hash: plan_hash.clone(),
+            summary: "terminal permission plan".to_owned(),
+            inline_text: Some("terminal permission plan".to_owned()),
+            steps: Vec::new(),
+            intent_proposal: None,
+            target_paths: vec!["src/lib.rs".to_owned()],
+            suggested_checks: Vec::new(),
+            risk: None,
+            notes: Vec::new(),
+            workspace_snapshot_id: Some("snapshot-v1".to_owned()),
+            created_at_ms: 4,
+        },
+    ))?;
     session.append_control(crate::ControlEntry::TaskCreatedFromPlan(
         crate::TaskCreatedFromPlanEntry {
             plan_id: plan_id.clone(),

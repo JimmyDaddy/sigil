@@ -754,10 +754,13 @@ export interface ConversationDisplayPage {
   };
   taskControl?: ConversationTaskControl;
   planReview?: ConversationPlanReview;
+  userInput?: UserInputRequest;
 }
 
 export type PlanReviewStatus =
   | "started"
+  | "waiting_for_input"
+  | "finalizing"
   | "draft_ready"
   | "completed_without_draft"
   | "failed"
@@ -770,11 +773,22 @@ export type PlanReviewSource =
 
 export type PlanDecisionAction = "run" | "save" | "revise" | "reject";
 
+export type PlanRevisionStatus =
+  | "awaiting_guidance"
+  | "queued"
+  | "researching"
+  | "waiting_for_input"
+  | "finalizing"
+  | "failed"
+  | "cancelled"
+  | "succeeded";
+
 export interface ConversationPlanReview {
   planId: string;
   planHash?: string;
   status: PlanReviewStatus;
   summary?: string;
+  summaryTruncated: boolean;
   stepCount?: number;
   targetPathCount?: number;
   suggestedCheckCount?: number;
@@ -782,6 +796,13 @@ export interface ConversationPlanReview {
   allowedActions: PlanDecisionAction[];
   source: PlanReviewSource;
   stale: boolean;
+  revision?: {
+    requestId: string;
+    attemptId?: string;
+    attemptOrdinal?: number;
+    status: PlanRevisionStatus;
+    terminalReason?: string;
+  };
 }
 
 export interface PlanDecisionSummary {
@@ -793,6 +814,183 @@ export interface PlanDecisionSummary {
   action: PlanDecisionAction;
   taskId?: string;
   revisionRunId?: string;
+  userInputRequest?: UserInputRequest;
+  replayed: boolean;
+}
+
+export type PlanAgentRole = "planner" | "executor" | "subagent_read" | "subagent_write";
+export type PlanStepMode = "read" | "write" | "review" | "verify";
+export type PlanIsolationMode =
+  | "shared_read_only"
+  | "sequential_workspace_write"
+  | "changeset_only"
+  | "worktree";
+export type PlanCheckEffect =
+  | "read_only"
+  | "workspace_write"
+  | "external_write"
+  | "network"
+  | "unknown";
+
+export interface PlanSuggestedCheckDetail {
+  checkSpecId: string;
+  command: string;
+  args: string[];
+  cwd?: string;
+  effect: PlanCheckEffect;
+  sourceLine?: string;
+}
+
+export interface PlanReviewStepDetail {
+  stepId: string;
+  title: string;
+  displayName?: string;
+  detail?: string;
+  role?: PlanAgentRole;
+  dependsOn: string[];
+  mode?: PlanStepMode;
+  isolation?: PlanIsolationMode;
+  targetPaths: string[];
+  suggestedChecks: PlanSuggestedCheckDetail[];
+  risk?: string;
+  notes: string[];
+}
+
+export interface PlanSourceTurn {
+  sessionScopeId: string;
+  messageId: string;
+  logicalRunId: string;
+}
+
+export interface PlanSourceDetail {
+  sessionRef?: string;
+  runId?: string;
+  finalMessageId?: string;
+  sourceTurn?: PlanSourceTurn;
+  routeDecisionId?: string;
+  planReviewId?: string;
+}
+
+export interface PlanReviewDetail {
+  planId: string;
+  planHash: string;
+  workspaceSnapshotId?: string;
+  source: PlanReviewSource;
+  summary: string;
+  steps: PlanReviewStepDetail[];
+  targetPaths: string[];
+  suggestedChecks: PlanSuggestedCheckDetail[];
+  risk?: string;
+  notes: string[];
+  lineage: {
+    source: PlanSourceDetail;
+    planReviewId?: string;
+    attemptId?: string;
+    createdAtMs: number;
+  };
+  legacyMarkdown?: string;
+}
+
+export type UserInputPurpose =
+  | "clarification"
+  | "choice"
+  | "missing_constraint"
+  | "revision_guidance"
+  | "external_elicitation";
+export type UserInputAction = "submit" | "decline" | "cancel_run";
+export type UserInputStatus =
+  | "requested"
+  | "decision_accepted"
+  | "continuation_claimed"
+  | "continuation_started"
+  | "resolved";
+
+export interface UserInputOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export type UserInputField =
+  | { kind: "text"; multiline: boolean; maxChars: number }
+  | { kind: "number" }
+  | { kind: "integer" }
+  | { kind: "boolean" }
+  | { kind: "single_select"; options: UserInputOption[]; allowOther: boolean }
+  | { kind: "multi_select"; options: UserInputOption[]; maxSelected: number };
+
+export interface UserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  description?: string;
+  required: boolean;
+  field: UserInputField;
+}
+
+export interface UserInputRequest {
+  identity: {
+    sessionScopeId: string;
+    rootLogicalRunId: string;
+    sourceThreadId: string;
+    requestId: string;
+    generation: number;
+    sourceBindingHash: string;
+  };
+  requestHash: string;
+  source: {
+    kind: "agent" | "plan_review_research" | "plan_revision" | "planner" | "mcp";
+    planReviewId?: string;
+    attemptId?: string;
+    basePlanId?: string;
+    basePlanHash?: string;
+    taskId?: string;
+    serverId?: string;
+    callId?: string;
+  };
+  purpose: UserInputPurpose;
+  prompt: string;
+  questions: UserInputQuestion[];
+  allowedActions: UserInputAction[];
+  requestedAtUnixMs: number;
+  status: UserInputStatus;
+  answerReceipt?: {
+    commandId: string;
+    decision: "submitted" | "declined" | "run_cancelled";
+    answerHash?: string;
+    answeredQuestionIds: string[];
+  };
+  resolution?: {
+    kind: "consumed" | "declined" | "run_cancelled" | "failed";
+    failureClass?: string;
+    retryable?: boolean;
+  };
+}
+
+export type UserInputAnswerValue =
+  | { kind: "text"; value: string }
+  | { kind: "number"; value: string }
+  | { kind: "integer"; value: number }
+  | { kind: "boolean"; value: boolean }
+  | { kind: "single_select"; optionId?: string; other?: string }
+  | { kind: "multi_select"; optionIds: string[] };
+
+export interface UserInputAnswer {
+  questionId: string;
+  value: UserInputAnswerValue;
+}
+
+export type UserInputDecision =
+  | { kind: "submitted"; answers: UserInputAnswer[] }
+  | { kind: "declined" }
+  | { kind: "run_cancelled" };
+
+export interface UserInputDecisionSummary {
+  commandId: string;
+  clientId: string;
+  sessionId: string;
+  request: UserInputRequest;
+  continuationRunId?: string;
   replayed: boolean;
 }
 
@@ -1460,6 +1658,9 @@ export type TimelineEventKind =
   | "task_run_started"
   | "task_run_finished"
   | "task_routing_changed"
+  | "conversation_route_changed"
+  | "plan_review_changed"
+  | "user_input_changed"
   | "task_phase_changed"
   | "task_plan_updated"
   | "task_batch_changed"

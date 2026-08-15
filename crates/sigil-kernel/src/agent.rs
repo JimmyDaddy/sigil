@@ -379,12 +379,14 @@ pub struct AgentRunInput {
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub plan_review_draft: Option<PlanReviewDraftContext>,
+    pub plan_review_submit_only: bool,
     pub task_guidance_assessment: Option<TaskGuidanceAssessmentContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
     pub purpose: Option<AgentRunPurpose>,
     agent_invocation_grant: Option<crate::AgentInvocationGrant>,
     logical_run_id: Option<String>,
     source_thread_id: Option<crate::AgentThreadId>,
+    user_input_root_logical_run_id: Option<String>,
     cancellation: Option<RunCancellationHandle>,
     cancellation_terminal_authority: bool,
     source_capability_nonce: Option<String>,
@@ -443,6 +445,10 @@ impl fmt::Debug for AgentRunInput {
             )
             .field("logical_run_id", &self.logical_run_id)
             .field("source_thread_id", &self.source_thread_id)
+            .field(
+                "user_input_root_logical_run_id",
+                &self.user_input_root_logical_run_id,
+            )
             .field("cancellation", &self.cancellation)
             .field(
                 "user_url_capability_registrar",
@@ -491,12 +497,14 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             plan_review_draft: None,
+            plan_review_submit_only: false,
             task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
             logical_run_id: None,
             source_thread_id: None,
+            user_input_root_logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
@@ -524,12 +532,14 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             plan_review_draft: None,
+            plan_review_submit_only: false,
             task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
             logical_run_id: None,
             source_thread_id: None,
+            user_input_root_logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
@@ -556,12 +566,14 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             plan_review_draft: None,
+            plan_review_submit_only: false,
             task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
             logical_run_id: None,
             source_thread_id: None,
+            user_input_root_logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: None,
@@ -656,6 +668,13 @@ impl AgentRunInput {
     #[must_use]
     pub fn with_plan_review_draft(mut self, context: PlanReviewDraftContext) -> Self {
         self.plan_review_draft = Some(context);
+        self
+    }
+
+    /// Restricts a fresh plan finalizer to the typed draft submission protocol.
+    #[must_use]
+    pub fn with_plan_review_submit_only(mut self) -> Self {
+        self.plan_review_submit_only = true;
         self
     }
 
@@ -821,6 +840,19 @@ impl AgentRunInput {
     /// Binds host-owned user-input requests to the concrete agent thread that emitted them.
     #[must_use]
     pub fn with_source_thread_id(mut self, source_thread_id: crate::AgentThreadId) -> Self {
+        self.source_thread_id = Some(source_thread_id);
+        self
+    }
+
+    /// Re-enables host-owned user-input suspension for a resumed conversation without restoring
+    /// automatic routing authority or synthesizing another user message.
+    #[must_use]
+    pub fn with_user_input_continuation_context(
+        mut self,
+        root_logical_run_id: impl Into<String>,
+        source_thread_id: crate::AgentThreadId,
+    ) -> Self {
+        self.user_input_root_logical_run_id = Some(root_logical_run_id.into());
         self.source_thread_id = Some(source_thread_id);
         self
     }
@@ -1875,12 +1907,14 @@ where
             runtime_context,
             task_plan_update,
             plan_review_draft,
+            plan_review_submit_only,
             task_guidance_assessment,
             agent_delegation,
             purpose,
             agent_invocation_grant,
             logical_run_id,
             source_thread_id,
+            user_input_root_logical_run_id,
             cancellation,
             cancellation_terminal_authority,
             source_capability_nonce,
@@ -2239,13 +2273,18 @@ where
             Some(source_thread_id) => source_thread_id,
             None => crate::AgentThreadId::new("main")?,
         };
-        let root_logical_run_id = purpose
-            .as_ref()
-            .and_then(|purpose| match purpose {
-                AgentRunPurpose::Conversation(context) => Some(context.root_run_id.clone()),
-                _ => None,
+        let root_logical_run_id = user_input_root_logical_run_id
+            .clone()
+            .or_else(|| {
+                purpose.as_ref().and_then(|purpose| match purpose {
+                    AgentRunPurpose::Conversation(context) => Some(context.root_run_id.clone()),
+                    _ => None,
+                })
             })
             .unwrap_or_else(|| logical_run_id.clone());
+        if root_logical_run_id.trim().is_empty() {
+            return Err(anyhow!("user-input root logical run id is empty"));
+        }
         if let Some(delegate) = agent_delegate.as_deref_mut() {
             delegate.set_root_logical_run_id(Some(&logical_run_id));
         }
@@ -2406,7 +2445,16 @@ where
                     .collect::<Vec<_>>()
             };
             if !task_routing_decision_pending && !participant_finalization_turn {
-                if matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_))) {
+                if matches!(
+                    purpose.as_ref(),
+                    Some(
+                        AgentRunPurpose::Conversation(_)
+                            | AgentRunPurpose::PlanReview(_)
+                            | AgentRunPurpose::TaskPlanner(_)
+                    )
+                ) && !plan_review_submit_only
+                    || user_input_root_logical_run_id.is_some()
+                {
                     tool_specs.push(crate::request_user_input_tool_spec());
                 }
                 if let Some(context) = task_plan_update.as_ref() {
@@ -2772,6 +2820,25 @@ where
                 for call in execution_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
+                    if plan_review_submit_only && call.name != SUBMIT_PLAN_DRAFT_TOOL_NAME {
+                        let mut result = ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::Protocol,
+                            "submit_only_protocol_violation: plan finalization accepts only submit_plan_draft",
+                        );
+                        attach_tool_call_context(&mut result, &call, &[]);
+                        append_tool_execution_audit(
+                            session,
+                            &call,
+                            &[],
+                            ToolExecutionStatus::Failed,
+                            None,
+                            Some(&result),
+                        )?;
+                        assistant_batch_results.push((call.clone(), result));
+                        continue;
+                    }
                     if accepted_user_input_in_batch
                         && (call.name != crate::REQUEST_USER_INPUT_TOOL_NAME
                             || accepted_user_input.is_some())
@@ -3078,6 +3145,20 @@ where
                                 source_thread_id: &source_thread_id,
                                 provider_name: self.provider.name(),
                                 model_name: &model_name,
+                                source: match purpose.as_ref() {
+                                    Some(AgentRunPurpose::PlanReview(context)) => {
+                                        crate::UserInputSourceV1::PlanReviewResearch {
+                                            plan_review_id: context.plan_review_id.clone(),
+                                            attempt_id: context.attempt_id.clone(),
+                                        }
+                                    }
+                                    Some(AgentRunPurpose::TaskPlanner(context)) => {
+                                        crate::UserInputSourceV1::Planner {
+                                            task_id: context.task_id.clone(),
+                                        }
+                                    }
+                                    _ => crate::UserInputSourceV1::Agent,
+                                },
                             },
                         ) {
                             Ok(request) => accepted_user_input = Some(request),

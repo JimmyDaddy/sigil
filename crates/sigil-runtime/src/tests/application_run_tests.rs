@@ -26,8 +26,13 @@ use sigil_kernel::{
     TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
     TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval,
     ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
-    ToolResultRecordedV3, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec, UsageStats,
+    UserInputActionV1, UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId,
+    UserInputContinuationBindingV1, UserInputDecisionV1, UserInputFieldKindV1, UserInputIdentityV1,
+    UserInputLifecycleEntryV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
+    UserInputRequestV1, UserInputRequestedV1, UserInputResolutionV1, UserInputSourceV1,
+    UserInputStatusV1, conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
@@ -38,7 +43,7 @@ use super::{
     ApplicationRunPrepareError, ApplicationRunPrepareErrorClass, ApplicationRunRequest,
     ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
     ApplicationTaskContinuationRequest, ApplicationTaskExecutionRuntime,
-    ApplicationTaskPauseTicket, ApplicationTranscriptRole,
+    ApplicationTaskPauseTicket, ApplicationTranscriptRole, ApplicationUserInputDecisionRequest,
     MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
     accept_application_task_integration_review, admit_application_agent_binding,
     admit_application_model_selection, admit_application_reasoning_effort,
@@ -51,8 +56,8 @@ use super::{
     constrain_application_tool_registry, continue_application_task_handoff,
     default_application_session_path, optional_eager_mcp_warning, prepare_application_run,
     prepare_application_run_blocking, prepare_application_task_continuation,
-    record_application_preparation_cancellation, rerun_application_verification,
-    validate_execution_contract,
+    prepare_application_user_input_decision, record_application_preparation_cancellation,
+    rerun_application_verification, validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -152,6 +157,254 @@ base_url = "http://127.0.0.1:1"
 credential = { source = "none" }
 "#,
     )?;
+    Ok(())
+}
+
+fn seed_application_user_input_request(
+    config_path: &Path,
+    launch_cwd: &Path,
+    binding: &super::ApplicationSessionBinding,
+) -> Result<UserInputRequestedV1> {
+    let context = application_run_context_view(
+        config_path,
+        launch_cwd,
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let mut session = Session::load_from_store(&context.provider_name, &context.model_name, store)?;
+    session.append_user_message(ModelMessage::user("implement after clarification"))?;
+    let call = ToolCall {
+        id: "call-user-input-runtime".to_owned(),
+        name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+        args_json: r#"{"prompt":"Choose a runtime mode","questions":[{"id":"mode","header":"Mode","question":"Which mode should continue?","required":true,"field":{"kind":"text","multiline":false,"max_chars":32}}]}"#.to_owned(),
+    };
+    let assistant = ModelMessage::assistant(None, vec![call.clone()]);
+    let assistant_message_id = assistant.id.clone();
+    session.append_assistant_message(assistant)?;
+    let requested = UserInputRequestedV1::new(UserInputRequestV1 {
+        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+        identity: UserInputIdentityV1 {
+            session_scope_id: sigil_kernel::SessionScopeId::new(&binding.session_scope_id)?,
+            root_logical_run_id: sigil_kernel::LogicalRunId::new("runtime-user-input-root")?,
+            source_thread_id: sigil_kernel::AgentThreadId::new("main")?,
+            request_id: UserInputRequestId::new("runtime-user-input-request")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        source: UserInputSourceV1::Agent,
+        purpose: UserInputPurposeV1::Clarification,
+        prompt: "Choose a runtime mode".to_owned(),
+        questions: vec![UserInputQuestionV1 {
+            id: "mode".to_owned(),
+            header: "Mode".to_owned(),
+            question: "Which mode should continue?".to_owned(),
+            description: None,
+            required: true,
+            field: UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 32,
+            },
+        }],
+        allowed_actions: vec![
+            UserInputActionV1::Submit,
+            UserInputActionV1::Decline,
+            UserInputActionV1::CancelRun,
+        ],
+        requested_at_unix_ms: 10,
+        continuation: Some(UserInputContinuationBindingV1 {
+            assistant_message_id,
+            tool_call_id: call.id.clone(),
+            provider_name: context.provider_name,
+            model_name: context.model_name,
+        }),
+    })?;
+    session.append_controls(vec![
+        ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: call.id,
+            tool_name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        })),
+        UserInputLifecycleEntryV1::Requested(Box::new(requested.clone())).into_control(),
+    ])?;
+    Ok(requested)
+}
+
+#[tokio::test]
+async fn submitted_user_input_is_durable_before_one_supervised_continuation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/user-input.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let requested = seed_application_user_input_request(&config_path, temp.path(), &binding)?;
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+
+    let prepared = prepare_application_user_input_decision(
+        ApplicationUserInputDecisionRequest {
+            config_path: config_path.clone(),
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: binding.session_log_path.clone(),
+            session_attachment: None,
+            expected_session_scope_id: binding.session_scope_id.clone(),
+            run_id: "user-input-continuation-1".to_owned(),
+            identity: requested.request.identity.clone(),
+            request_hash: requested.request_hash.clone(),
+            command_id: UserInputCommandId::new("user-input-command-1")?,
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![UserInputAnswerV1 {
+                    question_id: "mode".to_owned(),
+                    value: UserInputAnswerValueV1::Text {
+                        value: "safe".to_owned(),
+                    },
+                }],
+            },
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    assert!(prepared.has_continuation());
+    assert!(prepared.receipt().continuation_required);
+
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let accepted_session = Session::load_from_store("custom", "gpt-test", store.clone())?;
+    let accepted = accepted_session.user_input_projection()?;
+    let accepted_state = accepted
+        .request(&requested.request.identity)
+        .expect("accepted request should remain projected");
+    assert_eq!(
+        accepted_state.status,
+        UserInputStatusV1::DecisionAccepted,
+        "preparation must not claim continuation ownership before execution"
+    );
+
+    let (_, continuation, revision) = prepared.into_parts();
+    assert!(revision.is_none());
+    let (execution, control) = continuation
+        .expect("submitted answer should prepare a continuation")
+        .into_parts();
+    let mut events = RecordingApplicationRunEvents::default();
+    let mut approvals = AutoApproveHandler;
+    let error = execution
+        .execute(&mut events, &mut approvals)
+        .await
+        .expect_err("closed local endpoint should fail after continuation dispatch");
+    assert!(!error.to_string().is_empty());
+    drop(control);
+
+    let recovered = Session::load_from_store("custom", "gpt-test", store)?;
+    let state = recovered
+        .user_input_projection()?
+        .request(&requested.request.identity)
+        .cloned()
+        .expect("continued request should remain projected");
+    assert_eq!(state.status, UserInputStatusV1::Resolved);
+    assert!(matches!(
+        state.resolution.map(|entry| entry.resolution),
+        Some(UserInputResolutionV1::Failed {
+            retryable: true,
+            ..
+        })
+    ));
+    assert_eq!(
+        recovered
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::ToolResultV3(result)
+                    if result.call_id == "call-user-input-runtime"
+            ))
+            .count(),
+        1,
+        "the original tool call must be settled exactly once"
+    );
+    assert!(events.0.iter().any(|event| matches!(
+        event.event,
+        PublicRunEventKind::UserInputChanged {
+            status: UserInputStatusV1::ContinuationStarted,
+            ..
+        }
+    )));
+    assert!(events.0.iter().any(|event| matches!(
+        event.event,
+        PublicRunEventKind::UserInputChanged {
+            status: UserInputStatusV1::Resolved,
+            ..
+        }
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn submitted_user_input_remains_retryable_when_provider_preparation_fails() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let temp = tempfile::tempdir()?;
+    let _ca_bundle = crate::test_env::EnvScope::set(
+        "SSL_CERT_FILE",
+        temp.path().join("missing-ca-bundle.pem").as_os_str(),
+    );
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let session_path = temp
+        .path()
+        .join("state/sessions/user-input-provider-failure.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let requested = seed_application_user_input_request(&config_path, temp.path(), &binding)?;
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let command_id = UserInputCommandId::new("user-input-provider-failure-command")?;
+
+    let error = match prepare_application_user_input_decision(
+        ApplicationUserInputDecisionRequest {
+            config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: binding.session_log_path.clone(),
+            session_attachment: None,
+            expected_session_scope_id: binding.session_scope_id.clone(),
+            run_id: "user-input-provider-failure-run".to_owned(),
+            identity: requested.request.identity.clone(),
+            request_hash: requested.request_hash.clone(),
+            command_id: command_id.clone(),
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![UserInputAnswerV1 {
+                    question_id: "mode".to_owned(),
+                    value: UserInputAnswerValueV1::Text {
+                        value: "safe".to_owned(),
+                    },
+                }],
+            },
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await
+    {
+        Ok(_) => panic!("the missing explicit CA bundle must fail provider preparation"),
+        Err(error) => error,
+    };
+    assert!(!error.to_string().is_empty());
+
+    let recovered = Session::load_from_store(
+        "custom",
+        "gpt-test",
+        JsonlSessionStore::new(&binding.session_log_path)?,
+    )?;
+    let projection = recovered.user_input_projection()?;
+    let state = projection
+        .request(&requested.request.identity)
+        .expect("request must survive provider preparation failure");
+    assert_eq!(state.status, UserInputStatusV1::Requested);
+    assert!(state.decision.is_none());
     Ok(())
 }
 

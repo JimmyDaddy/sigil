@@ -192,6 +192,38 @@ fn reducer_rejects_duplicate_decision_stale_hash_and_invalid_order() -> Result<(
 }
 
 #[test]
+fn accepted_answer_reconstructs_private_retry_command_without_public_values() -> Result<()> {
+    let mut session = Session::new("test", "model");
+    let request = text_request_for_session(&session, "recover_request", 1)?;
+    session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Requested(Box::new(
+        request.clone(),
+    ))])?;
+    let command = UserInputDecisionCommandV1 {
+        identity: request.request.identity.clone(),
+        request_hash: request.request_hash.clone(),
+        command_id: UserInputCommandId::new("recover_command")?,
+        decision: UserInputDecisionV1::Submitted {
+            answers: vec![UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: UserInputAnswerValueV1::Text {
+                    value: "restore the exact continuation".to_owned(),
+                },
+            }],
+        },
+    };
+    accept_user_input_decision(&mut session, command.clone(), 20)?;
+
+    assert_eq!(recoverable_user_input_decision(&session)?, Some(command));
+    let public = session
+        .user_input_projection()?
+        .request(&request.request.identity)
+        .expect("request should remain pending")
+        .public_view();
+    assert!(!serde_json::to_string(&public)?.contains("restore the exact continuation"));
+    Ok(())
+}
+
+#[test]
 fn reducer_requires_one_pending_request_per_agent_and_contiguous_generations() -> Result<()> {
     let mut empty = UserInputProjectionV1::default();
     assert!(

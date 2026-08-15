@@ -1958,14 +1958,23 @@ where
         state.session.current = Some(task_result.session);
         match task_result.payload {
             RunTaskPayload::AwaitingUserInput { request } => {
-                let projected = state
-                    .session
-                    .current
-                    .as_ref()
-                    .and_then(|session| session.user_input_projection().ok())
-                    .and_then(|projection| projection.request(&request.identity).cloned());
+                let projected = state.session.current.as_ref().and_then(|session| {
+                    session
+                        .user_input_projection()
+                        .ok()
+                        .and_then(|projection| projection.request(&request.identity).cloned())
+                        .map(|state| state.public_view())
+                        .or_else(|| {
+                            sigil_kernel::PlanReviewProjection::from_entries(session.entries())
+                                .attempt_for_pending_user_input(
+                                    &request.identity,
+                                    &request.request_hash,
+                                )
+                                .and_then(|attempt| attempt.pending_user_input.as_deref().cloned())
+                        })
+                });
                 match projected {
-                    Some(projected) if projected.requested.request_hash == request.request_hash => {
+                    Some(projected) if projected.request_hash == request.request_hash => {
                         let entries = state
                             .session
                             .current
@@ -1973,7 +1982,7 @@ where
                             .map(|session| session.entries().to_vec())
                             .unwrap_or_default();
                         let _ = message_tx.send(WorkerMessage::UserInputRequested {
-                            request: projected.public_view(),
+                            request: projected,
                             entries,
                         });
                     }

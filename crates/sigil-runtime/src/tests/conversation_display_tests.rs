@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use sigil_kernel::{
@@ -1356,6 +1356,13 @@ fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Res
             source_turn: source.clone(),
             route_decision_id: None,
             child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
+            finalizer_session_ref: None,
+            revision_request_id: None,
+            attempt_ordinal: 1,
+            base_plan_id: None,
+            base_plan_hash: None,
+            workspace_snapshot_id: None,
+            pending_user_input: None,
             status,
             terminal_reason,
             recorded_at_ms,
@@ -1385,30 +1392,74 @@ fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Res
     );
     assert_eq!(started.plan_id, plan_id.as_str());
 
+    // Loading a non-terminal attempt without an attached supervisor intentionally reconciles it
+    // to Interrupted. Use independent durable fixtures for each terminal branch rather than
+    // appending a second terminal fact to that recovered lifecycle.
+    let project_terminal = |status: sigil_kernel::PlanReviewAttemptStatus,
+                            reason: sigil_kernel::PlanReviewTerminalReason|
+     -> Result<sigil_kernel::PublicPlanReview> {
+        let (_temp, store, mut session) = durable_session()?;
+        let scope = session.session_scope_id().to_owned();
+        let source = sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            "message-terminal",
+            "run-terminal",
+        )?;
+        let review_id = sigil_kernel::plan_review_id_for_source(&source);
+        let attempt_id = sigil_kernel::plan_review_attempt_id_for_review(&review_id);
+        let plan_id = sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_id);
+        let entry =
+            |status, terminal_reason, recorded_at_ms| sigil_kernel::PlanReviewAttemptEntry {
+                plan_review_id: review_id.clone(),
+                attempt_id: attempt_id.clone(),
+                plan_id: plan_id.clone(),
+                source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+                source_turn: source.clone(),
+                route_decision_id: None,
+                child_session_ref: sigil_kernel::plan_review_child_session_ref(
+                    &review_id,
+                    &attempt_id,
+                ),
+                finalizer_session_ref: None,
+                revision_request_id: None,
+                attempt_ordinal: 1,
+                base_plan_id: None,
+                base_plan_hash: None,
+                workspace_snapshot_id: None,
+                pending_user_input: None,
+                status,
+                terminal_reason,
+                recorded_at_ms,
+            };
+        session.append_control(ControlEntry::PlanReviewAttempt(entry(
+            sigil_kernel::PlanReviewAttemptStatus::Started,
+            None,
+            5,
+        )))?;
+        session.append_control(ControlEntry::PlanReviewAttempt(entry(
+            status,
+            Some(reason),
+            6,
+        )))?;
+        conversation_display_page(store.path(), &scope, None, 10, None)?
+            .plan_review
+            .context("terminal attempt must remain publicly visible")
+    };
+
     // A durable terminal attempt without a draft (failed) also stays visible across reloads.
-    session.append_control(ControlEntry::PlanReviewAttempt(attempt_entry(
+    let failed = project_terminal(
         sigil_kernel::PlanReviewAttemptStatus::Failed,
-        Some(sigil_kernel::PlanReviewTerminalReason::RunFailed),
-        6,
-    )))?;
-    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
-    let failed = page
-        .plan_review
-        .expect("a Failed attempt must project its terminal lifecycle");
+        sigil_kernel::PlanReviewTerminalReason::RunFailed,
+    )?;
     assert_eq!(failed.status, sigil_kernel::PublicPlanReviewStatus::Failed);
     assert!(failed.summary.is_none());
     assert!(failed.allowed_actions.is_empty());
 
     // A cancelled attempt without a draft projects as cancelled.
-    session.append_control(ControlEntry::PlanReviewAttempt(attempt_entry(
+    let cancelled = project_terminal(
         sigil_kernel::PlanReviewAttemptStatus::Cancelled,
-        Some(sigil_kernel::PlanReviewTerminalReason::UserCancelled),
-        7,
-    )))?;
-    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
-    let cancelled = page
-        .plan_review
-        .expect("a Cancelled attempt must project its terminal lifecycle");
+        sigil_kernel::PlanReviewTerminalReason::UserCancelled,
+    )?;
     assert_eq!(
         cancelled.status,
         sigil_kernel::PublicPlanReviewStatus::Cancelled

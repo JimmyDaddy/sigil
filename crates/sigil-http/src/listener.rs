@@ -36,7 +36,7 @@ use crate::{
         HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
         HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
         HttpTaskIntegrationReviewRequest, HttpTaskPauseRequest, HttpTerminalTaskCancelRequest,
-        HttpToolArtifactReadRequest, HttpVerificationRerunRequest,
+        HttpToolArtifactReadRequest, HttpUserInputDecisionRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -901,6 +901,56 @@ fn route_http_request(
         };
     }
 
+    if request.method == "GET"
+        && let Some((session_id, plan_id)) = parse_plan_detail_path(&request.path)
+    {
+        let expected_plan_hash = match parse_plan_detail_query(request.query.as_deref()) {
+            Ok(hash) => hash,
+            Err(message) => return http_error_response(400, "bad_request", &message),
+        };
+        return match registry.plan_review_detail(session_id, plan_id, &expected_plan_hash) {
+            Ok(detail) => json_response_with_etag(200, json!(detail), &expected_plan_hash),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some((session_id, request_id)) = parse_user_input_path(&request.path, false)
+    {
+        let (generation, expected_request_hash) =
+            match parse_user_input_detail_query(request.query.as_deref()) {
+                Ok(query) => query,
+                Err(message) => return http_error_response(400, "bad_request", &message),
+            };
+        return match registry.user_input_request(
+            session_id,
+            request_id,
+            generation,
+            &expected_request_hash,
+        ) {
+            Ok(view) => json_response_with_etag(200, json!(view), &expected_request_hash),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some((session_id, request_id)) = parse_user_input_path(&request.path, true)
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpUserInputDecisionRequest>>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "bad_request",
+                "invalid user-input decision command body",
+            );
+        };
+        return match registry.user_input_decision_command(session_id, request_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
     if request.method == "POST"
         && let Some(session_id) = request
             .path
@@ -1574,6 +1624,93 @@ fn parse_json_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Er
     serde_json::from_slice(body)
 }
 
+fn parse_user_input_path(path: &str, decision: bool) -> Option<(&str, &str)> {
+    let suffix = path.strip_prefix("/sessions/")?;
+    let (session_id, request_path) = suffix.split_once("/user-input/")?;
+    let request_id = if decision {
+        request_path.strip_suffix("/decision")?
+    } else {
+        request_path
+    };
+    (!session_id.is_empty()
+        && !request_id.is_empty()
+        && !session_id.contains('/')
+        && !request_id.contains('/'))
+    .then_some((session_id, request_id))
+}
+
+fn parse_plan_detail_path(path: &str) -> Option<(&str, &str)> {
+    let suffix = path.strip_prefix("/sessions/")?;
+    let (session_id, plan_id) = suffix.split_once("/plans/")?;
+    (!session_id.is_empty()
+        && !plan_id.is_empty()
+        && !session_id.contains('/')
+        && !plan_id.contains('/'))
+    .then_some((session_id, plan_id))
+}
+
+fn parse_plan_detail_query(raw_query: Option<&str>) -> Result<String, String> {
+    let raw_query = raw_query
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| "expected_plan_hash is required".to_owned())?;
+    validate_percent_encoding(raw_query)?;
+    let mut expected_plan_hash = None;
+    for (name, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if name != "expected_plan_hash" || expected_plan_hash.is_some() {
+            return Err("only one expected_plan_hash query parameter is supported".to_owned());
+        }
+        expected_plan_hash = Some(value.into_owned());
+    }
+    expected_plan_hash
+        .filter(|hash| {
+            hash.strip_prefix("sha256:").is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+        })
+        .ok_or_else(|| "expected_plan_hash must be a canonical sha256 digest".to_owned())
+}
+
+fn parse_user_input_detail_query(raw_query: Option<&str>) -> Result<(u32, String), String> {
+    let raw_query = raw_query
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| "generation and expected_request_hash are required".to_owned())?;
+    validate_percent_encoding(raw_query)?;
+    let mut generation = None;
+    let mut expected_request_hash = None;
+    let mut seen = BTreeMap::new();
+    for (name, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if name.contains('\u{fffd}') || value.contains('\u{fffd}') {
+            return Err("query must use valid UTF-8".to_owned());
+        }
+        let name = name.into_owned();
+        if seen.insert(name.clone(), ()).is_some() {
+            return Err(format!("query parameter '{name}' must appear at most once"));
+        }
+        let value = value.into_owned();
+        match name.as_str() {
+            "generation" => {
+                let value = value
+                    .parse::<u32>()
+                    .map_err(|_| "generation must be a positive integer".to_owned())?;
+                if value == 0 {
+                    return Err("generation must be a positive integer".to_owned());
+                }
+                generation = Some(value);
+            }
+            "expected_request_hash" => expected_request_hash = Some(value),
+            _ => return Err(format!("unsupported query parameter '{name}'")),
+        }
+    }
+    let generation = generation.ok_or_else(|| "generation is required".to_owned())?;
+    let expected_request_hash = expected_request_hash
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| "expected_request_hash must be a SHA-256 hex digest".to_owned())?;
+    Ok((generation, expected_request_hash.to_ascii_lowercase()))
+}
+
 fn parse_session_catalog_query(
     raw_query: Option<&str>,
 ) -> Result<SessionCatalogProjectionQuery, String> {
@@ -1884,13 +2021,20 @@ async fn write_http_response(
     stream: &mut TcpStream,
     response: HttpResponse,
 ) -> Result<(), HttpListenerError> {
-    let head = format!(
-        "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n",
         response.status,
         http_reason(response.status),
         response.content_type,
         response.body.len()
     );
+    for (name, value) in &response.headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(&response.body).await?;
     stream.shutdown().await?;
@@ -1952,6 +2096,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ApprovalDecisionUnavailable { .. }
         | HttpRegistryError::ApprovalExpired { .. }
         | HttpRegistryError::SessionForegroundRunActive { .. }
+        | HttpRegistryError::SessionAwaitingUserInput { .. }
+        | HttpRegistryError::UserInputStale
         | HttpRegistryError::SessionRunCleanupActive { .. }
         | HttpRegistryError::SessionVerificationActive { .. }
         | HttpRegistryError::SessionRunRecoveryRequired { .. }
@@ -2021,6 +2167,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ToolArtifactUnavailable => "tool_artifact_unavailable",
         HttpRegistryError::ToolArtifactCorrupt => "tool_artifact_corrupt",
         HttpRegistryError::ToolArtifactPolicyRevoked => "tool_artifact_policy_revoked",
+        HttpRegistryError::SessionAwaitingUserInput { .. } => "session_awaiting_user_input",
+        HttpRegistryError::UserInputStale => "user_input_stale",
         HttpRegistryError::SessionRunCleanupActive { .. } => "session_run_cleanup_active",
         HttpRegistryError::SessionRunRecoveryRequired { .. } => "session_run_recovery_required",
         HttpRegistryError::ConversationQueueInvalidCommand => "invalid_queue_command",
@@ -2148,11 +2296,20 @@ fn json_response(status: u16, body: Value) -> HttpResponse {
     }
 }
 
+fn json_response_with_etag(status: u16, body: Value, etag: &str) -> HttpResponse {
+    let mut response = json_response(status, body);
+    response
+        .headers
+        .insert("etag".to_owned(), format!("\"{etag}\""));
+    response
+}
+
 fn bytes_response(status: u16, content_type: &'static str, body: Vec<u8>) -> HttpResponse {
     HttpResponse {
         status,
         content_type,
         body,
+        headers: BTreeMap::new(),
     }
 }
 
@@ -2204,6 +2361,7 @@ struct HttpResponse {
     status: u16,
     content_type: &'static str,
     body: Vec<u8>,
+    headers: BTreeMap<String, String>,
 }
 
 #[cfg(test)]

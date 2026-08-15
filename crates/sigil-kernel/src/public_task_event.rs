@@ -74,6 +74,8 @@ impl From<crate::ConversationRoute> for PublicConversationRoute {
 #[serde(rename_all = "snake_case")]
 pub enum PublicPlanReviewStatus {
     Started,
+    WaitingForInput,
+    Finalizing,
     DraftReady,
     CompletedWithoutDraft,
     Failed,
@@ -85,6 +87,8 @@ impl From<PlanReviewAttemptStatus> for PublicPlanReviewStatus {
     fn from(status: PlanReviewAttemptStatus) -> Self {
         match status {
             PlanReviewAttemptStatus::Started => Self::Started,
+            PlanReviewAttemptStatus::WaitingForInput => Self::WaitingForInput,
+            PlanReviewAttemptStatus::Finalizing => Self::Finalizing,
             PlanReviewAttemptStatus::DraftReady => Self::DraftReady,
             PlanReviewAttemptStatus::CompletedWithoutDraft => Self::CompletedWithoutDraft,
             PlanReviewAttemptStatus::Failed => Self::Failed,
@@ -146,6 +150,8 @@ pub struct PublicPlanReview {
     pub status: PublicPlanReviewStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// True when `summary` is a bounded compact projection rather than the complete detail.
+    pub summary_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +163,37 @@ pub struct PublicPlanReview {
     pub allowed_actions: Vec<PublicPlanAction>,
     pub source: PublicPlanReviewSource,
     pub stale: bool,
+    /// Candidate revision state is projected separately so a failed/running attempt never hides
+    /// the immutable active plan above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<PublicPlanRevisionSummaryV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PublicPlanRevisionSummaryV1 {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_ordinal: Option<u32>,
+    pub status: PublicPlanRevisionStatusV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+}
+
+/// Stable product-facing phase of a revision while the immutable base plan remains reviewable.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicPlanRevisionStatusV1 {
+    AwaitingGuidance,
+    Queued,
+    Researching,
+    WaitingForInput,
+    Finalizing,
+    Failed,
+    Cancelled,
+    Succeeded,
 }
 
 /// Bounded public plan-step DTO with no prompt, transcript, path, ref, or mutation authority.

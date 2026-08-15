@@ -37,7 +37,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 13;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 14;
 /// Schema version for one bounded display-surface artifact page.
 pub const HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION: u16 = 1;
 
@@ -69,6 +69,8 @@ pub struct HttpServerCapabilities {
     pub live_events: bool,
     /// Pending tool approvals can be resolved by an authenticated client.
     pub approval: bool,
+    /// Durable user-input requests can be inspected and resolved with exact identities.
+    pub durable_user_input: bool,
     /// Active runs support cooperative cancellation and bounded drain.
     pub cancellation: bool,
     /// Active durable Tasks support exact plan- and scope-bound pause.
@@ -108,6 +110,7 @@ impl HttpServerCapabilities {
             durable_event_replay: true,
             live_events: true,
             approval: true,
+            durable_user_input: true,
             cancellation: true,
             task_pause: true,
             terminal_task_cancel: true,
@@ -1268,6 +1271,8 @@ pub struct HttpConversationDisplayPage {
     pub task_control: Option<HttpConversationTaskControl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_review: Option<HttpPlanReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input: Option<HttpUserInputRequest>,
 }
 
 /// Bounded public plan review surface with no prompt, transcript, path, ref, or authority.
@@ -1280,6 +1285,7 @@ pub struct HttpPlanReview {
     pub status: HttpPlanReviewStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    pub summary_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1291,12 +1297,16 @@ pub struct HttpPlanReview {
     pub allowed_actions: Vec<HttpPlanAction>,
     pub source: HttpPlanReviewSource,
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<sigil_kernel::PublicPlanRevisionSummaryV1>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpPlanReviewStatus {
     Started,
+    WaitingForInput,
+    Finalizing,
     DraftReady,
     CompletedWithoutDraft,
     Failed,
@@ -1335,6 +1345,7 @@ impl HttpConversationDisplayPage {
             live_provisional_anchor: None,
             task_control: page.task_control.map(Into::into),
             plan_review: page.plan_review.map(Into::into),
+            user_input: page.user_input.map(Into::into),
         }
     }
 }
@@ -3621,6 +3632,7 @@ impl From<sigil_kernel::PublicPlanReview> for HttpPlanReview {
             plan_hash: review.plan_hash,
             status: review.status.into(),
             summary: review.summary,
+            summary_truncated: review.summary_truncated,
             step_count: review.step_count,
             target_path_count: review.target_path_count,
             suggested_check_count: review.suggested_check_count,
@@ -3628,6 +3640,7 @@ impl From<sigil_kernel::PublicPlanReview> for HttpPlanReview {
             allowed_actions: review.allowed_actions.into_iter().map(Into::into).collect(),
             source: review.source.into(),
             stale: review.stale,
+            revision: review.revision,
         }
     }
 }
@@ -3636,6 +3649,8 @@ impl From<sigil_kernel::PublicPlanReviewStatus> for HttpPlanReviewStatus {
     fn from(status: sigil_kernel::PublicPlanReviewStatus) -> Self {
         match status {
             sigil_kernel::PublicPlanReviewStatus::Started => Self::Started,
+            sigil_kernel::PublicPlanReviewStatus::WaitingForInput => Self::WaitingForInput,
+            sigil_kernel::PublicPlanReviewStatus::Finalizing => Self::Finalizing,
             sigil_kernel::PublicPlanReviewStatus::DraftReady => Self::DraftReady,
             sigil_kernel::PublicPlanReviewStatus::CompletedWithoutDraft => {
                 Self::CompletedWithoutDraft
@@ -3727,7 +3742,83 @@ pub struct HttpPlanDecisionCommandReceipt {
     /// client can subscribe to and track the child run's event stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_request: Option<HttpUserInputRequest>,
     pub replayed: bool,
+}
+
+/// Complete immutable plan detail shared with the kernel converter.
+pub type HttpPlanReviewDetail = sigil_kernel::PlanReviewDetailV1;
+
+/// Exact immutable public view of one durable user-input request.
+///
+/// Answer values are never included in this projection; after submission only the bounded
+/// answer receipt (hash plus answered question identities) remains visible.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpUserInputRequest {
+    pub identity: sigil_kernel::UserInputIdentityV1,
+    pub request_hash: String,
+    pub source: sigil_kernel::UserInputSourceV1,
+    pub purpose: sigil_kernel::UserInputPurposeV1,
+    pub prompt: String,
+    pub questions: Vec<sigil_kernel::UserInputQuestionV1>,
+    pub allowed_actions: Vec<sigil_kernel::UserInputActionV1>,
+    pub requested_at_unix_ms: u64,
+    pub status: sigil_kernel::UserInputStatusV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_receipt: Option<sigil_kernel::PublicUserInputAnswerReceiptV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<sigil_kernel::UserInputResolutionV1>,
+}
+
+impl From<sigil_kernel::PublicUserInputRequestV1> for HttpUserInputRequest {
+    fn from(request: sigil_kernel::PublicUserInputRequestV1) -> Self {
+        Self {
+            identity: request.identity,
+            request_hash: request.request_hash,
+            source: request.source,
+            purpose: request.purpose,
+            prompt: request.prompt,
+            questions: request.questions,
+            allowed_actions: request.allowed_actions,
+            requested_at_unix_ms: request.requested_at_unix_ms,
+            status: request.status,
+            answer_receipt: request.answer_receipt,
+            resolution: request.resolution,
+        }
+    }
+}
+
+/// Typed decision for one exact durable user-input request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpUserInputDecisionRequest {
+    pub generation: u32,
+    pub expected_request_hash: String,
+    pub decision: sigil_kernel::UserInputDecisionV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<HttpPermissionMode>,
+}
+
+/// Idempotent receipt for one exact user-input decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpUserInputDecisionCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub request: HttpUserInputRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_run_id: Option<String>,
+    pub replayed: bool,
+}
+
+impl HttpUserInputDecisionCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
 }
 
 impl HttpPlanDecisionCommandReceipt {
@@ -3757,6 +3848,7 @@ impl From<sigil_runtime::ApplicationPlanDecisionReceipt> for HttpPlanDecisionCom
             },
             task_id: receipt.task_id,
             revision_run_id,
+            user_input_request: receipt.user_input_request.map(Into::into),
             replayed: false,
         }
     }

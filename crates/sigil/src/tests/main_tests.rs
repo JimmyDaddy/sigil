@@ -2186,11 +2186,18 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
         source_turn: source.clone(),
         route_decision_id: Some(decision_id.clone()),
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
+        finalizer_session_ref: None,
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        workspace_snapshot_id: None,
+        pending_user_input: None,
         status: PlanReviewAttemptStatus::Started,
         terminal_reason: None,
         recorded_at_ms: 1,
     };
-    session.append_control(ControlEntry::PlanReviewAttempt(attempt))?;
+    session.append_control(ControlEntry::PlanReviewAttempt(attempt.clone()))?;
     let draft_args = r#"{
         "schema_version": 2,
         "summary": "Migrate the coordinator",
@@ -2219,18 +2226,9 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
     )?
     .expect("draft must be valid");
     session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
-    let ready = PlanReviewAttemptEntry {
-        plan_review_id: review_id,
-        attempt_id,
-        plan_id: draft.plan_id.clone(),
-        source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
-        source_turn: source,
-        route_decision_id: None,
-        child_session_ref: SessionRef::new_relative("child.jsonl")?,
-        status: PlanReviewAttemptStatus::DraftReady,
-        terminal_reason: None,
-        recorded_at_ms: 2,
-    };
+    let mut ready = attempt;
+    ready.status = PlanReviewAttemptStatus::DraftReady;
+    ready.recorded_at_ms = 2;
     session.append_control(ControlEntry::PlanReviewAttempt(ready))?;
     Ok(PendingPlanDraft {
         plan_id: draft.plan_id.as_str().to_owned(),

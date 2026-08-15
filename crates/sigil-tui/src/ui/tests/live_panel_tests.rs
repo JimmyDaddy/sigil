@@ -1032,12 +1032,10 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
     assert!(rendered.contains("1 check"));
     assert!(rendered.contains("inspect and edit"));
     assert!(rendered.contains("Enter"));
-    assert!(rendered.contains("run"));
-    assert!(rendered.contains("save"));
-    assert!(rendered.contains("revise"));
+    assert!(rendered.contains("review"));
     assert!(!rendered.contains("scoped edits"));
     assert!(!rendered.contains("Shift-Enter"));
-    assert!(rendered.contains("Esc reject"));
+    assert!(!rendered.contains("Esc reject"));
     Ok(())
 }
 
@@ -1071,13 +1069,13 @@ fn render_live_panel_one_row_plan_budget_discloses_hidden_plan_before_run() -> a
     terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
 
     let rendered = rendered_rows(&terminal).join("\n");
-    assert!(rendered.contains("Enter run"));
+    assert!(rendered.contains("Enter review"));
     assert!(rendered.contains("plan…"));
     Ok(())
 }
 
 #[test]
-fn plan_one_row_compact_action_keeps_run_visible_at_16_columns() {
+fn plan_one_row_compact_action_keeps_review_visible_at_16_columns() {
     let theme = Theme::default();
     let action = render_plan_action_line(false, 16, &theme);
     let compact = status_band_line(
@@ -1090,8 +1088,8 @@ fn plan_one_row_compact_action_keeps_run_visible_at_16_columns() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(rendered.contains("Enter run"));
-    assert!(rendered.contains("plan"));
+    assert!(rendered.contains("Enter"));
+    assert!(!rendered.trim().is_empty());
 }
 
 #[test]
@@ -1139,11 +1137,8 @@ fn render_live_panel_bounds_long_plan_and_keeps_actions_on_short_narrow_terminal
 
     let rows = rendered_rows(&terminal);
     assert!(rows.iter().any(|row| row.contains("Plan ready")));
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("plan details truncated"))
-    );
-    assert!(rows.iter().any(|row| row.contains("Enter s r Esc")));
+    assert!(rows.iter().any(|row| row.contains("compact preview")));
+    assert!(rows.iter().any(|row| row.contains("Enter")));
     assert!(rows.last().is_some_and(|row| row.trim().is_empty()));
     Ok(())
 }
@@ -1209,9 +1204,8 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
     assert!(rendered.contains("queued follow-up"));
     assert!(rendered.contains("Actions"));
     assert!(rendered.contains("Thinking..."));
-    assert!(rendered.contains("plan details truncated"));
-    assert!(rendered.contains("Enter run"));
-    assert!(rendered.contains("Esc reject"));
+    assert!(rendered.contains("compact preview"));
+    assert!(rendered.contains("Enter review"));
     assert!(rendered.contains("Task task_1"));
     Ok(())
 }

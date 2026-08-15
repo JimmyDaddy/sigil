@@ -35,6 +35,7 @@ pub(super) struct RequestUserInputContext<'a> {
     pub source_thread_id: &'a AgentThreadId,
     pub provider_name: &'a str,
     pub model_name: &'a str,
+    pub source: UserInputSourceV1,
 }
 
 pub(super) fn handle_request_user_input_call<H>(
@@ -80,17 +81,24 @@ where
         &assistant_message_id,
         call,
     )?;
+    let identity = UserInputIdentityV1 {
+        session_scope_id: crate::SessionScopeId::new(session.session_scope_id())?,
+        root_logical_run_id,
+        source_thread_id: context.source_thread_id.clone(),
+        request_id,
+        generation: 1,
+        source_binding_hash,
+    };
+    let projection = session.user_input_projection()?;
+    let requested_at_unix_ms = projection
+        .request(&identity)
+        .map_or_else(super::unix_time_ms, |existing| {
+            existing.requested.request.requested_at_unix_ms
+        });
     let requested = UserInputRequestedV1::new(UserInputRequestV1 {
         schema_version: USER_INPUT_SCHEMA_VERSION,
-        identity: UserInputIdentityV1 {
-            session_scope_id: crate::SessionScopeId::new(session.session_scope_id())?,
-            root_logical_run_id,
-            source_thread_id: context.source_thread_id.clone(),
-            request_id,
-            generation: 1,
-            source_binding_hash,
-        },
-        source: UserInputSourceV1::Agent,
+        identity,
+        source: context.source,
         purpose: UserInputPurposeV1::Clarification,
         prompt: args.prompt,
         questions: args.questions,
@@ -99,7 +107,7 @@ where
             UserInputActionV1::Decline,
             UserInputActionV1::CancelRun,
         ],
-        requested_at_unix_ms: super::unix_time_ms(),
+        requested_at_unix_ms,
         continuation: Some(UserInputContinuationBindingV1 {
             assistant_message_id,
             tool_call_id: call.id.clone(),
@@ -108,7 +116,6 @@ where
         }),
     })?;
 
-    let projection = session.user_input_projection()?;
     if let Some(existing) = projection.request(&requested.request.identity) {
         if existing.requested == requested {
             return Ok((&existing.requested).into());

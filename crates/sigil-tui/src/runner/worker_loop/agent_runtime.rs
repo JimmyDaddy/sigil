@@ -350,6 +350,239 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(in crate::runner) fn apply_user_input_decision<P>(
+    runtime: &tokio::runtime::Runtime,
+    agent: Arc<Agent<P>>,
+    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    root_config: &RootConfig,
+    base_registry: &ToolRegistry,
+    options: &AgentRunOptions,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+    current_session: &mut Option<Session>,
+    task_result_tx: &WorkerEventPayloadSender<RunTaskResult>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    elicitation_handler: Arc<ChannelMcpElicitationHandler>,
+    next_run_id: &mut u64,
+    tool_artifact_read_budget: ToolArtifactReadBudgetV1,
+    identity: sigil_kernel::UserInputIdentityV1,
+    request_hash: String,
+    command_id: sigil_kernel::UserInputCommandId,
+    decision: sigil_kernel::UserInputDecisionV1,
+) -> std::result::Result<Option<ActiveRun>, String>
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let session = current_session
+        .as_mut()
+        .ok_or_else(|| "session state is unavailable for user input".to_owned())?;
+    let continuation_requested = matches!(
+        decision,
+        sigil_kernel::UserInputDecisionV1::Submitted { .. }
+    );
+    let prepared_cancellation = if continuation_requested {
+        Some(prepare_run_cancellation(session)?)
+    } else {
+        None
+    };
+    let _receipt = sigil_kernel::accept_user_input_decision(
+        session,
+        sigil_kernel::UserInputDecisionCommandV1 {
+            identity: identity.clone(),
+            request_hash: request_hash.clone(),
+            command_id,
+            decision,
+        },
+        current_unix_time_ms(),
+    )
+    .map_err(|error| format!("user input decision failed: {error:#}"))?;
+    if !continuation_requested {
+        let projection = session
+            .user_input_projection()
+            .map_err(|error| format!("user input projection failed: {error:#}"))?;
+        let request = projection
+            .request(&identity)
+            .map(sigil_kernel::UserInputRequestStateV1::public_view)
+            .ok_or_else(|| "resolved user input request is missing".to_owned())?;
+        let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+            request,
+            continuation_started: false,
+            entries: session.entries().to_vec(),
+        });
+        return Ok(None);
+    }
+    let run_id = *next_run_id;
+    *next_run_id = (*next_run_id).saturating_add(1);
+    let physical_attempt_id = format!("tui-user-input-{run_id}");
+    let preparation = sigil_kernel::prepare_user_input_continuation(
+        session,
+        &identity,
+        &request_hash,
+        "sigil-tui",
+        &physical_attempt_id,
+        current_unix_time_ms(),
+    )
+    .map_err(|error| format!("user input continuation failed to start: {error:#}"))?;
+    if preparation.already_started {
+        return Err("user input continuation is already owned by another physical run".to_owned());
+    }
+    let continuation_logical_run_id = preparation.continuation.continuation_logical_run_id.clone();
+    let source_thread_id = identity.source_thread_id.clone();
+    let root_logical_run_id = identity.root_logical_run_id.as_str().to_owned();
+    let request = preparation.request;
+    let entries = session.entries().to_vec();
+    let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+        request,
+        continuation_started: true,
+        entries,
+    });
+    let run_session = current_session
+        .take()
+        .ok_or_else(|| "session state disappeared before user input continuation".to_owned())?;
+    let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
+        prepared_cancellation.expect("submitted input prepares cancellation");
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    let (approval_tx, approval_rx) = mpsc::channel();
+    let elicitation_audit_buffer: McpElicitationAuditBuffer =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+    let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
+        agent_supervisor.clone(),
+        effective_orchestration_root_config(root_config, &run_session),
+        base_registry.clone(),
+    )
+    .with_background_runs(background_runs.clone());
+    let options = options.clone();
+    let task_result_tx = task_result_tx.clone();
+    let url_capability_registrar = run_session.user_url_capability_registrar();
+    let image_attachment_resolver = run_session.image_attachment_resolver();
+    let handle = runtime.spawn(async move {
+        let _cancellation_task_guard = cancellation_task_guard;
+        let mut run_session = run_session;
+        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+        let output = agent
+            .run_with_approval_input_and_agent_delegate(
+                &mut run_session,
+                AgentRunInput::without_persisted_user_message(Vec::new())
+                    .with_logical_run_id(continuation_logical_run_id.as_str())
+                    .with_user_input_continuation_context(root_logical_run_id, source_thread_id)
+                    .with_tool_artifact_read_budget(tool_artifact_read_budget)
+                    .with_cancellation(cancellation_handle),
+                options,
+                &mut handler,
+                &mut approval_handler,
+                &mut agent_delegate,
+            )
+            .await;
+        let (payload, resolution) = match output {
+            Ok(output) => match output.disposition {
+                AgentRunDisposition::FinalAnswer => (
+                    RunTaskPayload::Chat {
+                        result: Ok(output.result),
+                        plan_mode: false,
+                        plan_review: false,
+                        queue_id: None,
+                        provider_logical_run_id: None,
+                        agent_result_continuation_thread_ids: Vec::new(),
+                    },
+                    sigil_kernel::UserInputResolutionV1::Consumed,
+                ),
+                AgentRunDisposition::AwaitingUserInput(request) => (
+                    RunTaskPayload::AwaitingUserInput { request },
+                    sigil_kernel::UserInputResolutionV1::Consumed,
+                ),
+                _ => (
+                    RunTaskPayload::Chat {
+                        result: Err(
+                            "user input continuation ended with an unsupported disposition"
+                                .to_owned(),
+                        ),
+                        plan_mode: false,
+                        plan_review: false,
+                        queue_id: None,
+                        provider_logical_run_id: None,
+                        agent_result_continuation_thread_ids: Vec::new(),
+                    },
+                    sigil_kernel::UserInputResolutionV1::Failed {
+                        failure_class: "unsupported_disposition".to_owned(),
+                        retryable: true,
+                    },
+                ),
+            },
+            Err(error) => (
+                RunTaskPayload::Chat {
+                    result: Err(format!("{error:#}")),
+                    plan_mode: false,
+                    plan_review: false,
+                    queue_id: None,
+                    provider_logical_run_id: None,
+                    agent_result_continuation_thread_ids: Vec::new(),
+                },
+                sigil_kernel::UserInputResolutionV1::Failed {
+                    failure_class: "continuation_failed".to_owned(),
+                    retryable: true,
+                },
+            ),
+        };
+        let settlement = run_session.append_user_input_lifecycle(vec![
+            sigil_kernel::UserInputLifecycleEntryV1::Resolved(sigil_kernel::UserInputResolvedV1 {
+                schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+                identity,
+                request_hash,
+                resolution,
+                resolved_at_unix_ms: current_unix_time_ms(),
+            }),
+        ]);
+        let payload = match settlement {
+            Ok(()) => payload,
+            Err(error) => RunTaskPayload::Chat {
+                result: Err(format!(
+                    "user input continuation settlement failed: {error:#}"
+                )),
+                plan_mode: false,
+                plan_review: false,
+                queue_id: None,
+                provider_logical_run_id: None,
+                agent_result_continuation_thread_ids: Vec::new(),
+            },
+        };
+        let payload =
+            match append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer) {
+                Ok(()) => payload,
+                Err(error) => RunTaskPayload::Chat {
+                    result: Err(error),
+                    plan_mode: false,
+                    plan_review: false,
+                    queue_id: None,
+                    provider_logical_run_id: None,
+                    agent_result_continuation_thread_ids: Vec::new(),
+                },
+            };
+        let _ = task_result_tx.send(RunTaskResult {
+            run_id,
+            session: run_session,
+            payload,
+        });
+    });
+    Ok(Some(ActiveRun {
+        run_id,
+        handle,
+        approval_tx,
+        elicitation_audit_buffer,
+        cancellation_owner,
+        cancellation_recorder,
+        cancellation_target: RunCancellationTarget::Run,
+        url_capability_registrar,
+        image_attachment_resolver,
+    }))
+}
+
+pub(in crate::runner) enum PlanReviewExecutionResult {
+    Finished(sigil_kernel::AgentRunResult),
+    AwaitingUserInput(sigil_kernel::UserInputRequestRefV1),
+}
+
 pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     run_session: &mut Session,
     action: sigil_kernel::StartPlanReviewAction,
@@ -360,7 +593,7 @@ pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
-) -> std::result::Result<sigil_kernel::AgentRunResult, String>
+) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
     A: sigil_kernel::ApprovalHandler + Send,
@@ -385,6 +618,44 @@ where
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(in crate::runner) async fn run_explicit_plan_review<H, A>(
+    run_session: &mut Session,
+    prompt: &str,
+    root_logical_run_id: &str,
+    workspace_snapshot_id: Option<String>,
+    agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
+    options: AgentRunOptions,
+    tool_registry: sigil_kernel::ToolRegistry,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: sigil_kernel::RunCancellationHandle,
+) -> std::result::Result<PlanReviewExecutionResult, String>
+where
+    H: sigil_kernel::EventHandler + Send,
+    A: sigil_kernel::ApprovalHandler + Send,
+{
+    let request = sigil_runtime::PlanReviewCoordinator::prepare_explicit_plan_review(
+        run_session,
+        prompt,
+        root_logical_run_id,
+        workspace_snapshot_id,
+        current_unix_time_ms(),
+    )
+    .map_err(|error| format!("failed to prepare explicit plan review: {error:#}"))?;
+    run_prepared_plan_review(
+        run_session,
+        &request,
+        agent,
+        options,
+        tool_registry,
+        handler,
+        approval_handler,
+        cancellation_handle,
+    )
+    .await
+}
+
 /// Runs an already-prepared plan review (automatic decision or revision) and commits the typed
 /// draft to the parent session.
 pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
@@ -396,7 +667,7 @@ pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
-) -> std::result::Result<sigil_kernel::AgentRunResult, String>
+) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
     A: sigil_kernel::ApprovalHandler + Send,
@@ -438,6 +709,23 @@ where
         }
     };
     match outcome {
+        sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput { request: pending } => {
+            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput {
+                    request: pending.clone(),
+                },
+                current_unix_time_ms(),
+            )
+            .map_err(|error| format!("failed to suspend plan review: {error:#}"))?;
+            Ok(PlanReviewExecutionResult::AwaitingUserInput(
+                sigil_kernel::UserInputRequestRefV1 {
+                    identity: pending.identity.clone(),
+                    request_hash: pending.request_hash.clone(),
+                },
+            ))
+        }
         sigil_runtime::PlanReviewRunOutcome::DraftReady { draft } => {
             sigil_runtime::PlanReviewCoordinator::commit_draft_from_child(
                 run_session,
@@ -446,11 +734,13 @@ where
                 current_unix_time_ms(),
             )
             .map_err(|error| format!("failed to commit plan review draft: {error:#}"))?;
-            Ok(sigil_kernel::AgentRunResult {
-                final_text: format!("Plan ready: {}", draft.summary),
-                tool_calls: 0,
-                final_message_id: None,
-            })
+            Ok(PlanReviewExecutionResult::Finished(
+                sigil_kernel::AgentRunResult {
+                    final_text: format!("Plan ready: {}", draft.summary),
+                    tool_calls: 0,
+                    final_message_id: None,
+                },
+            ))
         }
         sigil_runtime::PlanReviewRunOutcome::CompletedWithoutDraft => {
             sigil_runtime::PlanReviewCoordinator::complete_without_draft(
@@ -459,11 +749,14 @@ where
                 current_unix_time_ms(),
             )
             .map_err(|error| format!("failed to close plan review: {error:#}"))?;
-            Ok(sigil_kernel::AgentRunResult {
-                final_text: "Plan review closed without a draft; no task was created.".to_owned(),
-                tool_calls: 0,
-                final_message_id: None,
-            })
+            Ok(PlanReviewExecutionResult::Finished(
+                sigil_kernel::AgentRunResult {
+                    final_text: "Plan review closed without a draft; no task was created."
+                        .to_owned(),
+                    tool_calls: 0,
+                    final_message_id: None,
+                },
+            ))
         }
         sigil_runtime::PlanReviewRunOutcome::Cancelled => {
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
@@ -500,6 +793,18 @@ where
             )
             .map_err(|close_error| {
                 format!("plan review failed ({error}) and its terminal closure also failed: {close_error:#}")
+            })?;
+            Err(error)
+        }
+        sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => {
+            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone()),
+                current_unix_time_ms(),
+            )
+            .map_err(|close_error| {
+                format!("plan review violated submit-only finalization ({error}) and its terminal closure also failed: {close_error:#}")
             })?;
             Err(error)
         }
@@ -890,13 +1195,28 @@ where
                             cancellation_handle.clone(),
                         )
                         .await;
-                        RunTaskPayload::Chat {
-                            result,
-                            plan_mode: false,
-                            plan_review: true,
-                            queue_id: Some(queue_id.clone()),
-                            provider_logical_run_id: None,
-                            agent_result_continuation_thread_ids: Vec::new(),
+                        match result {
+                            Ok(PlanReviewExecutionResult::Finished(result)) => {
+                                RunTaskPayload::Chat {
+                                    result: Ok(result),
+                                    plan_mode: false,
+                                    plan_review: true,
+                                    queue_id: Some(queue_id.clone()),
+                                    provider_logical_run_id: None,
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                }
+                            }
+                            Ok(PlanReviewExecutionResult::AwaitingUserInput(request)) => {
+                                RunTaskPayload::AwaitingUserInput { request }
+                            }
+                            Err(error) => RunTaskPayload::Chat {
+                                result: Err(error),
+                                plan_mode: false,
+                                plan_review: true,
+                                queue_id: Some(queue_id.clone()),
+                                provider_logical_run_id: None,
+                                agent_result_continuation_thread_ids: Vec::new(),
+                            },
                         }
                     }
                     AgentRunDisposition::PlanReviewDraftSubmitted(_) => RunTaskPayload::Chat {

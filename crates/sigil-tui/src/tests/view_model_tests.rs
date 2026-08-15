@@ -1059,10 +1059,8 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     .expect("structured plan should create draft");
     plan_app.set_pending_plan_approval_from_draft(&draft, Some("snapshot-1"));
     let plan_view = UiViewModel::from_app(&plan_app);
-    assert!(plan_view.footer.hints.contains("Enter run"));
-    assert!(plan_view.footer.hints.contains("s save"));
-    assert!(plan_view.footer.hints.contains("r revise"));
-    assert!(plan_view.footer.hints.contains("Esc reject"));
+    assert!(plan_view.footer.hints.contains("Enter review"));
+    assert!(plan_view.footer.hints.contains("Shift-Tab reopen"));
     assert!(!plan_view.footer.hints.contains("S scoped edits"));
     let live_view = LivePanelViewModel::from_app(&plan_app, 4);
     let approval = live_view
@@ -1077,10 +1075,8 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     let mut stale_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     stale_app.set_pending_plan_approval_from_draft(&draft, Some("different-snapshot"));
     let stale_view = UiViewModel::from_app(&stale_app);
-    assert!(!stale_view.footer.hints.contains("Enter run"));
-    assert!(!stale_view.footer.hints.contains("s save"));
-    assert!(stale_view.footer.hints.contains("r revise"));
-    assert!(stale_view.footer.hints.contains("Esc reject"));
+    assert!(stale_view.footer.hints.contains("Enter review"));
+    assert!(stale_view.footer.hints.contains("plan stale"));
     let stale_live = LivePanelViewModel::from_app(&stale_app, 4);
     let stale_approval = stale_live
         .plan_approval

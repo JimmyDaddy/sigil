@@ -91,7 +91,16 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     assert!(ignored.is_none());
     assert!(app.pending_plan_approval().is_some());
     assert_eq!(app.composer.input, "z");
-    let discard = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    for _ in 0..3 {
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    }
+    let discard = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         discard,
         Some(AppAction::RejectPlan {

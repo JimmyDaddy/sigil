@@ -577,6 +577,7 @@ fn plan_review_surface_validates_bounded_typed_decisions() {
             "plan_hash": format!("sha256:{}", "a".repeat(64)),
             "status": "draft_ready",
             "summary": "Refactor the workspace snapshot binding",
+            "summary_truncated": false,
             "step_count": 3,
             "target_path_count": 2,
             "suggested_check_count": 1,
@@ -605,8 +606,26 @@ fn plan_review_surface_validates_bounded_typed_decisions() {
         .as_mut()
         .expect("plan review present")
         .allowed_actions = vec![crate::DesktopPlanAction::Run];
+    validate_conversation_display_page(&partial_actions, "http-session-1")
+        .expect("saved-only plans may expose a strict action subset");
+
+    let mut revision_running = page.clone();
+    revision_running
+        .plan_review
+        .as_mut()
+        .expect("plan review present")
+        .allowed_actions = Vec::new();
+    validate_conversation_display_page(&revision_running, "http-session-1")
+        .expect("a revision-running base plan intentionally exposes no actions");
+
+    let mut duplicate_actions = page.clone();
+    duplicate_actions
+        .plan_review
+        .as_mut()
+        .expect("plan review present")
+        .allowed_actions = vec![crate::DesktopPlanAction::Run, crate::DesktopPlanAction::Run];
     assert!(matches!(
-        validate_conversation_display_page(&partial_actions, "http-session-1"),
+        validate_conversation_display_page(&duplicate_actions, "http-session-1"),
         Err(DesktopClientError::InvalidResponse)
     ));
 
@@ -644,6 +663,7 @@ fn plan_review_surface_validates_bounded_typed_decisions() {
         "plan_hash": format!("sha256:{}", "b".repeat(64)),
         "status": "started",
         "summary": "Review in progress without a draft",
+        "summary_truncated": false,
         "step_count": 0,
         "target_path_count": 0,
         "suggested_check_count": 0,
@@ -669,6 +689,7 @@ fn plan_review_surface_validates_bounded_typed_decisions() {
         "plan_review": {
             "plan_id": "plan-review-3",
             "status": "cancelled",
+            "summary_truncated": false,
             "allowed_actions": [],
             "source": "automatic_conversation_route",
             "stale": false
@@ -1615,6 +1636,229 @@ async fn approval_retry_reuses_the_exact_command_envelope_after_a_lost_response(
     assert_eq!(
         receipt.decision.family_pattern.as_deref(),
         Some("cargo test*")
+    );
+    server.await.expect("server task should complete");
+}
+
+#[tokio::test]
+async fn user_input_detail_requires_the_exact_request_hash_etag() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("loopback listener should expose its address");
+    let expected_request_hash = format!("sha256:{}", "b".repeat(64));
+    let response_request_hash = expected_request_hash.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("request should connect");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1_024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).await.expect("request should read");
+            assert!(read > 0, "request closed before headers completed");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let headers = String::from_utf8(request).expect("request should be UTF-8");
+        assert!(
+            headers.starts_with("GET /sessions/session-1/user-input/request-1?generation=1&expected_request_hash=sha256%3A"),
+            "unexpected user-input detail route: {headers}"
+        );
+        let response_body = serde_json::json!({
+            "identity": {
+                "session_scope_id": "session-1",
+                "root_logical_run_id": "root-run-1",
+                "source_thread_id": "main",
+                "request_id": "request-1",
+                "generation": 1,
+                "source_binding_hash": format!("sha256:{}", "a".repeat(64))
+            },
+            "request_hash": response_request_hash,
+            "source": "agent",
+            "purpose": "clarification",
+            "prompt": "Which workspace should I inspect?",
+            "questions": [{
+                "id": "workspace",
+                "header": "Workspace",
+                "question": "Which workspace should I inspect?",
+                "required": true,
+                "field": {"kind": "text", "multiline": false, "max_chars": 512}
+            }],
+            "allowed_actions": ["submit", "decline", "cancel_run"],
+            "requested_at_unix_ms": 100,
+            "status": "requested"
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"{response_request_hash}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("response should write");
+    });
+
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("token should generate")),
+    );
+    let request = client
+        .user_input_request("session-1", "request-1", 1, &expected_request_hash)
+        .await
+        .expect("exact ETag-bound request should decode");
+
+    assert_eq!(request.request_hash, expected_request_hash);
+    server.await.expect("server task should complete");
+}
+
+#[tokio::test]
+async fn user_input_retry_reuses_the_exact_command_envelope_after_a_lost_response() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1_024];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).await.expect("request should read");
+            assert!(read > 0, "request closed before its headers completed");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).expect("headers should be UTF-8");
+        assert!(
+            headers
+                .starts_with("POST /sessions/session-1/user-input/request-1/decision HTTP/1.1\r\n"),
+            "unexpected user-input route: {headers}"
+        );
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::parse::<usize>)
+            })
+            .expect("request should include content length")
+            .expect("content length should be numeric");
+        while request.len() - header_end < content_length {
+            let read = stream.read(&mut buffer).await.expect("body should read");
+            assert!(read > 0, "request closed before its body completed");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        serde_json::from_slice(&request[header_end..header_end + content_length])
+            .expect("request body should be JSON")
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("loopback listener should expose its address");
+    let expected_request_hash = format!("sha256:{}", "b".repeat(64));
+    let response_request_hash = expected_request_hash.clone();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener
+            .accept()
+            .await
+            .expect("first request should connect");
+        let first_body = read_request(&mut first).await;
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.expect("retry should connect");
+        let second_body = read_request(&mut second).await;
+        assert_eq!(
+            second_body, first_body,
+            "retry must reuse the exact answer command envelope"
+        );
+
+        let command_id = first_body["command_id"]
+            .as_str()
+            .expect("command id should be present");
+        let client_id = first_body["client_id"]
+            .as_str()
+            .expect("client id should be present");
+        let response_body = serde_json::json!({
+            "command_id": command_id,
+            "client_id": client_id,
+            "session_id": "session-1",
+            "request": {
+                "identity": {
+                    "session_scope_id": "session-1",
+                    "root_logical_run_id": "root-run-1",
+                    "source_thread_id": "main",
+                    "request_id": "request-1",
+                    "generation": 1,
+                    "source_binding_hash": format!("sha256:{}", "a".repeat(64))
+                },
+                "request_hash": response_request_hash,
+                "source": "agent",
+                "purpose": "clarification",
+                "prompt": "Which workspace should I inspect?",
+                "questions": [{
+                    "id": "workspace",
+                    "header": "Workspace",
+                    "question": "Which workspace should I inspect?",
+                    "required": true,
+                    "field": {"kind": "text", "multiline": false, "max_chars": 512}
+                }],
+                "allowed_actions": ["submit", "decline", "cancel_run"],
+                "requested_at_unix_ms": 100,
+                "status": "decision_accepted",
+                "answer_receipt": {
+                    "command_id": command_id,
+                    "decision": "submitted",
+                    "answer_hash": format!("sha256:{}", "b".repeat(64)),
+                    "answered_question_ids": ["workspace"]
+                }
+            },
+            "continuation_run_id": "user-input-continuation-1",
+            "replayed": true
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        second
+            .write_all(response.as_bytes())
+            .await
+            .expect("response should write");
+    });
+
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("token should generate")),
+    );
+    let receipt = client
+        .user_input_decision(
+            "session-1",
+            "request-1",
+            1,
+            &expected_request_hash,
+            crate::DesktopUserInputDecision::Submitted {
+                answers: vec![crate::DesktopUserInputAnswer {
+                    question_id: "workspace".to_owned(),
+                    value: crate::DesktopUserInputAnswerValue::Text {
+                        value: "crates/sigil-kernel".to_owned(),
+                    },
+                }],
+            },
+            None,
+        )
+        .await
+        .expect("lost response should be recovered by exact replay");
+
+    assert!(receipt.replayed);
+    assert_eq!(
+        receipt.continuation_run_id.as_deref(),
+        Some("user-input-continuation-1")
     );
     server.await.expect("server task should complete");
 }

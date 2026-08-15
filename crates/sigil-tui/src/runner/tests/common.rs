@@ -113,6 +113,25 @@ pub(super) fn routed_session_identity(
     })
 }
 
+pub(super) fn submit_plan_draft_chunks(call_id: &str, args_json: &str) -> Vec<ProviderChunk> {
+    vec![
+        ProviderChunk::ToolCallStart {
+            id: call_id.to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+        },
+        ProviderChunk::ToolCallArgsDelta {
+            id: call_id.to_owned(),
+            delta: args_json.to_owned(),
+        },
+        ProviderChunk::ToolCallComplete(ToolCall {
+            id: call_id.to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            args_json: args_json.to_owned(),
+        }),
+        ProviderChunk::Done,
+    ]
+}
+
 pub(super) struct TestWorker {
     command_tx: WorkerCommandSender,
     message_rx: mpsc::Receiver<WorkerMessage>,

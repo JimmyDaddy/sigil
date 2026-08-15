@@ -2301,6 +2301,16 @@
           },
           "total_items": {
             "$ref": "#/components/schemas/DecimalSequence"
+          },
+          "user_input": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserInputRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -3175,6 +3185,38 @@
           "checkpoints",
           "fork_points",
           "through_stream_sequence"
+        ],
+        "type": "object"
+      },
+      "ConversationRouteChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "decision_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "route": {
+            "enum": [
+              "chat",
+              "plan_review",
+              "task"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "conversation_route_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "decision_id",
+          "route",
+          "status"
         ],
         "type": "object"
       },
@@ -4616,6 +4658,16 @@
               "string",
               "null"
             ]
+          },
+          "user_input_request": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserInputRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -4671,6 +4723,37 @@
         ],
         "type": "object"
       },
+      "PlanLineage": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "plan_review_id": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "source",
+          "created_at_ms"
+        ],
+        "type": "object"
+      },
       "PlanReview": {
         "additionalProperties": false,
         "properties": {
@@ -4697,6 +4780,58 @@
             "maxLength": 128,
             "type": "string"
           },
+          "revision": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "attempt_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "attempt_ordinal": {
+                    "minimum": 1,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "awaiting_guidance",
+                      "queued",
+                      "researching",
+                      "waiting_for_input",
+                      "finalizing",
+                      "failed",
+                      "cancelled",
+                      "succeeded"
+                    ],
+                    "type": "string"
+                  },
+                  "terminal_reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "status"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "risk": {
             "maxLength": 512,
             "type": [
@@ -4717,6 +4852,8 @@
           "status": {
             "enum": [
               "started",
+              "waiting_for_input",
+              "finalizing",
               "draft_ready",
               "completed_without_draft",
               "failed",
@@ -4746,6 +4883,9 @@
               "null"
             ]
           },
+          "summary_truncated": {
+            "type": "boolean"
+          },
           "target_path_count": {
             "minimum": 0,
             "type": [
@@ -4757,9 +4897,326 @@
         "required": [
           "plan_id",
           "status",
+          "summary_truncated",
           "allowed_actions",
           "source",
           "stale"
+        ],
+        "type": "object"
+      },
+      "PlanReviewChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "plan_review_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "started",
+              "waiting_for_input",
+              "finalizing",
+              "draft_ready",
+              "completed_without_draft",
+              "failed",
+              "interrupted",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "const": "plan_review_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "plan_review_id",
+          "plan_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "PlanReviewDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "legacy_markdown": {
+            "maxLength": 65536,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lineage": {
+            "$ref": "#/components/schemas/PlanLineage"
+          },
+          "notes": {
+            "items": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "plan_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "plan_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "risk": {
+            "maxLength": 4096,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "enum": [
+              "explicit_plan_command",
+              "automatic_conversation_route"
+            ],
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PlanReviewStepDetail"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "suggested_checks": {
+            "items": {
+              "$ref": "#/components/schemas/PlanSuggestedCheck"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "summary": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          "target_paths": {
+            "items": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "maxItems": 512,
+            "type": "array"
+          },
+          "workspace_snapshot_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "plan_id",
+          "plan_hash",
+          "source",
+          "summary",
+          "steps",
+          "target_paths",
+          "suggested_checks",
+          "notes",
+          "lineage"
+        ],
+        "type": "object"
+      },
+      "PlanReviewStepDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "depends_on": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "detail": {
+            "maxLength": 16384,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "maxLength": 4096,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isolation": {
+            "oneOf": [
+              {
+                "enum": [
+                  "shared_read_only",
+                  "sequential_workspace_write",
+                  "changeset_only",
+                  "worktree"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mode": {
+            "oneOf": [
+              {
+                "enum": [
+                  "read",
+                  "write",
+                  "review",
+                  "verify"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "items": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "risk": {
+            "maxLength": 4096,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "oneOf": [
+              {
+                "enum": [
+                  "planner",
+                  "executor",
+                  "subagent_read",
+                  "subagent_write"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "step_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "suggested_checks": {
+            "items": {
+              "$ref": "#/components/schemas/PlanSuggestedCheck"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "target_paths": {
+            "items": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "maxItems": 512,
+            "type": "array"
+          },
+          "title": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "title",
+          "depends_on",
+          "target_paths",
+          "suggested_checks",
+          "notes"
+        ],
+        "type": "object"
+      },
+      "PlanSuggestedCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "check_spec_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "command": {
+            "additionalProperties": false,
+            "properties": {
+              "args": {
+                "items": {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "maxItems": 256,
+                "type": "array"
+              },
+              "command": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "cwd": {
+                "maxLength": 4096,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "command",
+              "args"
+            ],
+            "type": "object"
+          },
+          "effect": {
+            "enum": [
+              "read_only",
+              "workspace_write",
+              "external_write",
+              "network",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "source_line": {
+            "maxLength": 4096,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "check_spec_id",
+          "command",
+          "effect"
         ],
         "type": "object"
       },
@@ -5320,10 +5777,22 @@
             "$ref": "#/components/schemas/RunFinishedEvent"
           },
           {
+            "$ref": "#/components/schemas/RunAwaitingUserInputEvent"
+          },
+          {
             "$ref": "#/components/schemas/TaskRunFinishedEvent"
           },
           {
             "$ref": "#/components/schemas/TaskRoutingChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationRouteChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PlanReviewChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/UserInputChangedEvent"
           },
           {
             "$ref": "#/components/schemas/TaskPhaseChangedEvent"
@@ -5757,6 +6226,34 @@
         },
         "required": [
           "error"
+        ],
+        "type": "object"
+      },
+      "RunAwaitingUserInputEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "request_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "request_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "run_awaiting_user_input",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id",
+          "generation",
+          "request_hash"
         ],
         "type": "object"
       },
@@ -6258,6 +6755,9 @@
           "durable_session_reopen": {
             "type": "boolean"
           },
+          "durable_user_input": {
+            "type": "boolean"
+          },
           "intent_stack": {
             "type": "boolean"
           },
@@ -6305,6 +6805,7 @@
           "durable_event_replay",
           "live_events",
           "approval",
+          "durable_user_input",
           "cancellation",
           "task_pause",
           "terminal_task_cancel",
@@ -6339,7 +6840,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 13,
+            "const": 14,
             "type": "integer"
           },
           "server_version": {
@@ -7301,6 +7802,12 @@
           "messages"
         ],
         "type": "object"
+      },
+      "Sha256": {
+        "maxLength": 71,
+        "minLength": 71,
+        "pattern": "^sha256:[0-9a-fA-F]{64}$",
+        "type": "string"
       },
       "SupportBundleExport": {
         "additionalProperties": false,
@@ -8707,6 +9214,837 @@
         ],
         "type": "object"
       },
+      "UserInputAnswerReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_hash": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha256"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "answered_question_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 3,
+            "type": "array"
+          },
+          "command_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "submitted",
+              "declined",
+              "run_cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "decision"
+        ],
+        "type": "object"
+      },
+      "UserInputAnswerValue": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "text"
+              },
+              "value": {
+                "maxLength": 4096,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "number"
+              },
+              "value": {
+                "maxLength": 64,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "integer"
+              },
+              "value": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "boolean"
+              },
+              "value": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "single_select"
+              },
+              "option_id": {
+                "maxLength": 48,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "other": {
+                "maxLength": 512,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "multi_select"
+              },
+              "option_ids": {
+                "items": {
+                  "maxLength": 48,
+                  "type": "string"
+                },
+                "maxItems": 12,
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "option_ids"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "UserInputChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "request": {
+            "$ref": "#/components/schemas/UserInputRequest"
+          },
+          "request_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "request_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "requested",
+              "decision_accepted",
+              "continuation_claimed",
+              "continuation_started",
+              "resolved"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "const": "user_input_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id",
+          "generation",
+          "request_hash",
+          "status",
+          "request"
+        ],
+        "type": "object"
+      },
+      "UserInputDecision": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "answers": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "question_id": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/components/schemas/UserInputAnswerValue"
+                    }
+                  },
+                  "required": [
+                    "question_id",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 3,
+                "type": "array"
+              },
+              "kind": {
+                "const": "submitted"
+              }
+            },
+            "required": [
+              "kind",
+              "answers"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "declined"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "run_cancelled"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "UserInputDecisionCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "command_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "correlation_id": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_stream_sequence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/UserInputDecisionRequest"
+          },
+          "protocol_version": {
+            "const": 2,
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "client_id",
+          "session_id",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "UserInputDecisionCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "continuation_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "request": {
+            "$ref": "#/components/schemas/UserInputRequest"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "request",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "UserInputDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/UserInputDecision"
+          },
+          "expected_request_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "generation": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "permission_mode": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PermissionMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "generation",
+          "expected_request_hash",
+          "decision"
+        ],
+        "type": "object"
+      },
+      "UserInputField": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "text"
+              },
+              "max_chars": {
+                "format": "uint32",
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "multiline": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "multiline",
+              "max_chars"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "number"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "integer"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "boolean"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "allow_other": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "single_select"
+              },
+              "options": {
+                "items": {
+                  "$ref": "#/components/schemas/UserInputOption"
+                },
+                "maxItems": 12,
+                "minItems": 2,
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "options",
+              "allow_other"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "multi_select"
+              },
+              "max_selected": {
+                "format": "uint32",
+                "maximum": 12,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "options": {
+                "items": {
+                  "$ref": "#/components/schemas/UserInputOption"
+                },
+                "maxItems": 12,
+                "minItems": 2,
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "options",
+              "max_selected"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "UserInputIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "root_logical_run_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "session_scope_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_binding_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "source_thread_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_scope_id",
+          "root_logical_run_id",
+          "source_thread_id",
+          "request_id",
+          "generation",
+          "source_binding_hash"
+        ],
+        "type": "object"
+      },
+      "UserInputOption": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "maxLength": 240,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "maxLength": 48,
+            "minLength": 1,
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "type": "object"
+      },
+      "UserInputQuestion": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "field": {
+            "$ref": "#/components/schemas/UserInputField"
+          },
+          "header": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "maxLength": 48,
+            "minLength": 1,
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "header",
+          "question",
+          "required",
+          "field"
+        ],
+        "type": "object"
+      },
+      "UserInputRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "submit",
+                "decline",
+                "cancel_run"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "answer_receipt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserInputAnswerReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identity": {
+            "$ref": "#/components/schemas/UserInputIdentity"
+          },
+          "prompt": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "purpose": {
+            "enum": [
+              "clarification",
+              "choice",
+              "missing_constraint",
+              "revision_guidance",
+              "external_elicitation"
+            ],
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/UserInputQuestion"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "type": "array"
+          },
+          "request_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "requested_at_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "resolution": {
+            "oneOf": [
+              {
+                "enum": [
+                  "consumed",
+                  "declined",
+                  "run_cancelled"
+                ],
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "failed": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "failure_class": {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      "retryable": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "failure_class",
+                      "retryable"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "failed"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "plan_review_research": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "attempt_id": {
+                        "type": "string"
+                      },
+                      "plan_review_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "plan_review_id",
+                      "attempt_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "plan_review_research"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "plan_revision": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "base_plan_hash": {
+                        "$ref": "#/components/schemas/Sha256"
+                      },
+                      "base_plan_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "base_plan_id",
+                      "base_plan_hash"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "plan_revision"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "planner": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "task_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "task_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "planner"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mcp": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "call_id": {
+                        "type": "string"
+                      },
+                      "server_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "server_id",
+                      "call_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "mcp"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "requested",
+              "decision_accepted",
+              "continuation_claimed",
+              "continuation_started",
+              "resolved"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "request_hash",
+          "source",
+          "purpose",
+          "prompt",
+          "questions",
+          "allowed_actions",
+          "requested_at_unix_ms",
+          "status"
+        ],
+        "type": "object"
+      },
       "VerificationEvidence": {
         "properties": {
           "changeset_apply_event_id": {
@@ -9900,6 +11238,201 @@
           }
         },
         "summary": "Apply one exact typed plan decision (Run, Save, Revise, Reject)"
+      }
+    },
+    "/sessions/{id}/plans/{plan_id}": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_plan_hash",
+            "required": true,
+            "schema": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanReviewDetail"
+                }
+              }
+            },
+            "description": "Exact complete plan detail",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Read one exact immutable complete plan-review detail"
+      }
+    },
+    "/sessions/{id}/user-input/{request_id}": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "generation",
+            "required": true,
+            "schema": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_request_hash",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Sha256"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInputRequest"
+                }
+              }
+            },
+            "description": "Exact public user-input request",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Read one exact immutable durable user-input request"
+      }
+    },
+    "/sessions/{id}/user-input/{request_id}/decision": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserInputDecisionCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInputDecisionCommandReceipt"
+                }
+              }
+            },
+            "description": "User-input decision receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Apply one exact durable user-input decision"
       }
     },
     "/sessions/{session_id}": {

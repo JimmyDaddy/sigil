@@ -980,6 +980,70 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{id}/plans/{plan_id}": {
+                "get": {
+                    "summary": "Read one exact immutable complete plan-review detail",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "name": "plan_id", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } },
+                        { "name": "expected_plan_hash", "in": "query", "required": true, "schema": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Exact complete plan detail",
+                            "headers": { "ETag": { "schema": { "type": "string" } } },
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlanReviewDetail" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
+            "/sessions/{id}/user-input/{request_id}": {
+                "get": {
+                    "summary": "Read one exact immutable durable user-input request",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "name": "request_id", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 512 } },
+                        { "name": "generation", "in": "query", "required": true, "schema": { "type": "integer", "format": "uint32", "minimum": 1 } },
+                        { "name": "expected_request_hash", "in": "query", "required": true, "schema": { "$ref": "#/components/schemas/Sha256" } }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Exact public user-input request",
+                            "headers": { "ETag": { "schema": { "type": "string" } } },
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserInputRequest" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
+            "/sessions/{id}/user-input/{request_id}/decision": {
+                "post": {
+                    "summary": "Apply one exact durable user-input decision",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "name": "request_id", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 512 } }
+                    ],
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserInputDecisionCommand" } } } },
+                    "responses": {
+                        "200": { "description": "User-input decision receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserInputDecisionCommandReceipt" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/runs/{run_id}/events": {
                 "get": {
                     "summary": "Replay durable run events then follow live events",
@@ -1114,7 +1178,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "terminal_task_cancel", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "durable_user_input", "cancellation", "task_pause", "terminal_task_cancel", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -1125,6 +1189,7 @@ pub fn http_openapi_document() -> Value {
                         "durable_event_replay": { "type": "boolean" },
                         "live_events": { "type": "boolean" },
                         "approval": { "type": "boolean" },
+                        "durable_user_input": { "type": "boolean" },
                         "cancellation": { "type": "boolean" },
                         "task_pause": { "type": "boolean" },
                         "terminal_task_cancel": { "type": "boolean" },
@@ -1850,25 +1915,113 @@ pub fn http_openapi_document() -> Value {
                         "gap_facts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/components/schemas/ConversationDisplayGapFact" } },
                         "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] },
                         "task_control": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTaskControl" }, { "type": "null" }] },
-                        "plan_review": { "oneOf": [{ "$ref": "#/components/schemas/PlanReview" }, { "type": "null" }] }
+                        "plan_review": { "oneOf": [{ "$ref": "#/components/schemas/PlanReview" }, { "type": "null" }] },
+                        "user_input": { "oneOf": [{ "$ref": "#/components/schemas/UserInputRequest" }, { "type": "null" }] }
                     }
                 },
                 "PlanReview": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["plan_id", "status", "allowed_actions", "source", "stale"],
+                    "required": ["plan_id", "status", "summary_truncated", "allowed_actions", "source", "stale"],
                     "properties": {
                         "plan_id": { "type": "string", "maxLength": 128 },
                         "plan_hash": { "type": ["string", "null"], "maxLength": 128 },
-                        "status": { "type": "string", "enum": ["started", "draft_ready", "completed_without_draft", "failed", "interrupted", "cancelled"] },
+                        "status": { "type": "string", "enum": ["started", "waiting_for_input", "finalizing", "draft_ready", "completed_without_draft", "failed", "interrupted", "cancelled"] },
                         "summary": { "type": ["string", "null"], "maxLength": 512 },
+                        "summary_truncated": { "type": "boolean" },
                         "step_count": { "type": ["integer", "null"], "minimum": 0 },
                         "target_path_count": { "type": ["integer", "null"], "minimum": 0 },
                         "suggested_check_count": { "type": ["integer", "null"], "minimum": 0 },
                         "risk": { "type": ["string", "null"], "maxLength": 512 },
                         "allowed_actions": { "type": "array", "items": { "type": "string", "enum": ["run", "save", "revise", "reject"] } },
                         "source": { "type": "string", "enum": ["explicit_plan_command", "automatic_conversation_route"] },
-                        "stale": { "type": "boolean" }
+                        "stale": { "type": "boolean" },
+                        "revision": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["request_id", "status"],
+                                    "properties": {
+                                        "request_id": { "type": "string" },
+                                        "attempt_id": { "type": ["string", "null"] },
+                                        "attempt_ordinal": { "type": ["integer", "null"], "minimum": 1 },
+                                        "status": { "type": "string", "enum": ["awaiting_guidance", "queued", "researching", "waiting_for_input", "finalizing", "failed", "cancelled", "succeeded"] },
+                                        "terminal_reason": { "type": ["string", "null"] }
+                                    }
+                                },
+                                { "type": "null" }
+                            ]
+                        }
+                    }
+                },
+                "PlanSuggestedCheck": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["check_spec_id", "command", "effect"],
+                    "properties": {
+                        "check_spec_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "command": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["command", "args"],
+                            "properties": {
+                                "command": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                                "args": { "type": "array", "maxItems": 256, "items": { "type": "string", "maxLength": 4096 } },
+                                "cwd": { "type": ["string", "null"], "maxLength": 4096 }
+                            }
+                        },
+                        "effect": { "type": "string", "enum": ["read_only", "workspace_write", "external_write", "network", "unknown"] },
+                        "source_line": { "type": ["string", "null"], "maxLength": 4096 }
+                    }
+                },
+                "PlanReviewStepDetail": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["step_id", "title", "depends_on", "target_paths", "suggested_checks", "notes"],
+                    "properties": {
+                        "step_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                        "display_name": { "type": ["string", "null"], "maxLength": 4096 },
+                        "detail": { "type": ["string", "null"], "maxLength": 16384 },
+                        "role": { "oneOf": [{ "type": "string", "enum": ["planner", "executor", "subagent_read", "subagent_write"] }, { "type": "null" }] },
+                        "depends_on": { "type": "array", "maxItems": 256, "items": { "type": "string", "maxLength": 128 } },
+                        "mode": { "oneOf": [{ "type": "string", "enum": ["read", "write", "review", "verify"] }, { "type": "null" }] },
+                        "isolation": { "oneOf": [{ "type": "string", "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"] }, { "type": "null" }] },
+                        "target_paths": { "type": "array", "maxItems": 512, "items": { "type": "string", "maxLength": 4096 } },
+                        "suggested_checks": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/PlanSuggestedCheck" } },
+                        "risk": { "type": ["string", "null"], "maxLength": 4096 },
+                        "notes": { "type": "array", "maxItems": 256, "items": { "type": "string", "maxLength": 4096 } }
+                    }
+                },
+                "PlanLineage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["source", "created_at_ms"],
+                    "properties": {
+                        "source": { "type": "object" },
+                        "plan_review_id": { "type": ["string", "null"], "maxLength": 128 },
+                        "attempt_id": { "type": ["string", "null"], "maxLength": 128 },
+                        "created_at_ms": { "type": "integer", "format": "uint64" }
+                    }
+                },
+                "PlanReviewDetail": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["plan_id", "plan_hash", "source", "summary", "steps", "target_paths", "suggested_checks", "notes", "lineage"],
+                    "properties": {
+                        "plan_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "plan_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                        "workspace_snapshot_id": { "type": ["string", "null"], "maxLength": 512 },
+                        "source": { "type": "string", "enum": ["explicit_plan_command", "automatic_conversation_route"] },
+                        "summary": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                        "steps": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/PlanReviewStepDetail" } },
+                        "target_paths": { "type": "array", "maxItems": 512, "items": { "type": "string", "maxLength": 4096 } },
+                        "suggested_checks": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/PlanSuggestedCheck" } },
+                        "risk": { "type": ["string", "null"], "maxLength": 4096 },
+                        "notes": { "type": "array", "maxItems": 256, "items": { "type": "string", "maxLength": 4096 } },
+                        "lineage": { "$ref": "#/components/schemas/PlanLineage" },
+                        "legacy_markdown": { "type": ["string", "null"], "maxLength": 65536 }
                     }
                 },
                 "PlanDecisionCommand": {
@@ -1909,6 +2062,173 @@ pub fn http_openapi_document() -> Value {
                         "action": { "type": "string", "enum": ["run", "save", "revise", "reject"] },
                         "task_id": { "type": ["string", "null"] },
                         "revision_run_id": { "type": ["string", "null"] },
+                        "user_input_request": { "oneOf": [{ "$ref": "#/components/schemas/UserInputRequest" }, { "type": "null" }] },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
+                "Sha256": {
+                    "type": "string",
+                    "minLength": 71,
+                    "maxLength": 71,
+                    "pattern": "^sha256:[0-9a-fA-F]{64}$"
+                },
+                "UserInputIdentity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["session_scope_id", "root_logical_run_id", "source_thread_id", "request_id", "generation", "source_binding_hash"],
+                    "properties": {
+                        "session_scope_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "root_logical_run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "source_thread_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "request_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "generation": { "type": "integer", "format": "uint32", "minimum": 1 },
+                        "source_binding_hash": { "$ref": "#/components/schemas/Sha256" }
+                    }
+                },
+                "UserInputOption": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "label"],
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1, "maxLength": 48 },
+                        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+                        "description": { "type": ["string", "null"], "maxLength": 240 }
+                    }
+                },
+                "UserInputField": {
+                    "oneOf": [
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "multiline", "max_chars"], "properties": { "kind": { "const": "text" }, "multiline": { "type": "boolean" }, "max_chars": { "type": "integer", "format": "uint32", "minimum": 1, "maximum": 4096 } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "number" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "integer" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "boolean" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "options", "allow_other"], "properties": { "kind": { "const": "single_select" }, "options": { "type": "array", "minItems": 2, "maxItems": 12, "items": { "$ref": "#/components/schemas/UserInputOption" } }, "allow_other": { "type": "boolean" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "options", "max_selected"], "properties": { "kind": { "const": "multi_select" }, "options": { "type": "array", "minItems": 2, "maxItems": 12, "items": { "$ref": "#/components/schemas/UserInputOption" } }, "max_selected": { "type": "integer", "format": "uint32", "minimum": 1, "maximum": 12 } } }
+                    ]
+                },
+                "UserInputQuestion": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "header", "question", "required", "field"],
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1, "maxLength": 48 },
+                        "header": { "type": "string", "minLength": 1, "maxLength": 32 },
+                        "question": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "description": { "type": ["string", "null"], "maxLength": 512 },
+                        "required": { "type": "boolean" },
+                        "field": { "$ref": "#/components/schemas/UserInputField" }
+                    }
+                },
+                "UserInputRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["identity", "request_hash", "source", "purpose", "prompt", "questions", "allowed_actions", "requested_at_unix_ms", "status"],
+                    "properties": {
+                        "identity": { "$ref": "#/components/schemas/UserInputIdentity" },
+                        "request_hash": { "$ref": "#/components/schemas/Sha256" },
+                        "source": { "oneOf": [
+                            { "type": "string", "enum": ["agent"] },
+                            { "type": "object", "additionalProperties": false, "required": ["plan_review_research"], "properties": { "plan_review_research": { "type": "object", "additionalProperties": false, "required": ["plan_review_id", "attempt_id"], "properties": { "plan_review_id": { "type": "string" }, "attempt_id": { "type": "string" } } } } },
+                            { "type": "object", "additionalProperties": false, "required": ["plan_revision"], "properties": { "plan_revision": { "type": "object", "additionalProperties": false, "required": ["base_plan_id", "base_plan_hash"], "properties": { "base_plan_id": { "type": "string" }, "base_plan_hash": { "$ref": "#/components/schemas/Sha256" } } } } },
+                            { "type": "object", "additionalProperties": false, "required": ["planner"], "properties": { "planner": { "type": "object", "additionalProperties": false, "required": ["task_id"], "properties": { "task_id": { "type": "string" } } } } },
+                            { "type": "object", "additionalProperties": false, "required": ["mcp"], "properties": { "mcp": { "type": "object", "additionalProperties": false, "required": ["server_id", "call_id"], "properties": { "server_id": { "type": "string" }, "call_id": { "type": "string" } } } } }
+                        ] },
+                        "purpose": { "type": "string", "enum": ["clarification", "choice", "missing_constraint", "revision_guidance", "external_elicitation"] },
+                        "prompt": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "questions": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "$ref": "#/components/schemas/UserInputQuestion" } },
+                        "allowed_actions": { "type": "array", "uniqueItems": true, "items": { "type": "string", "enum": ["submit", "decline", "cancel_run"] } },
+                        "requested_at_unix_ms": { "type": "integer", "format": "uint64" },
+                        "status": { "type": "string", "enum": ["requested", "decision_accepted", "continuation_claimed", "continuation_started", "resolved"] },
+                        "answer_receipt": { "oneOf": [{ "$ref": "#/components/schemas/UserInputAnswerReceipt" }, { "type": "null" }] },
+                        "resolution": { "oneOf": [
+                            { "type": "string", "enum": ["consumed", "declined", "run_cancelled"] },
+                            { "type": "object", "additionalProperties": false, "required": ["failed"], "properties": { "failed": { "type": "object", "additionalProperties": false, "required": ["failure_class", "retryable"], "properties": { "failure_class": { "type": "string", "maxLength": 128 }, "retryable": { "type": "boolean" } } } } },
+                            { "type": "null" }
+                        ] }
+                    }
+                },
+                "UserInputAnswerReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "decision"],
+                    "properties": {
+                        "command_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "decision": { "type": "string", "enum": ["submitted", "declined", "run_cancelled"] },
+                        "answer_hash": { "oneOf": [{ "$ref": "#/components/schemas/Sha256" }, { "type": "null" }] },
+                        "answered_question_ids": { "type": "array", "maxItems": 3, "items": { "type": "string" } }
+                    }
+                },
+                "UserInputAnswerValue": {
+                    "oneOf": [
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "text" }, "value": { "type": "string", "maxLength": 4096 } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "number" }, "value": { "type": "string", "maxLength": 64 } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "integer" }, "value": { "type": "integer", "format": "int64" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "boolean" }, "value": { "type": "boolean" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "single_select" }, "option_id": { "type": ["string", "null"], "maxLength": 48 }, "other": { "type": ["string", "null"], "maxLength": 512 } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind", "option_ids"], "properties": { "kind": { "const": "multi_select" }, "option_ids": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 48 } } } }
+                    ]
+                },
+                "UserInputDecision": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "answers"],
+                            "properties": {
+                                "kind": { "const": "submitted" },
+                                "answers": {
+                                    "type": "array",
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "required": ["question_id", "value"],
+                                        "properties": {
+                                            "question_id": { "type": "string" },
+                                            "value": { "$ref": "#/components/schemas/UserInputAnswerValue" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "declined" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "run_cancelled" } } }
+                    ]
+                },
+                "UserInputDecisionRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["generation", "expected_request_hash", "decision"],
+                    "properties": {
+                        "generation": { "type": "integer", "format": "uint32", "minimum": 1 },
+                        "expected_request_hash": { "$ref": "#/components/schemas/Sha256" },
+                        "decision": { "$ref": "#/components/schemas/UserInputDecision" },
+                        "permission_mode": { "oneOf": [{ "$ref": "#/components/schemas/PermissionMode" }, { "type": "null" }] }
+                    }
+                },
+                "UserInputDecisionCommand": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["protocol_version", "command_id", "client_id", "session_id", "payload"],
+                    "properties": {
+                        "protocol_version": { "type": "integer", "const": 2 },
+                        "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "client_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "session_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "expected_stream_sequence": { "type": ["string", "null"] },
+                        "correlation_id": { "type": ["string", "null"], "maxLength": 128 },
+                        "payload": { "$ref": "#/components/schemas/UserInputDecisionRequest" }
+                    }
+                },
+                "UserInputDecisionCommandReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "client_id", "session_id", "request", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "request": { "$ref": "#/components/schemas/UserInputRequest" },
+                        "continuation_run_id": { "type": ["string", "null"] },
                         "replayed": { "type": "boolean" }
                     }
                 },
@@ -4110,6 +4430,19 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "RunAwaitingUserInputEvent",
+            public_event_variant(
+                "run_awaiting_user_input",
+                &["request_id", "generation", "request_hash"],
+                json_properties(json!({
+                    "request_id": { "type": "string", "maxLength": 512 },
+                    "generation": { "type": "integer", "format": "uint32", "minimum": 1 },
+                    "request_hash": { "$ref": "#/components/schemas/Sha256" }
+                })),
+                true,
+            ),
+        ),
+        (
             "TaskRunFinishedEvent",
             public_event_variant(
                 "task_run_finished",
@@ -4130,6 +4463,53 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
                     "handoff_id": { "type": "string", "maxLength": 512 },
                     "status": { "type": "string", "maxLength": 512 },
                     "task_id": { "type": ["string", "null"], "maxLength": 512 }
+                })),
+                true,
+            ),
+        ),
+        (
+            "ConversationRouteChangedEvent",
+            public_event_variant(
+                "conversation_route_changed",
+                &["decision_id", "route", "status"],
+                json_properties(json!({
+                    "decision_id": { "type": "string", "maxLength": 512 },
+                    "route": { "type": "string", "enum": ["chat", "plan_review", "task"] },
+                    "status": { "type": "string", "maxLength": 512 }
+                })),
+                true,
+            ),
+        ),
+        (
+            "PlanReviewChangedEvent",
+            public_event_variant(
+                "plan_review_changed",
+                &["plan_review_id", "plan_id", "status"],
+                json_properties(json!({
+                    "plan_review_id": { "type": "string", "maxLength": 512 },
+                    "plan_id": { "type": "string", "maxLength": 512 },
+                    "status": { "type": "string", "enum": ["started", "waiting_for_input", "finalizing", "draft_ready", "completed_without_draft", "failed", "interrupted", "cancelled"] }
+                })),
+                true,
+            ),
+        ),
+        (
+            "UserInputChangedEvent",
+            public_event_variant(
+                "user_input_changed",
+                &[
+                    "request_id",
+                    "generation",
+                    "request_hash",
+                    "status",
+                    "request",
+                ],
+                json_properties(json!({
+                    "request_id": { "type": "string", "maxLength": 512 },
+                    "generation": { "type": "integer", "format": "uint32", "minimum": 1 },
+                    "request_hash": { "$ref": "#/components/schemas/Sha256" },
+                    "status": { "type": "string", "enum": ["requested", "decision_accepted", "continuation_claimed", "continuation_started", "resolved"] },
+                    "request": { "$ref": "#/components/schemas/UserInputRequest" }
                 })),
                 true,
             ),

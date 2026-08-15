@@ -465,17 +465,32 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
                 .flatten()
         })
         .expect("test workspace snapshot");
-    let draft = sigil_kernel::plan_draft_created_entry(
+    let mut review_session = sigil_kernel::Session::new("planned", "planned-model");
+    let review_request = sigil_runtime::PlanReviewCoordinator::prepare_explicit_plan_review(
+        &mut review_session,
+        "Inspect and edit README.md",
+        "worker-bridge-plan-review",
+        Some(base_snapshot.clone()),
+        1,
+    )?;
+    let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
+        review_request.plan_id.clone(),
         &structured_plan_text(
             "Inspect and edit README.md",
             "Apply the approved copy edit",
             "README.md",
         ),
-        sigil_kernel::PlanSourceRef::default(),
-        1,
+        review_request.plan_source_ref(),
+        2,
         Some(base_snapshot),
     )?
     .expect("non-empty plan should create draft");
+    sigil_runtime::PlanReviewCoordinator::commit_draft_from_child(
+        &mut review_session,
+        &draft,
+        &review_request,
+        3,
+    )?;
 
     app.handle_worker_message(WorkerMessage::PlanRunFinished {
         result: sigil_kernel::AgentRunResult {
@@ -483,9 +498,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
             tool_calls: 0,
             final_message_id: None,
         },
-        entries: vec![sigil_kernel::SessionLogEntry::Control(
-            sigil_kernel::ControlEntry::PlanDraftCreated(draft.clone()),
-        )],
+        entries: review_session.entries().to_vec(),
     })?;
 
     let pending = app
@@ -500,6 +513,15 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
     assert_eq!(app.composer_mode_label(), "Plan");
     assert_eq!(app.last_notice(), Some("plan ready"));
 
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        action.is_none(),
+        "first Enter opens the complete plan review"
+    );
+    assert!(
+        app.pending_plan_approval()
+            .is_some_and(|plan| plan.workbench_open)
+    );
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(app.pending_plan_approval().is_none());
     assert!(matches!(
@@ -572,7 +594,7 @@ fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
 }
 
 #[test]
-fn pending_durable_plan_discard_requests_worker_rejection() -> Result<()> {
+fn pending_durable_plan_explicit_reject_requests_worker_rejection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
         &structured_plan_text("Update README", "Update README.md", "README.md"),
@@ -583,7 +605,14 @@ fn pending_durable_plan_discard_requests_worker_rejection() -> Result<()> {
     .expect("non-empty plan should create draft");
     app.set_pending_plan_approval_from_draft(&draft, None);
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    for _ in 0..3 {
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     assert!(app.pending_plan_approval().is_some());
     assert!(matches!(
@@ -5289,7 +5318,41 @@ fn shell_tool_result_refreshes_visible_workspace_git_status() -> Result<()> {
 }
 
 #[test]
-fn pending_plan_save_key_emits_save_plan_action() -> Result<()> {
+fn session_restore_rehydrates_the_complete_plan_workbench() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text(
+            "Restore the durable plan",
+            "Inspect the recovery path",
+            "crates/sigil-tui/src/app/session_flow.rs",
+        ),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("plan draft");
+    app.restore_session_view(
+        Path::new("restored-plan.jsonl").to_path_buf(),
+        "mock".to_owned(),
+        "mock".to_owned(),
+        vec![sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::PlanDraftCreated(draft.clone()),
+        )],
+        "restored",
+    );
+
+    let pending = app
+        .pending_plan_approval()
+        .expect("durable pending plan must survive TUI restart");
+    assert_eq!(pending.plan_id.as_deref(), Some(draft.plan_id.as_str()));
+    assert_eq!(pending.detail.summary, "Restore the durable plan");
+    assert_eq!(pending.detail.steps.len(), 1);
+    assert!(!pending.workbench_open);
+    Ok(())
+}
+
+#[test]
+fn pending_plan_printable_keys_edit_composer_and_workbench_confirms_save() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
         &structured_plan_text("Update README", "Update README.md", "README.md"),
@@ -5301,12 +5364,26 @@ fn pending_plan_save_key_emits_save_plan_action() -> Result<()> {
     app.set_pending_plan_approval_from_draft(&draft, Some("snapshot-1"));
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.composer.input, "s");
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(
+        app.pending_plan_approval()
+            .is_some_and(|plan| plan.workbench_open)
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(action, Some(AppAction::SavePlan { .. })));
     Ok(())
 }
 
 #[test]
-fn pending_plan_revise_key_emits_revise_plan_action() -> Result<()> {
+fn plan_workbench_esc_only_closes_and_explicit_revise_emits_action() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
         &structured_plan_text("Update README", "Update README.md", "README.md"),
@@ -5317,8 +5394,56 @@ fn pending_plan_revise_key_emits_revise_plan_action() -> Result<()> {
     .expect("non-empty plan should create draft");
     app.set_pending_plan_approval_from_draft(&draft, None);
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    let close = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(close.is_none(), "Esc must not reject a plan");
+    assert!(
+        app.pending_plan_approval()
+            .is_some_and(|plan| !plan.workbench_open)
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(action, Some(AppAction::RevisePlan { .. })));
+    Ok(())
+}
+
+#[test]
+fn plan_workbench_end_and_up_use_the_rendered_scroll_extent() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text("Review a long plan", "Inspect all details", "README.md"),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("plan draft");
+    app.set_pending_plan_approval_from_draft(&draft, None);
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.pending_plan_approval()
+        .expect("pending plan")
+        .workbench_scroll_extent
+        .set(24);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.pending_plan_approval()
+            .expect("pending plan")
+            .workbench_scroll,
+        24
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.pending_plan_approval()
+            .expect("pending plan")
+            .workbench_scroll,
+        23,
+        "Up must remain usable after End"
+    );
     Ok(())
 }
 
@@ -5346,6 +5471,8 @@ fn stale_pending_plan_blocks_run_and_save_but_keeps_revise_and_reject() -> Resul
         "reason must mention staleness: {reason}"
     );
 
+    let open = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(open.is_none(), "Enter opens review before any decision");
     let run = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(run.is_none(), "stale plan must not run");
     assert!(
@@ -5354,13 +5481,212 @@ fn stale_pending_plan_blocks_run_and_save_but_keeps_revise_and_reject() -> Resul
     );
     assert_eq!(app.last_notice(), Some(reason.as_str()));
 
-    let save = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let save = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(save.is_none(), "stale plan must not save");
 
-    let revise = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let revise = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(revise, Some(AppAction::RevisePlan { .. })));
 
-    let reject = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let reject = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(reject, Some(AppAction::RejectPlan { .. })));
+    Ok(())
+}
+
+fn pending_text_user_input_request() -> Result<sigil_kernel::PublicUserInputRequestV1> {
+    Ok(sigil_kernel::PublicUserInputRequestV1 {
+        identity: sigil_kernel::UserInputIdentityV1 {
+            session_scope_id: sigil_kernel::SessionScopeId::new("tui-input-session")?,
+            root_logical_run_id: sigil_kernel::LogicalRunId::new("tui-input-root")?,
+            source_thread_id: sigil_kernel::AgentThreadId::new("main")?,
+            request_id: sigil_kernel::UserInputRequestId::new("tui-input-request")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        request_hash: format!("sha256:{}", "b".repeat(64)),
+        source: sigil_kernel::UserInputSourceV1::Agent,
+        purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+        prompt: "One constraint is required before work can continue.".to_owned(),
+        questions: vec![sigil_kernel::UserInputQuestionV1 {
+            id: "scope".to_owned(),
+            header: "Scope".to_owned(),
+            question: "Which scope should be used?".to_owned(),
+            description: None,
+            required: true,
+            field: sigil_kernel::UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 64,
+            },
+        }],
+        allowed_actions: vec![
+            sigil_kernel::UserInputActionV1::Submit,
+            sigil_kernel::UserInputActionV1::Decline,
+            sigil_kernel::UserInputActionV1::CancelRun,
+        ],
+        requested_at_unix_ms: 10,
+        status: sigil_kernel::UserInputStatusV1::Requested,
+        answer_receipt: None,
+        resolution: None,
+    })
+}
+
+#[test]
+fn user_input_form_validates_required_text_preserves_spaces_and_submits_exact_identity()
+-> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let request = pending_text_user_input_request()?;
+    app.handle_worker_message(WorkerMessage::UserInputRequested {
+        request: request.clone(),
+        entries: Vec::new(),
+    })?;
+
+    assert!(app.pending_user_input().is_some_and(|form| form.open));
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none(),
+        "an empty required answer must stay in the form"
+    );
+    assert_eq!(app.last_notice(), Some("Scope requires an answer"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    for character in "repo scope".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitUserInputDecision {
+            command_id: None,
+            request_id,
+            generation: 1,
+            expected_request_hash,
+            decision: sigil_kernel::UserInputDecisionV1::Submitted { answers },
+        }) if request_id == request.identity.request_id.as_str()
+            && expected_request_hash == request.request_hash
+            && answers == vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "repo scope".to_owned(),
+                },
+            }]
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepted_user_input_restores_an_exact_resume_action_without_echoing_answers() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut request = pending_text_user_input_request()?;
+    request.status = sigil_kernel::UserInputStatusV1::DecisionAccepted;
+    request.answer_receipt = Some(sigil_kernel::PublicUserInputAnswerReceiptV1 {
+        command_id: sigil_kernel::UserInputCommandId::new("desktop-answer-command")?,
+        decision: sigil_kernel::PublicUserInputDecisionKindV1::Submitted,
+        answer_hash: Some(format!("sha256:{}", "c".repeat(64))),
+        answered_question_ids: vec!["scope".to_owned()],
+    });
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: request.identity.clone(),
+        request_hash: request.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("desktop-answer-command")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "private accepted value".to_owned(),
+                },
+            }],
+        },
+    };
+    app.set_pending_user_input_recovery(request.clone(), command.clone());
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitUserInputDecision {
+            command_id: Some(command_id),
+            request_id,
+            generation: 1,
+            expected_request_hash,
+            decision,
+        }) if command_id == command.command_id.as_str()
+            && request_id == request.identity.request_id.as_str()
+            && expected_request_hash == request.request_hash
+            && decision == command.decision
+    ));
+    Ok(())
+}
+
+#[test]
+fn multiline_user_input_uses_enter_for_newline_and_control_enter_for_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut request = pending_text_user_input_request()?;
+    request.questions[0].field = sigil_kernel::UserInputFieldKindV1::Text {
+        multiline: true,
+        max_chars: 64,
+    };
+    app.set_pending_user_input(request);
+
+    for character in "first".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    for character in "second".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitUserInputDecision {
+            decision: sigil_kernel::UserInputDecisionV1::Submitted { answers },
+            ..
+        }) if matches!(
+            answers.as_slice(),
+            [sigil_kernel::UserInputAnswerV1 {
+                value: sigil_kernel::UserInputAnswerValueV1::Text { value },
+                ..
+            }] if value == "first\nsecond"
+        )
+    ));
+    Ok(())
+}
+
+#[test]
+fn user_input_form_escape_is_repairable_and_never_cancels_the_run() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_pending_user_input(pending_text_user_input_request()?);
+
+    let close = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(close.is_none());
+    assert!(app.pending_user_input().is_some_and(|form| !form.open));
+    app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
+    assert!(app.pending_user_input().is_some_and(|form| form.open));
+    Ok(())
+}
+
+#[test]
+fn user_input_form_page_keys_use_the_rendered_scroll_extent() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_pending_user_input(pending_text_user_input_request()?);
+    app.pending_user_input()
+        .expect("pending input")
+        .scroll_extent
+        .set(20);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(app.pending_user_input().expect("pending input").scroll, 8);
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    assert_eq!(app.pending_user_input().expect("pending input").scroll, 20);
+    app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(app.pending_user_input().expect("pending input").scroll, 12);
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    assert_eq!(app.pending_user_input().expect("pending input").scroll, 0);
     Ok(())
 }

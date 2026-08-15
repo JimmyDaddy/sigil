@@ -74,10 +74,14 @@ import type {
   TaskPauseBinding,
   PlanDecisionAction,
   PlanDecisionSummary,
+  PlanReviewDetail,
   ToolArtifactPage,
   ToolArtifactReadInput,
   SupportDoctorReport,
   SupportSaveSummary,
+  UserInputDecision,
+  UserInputDecisionSummary,
+  UserInputRequest,
 } from "./types";
 
 export interface DesktopBridge {
@@ -214,6 +218,28 @@ export interface DesktopBridge {
     expectedPlanHash: string,
     action: PlanDecisionAction,
   ): Promise<PlanDecisionSummary>;
+  planDetail(
+    workspaceId: string,
+    sessionId: string,
+    planId: string,
+    expectedPlanHash: string,
+  ): Promise<PlanReviewDetail>;
+  userInputRequest(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    generation: number,
+    expectedRequestHash: string,
+  ): Promise<UserInputRequest>;
+  userInputDecision(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    generation: number,
+    expectedRequestHash: string,
+    decision: UserInputDecision,
+    permissionMode?: PermissionMode,
+  ): Promise<UserInputDecisionSummary>;
   resolveApproval(
     workspaceId: string,
     sessionId: string,
@@ -427,6 +453,36 @@ export const desktopBridge: DesktopBridge = {
     invoke<PlanDecisionSummary>("desktop_plan_decision", {
       workspaceId,
       input: { sessionId, planId, expectedPlanHash, action },
+    }),
+  planDetail: (workspaceId, sessionId, planId, expectedPlanHash) =>
+    invoke<PlanReviewDetail>("desktop_plan_detail", {
+      workspaceId,
+      input: { sessionId, planId, expectedPlanHash },
+    }),
+  userInputRequest: (workspaceId, sessionId, requestId, generation, expectedRequestHash) =>
+    invoke<UserInputRequest>("desktop_user_input_request", {
+      workspaceId,
+      input: { sessionId, requestId, generation, expectedRequestHash },
+    }),
+  userInputDecision: (
+    workspaceId,
+    sessionId,
+    requestId,
+    generation,
+    expectedRequestHash,
+    decision,
+    permissionMode,
+  ) =>
+    invoke<UserInputDecisionSummary>("desktop_user_input_decision", {
+      workspaceId,
+      input: {
+        sessionId,
+        requestId,
+        generation,
+        expectedRequestHash,
+        decision,
+        permissionMode,
+      },
     }),
   resolveApproval: (workspaceId, sessionId, runId, approval, decision) =>
     invoke<ApprovalDecisionSummary>("desktop_resolve_approval", {

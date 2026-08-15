@@ -21,6 +21,7 @@ pub const PLAN_REVIEW_ATTEMPT_ID_DOMAIN: &str = "sigil-plan-review-attempt-v1";
 pub const PLAN_REVIEW_PLAN_ID_DOMAIN: &str = "sigil-plan-review-plan-v1";
 pub const PLAN_REVIEW_ROUTING_POLICY_DOMAIN: &str = "sigil-plan-review-routing-policy-v1";
 pub const PLAN_REVIEW_CHILD_SESSION_DOMAIN: &str = "sigil-plan-review-child-session-v1";
+pub const PLAN_REVIEW_FINALIZER_SESSION_DOMAIN: &str = "sigil-plan-review-finalizer-session-v1";
 
 /// Stable semantic route chosen by one ordinary conversation turn.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -205,6 +206,8 @@ impl PlanReviewSource {
 #[serde(rename_all = "snake_case")]
 pub enum PlanReviewAttemptStatus {
     Started,
+    WaitingForInput,
+    Finalizing,
     DraftReady,
     CompletedWithoutDraft,
     Failed,
@@ -216,6 +219,8 @@ impl PlanReviewAttemptStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",
+            Self::WaitingForInput => "waiting_for_input",
+            Self::Finalizing => "finalizing",
             Self::DraftReady => "draft_ready",
             Self::CompletedWithoutDraft => "completed_without_draft",
             Self::Failed => "failed",
@@ -245,6 +250,7 @@ pub enum PlanReviewTerminalReason {
     RevisionRequested,
     AcceptedAndTaskCreated,
     PlanSuperseded,
+    SubmitOnlyProtocolViolation,
 }
 
 impl PlanReviewTerminalReason {
@@ -259,6 +265,7 @@ impl PlanReviewTerminalReason {
             Self::RevisionRequested => "revision_requested",
             Self::AcceptedAndTaskCreated => "accepted_and_task_created",
             Self::PlanSuperseded => "plan_superseded",
+            Self::SubmitOnlyProtocolViolation => "submit_only_protocol_violation",
         }
     }
 }
@@ -276,10 +283,35 @@ pub struct PlanReviewAttemptEntry {
     pub route_decision_id: Option<ConversationRouteDecisionId>,
     /// Retry-stable child session that owns the read-only plan review transcript.
     pub child_session_ref: SessionRef,
+    /// Fresh submit-only child session. Older records omit it and remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalizer_session_ref: Option<SessionRef>,
+    /// Retry-stable user revision intent. It is absent for the initial review attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_request_id: Option<crate::UserInputRequestId>,
+    /// Physical execution ordinal within one revision request. Initial reviews use one.
+    #[serde(default = "default_plan_review_attempt_ordinal")]
+    pub attempt_ordinal: u32,
+    /// Immutable base plan retained while a revision candidate is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_plan_id: Option<PlanId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_plan_hash: Option<String>,
+    /// Workspace snapshot frozen when this physical attempt was prepared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_snapshot_id: Option<String>,
+    /// Public-safe request mirrored from the read-only child while the attempt is suspended.
+    /// The authoritative lifecycle and continuation binding remain in `child_session_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_user_input: Option<Box<crate::PublicUserInputRequestV1>>,
     pub status: PlanReviewAttemptStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<PlanReviewTerminalReason>,
     pub recorded_at_ms: u64,
+}
+
+fn default_plan_review_attempt_ordinal() -> u32 {
+    1
 }
 
 /// Host-bound identity for one possible automatic PlanReview decision.
@@ -384,6 +416,24 @@ pub fn plan_review_attempt_id_for_revision(
     ))
 }
 
+/// Derives one execution identity for a retry-stable revision request and physical ordinal.
+#[must_use]
+pub fn plan_review_attempt_id_for_revision_ordinal(
+    plan_review_id: &PlanReviewId,
+    revision_request_id: &crate::UserInputRequestId,
+    ordinal: u32,
+) -> PlanReviewAttemptId {
+    PlanReviewAttemptId(stable_event_uuid(
+        PLAN_REVIEW_ATTEMPT_ID_DOMAIN,
+        &format!(
+            "{}|revision-request|{}|attempt|{}",
+            plan_review_id.as_str(),
+            revision_request_id.as_str(),
+            ordinal
+        ),
+    ))
+}
+
 /// Derives the plan artifact identity for one plan review attempt.
 ///
 /// Plan review plans are identity-bound (not content-bound): the same attempt always produces the
@@ -443,6 +493,26 @@ pub fn plan_review_child_session_ref(
     );
     SessionRef::new_relative(format!("children/plan-reviews/{file_name}.jsonl"))
         .expect("plan review child session ref is always relative and safe")
+}
+
+/// Derives an isolated durable child session for one submit-only finalizer attempt.
+#[must_use]
+pub fn plan_review_finalizer_session_ref(
+    plan_review_id: &PlanReviewId,
+    attempt_id: &PlanReviewAttemptId,
+    corrective_ordinal: u32,
+) -> SessionRef {
+    let file_name = stable_event_uuid(
+        PLAN_REVIEW_FINALIZER_SESSION_DOMAIN,
+        &format!(
+            "{}|{}|{}",
+            plan_review_id.as_str(),
+            attempt_id.as_str(),
+            corrective_ordinal
+        ),
+    );
+    SessionRef::new_relative(format!("children/plan-finalizers/{file_name}.jsonl"))
+        .expect("plan review finalizer session ref is always relative and safe")
 }
 
 /// Computes the policy snapshot hash for automatic plan review routing.
@@ -827,15 +897,81 @@ fn legal_same_attempt_transition(
     previous: PlanReviewAttemptStatus,
     next: PlanReviewAttemptStatus,
 ) -> bool {
-    previous == PlanReviewAttemptStatus::Started
-        && matches!(
-            next,
+    matches!(
+        (previous, next),
+        (
+            PlanReviewAttemptStatus::Started,
+            PlanReviewAttemptStatus::WaitingForInput
+                | PlanReviewAttemptStatus::Finalizing
+                | PlanReviewAttemptStatus::DraftReady
+                | PlanReviewAttemptStatus::CompletedWithoutDraft
+                | PlanReviewAttemptStatus::Failed
+                | PlanReviewAttemptStatus::Interrupted
+                | PlanReviewAttemptStatus::Cancelled,
+        ) | (
+            PlanReviewAttemptStatus::WaitingForInput,
+            PlanReviewAttemptStatus::Started
+                | PlanReviewAttemptStatus::CompletedWithoutDraft
+                | PlanReviewAttemptStatus::Failed
+                | PlanReviewAttemptStatus::Interrupted
+                | PlanReviewAttemptStatus::Cancelled,
+        ) | (
+            PlanReviewAttemptStatus::Finalizing,
             PlanReviewAttemptStatus::DraftReady
                 | PlanReviewAttemptStatus::CompletedWithoutDraft
                 | PlanReviewAttemptStatus::Failed
                 | PlanReviewAttemptStatus::Interrupted
-                | PlanReviewAttemptStatus::Cancelled
+                | PlanReviewAttemptStatus::Cancelled,
         )
+    )
+}
+
+fn validate_attempt_payload(entry: &PlanReviewAttemptEntry) -> Result<()> {
+    if entry.attempt_ordinal == 0 {
+        bail!("plan review attempt ordinal must start at one");
+    }
+    if entry.base_plan_id.is_some() != entry.base_plan_hash.is_some() {
+        bail!("plan review revision base id and hash must be recorded together");
+    }
+    match (entry.status, entry.pending_user_input.as_deref()) {
+        (PlanReviewAttemptStatus::WaitingForInput, Some(pending)) => match &pending.source {
+            crate::UserInputSourceV1::PlanReviewResearch {
+                plan_review_id,
+                attempt_id,
+            } if plan_review_id == &entry.plan_review_id && attempt_id == &entry.attempt_id => {}
+            _ => bail!("plan review waiting input is not bound to this exact attempt"),
+        },
+        (PlanReviewAttemptStatus::WaitingForInput, None) => {
+            bail!("plan review waiting input is missing its durable public request")
+        }
+        (_, Some(_)) => bail!("plan review pending input is only valid while waiting for input"),
+        (_, None) => {}
+    }
+    Ok(())
+}
+
+fn same_attempt_binding(previous: &PlanReviewAttemptEntry, next: &PlanReviewAttemptEntry) -> bool {
+    previous.plan_review_id == next.plan_review_id
+        && previous.attempt_id == next.attempt_id
+        && previous.plan_id == next.plan_id
+        && previous.source == next.source
+        && previous.source_turn == next.source_turn
+        && previous.route_decision_id == next.route_decision_id
+        && previous.child_session_ref == next.child_session_ref
+        // Older durable attempts did not carry these two fields. Permit a one-way enrichment, but
+        // never allow an established binding to disappear or change.
+        && previous
+            .finalizer_session_ref
+            .as_ref()
+            .is_none_or(|value| next.finalizer_session_ref.as_ref() == Some(value))
+        && previous.revision_request_id == next.revision_request_id
+        && previous.attempt_ordinal == next.attempt_ordinal
+        && previous.base_plan_id == next.base_plan_id
+        && previous.base_plan_hash == next.base_plan_hash
+        && previous
+            .workspace_snapshot_id
+            .as_ref()
+            .is_none_or(|value| next.workspace_snapshot_id.as_ref() == Some(value))
 }
 
 impl PlanReviewProjectionEntry {
@@ -904,6 +1040,14 @@ impl PlanReviewProjection {
             .reviews
             .entry(entry.plan_review_id.clone())
             .or_default();
+        if let Err(error) = validate_attempt_payload(entry) {
+            let conflict = format!(
+                "plan review attempt {} has invalid lifecycle payload: {error}",
+                entry.attempt_id.as_str()
+            );
+            review.conflicts.push(conflict.clone());
+            self.conflicts.push(conflict);
+        }
         if let Some(previous_id) = self
             .attempts
             .insert(entry.attempt_id.clone(), entry.plan_review_id.clone())
@@ -940,7 +1084,8 @@ impl PlanReviewProjection {
         }
         if let Some(previous) = review.attempts.last()
             && previous.attempt_id == entry.attempt_id
-            && !legal_same_attempt_transition(previous.status, entry.status)
+            && (!legal_same_attempt_transition(previous.status, entry.status)
+                || !same_attempt_binding(previous, entry))
         {
             let conflict = format!(
                 "attempt {} has conflicting lifecycle facts",
@@ -956,6 +1101,11 @@ impl PlanReviewProjection {
     #[must_use]
     pub fn review(&self, plan_review_id: &PlanReviewId) -> Option<&PlanReviewProjectionEntry> {
         self.reviews.get(plan_review_id)
+    }
+
+    /// Iterates all durable review lifecycles in deterministic identity order.
+    pub fn reviews(&self) -> impl Iterator<Item = &PlanReviewProjectionEntry> {
+        self.reviews.values()
     }
 
     /// Returns the plan review lifecycle bound to one route decision.
@@ -1001,6 +1151,51 @@ impl PlanReviewProjection {
             .find(|attempt| attempt.plan_id == *plan_id)
     }
 
+    /// Returns the suspended attempt that publicly mirrors one exact child-owned input request.
+    #[must_use]
+    pub fn attempt_for_pending_user_input(
+        &self,
+        identity: &crate::UserInputIdentityV1,
+        request_hash: &str,
+    ) -> Option<&PlanReviewAttemptEntry> {
+        self.reviews
+            .values()
+            .flat_map(|review| review.attempts.iter().rev())
+            .find(|attempt| {
+                attempt.status == PlanReviewAttemptStatus::WaitingForInput
+                    && attempt
+                        .pending_user_input
+                        .as_deref()
+                        .is_some_and(|pending| {
+                            &pending.identity == identity && pending.request_hash == request_hash
+                        })
+            })
+    }
+
+    /// Resolves one adapter-safe pending-input key without trusting caller-supplied child fields.
+    #[must_use]
+    pub fn attempt_for_pending_user_input_key(
+        &self,
+        request_id: &crate::UserInputRequestId,
+        generation: u32,
+        request_hash: &str,
+    ) -> Option<&PlanReviewAttemptEntry> {
+        self.reviews
+            .values()
+            .flat_map(|review| review.attempts.iter().rev())
+            .find(|attempt| {
+                attempt.status == PlanReviewAttemptStatus::WaitingForInput
+                    && attempt
+                        .pending_user_input
+                        .as_deref()
+                        .is_some_and(|pending| {
+                            pending.identity.request_id == *request_id
+                                && pending.identity.generation == generation
+                                && pending.request_hash == request_hash
+                        })
+            })
+    }
+
     /// Returns true when any conflicting durable fact was observed.
     #[must_use]
     pub fn has_conflicts(&self) -> bool {
@@ -1015,24 +1210,15 @@ impl PlanReviewProjection {
     /// illegal status transition, when a new attempt starts while the previous one is still
     /// running, or when a first record is not `Started`.
     pub fn validate_append(&self, entry: &PlanReviewAttemptEntry) -> Result<()> {
+        validate_attempt_payload(entry)?;
         if let Some(previous) = self.latest_attempt(&entry.plan_review_id) {
             if previous.attempt_id == entry.attempt_id {
                 if previous == entry {
                     // identical duplicate is idempotent
                     return Ok(());
                 }
-                let legal_transition = matches!(
-                    (previous.status, entry.status),
-                    (
-                        PlanReviewAttemptStatus::Started,
-                        PlanReviewAttemptStatus::DraftReady
-                            | PlanReviewAttemptStatus::CompletedWithoutDraft
-                            | PlanReviewAttemptStatus::Failed
-                            | PlanReviewAttemptStatus::Interrupted
-                            | PlanReviewAttemptStatus::Cancelled,
-                    )
-                );
-                if !legal_transition {
+                let legal_transition = legal_same_attempt_transition(previous.status, entry.status);
+                if !legal_transition || !same_attempt_binding(previous, entry) {
                     bail!(
                         "plan review attempt {} has conflicting lifecycle facts",
                         entry.attempt_id.as_str()
@@ -1041,11 +1227,20 @@ impl PlanReviewProjection {
                 return Ok(());
             }
             if previous.status.is_terminal() {
-                bail!(
-                    "plan review {} is already terminal and cannot accept attempt {}",
-                    entry.plan_review_id.as_str(),
-                    entry.attempt_id.as_str()
-                );
+                let legal_revision_retry = entry.status == PlanReviewAttemptStatus::Started
+                    && previous.revision_request_id.is_some()
+                    && previous.revision_request_id == entry.revision_request_id
+                    && entry.attempt_ordinal == previous.attempt_ordinal.saturating_add(1)
+                    && previous.base_plan_id == entry.base_plan_id
+                    && previous.base_plan_hash == entry.base_plan_hash;
+                if !legal_revision_retry {
+                    bail!(
+                        "plan review {} terminal attempt cannot accept unrelated attempt {}",
+                        entry.plan_review_id.as_str(),
+                        entry.attempt_id.as_str()
+                    );
+                }
+                return Ok(());
             }
             if previous.status != PlanReviewAttemptStatus::DraftReady {
                 bail!(
@@ -1073,10 +1268,12 @@ impl PlanReviewProjection {
 
 /// Reconciles plan review attempts after a durable session load.
 ///
-/// Per RFC-0063 recovery rules: a `Started` attempt without a terminal record is closed with
-/// `Interrupted` when no draft exists, and promoted to `DraftReady` when the draft was durably
-/// committed to the parent projection but the status transition was not. Conflicted projections
-/// are left untouched (their conflict is already the fail-closed signal).
+/// Per RFC-0063 recovery rules: an executing (`Started` or `Finalizing`) attempt without a
+/// terminal record is closed with `Interrupted` when no draft exists, and promoted to
+/// `DraftReady` when the draft was durably committed but the status transition was not. A
+/// `WaitingForInput` attempt remains suspended because its exact durable request is the recovery
+/// boundary. Conflicted projections are left untouched (their conflict is already the fail-closed
+/// signal).
 pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64) -> Result<()> {
     let projection = PlanReviewProjection::from_entries(session.entries());
     if projection.has_conflicts() {
@@ -1088,10 +1285,19 @@ pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64)
         let Some(attempt) = review.latest_active_attempt() else {
             continue;
         };
-        if attempt.status != PlanReviewAttemptStatus::Started {
+        if !matches!(
+            attempt.status,
+            PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
+        ) {
             continue;
         }
-        let has_draft = plan_projection.plans.contains_key(&attempt.plan_id);
+        let recovered_draft = if plan_projection.plans.contains_key(&attempt.plan_id) {
+            None
+        } else {
+            recover_plan_review_finalizer_draft(session, attempt)?
+        };
+        let has_draft =
+            plan_projection.plans.contains_key(&attempt.plan_id) || recovered_draft.is_some();
         if has_draft
             && review.attempts.iter().any(|entry| {
                 entry.attempt_id == attempt.attempt_id
@@ -1100,9 +1306,18 @@ pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64)
         {
             continue;
         }
-        pending.push((plan_review_id.clone(), attempt.clone(), has_draft));
+        pending.push((
+            plan_review_id.clone(),
+            attempt.clone(),
+            has_draft,
+            recovered_draft,
+        ));
     }
-    for (plan_review_id, attempt, has_draft) in pending {
+    for (plan_review_id, attempt, has_draft, recovered_draft) in pending {
+        let revision_base = attempt
+            .base_plan_id
+            .clone()
+            .zip(attempt.base_plan_hash.clone());
         let status = if has_draft {
             PlanReviewAttemptStatus::DraftReady
         } else {
@@ -1116,14 +1331,98 @@ pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64)
             source_turn: attempt.source_turn,
             route_decision_id: attempt.route_decision_id,
             child_session_ref: attempt.child_session_ref,
+            finalizer_session_ref: attempt.finalizer_session_ref,
+            revision_request_id: attempt.revision_request_id,
+            attempt_ordinal: attempt.attempt_ordinal,
+            base_plan_id: attempt.base_plan_id,
+            base_plan_hash: attempt.base_plan_hash,
+            workspace_snapshot_id: attempt.workspace_snapshot_id,
+            pending_user_input: None,
             status,
             terminal_reason: (!has_draft).then_some(PlanReviewTerminalReason::RunInterrupted),
             recorded_at_ms: now_ms,
         };
         projection.validate_append(&entry)?;
-        session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
+        let mut controls = Vec::new();
+        if let Some(draft) = recovered_draft {
+            controls.push(ControlEntry::PlanDraftCreated(draft));
+        }
+        controls.push(ControlEntry::PlanReviewAttempt(entry));
+        if let Some((base_plan_id, base_plan_hash)) = revision_base {
+            controls.push(ControlEntry::PlanDecisionRecorded(
+                crate::PlanDecisionRecordedEntry {
+                    plan_id: base_plan_id,
+                    plan_hash: base_plan_hash,
+                    decision: if has_draft {
+                        crate::PlanDecision::RevisionSucceeded
+                    } else {
+                        crate::PlanDecision::RevisionFailed
+                    },
+                    decided_by: crate::PlanDecisionActor::System,
+                    decided_at_ms: now_ms,
+                    reason: Some(if has_draft {
+                        "recovered revised draft from durable finalizer child".to_owned()
+                    } else {
+                        "recovered interrupted revision attempt".to_owned()
+                    }),
+                },
+            ));
+        }
+        session.append_controls(controls)?;
     }
     Ok(())
+}
+
+fn recover_plan_review_finalizer_draft(
+    parent: &crate::Session,
+    attempt: &PlanReviewAttemptEntry,
+) -> Result<Option<crate::PlanDraftCreatedEntry>> {
+    let Some(parent_dir) = parent.store_path().and_then(std::path::Path::parent) else {
+        return Ok(None);
+    };
+    let mut refs = attempt
+        .finalizer_session_ref
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
+    refs.push(plan_review_finalizer_session_ref(
+        &attempt.plan_review_id,
+        &attempt.attempt_id,
+        2,
+    ));
+    for child_ref in refs {
+        let child_path = child_ref.resolve(parent_dir);
+        if !child_path.exists() {
+            continue;
+        }
+        let entries = crate::JsonlSessionStore::read_entries(&child_path).map_err(|error| {
+            anyhow::anyhow!(
+                "plan review finalizer child {} is corrupt: {error}",
+                child_ref.as_path().display()
+            )
+        })?;
+        for entry in entries {
+            let crate::SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)) = entry
+            else {
+                continue;
+            };
+            if draft.plan_id != attempt.plan_id {
+                continue;
+            }
+            if draft.source.source_turn.as_ref() != Some(&attempt.source_turn)
+                || draft.source.route_decision_id != attempt.route_decision_id
+                || draft.source.plan_review_id.as_ref() != Some(&attempt.plan_review_id)
+                || draft.workspace_snapshot_id != attempt.workspace_snapshot_id
+            {
+                anyhow::bail!(
+                    "plan review finalizer child {} contains a draft with mismatched lineage",
+                    child_ref.as_path().display()
+                );
+            }
+            return Ok(Some(draft));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

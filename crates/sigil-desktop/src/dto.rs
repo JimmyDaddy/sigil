@@ -947,6 +947,8 @@ pub struct DesktopConversationDisplayPage {
     pub task_control: Option<DesktopConversationTaskControl>,
     #[serde(default)]
     pub plan_review: Option<DesktopPlanReview>,
+    #[serde(default)]
+    pub user_input: Option<DesktopUserInputRequest>,
 }
 
 /// Bounded query for one canonical conversation display page.
@@ -2639,6 +2641,8 @@ pub struct DesktopPlanDecisionCommandReceipt {
     /// renderer can track the child run's lifecycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_request: Option<DesktopUserInputRequest>,
     pub replayed: bool,
 }
 
@@ -2655,6 +2659,7 @@ pub struct DesktopPlanReview {
     pub status: DesktopPlanReviewStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    pub summary_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2666,17 +2671,47 @@ pub struct DesktopPlanReview {
     pub allowed_actions: Vec<DesktopPlanAction>,
     pub source: DesktopPlanReviewSource,
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<DesktopPlanRevisionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanRevisionSummary {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_ordinal: Option<u32>,
+    pub status: DesktopPlanRevisionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopPlanReviewStatus {
     Started,
+    WaitingForInput,
+    Finalizing,
     DraftReady,
     CompletedWithoutDraft,
     Failed,
     Interrupted,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanRevisionStatus {
+    AwaitingGuidance,
+    Queued,
+    Researching,
+    WaitingForInput,
+    Finalizing,
+    Failed,
+    Cancelled,
+    Succeeded,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2693,4 +2728,357 @@ pub enum DesktopPlanAction {
 pub enum DesktopPlanReviewSource {
     ExplicitPlanCommand,
     AutomaticConversationRoute,
+}
+
+/// Complete immutable plan detail returned only for one exact plan hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanReviewDetail {
+    pub plan_id: String,
+    pub plan_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_snapshot_id: Option<String>,
+    pub source: DesktopPlanReviewSource,
+    pub summary: String,
+    pub steps: Vec<DesktopPlanReviewStepDetail>,
+    pub target_paths: Vec<String>,
+    pub suggested_checks: Vec<DesktopPlanSuggestedCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub notes: Vec<String>,
+    pub lineage: DesktopPlanLineage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_markdown: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanReviewStepDetail {
+    pub step_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<DesktopPlanAgentRole>,
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<DesktopPlanStepMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<DesktopPlanIsolationMode>,
+    pub target_paths: Vec<String>,
+    pub suggested_checks: Vec<DesktopPlanSuggestedCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanAgentRole {
+    Planner,
+    Executor,
+    SubagentRead,
+    SubagentWrite,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanStepMode {
+    Read,
+    Write,
+    Review,
+    Verify,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanIsolationMode {
+    SharedReadOnly,
+    SequentialWorkspaceWrite,
+    ChangesetOnly,
+    Worktree,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanSuggestedCheck {
+    pub check_spec_id: String,
+    pub command: DesktopPlanCheckCommand,
+    pub effect: DesktopPlanCheckEffect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_line: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanCheckCommand {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanCheckEffect {
+    ReadOnly,
+    WorkspaceWrite,
+    ExternalWrite,
+    Network,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanLineage {
+    pub source: DesktopPlanSourceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanSourceRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_turn: Option<DesktopPlanSourceTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanSourceTurn {
+    pub session_scope_id: String,
+    pub message_id: String,
+    pub logical_run_id: String,
+}
+
+/// Exact immutable projection of one durable request for user input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputRequest {
+    pub identity: DesktopUserInputIdentity,
+    pub request_hash: String,
+    pub source: DesktopUserInputSource,
+    pub purpose: DesktopUserInputPurpose,
+    pub prompt: String,
+    pub questions: Vec<DesktopUserInputQuestion>,
+    pub allowed_actions: Vec<DesktopUserInputAction>,
+    pub requested_at_unix_ms: u64,
+    pub status: DesktopUserInputStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_receipt: Option<DesktopUserInputAnswerReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<DesktopUserInputResolution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputIdentity {
+    pub session_scope_id: String,
+    pub root_logical_run_id: String,
+    pub source_thread_id: String,
+    pub request_id: String,
+    pub generation: u32,
+    pub source_binding_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopUserInputSource {
+    Agent,
+    PlanReviewResearch {
+        plan_review_id: String,
+        attempt_id: String,
+    },
+    PlanRevision {
+        base_plan_id: String,
+        base_plan_hash: String,
+    },
+    Planner {
+        task_id: String,
+    },
+    Mcp {
+        server_id: String,
+        call_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopUserInputPurpose {
+    Clarification,
+    Choice,
+    MissingConstraint,
+    RevisionGuidance,
+    ExternalElicitation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopUserInputAction {
+    Submit,
+    Decline,
+    CancelRun,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub required: bool,
+    pub field: DesktopUserInputField,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DesktopUserInputField {
+    Text {
+        multiline: bool,
+        max_chars: u32,
+    },
+    Number,
+    Integer,
+    Boolean,
+    SingleSelect {
+        options: Vec<DesktopUserInputOption>,
+        allow_other: bool,
+    },
+    MultiSelect {
+        options: Vec<DesktopUserInputOption>,
+        max_selected: u32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopUserInputStatus {
+    Requested,
+    DecisionAccepted,
+    ContinuationClaimed,
+    ContinuationStarted,
+    Resolved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputAnswerReceipt {
+    pub command_id: String,
+    pub decision: DesktopUserInputDecisionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answered_question_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopUserInputDecisionKind {
+    Submitted,
+    Declined,
+    RunCancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DesktopUserInputResolution {
+    Consumed,
+    Declined,
+    RunCancelled,
+    Failed {
+        failure_class: String,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DesktopUserInputAnswerValue {
+    Text {
+        value: String,
+    },
+    Number {
+        value: String,
+    },
+    Integer {
+        value: i64,
+    },
+    Boolean {
+        value: bool,
+    },
+    SingleSelect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        other: Option<String>,
+    },
+    MultiSelect {
+        option_ids: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputAnswer {
+    pub question_id: String,
+    pub value: DesktopUserInputAnswerValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DesktopUserInputDecision {
+    Submitted {
+        answers: Vec<DesktopUserInputAnswer>,
+    },
+    Declined,
+    RunCancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputDecisionRequest {
+    pub generation: u32,
+    pub expected_request_hash: String,
+    pub decision: DesktopUserInputDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<DesktopPermissionMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopUserInputDecisionCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub request: DesktopUserInputRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_run_id: Option<String>,
+    pub replayed: bool,
 }

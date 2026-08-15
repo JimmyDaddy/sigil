@@ -726,6 +726,9 @@ export function createCatalogWorkbenchBridge(
       permissionMode: "manual",
       streamSequence: 5,
     }),
+    planDetail: async () => {
+      throw new Error("catalog plan detail is unavailable");
+    },
     planDecision: async (_workspaceId, sessionId, planId, _planHash, action) => ({
       commandId: "workbench-plan-decision-command",
       clientId: "desktop-workbench",
@@ -735,6 +738,12 @@ export function createCatalogWorkbenchBridge(
       action,
       replayed: false,
     }),
+    userInputRequest: async () => {
+      throw new Error("catalog user input is unavailable");
+    },
+    userInputDecision: async () => {
+      throw new Error("catalog user input is unavailable");
+    },
     resolveApproval: async (_workspaceId, sessionId, runId, request, decision) => ({
       commandId: "workbench-approval-command",
       clientId: "desktop-workbench",

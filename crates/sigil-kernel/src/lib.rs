@@ -214,7 +214,8 @@ pub use conversation_route::{
     conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
     conversation_route_routing_contract_material,
     direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_review,
-    plan_review_attempt_id_for_revision, plan_review_child_session_ref,
+    plan_review_attempt_id_for_revision, plan_review_attempt_id_for_revision_ordinal,
+    plan_review_child_session_ref, plan_review_finalizer_session_ref,
     plan_review_id_for_explicit_command, plan_review_id_for_source,
     plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
     plan_review_policy_snapshot_hash, plan_review_reason_codes,
@@ -463,10 +464,12 @@ pub use persistence::{
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
     PlanArtifactProjection, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry,
-    PlanDraftCreatedEntry, PlanDraftStep, PlanId, PlanPermissionGrantedEntry, PlanSourceRef,
-    PlanSuggestedCheck, PlanTaskStartMode, PlanToTaskStepMapping, TaskCreatedFromPlanEntry,
-    plan_draft_created_entry, plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
-    submit_plan_draft_entry, task_id_from_plan_draft, task_plan_from_plan_draft,
+    PlanDraftCreatedEntry, PlanDraftStep, PlanId, PlanLineageV1, PlanPermissionGrantedEntry,
+    PlanReviewDetailV1, PlanReviewStepDetailV1, PlanSourceRef, PlanSuggestedCheck,
+    PlanTaskStartMode, PlanToTaskStepMapping, TaskCreatedFromPlanEntry, plan_draft_created_entry,
+    plan_draft_created_entry_with_plan_id, plan_review_detail_from_entries,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, submit_plan_draft_entry,
+    task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 pub use plugin::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_PLUGIN_HOOK_TIMEOUT_MS,
@@ -528,8 +531,8 @@ pub use provider_timeout::{
 };
 pub use public_task_event::{
     PublicConversationPhase, PublicConversationRoute, PublicPlanAction, PublicPlanReview,
-    PublicPlanReviewSource, PublicPlanReviewStatus, PublicTaskEventProjector, PublicTaskPhase,
-    PublicTaskPlanStep,
+    PublicPlanReviewSource, PublicPlanReviewStatus, PublicPlanRevisionStatusV1,
+    PublicPlanRevisionSummaryV1, PublicTaskEventProjector, PublicTaskPhase, PublicTaskPlanStep,
 };
 pub use resume::{
     JobId, JobIntentEntry, LeaseId, ResumeDisposition, ResumeJobProjection,
@@ -783,7 +786,9 @@ pub use user_input::{
     UserInputQuestionV1, UserInputRequestId, UserInputRequestRefV1, UserInputRequestStateV1,
     UserInputRequestV1, UserInputRequestedV1, UserInputResolutionV1, UserInputResolvedV1,
     UserInputSourceV1, UserInputStatusV1, accept_user_input_decision,
-    prepare_user_input_continuation, request_user_input_tool_spec,
+    prepare_user_input_continuation, preview_user_input_decision, recoverable_user_input_decision,
+    recoverable_user_input_decision_from_entries, request_user_input_tool_spec,
+    user_input_continuation_logical_run_id,
 };
 pub use verification::{
     ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,

@@ -118,6 +118,13 @@ pub(in crate::runner) enum RunPlanCommand {
         plan_id: String,
         expected_plan_hash: String,
     },
+    SubmitUserInputDecision {
+        command_id: Option<String>,
+        request_id: String,
+        generation: u32,
+        expected_request_hash: String,
+        decision: sigil_kernel::UserInputDecisionV1,
+    },
 }
 
 #[derive(Debug)]
@@ -412,6 +419,19 @@ pub(in crate::runner) fn classify_worker_command(
         } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::RevisePlan {
             plan_id,
             expected_plan_hash,
+        }),
+        WorkerCommand::SubmitUserInputDecision {
+            command_id,
+            request_id,
+            generation,
+            expected_request_hash,
+            decision,
+        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::SubmitUserInputDecision {
+            command_id,
+            request_id,
+            generation,
+            expected_request_hash,
+            decision,
         }),
         WorkerCommand::InspectLocalSession {
             request_id,

@@ -296,6 +296,13 @@ pub enum WorkerCommand {
         plan_id: String,
         expected_plan_hash: String,
     },
+    SubmitUserInputDecision {
+        command_id: Option<String>,
+        request_id: String,
+        generation: u32,
+        expected_request_hash: String,
+        decision: sigil_kernel::UserInputDecisionV1,
+    },
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
@@ -681,6 +688,11 @@ pub enum WorkerMessage {
     },
     UserInputRequested {
         request: sigil_kernel::PublicUserInputRequestV1,
+        entries: Vec<SessionLogEntry>,
+    },
+    UserInputDecisionApplied {
+        request: sigil_kernel::PublicUserInputRequestV1,
+        continuation_started: bool,
         entries: Vec<SessionLogEntry>,
     },
     PlanRejected {

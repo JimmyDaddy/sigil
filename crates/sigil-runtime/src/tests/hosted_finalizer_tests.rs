@@ -172,8 +172,10 @@ async fn hosted_finalizer_drops_citation_when_safe_projection_changes_the_span()
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn gemini_hosted_provider_evidence_finalizes_to_safe_source_and_unicode_citation()
 -> anyhow::Result<()> {
+    let _environment_guard = crate::test_env::lock();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     tokio::spawn(async move {

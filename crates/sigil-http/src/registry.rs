@@ -29,6 +29,7 @@ use crate::{
         HttpRunAdmissionError, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
         HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel,
         HttpSessionOpenBindingError, HttpToolArtifactReadDriverError,
+        HttpUserInputDecisionDriverCommand,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecision,
@@ -43,17 +44,18 @@ use crate::{
         HttpForegroundRunOwner, HttpIntentDropCommandReceipt, HttpIntentDropPreview,
         HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpIntentStackView,
         HttpPendingApproval, HttpPermissionMode, HttpPlanDecisionCommandReceipt,
-        HttpPlanDecisionRequest, HttpReasoningEffort, HttpRunCancelCommandReceipt,
-        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
-        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
-        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionRouteRecoveryAction,
-        HttpSessionRouteRecoveryCode, HttpSessionRouteRecoveryView, HttpSessionSnapshot,
-        HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceCommandReceipt,
-        HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
-        HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpTerminalLifecycleView,
-        HttpTerminalTaskCancelCommandReceipt, HttpTerminalTaskCancelRequest, HttpToolArtifactPage,
-        HttpToolArtifactReadRequest, HttpVerificationRerunCommandReceipt,
-        HttpVerificationRerunRequest, HttpVerificationView,
+        HttpPlanDecisionRequest, HttpPlanReviewDetail, HttpReasoningEffort,
+        HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
+        HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+        HttpSessionBinding, HttpSessionContinuityView, HttpSessionCreateRequest,
+        HttpSessionOpenRequest, HttpSessionRouteRecoveryAction, HttpSessionRouteRecoveryCode,
+        HttpSessionRouteRecoveryView, HttpSessionSnapshot, HttpSessionTranscriptPage,
+        HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationReviewRequest,
+        HttpTaskIntegrationReviewView, HttpTaskPauseCommandReceipt, HttpTaskPauseRequest,
+        HttpTerminalLifecycleView, HttpTerminalTaskCancelCommandReceipt,
+        HttpTerminalTaskCancelRequest, HttpToolArtifactPage, HttpToolArtifactReadRequest,
+        HttpUserInputDecisionCommandReceipt, HttpUserInputDecisionRequest, HttpUserInputRequest,
+        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -119,6 +121,12 @@ pub enum HttpRegistryError {
     /// Another foreground run still owns this adapter session.
     #[error("http session {session_id} already has foreground run {run_id}")]
     SessionForegroundRunActive { session_id: String, run_id: String },
+    /// Durable user input owns the session frontier while its continuation is unresolved.
+    #[error("http session {session_id} is awaiting user input")]
+    SessionAwaitingUserInput { session_id: String },
+    /// The addressed user-input generation/hash no longer matches durable truth.
+    #[error("http user input request is stale")]
+    UserInputStale,
     /// A terminal run still owns process-local cleanup or the runtime session lease.
     #[error("http session {session_id} is still releasing run {run_id}")]
     SessionRunCleanupActive { session_id: String, run_id: String },
@@ -528,10 +536,48 @@ impl HttpSessionRunRegistry {
                 snapshot
             }
         };
-        // Reopening is also the restart recovery trigger for durable safe queued work. Admission
-        // failure must not hide an otherwise valid historical session from the client.
+        // Reopening is also the restart recovery trigger for accepted user input and durable safe
+        // queued work. Recovery failure must not hide an otherwise valid historical session from
+        // the client; the unresolved snapshot remains visible and a later reopen retries it.
+        if let Ok(Some(recovery)) = self.driver.recoverable_session_attention_command(&snapshot) {
+            let _ = self.resume_recoverable_session_attention(&snapshot, &recovery);
+        }
         let _ = self.schedule_next_queued_run(&snapshot.id);
         Ok(snapshot)
+    }
+
+    /// Re-enters a continuation whose answer is already durable without consulting the adapter
+    /// command receipt cache.
+    ///
+    /// The original decision command may already be retained as `Completed` in this adapter while
+    /// the durable request still proves that no continuation started. Replaying that receipt would
+    /// strand the accepted answer. The session reducer is the authority for this recovery path:
+    /// the driver only returns a command while the exact request remains `DecisionAccepted`, and
+    /// the durable-session mutation guard serializes re-entry with every other foreground
+    /// mutation.
+    fn resume_recoverable_session_attention(
+        &self,
+        session: &HttpSessionSnapshot,
+        recovery: &HttpUserInputDecisionDriverCommand,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
+        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.user_input_decision(session, recovery)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "User input recovery",
+            run_id: session.id.clone(),
+        })?
+        .map_err(|error| match error.kind {
+            crate::HttpRunDriverErrorKind::StaleUserInput => HttpRegistryError::UserInputStale,
+            crate::HttpRunDriverErrorKind::General => HttpRegistryError::DriverRejected {
+                operation: "User input recovery",
+                run_id: session.id.clone(),
+                message: error.message,
+            },
+        });
+        guard.finish(false);
+        result
     }
 
     /// Lists HTTP adapter sessions in deterministic id order.
@@ -620,6 +666,97 @@ impl HttpSessionRunRegistry {
         session.foreground_run_id = Some(run_id.to_owned());
         session.foreground_owner_generation = session.foreground_owner_generation.saturating_add(1);
         Ok(())
+    }
+
+    /// Atomically registers an adapter-visible supervised continuation and claims its foreground
+    /// slot. The caller must either start an owned worker or invoke
+    /// [`Self::rollback_supervised_session_run_registration`] before returning an error.
+    pub(crate) fn register_supervised_session_run(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        permission_mode: HttpPermissionMode,
+        prompt_preview: &str,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        let mut state = self.lock_state();
+        state.ensure_accepting_commands()?;
+        if state.runs.contains_key(run_id) {
+            return Err(HttpRegistryError::DriverRejected {
+                operation: "register supervised run",
+                run_id: run_id.to_owned(),
+                message: "run identity is already registered".to_owned(),
+            });
+        }
+        let durable_session_id = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            })?
+            .binding
+            .session_scope_id
+            .clone();
+        if !state
+            .durable_session_mutations
+            .contains(&durable_session_id)
+        {
+            return Err(HttpRegistryError::DurableSessionMutationActive);
+        }
+        let session = state.sessions.get_mut(session_id).ok_or_else(|| {
+            HttpRegistryError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            }
+        })?;
+        if let Some(existing) = session.foreground_run_id.as_ref() {
+            return Err(HttpRegistryError::SessionForegroundRunActive {
+                session_id: session_id.to_owned(),
+                run_id: existing.clone(),
+            });
+        }
+        if let Some(existing) = session.release_pending_run_id.as_ref() {
+            return Err(HttpRegistryError::SessionRunCleanupActive {
+                session_id: session_id.to_owned(),
+                run_id: existing.clone(),
+            });
+        }
+        let mut run = HttpRunState::new(
+            run_id.to_owned(),
+            session_id.to_owned(),
+            permission_mode,
+            None,
+            safe_persistence_text(prompt_preview),
+        );
+        run.status = HttpRunStatus::Running;
+        let snapshot = run.snapshot();
+        session.run_ids.push(run_id.to_owned());
+        session.foreground_run_id = Some(run_id.to_owned());
+        session.foreground_owner_generation = session.foreground_owner_generation.saturating_add(1);
+        state.runs.insert(run_id.to_owned(), run);
+        Ok(snapshot)
+    }
+
+    /// Rolls back a supervised continuation registration before its worker starts.
+    pub(crate) fn rollback_supervised_session_run_registration(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) {
+        let mut state = self.lock_state();
+        if state
+            .runs
+            .get(run_id)
+            .is_some_and(|run| run.session_id == session_id && run.status == HttpRunStatus::Running)
+        {
+            state.runs.remove(run_id);
+            if let Some(session) = state.sessions.get_mut(session_id) {
+                session.run_ids.retain(|current| current != run_id);
+                if session.foreground_run_id.as_deref() == Some(run_id) {
+                    session.foreground_run_id = None;
+                    session.foreground_owner_generation =
+                        session.foreground_owner_generation.saturating_add(1);
+                }
+            }
+        }
     }
 
     /// Releases the session foreground slot claimed by a supervised background run.
@@ -1358,6 +1495,18 @@ impl HttpSessionRunRegistry {
             current.snapshot()
         };
 
+        let awaiting_user_input = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.has_unresolved_user_input(&session)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "queued user input admission",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|_| HttpRegistryError::DurableSessionUnavailable)?;
+        if awaiting_user_input {
+            return Ok(None);
+        }
+
         let admission = catch_unwind(AssertUnwindSafe(|| {
             self.driver.next_queued_run_admission(&session)
         }))
@@ -1523,6 +1672,19 @@ impl HttpSessionRunRegistry {
                 })?
                 .snapshot()
         };
+        let awaiting_user_input = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.has_unresolved_user_input(&admission_session)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "user input admission",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|_| HttpRegistryError::DurableSessionUnavailable)?;
+        if awaiting_user_input {
+            return Err(HttpRegistryError::SessionAwaitingUserInput {
+                session_id: session_id.to_owned(),
+            });
+        }
         catch_unwind(AssertUnwindSafe(|| {
             self.driver.admit_run_start(&admission_session, &request)
         }))
@@ -2599,6 +2761,122 @@ impl HttpSessionRunRegistry {
         }
     }
 
+    /// Reads one complete immutable plan detail bound to the selected artifact hash.
+    pub fn plan_review_detail(
+        &self,
+        session_id: &str,
+        plan_id: &str,
+        expected_plan_hash: &str,
+    ) -> Result<HttpPlanReviewDetail, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver
+                .plan_review_detail(&session, plan_id, expected_plan_hash)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "Plan detail",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| HttpRegistryError::DriverRejected {
+            operation: "Plan detail",
+            run_id: session_id.to_owned(),
+            message: error.message,
+        })
+    }
+
+    /// Reads one exact immutable durable user-input request.
+    pub fn user_input_request(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        generation: u32,
+        expected_request_hash: &str,
+    ) -> Result<HttpUserInputRequest, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver
+                .user_input_request(&session, request_id, generation, expected_request_hash)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "User input detail",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| HttpRegistryError::DriverRejected {
+            operation: "User input detail",
+            run_id: session_id.to_owned(),
+            message: error.message,
+        })
+    }
+
+    /// Applies one exact durable user-input decision idempotently.
+    pub fn user_input_decision_command(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        command: HttpCommandEnvelope<HttpUserInputDecisionRequest>,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        let command_key = HttpCommandKey::from_envelope(&command);
+        let request = HttpReservedCommand::user_input_decision(session_id, request_id, &command)?;
+        let reservation = match self.reserve_command(command_key.clone(), request)? {
+            HttpCommandClaim::Execute(reservation) => reservation,
+            HttpCommandClaim::Wait(reservation) => {
+                return reservation.wait_for_user_input_decision();
+            }
+        };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = (|| -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
+            let session = self.get_session(session_id)?;
+            let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+            let driver_command = HttpUserInputDecisionDriverCommand {
+                command_id: command.command_id.clone(),
+                client_id: command.client_id.clone(),
+                request_id: request_id.to_owned(),
+                request: command.payload.clone(),
+            };
+            let receipt = catch_unwind(AssertUnwindSafe(|| {
+                self.driver.user_input_decision(&session, &driver_command)
+            }))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "User input decision",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(|error| match error.kind {
+                crate::HttpRunDriverErrorKind::StaleUserInput => HttpRegistryError::UserInputStale,
+                crate::HttpRunDriverErrorKind::General => HttpRegistryError::DriverRejected {
+                    operation: "User input decision",
+                    run_id: session_id.to_owned(),
+                    message: error.message,
+                },
+            })?;
+            guard.finish(false);
+            let mut receipt = receipt;
+            receipt.command_id = command.command_id.clone();
+            receipt.client_id = command.client_id.clone();
+            receipt.session_id = command.session_id.clone();
+            receipt.replayed = false;
+            Ok(receipt)
+        })();
+        let completion_result = completion.complete(HttpCommandCompletion::UserInputDecision(
+            Box::new(result.clone()),
+        ));
+        if result.is_err() || completion_result.is_err() {
+            self.release_retryable_user_input_reservation(&command_key, &reservation);
+        }
+        completion_result?;
+        result
+    }
+
     pub fn cancel_terminal_task_command(
         &self,
         run_id: &str,
@@ -3257,6 +3535,21 @@ impl HttpSessionRunRegistry {
         Ok(HttpCommandClaim::Execute(reservation))
     }
 
+    fn release_retryable_user_input_reservation(
+        &self,
+        key: &HttpCommandKey,
+        reservation: &Arc<HttpCommandReservation>,
+    ) {
+        let mut state = self.lock_state();
+        if state
+            .command_reservations
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, reservation))
+        {
+            state.command_reservations.remove(key);
+        }
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, HttpRegistryState> {
         self.state
             .lock()
@@ -3428,6 +3721,7 @@ enum HttpCommandKind {
     Verification,
     Integration,
     PlanDecision,
+    UserInputDecision,
     IntentDrop,
     Queue,
     Recovery,
@@ -3444,6 +3738,7 @@ impl HttpCommandKind {
             Self::Verification => b"verification",
             Self::Integration => b"integration",
             Self::PlanDecision => b"plan-decision",
+            Self::UserInputDecision => b"user-input-decision",
             Self::IntentDrop => b"intent_drop",
             Self::Queue => b"queue",
             Self::Recovery => b"recovery",
@@ -3460,6 +3755,7 @@ impl HttpCommandKind {
             Self::Verification => "verification",
             Self::Integration => "integration",
             Self::PlanDecision => "plan_decision",
+            Self::UserInputDecision => "user_input_decision",
             Self::IntentDrop => "intent_drop",
             Self::Queue => "queue",
             Self::Recovery => "recovery",
@@ -3529,6 +3825,18 @@ impl HttpReservedCommand {
         command: &HttpCommandEnvelope<HttpPlanDecisionRequest>,
     ) -> Result<Self, HttpRegistryError> {
         Self::new(HttpCommandKind::PlanDecision, &[path_session_id], command)
+    }
+
+    fn user_input_decision(
+        path_session_id: &str,
+        request_id: &str,
+        command: &HttpCommandEnvelope<HttpUserInputDecisionRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(
+            HttpCommandKind::UserInputDecision,
+            &[path_session_id, request_id],
+            command,
+        )
     }
 
     fn intent_drop(
@@ -3606,6 +3914,7 @@ enum HttpCommandCompletion {
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
     Integration(Box<Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError>>),
     PlanDecision(Box<Result<HttpPlanDecisionCommandReceipt, HttpRegistryError>>),
+    UserInputDecision(Box<Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError>>),
     IntentDrop(Box<Result<HttpIntentDropCommandReceipt, HttpRegistryError>>),
     Queue(Box<Result<HttpConversationQueueCommandReceipt, HttpRegistryError>>),
     Recovery(Box<Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError>>),
@@ -3687,6 +3996,22 @@ impl HttpCommandCompletion {
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Integration(Box::new(receipt))
             }
+            Self::PlanDecision(result) if result.is_ok() => {
+                let receipt = result
+                    .as_ref()
+                    .as_ref()
+                    .expect("successful plan decision completion should contain a receipt")
+                    .clone();
+                HttpStoredCommandCompletion::PlanDecision(receipt)
+            }
+            Self::UserInputDecision(result) if result.is_ok() => {
+                let receipt = result
+                    .as_ref()
+                    .as_ref()
+                    .expect("successful user-input completion should contain a receipt")
+                    .clone();
+                HttpStoredCommandCompletion::UserInputDecision(receipt)
+            }
             Self::IntentDrop(result) if result.is_ok() => {
                 let mut receipt = result
                     .as_ref()
@@ -3732,6 +4057,7 @@ impl HttpCommandCompletion {
             | Self::Queue(_)
             | Self::Recovery(_)
             | Self::PlanDecision(_)
+            | Self::UserInputDecision(_)
             | Self::Aborted => HttpStoredCommandCompletion::Aborted,
         }
     }
@@ -3753,6 +4079,9 @@ impl HttpCommandCompletion {
             }
             HttpStoredCommandCompletion::PlanDecision(receipt) => {
                 Self::PlanDecision(Box::new(Ok(receipt)))
+            }
+            HttpStoredCommandCompletion::UserInputDecision(receipt) => {
+                Self::UserInputDecision(Box::new(Ok(receipt)))
             }
             HttpStoredCommandCompletion::IntentDrop(receipt) => {
                 Self::IntentDrop(Box::new(Ok(*receipt)))
@@ -3971,6 +4300,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3990,6 +4320,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4009,6 +4340,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4030,6 +4362,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4049,6 +4382,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4070,6 +4404,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4077,6 +4412,18 @@ impl HttpCommandReservation {
     fn wait_for_plan_decision(&self) -> Result<HttpPlanDecisionCommandReceipt, HttpRegistryError> {
         match self.wait() {
             HttpCommandCompletion::PlanDecision(receipt) => match *receipt {
+                Ok(receipt) => Ok(receipt.replayed()),
+                Err(error) => Err(error),
+            },
+            _ => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_user_input_decision(
+        &self,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::UserInputDecision(receipt) => match *receipt {
                 Ok(receipt) => Ok(receipt.replayed()),
                 Err(error) => Err(error),
             },
@@ -4101,6 +4448,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4120,6 +4468,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4139,6 +4488,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4160,6 +4510,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::PlanDecision(_)
+            | HttpCommandCompletion::UserInputDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }

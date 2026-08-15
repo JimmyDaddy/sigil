@@ -60,7 +60,7 @@ pub fn request_user_input_tool_spec() -> ToolSpec {
                         "type": "object",
                         "properties": {
                             "id": {"type": "string", "minLength": 1, "maxLength": 48},
-                            "header": {"type": "string", "minLength": 1, "maxLength": 80},
+                            "header": {"type": "string", "minLength": 1, "maxLength": 32},
                             "question": {"type": "string", "minLength": 1, "maxLength": 512},
                             "description": {"type": "string", "maxLength": MAX_USER_INPUT_DESCRIPTION_CHARS},
                             "required": {"type": "boolean"},
@@ -236,6 +236,10 @@ impl UserInputIdentityV1 {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum UserInputSourceV1 {
     Agent,
+    PlanReviewResearch {
+        plan_review_id: crate::PlanReviewId,
+        attempt_id: crate::PlanReviewAttemptId,
+    },
     PlanRevision {
         base_plan_id: PlanId,
         base_plan_hash: String,
@@ -255,16 +259,23 @@ impl UserInputSourceV1 {
     }
 
     pub fn starts_agent_continuation(&self) -> bool {
-        !matches!(self, Self::Mcp { .. })
+        matches!(
+            self,
+            Self::Agent | Self::PlanReviewResearch { .. } | Self::Planner { .. }
+        )
     }
 
     fn counts_against_root_limit(&self) -> bool {
-        matches!(self, Self::Agent | Self::Planner { .. })
+        matches!(
+            self,
+            Self::Agent | Self::PlanReviewResearch { .. } | Self::Planner { .. }
+        )
     }
 
     fn validate(&self) -> Result<()> {
         match self {
             Self::Agent => Ok(()),
+            Self::PlanReviewResearch { .. } => Ok(()),
             Self::PlanRevision { base_plan_hash, .. } => {
                 validate_sha256("base plan hash", base_plan_hash)
             }
@@ -473,6 +484,10 @@ impl UserInputRequestV1 {
             (UserInputSourceV1::Mcp { .. }, None) => {}
             (UserInputSourceV1::Mcp { .. }, Some(_)) => {
                 bail!("MCP user input must not claim an agent continuation")
+            }
+            (UserInputSourceV1::PlanRevision { .. }, None) => {}
+            (UserInputSourceV1::PlanRevision { .. }, Some(_)) => {
+                bail!("host-owned plan revision guidance must not claim an agent continuation")
             }
             (_, Some(continuation)) => continuation.validate()?,
             (_, None) => bail!("agent-owned user input requires a continuation binding"),
@@ -1200,6 +1215,76 @@ pub struct UserInputDecisionReceiptV1 {
     pub continuation_required: bool,
 }
 
+/// Validates and projects one exact user-input decision without mutating the session.
+///
+/// Runtime adapters use this before fallible provider/tool-surface preparation so malformed or
+/// stale answers fail early, while a successfully accepted answer remains the final durable
+/// mutation immediately before its supervised continuation is handed to an owner.
+pub fn preview_user_input_decision(
+    session: &Session,
+    command: &UserInputDecisionCommandV1,
+    accepted_at_unix_ms: u64,
+) -> Result<UserInputDecisionReceiptV1> {
+    validate_sha256("user input decision request hash", &command.request_hash)?;
+    let projection = session.user_input_projection()?;
+    if let Some(previous) = projection.request_for_command(&command.command_id) {
+        let previous_decision = previous
+            .decision
+            .as_ref()
+            .context("user input command projection lost its decision")?;
+        let candidate = UserInputDecisionAcceptedV1::new(
+            &previous.requested,
+            command.command_id.clone(),
+            command.decision.clone(),
+            previous_decision.accepted_at_unix_ms,
+        )?;
+        if previous.requested.request.identity != command.identity
+            || previous.requested.request_hash != command.request_hash
+            || &candidate != previous_decision
+        {
+            bail!("user input command id is already bound to a different request or decision");
+        }
+        return Ok(UserInputDecisionReceiptV1 {
+            request: previous.public_view(),
+            idempotent_replay: true,
+            continuation_required: previous_decision.decision.is_submitted()
+                && !previous.is_terminal(),
+        });
+    }
+    let state = projection
+        .request(&command.identity)
+        .cloned()
+        .context("user input decision references an unknown request")?;
+    if state.requested.request_hash != command.request_hash {
+        bail!("user input decision does not bind the exact request hash");
+    }
+    if state.status != UserInputStatusV1::Requested {
+        bail!("user input request already has a different decision");
+    }
+    let accepted = UserInputDecisionAcceptedV1::new(
+        &state.requested,
+        command.command_id.clone(),
+        command.decision.clone(),
+        accepted_at_unix_ms,
+    )?;
+    let mut candidate = projection;
+    candidate.apply(UserInputLifecycleEntryV1::DecisionAccepted(Box::new(
+        accepted,
+    )))?;
+    let current = candidate
+        .request(&command.identity)
+        .context("previewed user input decision was not projected")?;
+    Ok(UserInputDecisionReceiptV1 {
+        request: current.public_view(),
+        idempotent_replay: false,
+        continuation_required: current
+            .decision
+            .as_ref()
+            .is_some_and(|decision| decision.decision.is_submitted())
+            && !current.is_terminal(),
+    })
+}
+
 /// Applies an exact user-input decision with command-level idempotency.
 ///
 /// Submitted agent answers are intentionally committed before continuation ownership is claimed;
@@ -1284,12 +1369,88 @@ pub fn accept_user_input_decision(
     })
 }
 
+/// Reconstructs the exact retry-stable command for one durably accepted answer that has not yet
+/// started its continuation.
+///
+/// Answer values are read only from private session truth and are never added to the public
+/// projection. MCP requests intentionally return no recovery command because their durable policy
+/// stores only a value hash and forbids replay to a disconnected server.
+///
+/// # Errors
+///
+/// Returns an error when more than one foreground-blocking accepted answer exists or the durable
+/// decision is missing the answer values required for an ordinary agent continuation.
+pub fn recoverable_user_input_decision(
+    session: &Session,
+) -> Result<Option<UserInputDecisionCommandV1>> {
+    recoverable_user_input_decision_from_entries(session.entries())
+}
+
+/// Reconstructs an accepted answer recovery command from a validated append-only session stream.
+///
+/// This entry-based form lets adapters recover a historical session without constructing a
+/// provider-bound mutable [`Session`].
+pub fn recoverable_user_input_decision_from_entries(
+    entries: &[SessionLogEntry],
+) -> Result<Option<UserInputDecisionCommandV1>> {
+    let projection = UserInputProjectionV1::from_session_entries(entries)?;
+    let mut recoverable = projection.pending().filter(|state| {
+        state.status == UserInputStatusV1::DecisionAccepted
+            && !matches!(
+                state.requested.request.source,
+                UserInputSourceV1::Mcp { .. }
+            )
+    });
+    let Some(state) = recoverable.next() else {
+        return Ok(None);
+    };
+    if recoverable.next().is_some() {
+        bail!("session contains multiple accepted user-input answers awaiting continuation");
+    }
+    let accepted = state
+        .decision
+        .as_ref()
+        .context("accepted user-input request lost its durable decision")?;
+    let decision = match &accepted.decision {
+        UserInputDurableDecisionV1::Submitted { answers, .. } => UserInputDecisionV1::Submitted {
+            answers: answers
+                .clone()
+                .context("accepted user-input answer omitted durable recovery values")?,
+        },
+        UserInputDurableDecisionV1::Declined | UserInputDurableDecisionV1::RunCancelled => {
+            bail!("terminal user-input decision remained pending")
+        }
+    };
+    Ok(Some(UserInputDecisionCommandV1 {
+        identity: accepted.identity.clone(),
+        request_hash: accepted.request_hash.clone(),
+        command_id: accepted.command_id.clone(),
+        decision,
+    }))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct UserInputContinuationPreparationV1 {
     pub request: PublicUserInputRequestV1,
     pub continuation: UserInputContinuationStartedV1,
     pub already_started: bool,
+}
+
+/// Derives the retry-stable logical run identity used after one accepted user-input decision.
+///
+/// # Errors
+///
+/// Returns an error when the request binding is malformed or the derived identity is invalid.
+pub fn user_input_continuation_logical_run_id(
+    identity: &UserInputIdentityV1,
+    request_hash: &str,
+) -> Result<LogicalRunId> {
+    LogicalRunId::new(stable_continuation_id(
+        "continuation",
+        identity,
+        request_hash,
+    )?)
 }
 
 /// Claims and starts the one logical continuation for an accepted agent answer.
@@ -1364,11 +1525,8 @@ pub fn prepare_user_input_continuation(
         .context("agent user input lost its continuation binding")?;
     let call = exact_user_input_tool_call(session, binding)?;
     let claim_id = UserInputClaimId::new(stable_continuation_id("claim", identity, request_hash)?)?;
-    let continuation_logical_run_id = LogicalRunId::new(stable_continuation_id(
-        "continuation",
-        identity,
-        request_hash,
-    )?)?;
+    let continuation_logical_run_id =
+        user_input_continuation_logical_run_id(identity, request_hash)?;
     let claim = UserInputContinuationClaimedV1 {
         schema_version: USER_INPUT_SCHEMA_VERSION,
         identity: identity.clone(),

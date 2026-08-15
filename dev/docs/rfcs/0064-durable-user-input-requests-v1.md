@@ -105,6 +105,7 @@ pub struct UserInputRequestV1 {
 
 pub enum UserInputSourceV1 {
     Agent,
+    PlanReviewResearch { plan_review_id: PlanReviewId, attempt_id: PlanReviewAttemptId },
     PlanRevision { base_plan_id: PlanId, base_plan_hash: String },
     Planner { task_id: TaskId },
     Mcp { server_id: String, call_id: String },
@@ -213,7 +214,7 @@ decision 与单一 live claim。未知 schema/current-version mismatch fail clos
 
 | Source | durable value | restart behavior |
 | --- | --- | --- |
-| Agent / Planner | bounded safe answer | exactly-once continuation |
+| Agent / Planner / PlanReview research | bounded safe answer | exactly-once continuation |
 | Plan revision guidance | bounded full guidance，绑定 base plan/hash | exactly-once revision request/attempt |
 | MCP | schema、decision、value hash；默认不保存 value | disconnected server => Stale，不 replay |
 | Host secret input | opaque receipt only | 按 secret broker 规则重新索取 |
@@ -364,7 +365,8 @@ RFC-0063 Revise 使用 host-owned `RevisionGuidance` request：
 - public logs、telemetry、SSE 与 notification 不记录 answer value；
 - agent/plan safe answer 在私有 session 中持久化，并受现有 owner-only session storage/retention 约束；
 - MCP answer 默认只记录 hash，避免断开的第三方 server answer 被误 replay；
-- question/answer 均经过内容和 byte bounds、Unicode normalization 与结构验证；
+- question/answer 均经过内容和 byte bounds、Unicode scalar/control-character 与结构验证；canonical
+  JSON 只用于稳定 hash，不声称改写用户文本或执行 NFC/NFKC normalization；
 - answer command 不授予 write/network/tool permission；后续工具仍走原审批/permission path。
 
 ## 14. Implementation slices
@@ -479,3 +481,34 @@ turn 抢占 pending continuation。
 
 本文状态保持 `implementation-in-progress`，直到 R64.0–R64.4、§16 所有 acceptance 与 release validation
 完成。局部 DTO、单一 UI 表单或 Plan-only guidance 不得被描述为 RFC 已实现。
+
+## 19. Implementation ledger（2026-08-15）
+
+本轮已落地但不足以把 RFC 标记为 `implemented` 的能力：
+
+- kernel 已有 provider-neutral V1 request/answer/lifecycle contract、稳定 hash/bounds、append-only reducer、
+  `AwaitingUserInput` disposition 与 typed `request_user_input` tool；request durable 后当前 worker 才退出；
+- ordinary root conversation 与 PlanReview research 已接入同一 decision/continuation coordinator；answer 以
+  session/root-run/thread/request/generation/hash/command identity exact-bound，public event/DTO 不包含 answer
+  value；
+- HTTP 已提供 exact detail/decision contract，detail 使用 request hash ETag；session reopen 会从私有 durable
+  `DecisionAccepted` frontier 恢复同一 continuation，不依赖已经完成的旧 command receipt；
+- TUI 与 Desktop 已使用同一 public projection 展示表单；Desktop 的 accepted recovery 只显示 answered field
+  ids 并提供 Resume，不回显私有值；TUI restore 同样恢复 exact resume action；
+- RFC-0063 Revise 已先创建 durable guidance request，提交 guidance 后才创建新的 revision attempt；失败恢复
+  base plan，finalizer 只暴露 `submit_plan_draft`，非 submit tool call 不执行并产生 typed protocol violation；
+- OpenAPI/generated TypeScript/strict Desktop DTO/SSE event variants 已同步；Plan detail 使用 hash/ETag 绑定，
+  UI action authority 来自 canonical reducer 而不是 renderer 本地猜测。
+
+仍未关闭的 release blocker：
+
+1. background child agent request 尚未镜像到 root attention queue，也没有 durable child-session resume routing；
+2. MCP elicitation 仍是连接存活期协议，尚未只复用 normalized renderer 并证明断线后绝不 replay answer；
+3. `ContinuationStarted` 后、provider dispatch evidence 尚未落地时的 crash window 仍需与 RFC-0058 physical
+   attempt recovery 完整收敛；
+4. unresolved request 的 compaction pin/property campaign、真实 TUI PTY、真实 `sigil serve` + Desktop E2E、
+   real-model campaign 尚未全部执行；
+5. migration/compatibility 与 release notes/Doctor 仍需在 release closure slice 完成。
+
+因此本节只记录当前事实，不放宽 §16 acceptance，也不把 root/PlanReview 的局部完成外推为 background、
+MCP 或 release 全链路完成。

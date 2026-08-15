@@ -22,8 +22,8 @@ use super::{
     common::{
         PlannedProvider, StreamPlan, planned_role_provider_builder,
         planned_role_provider_builder_with_stream_start_signal, routed_test_root_config,
-        spawn_test_worker, spawn_test_worker_with_role_provider_builder, test_root_config,
-        wait_for_session_entry,
+        spawn_test_worker, spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks,
+        test_root_config, wait_for_session_entry,
     },
 };
 
@@ -1549,12 +1549,8 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
         .path()
         .join(".sigil/sessions/session-plan-handoff-e2e.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta(
-            r#"Plan:
-
-```sigil-plan-v2
-{
+    let draft_args = r#"{
+  "schema_version": 2,
   "summary": "Inspect approved README plan",
   "steps": [
     {
@@ -1576,14 +1572,13 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
       "target_paths": ["README.md"]
     }
   ],
-  "target_paths": ["README.md"]
-}
-```
-"#
-            .to_owned(),
-        ),
-        ProviderChunk::Done,
-    ])]);
+  "target_paths": ["README.md"],
+  "suggested_checks": ["cargo test -p sigil-tui plan_handoff"]
+}"#;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(submit_plan_draft_chunks(
+        "approved-plan-draft",
+        draft_args,
+    ))]);
     let role_provider_builder = planned_role_provider_builder(vec![
         StreamPlan::Chunks(vec![
             ProviderChunk::TextDelta("approved plan inspection complete".to_owned()),
@@ -1611,9 +1606,37 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
         prompt: "plan README typo review".to_owned(),
         reasoning_effort: ReasoningEffort::Max,
     })?;
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))?;
-    let finished =
-        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let _ = worker
+        .recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))
+        .context("explicit plan review did not start")?;
+    let finished = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::PlanRunFinished { .. } | WorkerMessage::RunFailed(_)
+            )
+        })
+        .map_err(|error| {
+            let entries = JsonlSessionStore::read_entries(&session_log_path).unwrap_or_default();
+            let child_entries = entries
+                .iter()
+                .find_map(|entry| match entry {
+                    SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) => {
+                        Some(attempt.child_session_ref.resolve(
+                            session_log_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+                        ))
+                    }
+                    _ => None,
+                })
+                .and_then(|path| JsonlSessionStore::read_entries(path).ok())
+                .unwrap_or_default();
+            anyhow!(
+                "explicit plan review did not finish: {error:#}; durable entries: {entries:?}; child entries: {child_entries:?}"
+            )
+        })?;
+    if let WorkerMessage::RunFailed(error) = &finished {
+        return Err(anyhow!("explicit plan review failed: {error}"));
+    }
     let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
         unreachable!("recv_until only returns PlanRunFinished");
     };
@@ -1630,7 +1653,8 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
         permission_grant: None,
     })?;
     let created = worker
-        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))?;
+        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))
+        .context("approved plan did not create its task")?;
     let WorkerMessage::TaskCreatedFromPlan {
         entry: created_task,
         start_mode,
@@ -1661,8 +1685,9 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
         SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(_))
     )));
 
-    let started =
-        worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
+    let started = worker
+        .recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))
+        .context("approved task did not start")?;
     assert!(matches!(
         started,
         WorkerMessage::TaskRunStarted { ref objective, .. }
@@ -2035,13 +2060,33 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
         plan_id: draft_1.plan_id.as_str().to_owned(),
         expected_plan_hash: draft_1.plan_hash.clone(),
     })?;
+    let guidance = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::UserInputRequested { .. })
+    })?;
+    let WorkerMessage::UserInputRequested { request, .. } = guidance else {
+        unreachable!("recv_until only returns UserInputRequested");
+    };
+    worker.send(WorkerCommand::SubmitUserInputDecision {
+        command_id: Some("revision-guidance-e2e".to_owned()),
+        request_id: request.identity.request_id.as_str().to_owned(),
+        generation: request.identity.generation,
+        expected_request_hash: request.request_hash,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "revision_guidance".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "Preserve the public API and split the migration step.".to_owned(),
+                },
+            }],
+        },
+    })?;
     let started = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::PlanRunStarted { .. })
     })?;
     let WorkerMessage::PlanRunStarted { prompt } = started else {
         unreachable!("recv_until only returns PlanRunStarted");
     };
-    assert!(prompt.contains("plan review"));
+    assert!(prompt.contains("plan revision"));
     let revised = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::PlanRunFinished { .. })
     })?;

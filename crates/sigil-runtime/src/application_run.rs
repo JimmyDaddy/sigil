@@ -39,6 +39,7 @@ use crate::{
 
 mod integration_control;
 mod task_control;
+mod user_input;
 
 pub use integration_control::{
     APPLICATION_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION, ApplicationIntegrationLaneCandidateKind,
@@ -52,6 +53,12 @@ pub use task_control::{
     ApplicationTaskContinuationExecution, ApplicationTaskContinuationOutput,
     ApplicationTaskContinuationRequest, PreparedApplicationTaskContinuation,
     prepare_application_task_continuation,
+};
+pub use user_input::{
+    ApplicationUserInputDecisionRequest, PreparedApplicationUserInputDecision,
+    application_recoverable_user_input_decision, application_session_has_unresolved_user_input,
+    application_user_input_request_view, application_user_input_request_view_by_key,
+    prepare_application_user_input_decision,
 };
 
 const DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -640,6 +647,7 @@ impl Drop for ApplicationSessionLease {
 pub struct ApplicationRunServices {
     disclosure_presenter: Arc<dyn EgressDisclosurePresenter>,
     session_leases: Arc<ApplicationSessionLeaseManager>,
+    supervisor_instance_id: Arc<str>,
     task_role_provider_builder:
         Option<Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>>,
     terminal_lifecycle_handler: Option<Arc<dyn crate::ApplicationTerminalLifecycleHandler>>,
@@ -705,6 +713,7 @@ impl std::fmt::Debug for ApplicationRunServices {
             .debug_struct("ApplicationRunServices")
             .field("disclosure_presenter", &"configured")
             .field("session_leases", &self.session_leases)
+            .field("supervisor_instance_id", &self.supervisor_instance_id)
             .field(
                 "task_role_provider_builder",
                 &self.task_role_provider_builder.is_some(),
@@ -724,6 +733,7 @@ impl ApplicationRunServices {
         Self {
             disclosure_presenter,
             session_leases: Arc::new(ApplicationSessionLeaseManager::new()),
+            supervisor_instance_id: Arc::from(format!("runtime-{}", uuid::Uuid::new_v4())),
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
             scratch_control: None,
@@ -739,6 +749,7 @@ impl ApplicationRunServices {
         Self {
             disclosure_presenter,
             session_leases,
+            supervisor_instance_id: Arc::from(format!("runtime-{}", uuid::Uuid::new_v4())),
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
             scratch_control: None,
@@ -1714,6 +1725,7 @@ pub struct ApplicationRunExecution {
     conversation_coordinator: crate::ConversationCoordinator,
     parent_session_ref: SessionRef,
     pending_session_title: Option<ApplicationSessionTitleRequest>,
+    pending_user_input_continuation: Option<user_input::ApplicationUserInputContinuationContext>,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
     _session_lease: Arc<ApplicationSessionLease>,
 }
@@ -1879,6 +1891,56 @@ impl ApplicationRunExecution {
                 return Err(error).context("application run notice delivery failed");
             }
         }
+        let user_input_continuation = self.pending_user_input_continuation.take();
+        if let Some(context) = user_input_continuation.as_ref() {
+            let request = match user_input::start_application_user_input_continuation(
+                &mut self.session,
+                context,
+                &self.run_id,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    let safe_error = self.redactor.redact_text(&format!("{error:#}"));
+                    append_application_conversation_terminal(
+                        &self.conversation_lifecycle,
+                        &self.run_id,
+                        ConversationRunTerminalStatusV1::Failed,
+                        None,
+                        Some(&safe_error),
+                        &self.redactor,
+                    )?;
+                    bridge.emit(PublicRunEventKind::RunFailed { error: safe_error })?;
+                    return Err(error).context("failed to start user-input continuation");
+                }
+            };
+            if let Err(error) =
+                bridge.emit(user_input::application_user_input_changed_event(request))
+            {
+                let resolution = user_input::resolve_application_user_input_continuation(
+                    &mut self.session,
+                    context,
+                    sigil_kernel::UserInputResolutionV1::Failed {
+                        failure_class: "continuation_event_delivery_failed".to_owned(),
+                        retryable: true,
+                    },
+                );
+                let safe_error = self.redactor.redact_text(&format!("{error:#}"));
+                append_application_conversation_terminal(
+                    &self.conversation_lifecycle,
+                    &self.run_id,
+                    ConversationRunTerminalStatusV1::Failed,
+                    None,
+                    Some(&safe_error),
+                    &self.redactor,
+                )?;
+                if let Err(resolution_error) = resolution {
+                    return Err(error).context(format!(
+                        "user-input continuation event delivery failed and resolution append failed: {resolution_error:#}"
+                    ));
+                }
+                return Err(error).context("user-input continuation event delivery failed");
+            }
+        }
         let run = match self.kind {
             ApplicationRunExecutionKind::Main { agent, input } => {
                 agent
@@ -1917,18 +1979,63 @@ impl ApplicationRunExecution {
                     approval_handler,
                     &self.cancellation_handle,
                 )
-                .await?;
-                continue_application_plan_review(
-                    &mut self.session,
-                    output,
-                    self.plan_review_runtime.take(),
-                    &mut bridge,
-                    approval_handler,
-                    &self.cancellation_handle,
-                )
-                .await
+                .await;
+                match output {
+                    Ok(output) => {
+                        continue_application_plan_review(
+                            &mut self.session,
+                            output,
+                            self.plan_review_runtime.take(),
+                            &mut bridge,
+                            approval_handler,
+                            &self.cancellation_handle,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Err(error) => Err(error),
+        };
+        let run: Result<AgentRunOutput> = match (user_input_continuation.as_ref(), run) {
+            (Some(context), Ok(agent_output)) => {
+                match user_input::resolve_application_user_input_continuation(
+                    &mut self.session,
+                    context,
+                    sigil_kernel::UserInputResolutionV1::Consumed,
+                ) {
+                    Ok(request) => bridge
+                        .emit(user_input::application_user_input_changed_event(request))
+                        .map(|()| agent_output),
+                    Err(error) => Err(error),
+                }
+            }
+            (Some(context), Err(error)) => {
+                match user_input::resolve_application_user_input_continuation(
+                    &mut self.session,
+                    context,
+                    sigil_kernel::UserInputResolutionV1::Failed {
+                        failure_class: "continuation_execution_failed".to_owned(),
+                        retryable: true,
+                    },
+                ) {
+                    Ok(request) => {
+                        if let Err(event_error) =
+                            bridge.emit(user_input::application_user_input_changed_event(request))
+                        {
+                            Err(error.context(format!(
+                                "user-input continuation failed and resolution delivery failed: {event_error:#}"
+                            )))
+                        } else {
+                            Err(error)
+                        }
+                    }
+                    Err(resolution_error) => Err(error.context(format!(
+                        "user-input continuation failed and resolution append failed: {resolution_error:#}"
+                    ))),
+                }
+            }
+            (None, run) => run,
         };
         match run {
             Ok(agent_output) => {
@@ -2242,6 +2349,30 @@ where
         }
     };
     match outcome {
+        crate::PlanReviewRunOutcome::AwaitingUserInput { request: pending } => {
+            crate::PlanReviewCoordinator::close_plan_review_run(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::AwaitingUserInput {
+                    request: pending.clone(),
+                },
+                current_unix_time_ms(),
+            )?;
+            Ok(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::AwaitingUserInput(
+                    sigil_kernel::UserInputRequestRefV1 {
+                        identity: pending.identity.clone(),
+                        request_hash: pending.request_hash.clone(),
+                    },
+                ),
+            })
+        }
         crate::PlanReviewRunOutcome::DraftReady { draft } => {
             crate::PlanReviewCoordinator::commit_draft_from_child(
                 session,
@@ -2343,6 +2474,31 @@ where
                 disposition: AgentRunDisposition::Blocked,
             })
             .context(format!("plan review failed: {error}"))
+        }
+        crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => {
+            crate::PlanReviewCoordinator::close_plan_review_run(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone()),
+                current_unix_time_ms(),
+            )?;
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the plan review protocol terminal-state race");
+            }
+            Ok::<AgentRunOutput, anyhow::Error>(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::Blocked,
+            })
+            .context(format!(
+                "plan review submit-only protocol violation: {error}"
+            ))
         }
     }
 }
@@ -2971,6 +3127,7 @@ async fn prepare_application_run_internal(
             conversation_coordinator,
             parent_session_ref,
             pending_session_title,
+            pending_user_input_continuation: None,
             route_transition,
             _session_lease: Arc::clone(&session_lease),
         },
@@ -5124,7 +5281,7 @@ where
             handler,
         );
         let outcome = match crate::PlanReviewCoordinator::run_plan_review(
-            &session,
+            &mut session,
             request,
             &agent,
             options,
@@ -5154,6 +5311,14 @@ where
             }
         };
         match &outcome {
+            crate::PlanReviewRunOutcome::AwaitingUserInput { .. } => {
+                crate::PlanReviewCoordinator::close_plan_review_run(
+                    &mut session,
+                    request,
+                    &outcome,
+                    current_unix_time_ms(),
+                )?;
+            }
             crate::PlanReviewRunOutcome::DraftReady { draft } => {
                 crate::PlanReviewCoordinator::commit_draft_from_child(
                     &mut session,
@@ -5171,7 +5336,8 @@ where
             }
             crate::PlanReviewRunOutcome::Cancelled
             | crate::PlanReviewRunOutcome::Interrupted(_)
-            | crate::PlanReviewRunOutcome::Failed(_) => {
+            | crate::PlanReviewRunOutcome::Failed(_)
+            | crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(_) => {
                 crate::PlanReviewCoordinator::close_plan_review_run(
                     &mut session,
                     request,

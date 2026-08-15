@@ -460,21 +460,15 @@ fn eight_row_queue_action_names_hidden_selected_target_and_keeps_delete_hit_area
 fn eight_row_plan_action_discloses_hidden_plan_before_enter_run() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(40, 8);
-    app.composer.pending_plan_approval = Some(PendingPlanApproval {
-        plan_id: Some("plan-1".to_owned()),
-        plan_text: "inspect the complete plan before approval".to_owned(),
-        plan_hash: "sha256:plan".to_owned(),
-        summary: "short screen plan".to_owned(),
-        steps: vec!["inspect".to_owned(), "edit".to_owned()],
-        target_paths: vec!["src/lib.rs".to_owned()],
-        suggested_checks: vec!["cargo test".to_owned()],
-        target_path_count: 1,
-        suggested_check_count: 1,
-        workspace_snapshot_id: None,
-        stale: false,
-        stale_reason: None,
-        rendered_text_row_counts: Default::default(),
-    });
+    app.composer.pending_plan_approval = Some(PendingPlanApproval::test_fixture(
+        "plan-1",
+        "inspect the complete plan before approval",
+        "sha256:plan",
+        "short screen plan",
+        vec!["inspect".to_owned(), "edit".to_owned()],
+        vec!["src/lib.rs".to_owned()],
+        vec!["cargo test".to_owned()],
+    ));
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 40, 8), &app);
     let view_model = LivePanelViewModel::from_app(&app, 4);
@@ -490,7 +484,7 @@ fn eight_row_plan_action_discloses_hidden_plan_before_enter_run() -> anyhow::Res
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Enter run"));
+    assert!(rendered.contains("Enter review"));
     assert!(rendered.contains("plan…"));
     Ok(())
 }

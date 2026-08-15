@@ -234,7 +234,8 @@ pub use plan_review_coordinator::{
     ApplicationPlanAction, ApplicationPlanDecisionCommand, ApplicationPlanDecisionReceipt,
     CreateTaskFromPlanRequest, CreatedTaskFromPlan, PlanDecisionCommand, PlanReviewCoordinator,
     PlanReviewRunOutcome, PlanReviewRunRequest, RejectPlanRequest, RejectedPlan,
-    application_plan_decision, application_record_revision_failure,
+    application_plan_decision, application_plan_review_research_input_decision,
+    application_plan_revision_guidance_decision, application_record_revision_failure,
     plan_handoff_workspace_snapshot_id,
 };
 pub use plugins::{

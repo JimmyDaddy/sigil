@@ -4,7 +4,7 @@ use super::*;
 
 fn valid_server_info() -> DesktopServerInfo {
     serde_json::from_value(serde_json::json!({
-        "schema_version": 13,
+        "schema_version": 14,
         "protocol_version": 2,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -21,6 +21,7 @@ fn valid_server_info() -> DesktopServerInfo {
             "durable_event_replay": true,
             "live_events": true,
             "approval": true,
+            "durable_user_input": true,
             "cancellation": true,
             "terminal_task_cancel": true,
             "task_pause": true,
@@ -65,7 +66,7 @@ fn server_info_requires_exact_loopback_desktop_contract() {
 #[test]
 fn exact_server_info_rejects_unknown_fields() {
     let result = serde_json::from_value::<DesktopServerInfo>(serde_json::json!({
-        "schema_version": 13,
+        "schema_version": 14,
         "protocol_version": 2,
         "server_version": "0.0.1-alpha.5",
         "workspace_id": "workspace-safe-id",
@@ -82,6 +83,7 @@ fn exact_server_info_rejects_unknown_fields() {
             "durable_event_replay": true,
             "live_events": true,
             "approval": true,
+            "durable_user_input": true,
             "cancellation": true,
             "terminal_task_cancel": true,
             "task_pause": true,

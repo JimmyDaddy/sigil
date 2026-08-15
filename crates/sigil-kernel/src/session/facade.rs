@@ -396,6 +396,7 @@ impl Session {
             SessionLogEntry::Control(control) => {
                 control.validate_durable_contract()?;
                 self.validate_user_input_controls(std::iter::once(control))?;
+                self.validate_plan_controls(std::iter::once(control))?;
                 if let ControlEntry::ToolArtifactRead(receipt) = control {
                     receipt.validate()?;
                 }
@@ -922,6 +923,7 @@ impl Session {
             .iter()
             .try_for_each(ControlEntry::validate_durable_contract)?;
         self.validate_user_input_controls(controls.iter())?;
+        self.validate_plan_controls(controls.iter())?;
         let entries = controls
             .into_iter()
             .map(SessionLogEntry::Control)
@@ -945,6 +947,7 @@ impl Session {
     ) -> Result<Option<StoredEvent>> {
         control.validate_durable_contract()?;
         self.validate_user_input_controls(std::iter::once(&control))?;
+        self.validate_plan_controls(std::iter::once(&control))?;
         let entry = SessionLogEntry::Control(control);
         let event = self
             .store
@@ -978,6 +981,120 @@ impl Session {
         let mut projection = self.user_input_projection()?;
         for entry in lifecycle_entries {
             projection.apply(entry)?;
+        }
+        Ok(())
+    }
+
+    fn validate_plan_controls<'a>(
+        &self,
+        controls: impl IntoIterator<Item = &'a ControlEntry>,
+    ) -> Result<()> {
+        let mut entries = self.entries.clone();
+        let mut artifacts = crate::PlanArtifactProjection::from_entries(&entries);
+        let mut reviews = crate::PlanReviewProjection::from_entries(&entries);
+        for control in controls {
+            match control {
+                ControlEntry::PlanReviewAttempt(attempt) => {
+                    reviews.validate_append(attempt)?;
+                }
+                ControlEntry::PlanDraftCreated(draft) => {
+                    if let Some(existing) = artifacts.plans.get(&draft.plan_id)
+                        && existing != draft
+                    {
+                        bail!(
+                            "plan {} already has conflicting durable draft facts",
+                            draft.plan_id.as_str()
+                        );
+                    }
+                }
+                ControlEntry::PlanDecisionRecorded(decision) => {
+                    let draft = artifacts.plans.get(&decision.plan_id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "plan decision references unknown plan {}",
+                            decision.plan_id.as_str()
+                        )
+                    })?;
+                    if draft.plan_hash != decision.plan_hash {
+                        bail!("plan decision does not bind the durable plan hash");
+                    }
+                    if matches!(
+                        decision.decision,
+                        crate::PlanDecision::RevisionFailed
+                            | crate::PlanDecision::RevisionSucceeded
+                    ) != (decision.decided_by == crate::PlanDecisionActor::System)
+                    {
+                        bail!("plan revision settlement has an invalid decision actor");
+                    }
+                    if let Some(previous) = artifacts.latest_decision(&decision.plan_id) {
+                        let idempotent = previous == decision;
+                        let legal = matches!(
+                            (previous.decision, decision.decision),
+                            (
+                                crate::PlanDecision::SavedOnly,
+                                crate::PlanDecision::Accepted
+                            ) | (
+                                crate::PlanDecision::SavedOnly,
+                                crate::PlanDecision::Rejected
+                            ) | (
+                                crate::PlanDecision::SavedOnly,
+                                crate::PlanDecision::RevisionRequested
+                            ) | (
+                                crate::PlanDecision::RevisionRequested,
+                                crate::PlanDecision::RevisionFailed
+                            ) | (
+                                crate::PlanDecision::RevisionRequested,
+                                crate::PlanDecision::RevisionSucceeded
+                            ) | (
+                                crate::PlanDecision::RevisionFailed,
+                                crate::PlanDecision::SavedOnly
+                            ) | (
+                                crate::PlanDecision::RevisionFailed,
+                                crate::PlanDecision::Accepted
+                            ) | (
+                                crate::PlanDecision::RevisionFailed,
+                                crate::PlanDecision::Rejected
+                            ) | (
+                                crate::PlanDecision::RevisionFailed,
+                                crate::PlanDecision::RevisionRequested
+                            )
+                        );
+                        if !idempotent && !legal {
+                            bail!(
+                                "plan {} has illegal decision transition {} -> {}",
+                                decision.plan_id.as_str(),
+                                previous.decision.as_str(),
+                                decision.decision.as_str()
+                            );
+                        }
+                    } else if !matches!(
+                        decision.decision,
+                        crate::PlanDecision::Accepted
+                            | crate::PlanDecision::Rejected
+                            | crate::PlanDecision::RevisionRequested
+                            | crate::PlanDecision::SavedOnly
+                    ) {
+                        bail!("plan revision settlement is missing its requested prefix");
+                    }
+                }
+                ControlEntry::TaskCreatedFromPlan(created) => {
+                    let draft = artifacts.plans.get(&created.plan_id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "task promotion references unknown plan {}",
+                            created.plan_id.as_str()
+                        )
+                    })?;
+                    if draft.plan_hash != created.plan_hash {
+                        bail!("task promotion does not bind the durable plan hash");
+                    }
+                }
+                _ => continue,
+            }
+            entries.push(SessionLogEntry::Control(control.clone()));
+            artifacts = crate::PlanArtifactProjection::from_entries(&entries);
+            reviews = crate::PlanReviewProjection::from_entries(&entries);
+            if reviews.has_conflicts() {
+                bail!("plan review append would create a conflicted projection");
+            }
         }
         Ok(())
     }

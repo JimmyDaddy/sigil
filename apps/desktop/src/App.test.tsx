@@ -485,6 +485,30 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       action,
       replayed: false,
     }),
+    planDetail: async (_workspaceId, _sessionId, planId, expectedPlanHash) => ({
+      planId,
+      planHash: expectedPlanHash,
+      source: "explicit_plan_command",
+      summary: "Inspect and update the requested files",
+      steps: [{
+        stepId: "inspect",
+        title: "Inspect the current implementation",
+        dependsOn: [],
+        targetPaths: ["src/lib.rs"],
+        suggestedChecks: [],
+        notes: [],
+      }],
+      targetPaths: ["src/lib.rs"],
+      suggestedChecks: [],
+      notes: [],
+      lineage: { source: {}, createdAtMs: 1 },
+    }),
+    userInputRequest: async () => {
+      throw new Error("no pending user input");
+    },
+    userInputDecision: async () => {
+      throw new Error("no pending user input");
+    },
     resolveApproval: async (_workspaceId, sessionId, runId, approval, decision) => ({
       commandId: "approval-command-test",
       clientId: "desktop-test",
@@ -5675,6 +5699,7 @@ describe("desktop workspace and history shell", () => {
             planHash,
             status: "draft_ready" as const,
             summary: "Refactor the workspace snapshot binding",
+            summaryTruncated: false,
             stepCount: 3,
             targetPathCount: 2,
             suggestedCheckCount: 1,
@@ -5696,6 +5721,8 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText("plan-review-1")).toBeTruthy();
     expect(screen.getByText(/sha256:ddddd/)).toBeTruthy();
     expect(screen.getByText("Automatic plan review")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Review complete plan" }));
+    expect(await screen.findByTestId("plan-workbench")).toBeTruthy();
     const runButton = screen.getByRole("button", { name: "Run plan" });
     expect(runButton.hasAttribute("disabled")).toBe(false);
     await user.click(runButton);
@@ -5741,6 +5768,7 @@ describe("desktop workspace and history shell", () => {
           planHash: `sha256:${"e".repeat(64)}`,
           status: "draft_ready" as const,
           summary: "Stale plan draft",
+          summaryTruncated: false,
           stepCount: 1,
           targetPathCount: 0,
           suggestedCheckCount: 0,
@@ -5758,6 +5786,8 @@ describe("desktop workspace and history shell", () => {
 
     expect(await screen.findByText("Stale plan draft")).toBeTruthy();
     expect(screen.getByText("Explicit /plan")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Review complete plan" }));
+    expect(await screen.findByTestId("plan-workbench")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Run plan" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
     expect(
@@ -5775,6 +5805,119 @@ describe("desktop workspace and history shell", () => {
     );
     expect(await screen.findByText(/Plan revision started/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reject" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("submits a literal single-select option id without colliding with Other", async () => {
+    const user = userEvent.setup();
+    const requestHash = `sha256:${"7".repeat(64)}`;
+    const userInputDecision = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      requestId: string,
+      generation: number,
+      expectedRequestHash: string,
+    ) => ({
+      commandId: "user-input-command-1",
+      clientId: "desktop-test",
+      sessionId,
+      request: {
+        identity: {
+          sessionScopeId: sessionId,
+          rootLogicalRunId: "root-run-1",
+          sourceThreadId: "thread-1",
+          requestId,
+          generation,
+          sourceBindingHash: `sha256:${"6".repeat(64)}`,
+        },
+        requestHash: expectedRequestHash,
+        source: { kind: "agent" as const },
+        purpose: "choice" as const,
+        prompt: "Choose the execution mode",
+        questions: [],
+        allowedActions: ["submit" as const],
+        requestedAtUnixMs: 1,
+        status: "decision_accepted" as const,
+        answerReceipt: {
+          commandId: "user-input-command-1",
+          decision: "submitted" as const,
+          answerHash: `sha256:${"5".repeat(64)}`,
+          answeredQuestionIds: ["mode"],
+        },
+      },
+      continuationRunId: "continuation-1",
+      replayed: false,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      display: async () => ({
+        schemaVersion: 1,
+        requestScope: "http-session-new",
+        throughSessionStreamSequence: "11",
+        totalItems: "0",
+        items: [],
+        hasMore: false,
+        gapFacts: [],
+        userInput: {
+          identity: {
+            sessionScopeId: "http-session-new",
+            rootLogicalRunId: "root-run-1",
+            sourceThreadId: "thread-1",
+            requestId: "request-1",
+            generation: 1,
+            sourceBindingHash: `sha256:${"6".repeat(64)}`,
+          },
+          requestHash,
+          source: { kind: "agent" as const },
+          purpose: "choice" as const,
+          prompt: "Choose the execution mode",
+          questions: [{
+            id: "mode",
+            header: "Mode",
+            question: "Which mode should Sigil use?",
+            required: true,
+            field: {
+              kind: "single_select" as const,
+              options: [
+                { id: "__other__", label: "Literal sentinel" },
+                { id: "safe", label: "Safe" },
+              ],
+              allowOther: true,
+            },
+          }],
+          allowedActions: ["submit" as const],
+          requestedAtUnixMs: 1,
+          status: "requested" as const,
+        },
+      }),
+      userInputDecision,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const select = await screen.findByRole("combobox", { name: "Mode" });
+    await user.selectOptions(select, "option:0");
+    await user.click(screen.getByRole("button", { name: "Submit and continue" }));
+
+    await waitFor(() => expect(userInputDecision).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "request-1",
+      1,
+      requestHash,
+      {
+        kind: "submitted",
+        answers: [{
+          questionId: "mode",
+          value: { kind: "single_select", optionId: "__other__" },
+        }],
+      },
+      "manual",
+    ));
   });
 
   it("stops a persistent terminal task with its exact run and generation binding", async () => {

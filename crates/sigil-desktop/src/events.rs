@@ -269,6 +269,11 @@ pub enum DesktopPublicRunEventKind {
     RunFinished {
         final_text: String,
     },
+    RunAwaitingUserInput {
+        request_id: String,
+        generation: u32,
+        request_hash: String,
+    },
     TaskRunFinished {
         task_id: String,
         status: String,
@@ -278,6 +283,23 @@ pub enum DesktopPublicRunEventKind {
         status: String,
         #[serde(default)]
         task_id: Option<String>,
+    },
+    ConversationRouteChanged {
+        decision_id: String,
+        route: DesktopPublicConversationRoute,
+        status: String,
+    },
+    PlanReviewChanged {
+        plan_review_id: String,
+        plan_id: String,
+        status: crate::DesktopPlanReviewStatus,
+    },
+    UserInputChanged {
+        request_id: String,
+        generation: u32,
+        request_hash: String,
+        status: crate::DesktopUserInputStatus,
+        request: Box<crate::DesktopUserInputRequest>,
     },
     TaskPhaseChanged {
         #[serde(default)]
@@ -403,6 +425,9 @@ pub enum DesktopTimelineEventKind {
     TaskRunStarted,
     TaskRunFinished,
     TaskRoutingChanged,
+    ConversationRouteChanged,
+    PlanReviewChanged,
+    UserInputChanged,
     TaskPhaseChanged,
     TaskPlanUpdated,
     TaskBatchChanged,
@@ -426,6 +451,15 @@ pub enum DesktopTimelineEventKind {
     RouteRecoveryRequired,
     RunCancelled,
     Other,
+}
+
+/// Public conversation route carried by durable lifecycle events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPublicConversationRoute {
+    Chat,
+    PlanReview,
+    Task,
 }
 
 /// Typed task projection safe to send to the local renderer.
@@ -771,6 +805,61 @@ impl DesktopProtocolEvent {
                 Some(bounded_text(handoff_id)),
                 Some(bounded_text(status)),
             ),
+            DesktopPublicRunEventKind::ConversationRouteChanged {
+                decision_id,
+                status,
+                ..
+            } => (
+                DesktopTimelineEventKind::ConversationRouteChanged,
+                None,
+                Some(bounded_text(decision_id)),
+                Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::PlanReviewChanged {
+                plan_review_id,
+                status,
+                ..
+            } => (
+                DesktopTimelineEventKind::PlanReviewChanged,
+                None,
+                Some(bounded_text(plan_review_id)),
+                Some(
+                    match status {
+                        crate::DesktopPlanReviewStatus::Started => "started",
+                        crate::DesktopPlanReviewStatus::WaitingForInput => "waiting_for_input",
+                        crate::DesktopPlanReviewStatus::Finalizing => "finalizing",
+                        crate::DesktopPlanReviewStatus::DraftReady => "draft_ready",
+                        crate::DesktopPlanReviewStatus::CompletedWithoutDraft => {
+                            "completed_without_draft"
+                        }
+                        crate::DesktopPlanReviewStatus::Failed => "failed",
+                        crate::DesktopPlanReviewStatus::Interrupted => "interrupted",
+                        crate::DesktopPlanReviewStatus::Cancelled => "cancelled",
+                    }
+                    .to_owned(),
+                ),
+            ),
+            DesktopPublicRunEventKind::UserInputChanged {
+                request_id, status, ..
+            } => (
+                DesktopTimelineEventKind::UserInputChanged,
+                None,
+                Some(bounded_text(request_id)),
+                Some(
+                    match status {
+                        crate::DesktopUserInputStatus::Requested => "requested",
+                        crate::DesktopUserInputStatus::DecisionAccepted => "decision_accepted",
+                        crate::DesktopUserInputStatus::ContinuationClaimed => {
+                            "continuation_claimed"
+                        }
+                        crate::DesktopUserInputStatus::ContinuationStarted => {
+                            "continuation_started"
+                        }
+                        crate::DesktopUserInputStatus::Resolved => "resolved",
+                    }
+                    .to_owned(),
+                ),
+            ),
             DesktopPublicRunEventKind::TaskPhaseChanged { status, .. } => (
                 DesktopTimelineEventKind::TaskPhaseChanged,
                 None,
@@ -892,6 +981,12 @@ impl DesktopProtocolEvent {
                 Some(bounded_text(final_text)),
                 None,
                 Some("finished".to_owned()),
+            ),
+            DesktopPublicRunEventKind::RunAwaitingUserInput { request_id, .. } => (
+                DesktopTimelineEventKind::UserInputChanged,
+                None,
+                Some(bounded_text(request_id)),
+                Some("requested".to_owned()),
             ),
             DesktopPublicRunEventKind::RunFailed { error } => (
                 DesktopTimelineEventKind::RunFailed,

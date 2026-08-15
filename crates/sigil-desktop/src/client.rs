@@ -769,13 +769,18 @@ impl DesktopHttpClient {
         );
         let command_id = command.command_id.clone();
         let client_id = command.client_id.clone();
-        let mut receipt: crate::DesktopPlanDecisionCommandReceipt = self
-            .post_json(
-                self.route(["sessions", session_id, "plan-decision"])?,
-                &command,
-                StatusCode::OK,
-            )
-            .await?;
+        let route = self.route(["sessions", session_id, "plan-decision"])?;
+        let first = self
+            .post_json(route.clone(), &command, StatusCode::OK)
+            .await;
+        // The response may be lost after the append-only decision boundary. Replay the exact
+        // command envelope before surfacing ambiguity to the renderer.
+        let mut receipt: crate::DesktopPlanDecisionCommandReceipt = match first {
+            Err(DesktopClientError::RequestFailed) => {
+                self.post_json(route, &command, StatusCode::OK).await?
+            }
+            result => result?,
+        };
         if receipt.command_id != command_id
             || receipt.client_id != client_id
             || receipt.session_id != session_id
@@ -787,6 +792,115 @@ impl DesktopHttpClient {
         receipt.command_id = command_id;
         receipt.client_id = client_id;
         receipt.session_id = session_id.to_owned();
+        Ok(receipt)
+    }
+
+    /// Reads the complete immutable detail for one exact durable plan artifact.
+    pub async fn plan_review_detail(
+        &self,
+        session_id: &str,
+        plan_id: &str,
+        expected_plan_hash: &str,
+    ) -> Result<crate::DesktopPlanReviewDetail, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_stream_identity(plan_id)?;
+        if expected_plan_hash.is_empty() {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let mut url = self.route(["sessions", session_id, "plans", plan_id])?;
+        url.query_pairs_mut()
+            .append_pair("expected_plan_hash", expected_plan_hash);
+        let (detail, etag): (crate::DesktopPlanReviewDetail, String) =
+            self.get_json_with_etag(url, StatusCode::OK).await?;
+        if detail.plan_id != plan_id
+            || detail.plan_hash != expected_plan_hash
+            || etag != format!("\"{expected_plan_hash}\"")
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(detail)
+    }
+
+    /// Reads one exact durable user-input request without exposing answer values.
+    pub async fn user_input_request(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        generation: u32,
+        expected_request_hash: &str,
+    ) -> Result<crate::DesktopUserInputRequest, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_stream_identity(request_id)?;
+        if generation == 0 || expected_request_hash.is_empty() {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let mut url = self.route(["sessions", session_id, "user-input", request_id])?;
+        url.query_pairs_mut()
+            .append_pair("generation", &generation.to_string())
+            .append_pair("expected_request_hash", expected_request_hash);
+        let (request, etag): (crate::DesktopUserInputRequest, String) =
+            self.get_json_with_etag(url, StatusCode::OK).await?;
+        if request.identity.request_id != request_id
+            || request.identity.generation != generation
+            || request.request_hash != expected_request_hash
+            || etag != format!("\"{expected_request_hash}\"")
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        validate_user_input_request(&request)?;
+        Ok(request)
+    }
+
+    /// Resolves one exact durable user-input request and returns its idempotent receipt.
+    pub async fn user_input_decision(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        generation: u32,
+        expected_request_hash: &str,
+        decision: crate::DesktopUserInputDecision,
+        permission_mode: Option<crate::DesktopPermissionMode>,
+    ) -> Result<crate::DesktopUserInputDecisionCommandReceipt, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_stream_identity(request_id)?;
+        if generation == 0 || expected_request_hash.is_empty() {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let command = self.command(
+            session_id,
+            None,
+            crate::DesktopUserInputDecisionRequest {
+                generation,
+                expected_request_hash: expected_request_hash.to_owned(),
+                decision,
+                permission_mode,
+            },
+        );
+        let command_id = command.command_id.clone();
+        let client_id = command.client_id.clone();
+        let route = self.route(["sessions", session_id, "user-input", request_id, "decision"])?;
+        let first = self
+            .post_json(route.clone(), &command, StatusCode::OK)
+            .await;
+        // A lost response is ambiguous after the durable answer boundary. Retry the exact same
+        // envelope so the command store replays its receipt instead of accepting a second command
+        // identity for this request generation.
+        let receipt: crate::DesktopUserInputDecisionCommandReceipt = match first {
+            Err(DesktopClientError::RequestFailed) => {
+                self.post_json(route, &command, StatusCode::OK).await?
+            }
+            result => result?,
+        };
+        if receipt.command_id != command_id
+            || receipt.client_id != client_id
+            || receipt.session_id != session_id
+            || receipt.request.identity.request_id != request_id
+            || receipt.request.identity.generation != generation
+            || receipt.request.request_hash != expected_request_hash
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        validate_user_input_request(&receipt.request)?;
         Ok(receipt)
     }
 
@@ -1056,6 +1170,35 @@ impl DesktopHttpClient {
             .await
     }
 
+    async fn get_json_with_etag<T>(
+        &self,
+        url: Url,
+        expected_status: StatusCode,
+    ) -> Result<(T, String), DesktopClientError>
+    where
+        T: DeserializeOwned,
+    {
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(self.bearer.expose())
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| DesktopClientError::RequestFailed)?;
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or(DesktopClientError::InvalidResponse)?;
+        let value = self
+            .decode_json_response(response, expected_status, MAX_JSON_RESPONSE_BYTES)
+            .await?;
+        Ok((value, etag))
+    }
+
     async fn post_json<T, B>(
         &self,
         url: Url,
@@ -1105,12 +1248,25 @@ impl DesktopHttpClient {
     where
         T: DeserializeOwned,
     {
-        let mut response = request
+        let response = request
             .bearer_auth(self.bearer.expose())
             .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|_| DesktopClientError::RequestFailed)?;
+        self.decode_json_response(response, expected_status, max_response_bytes)
+            .await
+    }
+
+    async fn decode_json_response<T>(
+        &self,
+        mut response: Response,
+        expected_status: StatusCode,
+        max_response_bytes: usize,
+    ) -> Result<T, DesktopClientError>
+    where
+        T: DeserializeOwned,
+    {
         let status = response.status();
         if response
             .content_length()
@@ -1620,18 +1776,17 @@ fn validate_conversation_display_page(
         if let Some(risk) = plan_review.risk.as_deref() {
             validate_task_control_label(risk)?;
         }
+        let actions_are_unique = plan_review
+            .allowed_actions
+            .iter()
+            .enumerate()
+            .all(|(index, action)| !plan_review.allowed_actions[..index].contains(action));
         if matches!(
             plan_review.status,
             crate::DesktopPlanReviewStatus::DraftReady
         ) && (plan_review.plan_hash.is_none()
             || plan_review.summary.is_none()
-            || plan_review.allowed_actions
-                != [
-                    crate::DesktopPlanAction::Run,
-                    crate::DesktopPlanAction::Save,
-                    crate::DesktopPlanAction::Revise,
-                    crate::DesktopPlanAction::Reject,
-                ])
+            || !actions_are_unique)
         {
             return Err(DesktopClientError::InvalidResponse);
         }
@@ -1642,6 +1797,9 @@ fn validate_conversation_display_page(
         {
             return Err(DesktopClientError::InvalidResponse);
         }
+    }
+    if let Some(request) = page.user_input.as_ref() {
+        validate_user_input_request(request)?;
     }
     let Some(task) = page.task_control.as_ref() else {
         return Ok(());
@@ -1694,6 +1852,130 @@ fn validate_conversation_display_page(
         }
         for conflict in &lane.conflicts {
             validate_task_control_label(conflict)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_user_input_request(
+    request: &crate::DesktopUserInputRequest,
+) -> Result<(), DesktopClientError> {
+    use std::collections::BTreeSet;
+
+    let identity = &request.identity;
+    for value in [
+        identity.session_scope_id.as_str(),
+        identity.root_logical_run_id.as_str(),
+        identity.source_thread_id.as_str(),
+        identity.request_id.as_str(),
+    ] {
+        validate_stream_identity(value).map_err(|_| DesktopClientError::InvalidResponse)?;
+    }
+    if identity.generation == 0
+        || !valid_tool_artifact_hash(&identity.source_binding_hash)
+        || !valid_tool_artifact_hash(&request.request_hash)
+        || request.prompt.trim().is_empty()
+        || request.prompt.chars().count() > 512
+        || request.questions.is_empty()
+        || request.questions.len() > 3
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    let mut question_ids = BTreeSet::new();
+    for question in &request.questions {
+        if question.id.trim().is_empty()
+            || question.id.len() > 48
+            || !question_ids.insert(question.id.as_str())
+            || question.header.trim().is_empty()
+            || question.header.chars().count() > 32
+            || question.question.trim().is_empty()
+            || question.question.chars().count() > 512
+            || question
+                .description
+                .as_deref()
+                .is_some_and(|value| value.chars().count() > 512)
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        match &question.field {
+            crate::DesktopUserInputField::Text { max_chars, .. } => {
+                if *max_chars == 0 || *max_chars > 4096 {
+                    return Err(DesktopClientError::InvalidResponse);
+                }
+            }
+            crate::DesktopUserInputField::SingleSelect { options, .. }
+            | crate::DesktopUserInputField::MultiSelect { options, .. } => {
+                if options.len() < 2 || options.len() > 12 {
+                    return Err(DesktopClientError::InvalidResponse);
+                }
+                let mut option_ids = BTreeSet::new();
+                for option in options {
+                    if option.id.trim().is_empty()
+                        || option.id.len() > 48
+                        || !option_ids.insert(option.id.as_str())
+                        || option.label.trim().is_empty()
+                        || option.label.chars().count() > 80
+                        || option
+                            .description
+                            .as_deref()
+                            .is_some_and(|value| value.chars().count() > 240)
+                    {
+                        return Err(DesktopClientError::InvalidResponse);
+                    }
+                }
+                if let crate::DesktopUserInputField::MultiSelect { max_selected, .. } =
+                    &question.field
+                    && (*max_selected == 0 || *max_selected as usize > options.len())
+                {
+                    return Err(DesktopClientError::InvalidResponse);
+                }
+            }
+            crate::DesktopUserInputField::Number
+            | crate::DesktopUserInputField::Integer
+            | crate::DesktopUserInputField::Boolean => {}
+        }
+    }
+    let actions_are_unique = request
+        .allowed_actions
+        .iter()
+        .enumerate()
+        .all(|(index, action)| !request.allowed_actions[..index].contains(action));
+    if !actions_are_unique
+        || !request
+            .allowed_actions
+            .contains(&crate::DesktopUserInputAction::Submit)
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    let receipt_expected = request.status != crate::DesktopUserInputStatus::Requested;
+    if receipt_expected != request.answer_receipt.is_some()
+        || (request.status == crate::DesktopUserInputStatus::Resolved)
+            != request.resolution.is_some()
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    if let Some(receipt) = request.answer_receipt.as_ref() {
+        validate_stream_identity(&receipt.command_id)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        let answered = receipt
+            .answered_question_ids
+            .iter()
+            .collect::<BTreeSet<_>>();
+        if answered.len() != receipt.answered_question_ids.len()
+            || receipt
+                .answered_question_ids
+                .iter()
+                .any(|id| !question_ids.contains(id.as_str()))
+            || receipt
+                .answer_hash
+                .as_deref()
+                .is_some_and(|hash| !valid_tool_artifact_hash(hash))
+            || matches!(
+                receipt.decision,
+                crate::DesktopUserInputDecisionKind::Submitted
+            ) != receipt.answer_hash.is_some()
+        {
+            return Err(DesktopClientError::InvalidResponse);
         }
     }
     Ok(())

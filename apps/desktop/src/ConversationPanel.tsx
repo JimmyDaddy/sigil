@@ -20,6 +20,7 @@ import { IntentStackInspector } from "./IntentStackInspector";
 import { useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
 import { PlanCard } from "./PlanCard";
+import { UserInputCard } from "./UserInputCard";
 import { TaskControlPanel } from "./TaskControlPanel";
 import { TaskIntegrationInspector } from "./TaskIntegrationInspector";
 import { TerminalTaskCard } from "./TerminalTaskCard";
@@ -40,6 +41,7 @@ import type {
   ConversationTaskControl,
   PermissionMode,
   PlanDecisionAction,
+  PlanReviewDetail,
   ProviderConnectionInventory,
   ProviderModelRef,
   ReasoningEffort,
@@ -60,6 +62,8 @@ import type {
   TaskIntegrationAcceptance,
   TaskIntegrationReview,
   VerificationSummary,
+  UserInputDecision,
+  UserInputRequest,
 } from "./types";
 import type { ConversationDisplayPage as BridgeConversationDisplayPage } from "./types";
 import { providerModelRefsEqual } from "./types";
@@ -109,6 +113,7 @@ interface ConversationPanelProps {
   onOpenSupport: () => void;
   onOpenFork: (sessionRef: string, sessionId: string) => Promise<void>;
   onRetrySessionAttach?: (recoveryBinding: string) => Promise<boolean>;
+  onResumeAcceptedUserInput?: () => Promise<boolean>;
 }
 
 interface PendingPrompt {
@@ -162,6 +167,7 @@ export function ConversationPanel({
   onOpenSupport,
   onOpenFork,
   onRetrySessionAttach,
+  onResumeAcceptedUserInput,
 }: ConversationPanelProps) {
   const { t } = useLocale();
   const { notify } = useNotifications();
@@ -201,8 +207,20 @@ export function ConversationPanel({
   const [taskControlBusy, setTaskControlBusy] = useState(false);
   const [durableTaskControl, setDurableTaskControl] = useState<ConversationTaskControl>();
   const [durablePlanReview, setDurablePlanReview] = useState<ConversationPlanReview>();
+  const [planDetail, setPlanDetail] = useState<PlanReviewDetail>();
+  const [planDetailOpen, setPlanDetailOpen] = useState(false);
+  const [planDetailBusy, setPlanDetailBusy] = useState(false);
+  const [planDetailFailure, setPlanDetailFailure] = useState(false);
   const [planDecisionBusy, setPlanDecisionBusy] = useState(false);
   const [planDecisionFailure, setPlanDecisionFailure] = useState(false);
+  const [durableUserInput, setDurableUserInput] = useState<UserInputRequest>();
+  const [userInputBusy, setUserInputBusy] = useState(false);
+  const [userInputFailure, setUserInputFailure] = useState(false);
+  const exactPlanDetail = planDetail !== undefined
+    && durablePlanReview?.planId === planDetail.planId
+    && durablePlanReview.planHash === planDetail.planHash
+    ? planDetail
+    : undefined;
   const [taskIntegrationReview, setTaskIntegrationReview] = useState<TaskIntegrationReview>();
   const [taskIntegrationAcceptance, setTaskIntegrationAcceptance] =
     useState<TaskIntegrationAcceptance>();
@@ -430,8 +448,15 @@ export function ConversationPanel({
     setTaskControlBusy(false);
     setDurableTaskControl(undefined);
     setDurablePlanReview(undefined);
+    setPlanDetail(undefined);
+    setPlanDetailOpen(false);
+    setPlanDetailBusy(false);
+    setPlanDetailFailure(false);
     setPlanDecisionBusy(false);
     setPlanDecisionFailure(false);
+    setDurableUserInput(undefined);
+    setUserInputBusy(false);
+    setUserInputFailure(false);
     setTaskIntegrationReview(undefined);
     setTaskIntegrationAcceptance(undefined);
     setTaskIntegrationLoading(false);
@@ -493,6 +518,18 @@ export function ConversationPanel({
     }
     timelineViewportRestoring.current = false;
   }, [session.id, workspaceId]);
+
+  useEffect(() => {
+    if (
+      planDetail !== undefined
+      && (durablePlanReview?.planId !== planDetail.planId
+        || durablePlanReview?.planHash !== planDetail.planHash)
+    ) {
+      setPlanDetail(undefined);
+      setPlanDetailOpen(false);
+      setPlanDetailFailure(false);
+    }
+  }, [durablePlanReview?.planHash, durablePlanReview?.planId, planDetail]);
 
   useEffect(() => {
     if (conversationQueueBusy) return;
@@ -604,6 +641,7 @@ export function ConversationPanel({
             });
             setDurableTaskControl(canonicalPage.taskControl);
             setDurablePlanReview(canonicalPage.planReview);
+            setDurableUserInput(canonicalPage.userInput);
             setPlanDecisionFailure(false);
             setDisplayError(false);
             return;
@@ -900,6 +938,16 @@ export function ConversationPanel({
         setAgentActivityReload((value) => value + 1);
       }
       if (
+        event.kind === "conversation_route_changed"
+        || event.kind === "plan_review_changed"
+        || event.kind === "user_input_changed"
+      ) {
+        // These events carry only bounded lifecycle facts. Reconcile the full canonical
+        // workbench/request projection instead of trying to maintain a second renderer state
+        // machine from event order alone.
+        setContinuityReload((value) => value + 1);
+      }
+      if (
         event.kind === "integration_lane_changed"
         || event.kind === "task_run_finished"
         || (event.kind === "task_phase_changed" && event.task?.phase === "integration")
@@ -1161,6 +1209,7 @@ export function ConversationPanel({
           });
           setDurableTaskControl(page.taskControl);
           setDurablePlanReview(page.planReview);
+          setDurableUserInput(page.userInput);
           if (canonicalPageCoversTerminal(page, {
             runId: pendingRunId,
             status: observed?.status,
@@ -1649,29 +1698,119 @@ export function ConversationPanel({
     if (
       review === undefined
       || planDecisionBusy
+      || exactPlanDetail === undefined
+      || !planDetailOpen
+      || !review.allowedActions.includes(action)
       || (review.stale && (action === "run" || action === "save"))
       || review.status !== "draft_ready"
+      || review.planHash === undefined
       || pendingApproval?.approval !== undefined
     ) return;
     setPlanDecisionBusy(true);
     setPlanDecisionFailure(false);
+    if (action === "revise") {
+      // Freeze the old plan immediately. The canonical reload will replace this optimistic
+      // no-authority view with awaiting-guidance/running/failed state.
+      setDurablePlanReview((current) => current === undefined
+        ? current
+        : { ...current, allowedActions: [] });
+    }
     try {
       const summary = await bridge.planDecision(
         workspaceId,
         session.id,
         review.planId,
-        review.planHash!,
+        review.planHash,
         action,
       );
       if (summary.action === "revise" && summary.revisionRunId !== undefined) {
         notify({ message: t("planRevisionStarted"), tone: "info" });
       }
-      setDurablePlanReview(undefined);
+      if (summary.userInputRequest !== undefined) {
+        setDurableUserInput(summary.userInputRequest);
+      }
+      if (summary.action !== "revise") {
+        setDurablePlanReview(undefined);
+        setPlanDetail(undefined);
+        setPlanDetailOpen(false);
+      }
       setDisplayReload((value) => value + 1);
     } catch {
       setPlanDecisionFailure(true);
+      // The command response may have been lost after the durable decision append. Reconcile
+      // canonical state before allowing another action instead of trusting the stale card.
+      setDisplayReload((value) => value + 1);
+      setContinuityReload((value) => value + 1);
     } finally {
       setPlanDecisionBusy(false);
+    }
+  };
+
+  const openPlanDetail = async () => {
+    const review = durablePlanReview;
+    if (review?.planHash === undefined || planDetailBusy) return;
+    setPlanDetailOpen(true);
+    if (planDetail?.planId === review.planId && planDetail.planHash === review.planHash) return;
+    setPlanDetailBusy(true);
+    setPlanDetailFailure(false);
+    try {
+      const detail = await bridge.planDetail(
+        workspaceId,
+        session.id,
+        review.planId,
+        review.planHash,
+      );
+      setPlanDetail(detail);
+    } catch {
+      setPlanDetailFailure(true);
+    } finally {
+      setPlanDetailBusy(false);
+    }
+  };
+
+  const submitUserInputDecision = async (decision: UserInputDecision) => {
+    const request = durableUserInput;
+    if (request === undefined || request.status !== "requested" || userInputBusy) return;
+    setUserInputBusy(true);
+    setUserInputFailure(false);
+    try {
+      await bridge.userInputDecision(
+        workspaceId,
+        session.id,
+        request.identity.requestId,
+        request.identity.generation,
+        request.requestHash,
+        decision,
+        permissionMode,
+      );
+      setDurableUserInput(undefined);
+      setDisplayReload((value) => value + 1);
+      setContinuityReload((value) => value + 1);
+    } catch {
+      setUserInputFailure(true);
+      setDisplayReload((value) => value + 1);
+      setContinuityReload((value) => value + 1);
+    } finally {
+      setUserInputBusy(false);
+    }
+  };
+
+  const resumeAcceptedUserInput = async () => {
+    if (
+      durableUserInput?.status !== "decision_accepted"
+      || userInputBusy
+      || onResumeAcceptedUserInput === undefined
+    ) return;
+    setUserInputBusy(true);
+    setUserInputFailure(false);
+    try {
+      if (!await onResumeAcceptedUserInput()) setUserInputFailure(true);
+      setDisplayReload((value) => value + 1);
+      setContinuityReload((value) => value + 1);
+    } catch {
+      setUserInputFailure(true);
+    } finally {
+      setUserInputBusy(false);
     }
   };
 
@@ -2089,6 +2228,19 @@ export function ConversationPanel({
         />
       )}
 
+      {durableUserInput === undefined || durableUserInput.status === "resolved" ? null : (
+        <UserInputCard
+          key={`${durableUserInput.identity.requestId}:${durableUserInput.identity.generation}`}
+          request={durableUserInput}
+          busy={userInputBusy}
+          failure={userInputFailure}
+          onDecision={(decision) => void submitUserInputDecision(decision)}
+          onResume={onResumeAcceptedUserInput === undefined
+            ? undefined
+            : () => void resumeAcceptedUserInput()}
+        />
+      )}
+
       {durablePlanReview === undefined ? null : (
         <PlanCard
           key={durablePlanReview.planId}
@@ -2096,6 +2248,12 @@ export function ConversationPanel({
           disabled={submissionBlocked || pendingApproval?.approval !== undefined}
           busy={planDecisionBusy}
           failure={planDecisionFailure}
+          detail={exactPlanDetail}
+          detailOpen={planDetailOpen && exactPlanDetail !== undefined}
+          detailBusy={planDetailBusy}
+          detailFailure={planDetailFailure}
+          onOpenDetail={() => void openPlanDetail()}
+          onCloseDetail={() => setPlanDetailOpen(false)}
           onDecision={(action) => void submitPlanDecision(action)}
         />
       )}

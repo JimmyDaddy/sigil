@@ -407,21 +407,15 @@ fn short_shell_reserves_the_pending_plan_action_above_a_tall_composer() -> anyho
     app.set_terminal_size(80, 8);
     app.composer.input = "\n\n\n\n".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
-    app.composer.pending_plan_approval = Some(PendingPlanApproval {
-        plan_id: Some("plan_1".to_owned()),
-        plan_text: "Inspect, edit, and verify.".to_owned(),
-        plan_hash: "sha256:plan".to_owned(),
-        summary: "Inspect, edit, and verify".to_owned(),
-        steps: vec!["Inspect".to_owned()],
-        target_paths: vec!["src/lib.rs".to_owned()],
-        suggested_checks: vec!["cargo test".to_owned()],
-        target_path_count: 1,
-        suggested_check_count: 1,
-        workspace_snapshot_id: None,
-        stale: false,
-        stale_reason: None,
-        rendered_text_row_counts: Default::default(),
-    });
+    app.composer.pending_plan_approval = Some(PendingPlanApproval::test_fixture(
+        "plan_1",
+        "Inspect, edit, and verify.",
+        "sha256:plan",
+        "Inspect, edit, and verify",
+        vec!["Inspect".to_owned()],
+        vec!["src/lib.rs".to_owned()],
+        vec!["cargo test".to_owned()],
+    ));
 
     let layout = crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 80, 8), &app);
     assert!(layout.live_panel.height >= 4);
@@ -432,7 +426,7 @@ fn short_shell_reserves_the_pending_plan_action_above_a_tall_composer() -> anyho
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Enter"));
-    assert!(rendered.contains("run"));
+    assert!(rendered.contains("review"));
     Ok(())
 }
 
@@ -442,21 +436,15 @@ fn short_shell_reserves_action_and_egress_disclosure_without_overlap() -> anyhow
     app.set_terminal_size(80, 10);
     app.composer.input = "\n\n\n\n".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
-    app.composer.pending_plan_approval = Some(PendingPlanApproval {
-        plan_id: Some("plan_egress".to_owned()),
-        plan_text: "Inspect network usage before running.".to_owned(),
-        plan_hash: "sha256:plan-egress".to_owned(),
-        summary: "Inspect network usage".to_owned(),
-        steps: vec!["Inspect".to_owned()],
-        target_paths: vec!["src/lib.rs".to_owned()],
-        suggested_checks: vec!["cargo test".to_owned()],
-        target_path_count: 1,
-        suggested_check_count: 1,
-        workspace_snapshot_id: None,
-        stale: false,
-        stale_reason: None,
-        rendered_text_row_counts: Default::default(),
-    });
+    app.composer.pending_plan_approval = Some(PendingPlanApproval::test_fixture(
+        "plan_egress",
+        "Inspect network usage before running.",
+        "sha256:plan-egress",
+        "Inspect network usage",
+        vec!["Inspect".to_owned()],
+        vec!["src/lib.rs".to_owned()],
+        vec!["cargo test".to_owned()],
+    ));
     let (receipt_tx, mut receipt_rx) = tokio::sync::oneshot::channel();
     app.handle_worker_message(WorkerMessage::EgressDisclosureRequested {
         disclosure: PreEgressDisclosure::new(
@@ -493,7 +481,7 @@ fn short_shell_reserves_action_and_egress_disclosure_without_overlap() -> anyhow
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Network disclosure"));
     assert!(rendered.contains("Enter"));
-    assert!(rendered.contains("run"));
+    assert!(rendered.contains("review"));
 
     app.set_terminal_size(80, 8);
     let compact_screen = ratatui::layout::Rect::new(0, 0, 80, 8);
@@ -507,7 +495,7 @@ fn short_shell_reserves_action_and_egress_disclosure_without_overlap() -> anyhow
     let compact_rendered = rendered_content(&compact_terminal);
     assert!(!compact_rendered.contains("Network disclosure"));
     assert!(compact_rendered.contains("Enter"));
-    assert!(compact_rendered.contains("run"));
+    assert!(compact_rendered.contains("review"));
     assert!(!app.acknowledge_active_egress_disclosure_frame());
     assert!(matches!(
         receipt_rx.try_recv(),

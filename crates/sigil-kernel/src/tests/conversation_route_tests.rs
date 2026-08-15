@@ -52,6 +52,13 @@ fn attempt_entry(
         source_turn: source_turn.clone(),
         route_decision_id: None,
         child_session_ref: plan_review_child_session_ref(plan_review_id, attempt_id),
+        finalizer_session_ref: None,
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        workspace_snapshot_id: None,
+        pending_user_input: None,
         status,
         terminal_reason: None,
         recorded_at_ms: 42,
@@ -185,6 +192,16 @@ fn plan_review_projection_validates_attempt_transitions() -> Result<()> {
     )];
     let projection = PlanReviewProjection::from_entries(&entries);
     projection.validate_append(&draft_ready)?;
+
+    // A legal status edge cannot rewrite the attempt's immutable authority binding.
+    let mut rebound = draft_ready.clone();
+    rebound.child_session_ref = SessionRef::new_relative("different-child.jsonl")?;
+    assert!(projection.validate_append(&rebound).is_err());
+    let rebound_projection = PlanReviewProjection::from_entries(&[
+        entries[0].clone(),
+        SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(rebound)),
+    ]);
+    assert!(rebound_projection.has_conflicts());
 
     // Terminal after terminal fails.
     entries.push(SessionLogEntry::Control(
@@ -499,6 +516,209 @@ fn reconcile_closes_started_attempts_and_promotes_durable_drafts() -> Result<()>
         .latest_attempt(&review_id)
         .expect("attempt exists");
     assert_eq!(latest.status, PlanReviewAttemptStatus::DraftReady);
+    Ok(())
+}
+
+#[test]
+fn reconcile_preserves_waiting_attempts_and_closes_abandoned_finalizers() -> Result<()> {
+    let mut waiting_session = Session::new("mock", "mock");
+    let waiting_turn = source_turn(&waiting_session, "msg-waiting");
+    let waiting_review_id = plan_review_id_for_source(&waiting_turn);
+    let waiting_attempt_id = plan_review_attempt_id_for_review(&waiting_review_id);
+    let started = attempt_entry(
+        &waiting_review_id,
+        &waiting_attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &waiting_turn,
+    );
+    waiting_session.append_control(crate::ControlEntry::PlanReviewAttempt(started.clone()))?;
+    let mut waiting = started;
+    waiting.status = PlanReviewAttemptStatus::WaitingForInput;
+    waiting.recorded_at_ms = 43;
+    waiting.pending_user_input = Some(Box::new(crate::PublicUserInputRequestV1 {
+        identity: crate::UserInputIdentityV1 {
+            session_scope_id: crate::SessionScopeId::new(waiting_session.session_scope_id())?,
+            root_logical_run_id: crate::LogicalRunId::new("run-waiting")?,
+            source_thread_id: crate::AgentThreadId::new("main")?,
+            request_id: crate::UserInputRequestId::new("request-waiting")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        request_hash: format!("sha256:{}", "b".repeat(64)),
+        source: crate::UserInputSourceV1::PlanReviewResearch {
+            plan_review_id: waiting_review_id.clone(),
+            attempt_id: waiting_attempt_id.clone(),
+        },
+        purpose: crate::UserInputPurposeV1::Clarification,
+        prompt: "Choose a migration boundary".to_owned(),
+        questions: vec![crate::UserInputQuestionV1 {
+            id: "boundary".to_owned(),
+            header: "Boundary".to_owned(),
+            question: "Which boundary should the plan use?".to_owned(),
+            description: None,
+            required: true,
+            field: crate::UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 256,
+            },
+        }],
+        allowed_actions: vec![crate::UserInputActionV1::Submit],
+        requested_at_unix_ms: 43,
+        status: crate::UserInputStatusV1::Requested,
+        answer_receipt: None,
+        resolution: None,
+    }));
+    waiting_session.append_control(crate::ControlEntry::PlanReviewAttempt(waiting))?;
+
+    let waiting_count = waiting_session.entries().len();
+    reconcile_plan_review_attempts(&mut waiting_session, 100)?;
+    assert_eq!(waiting_session.entries().len(), waiting_count);
+    assert_eq!(
+        PlanReviewProjection::from_entries(waiting_session.entries())
+            .latest_attempt(&waiting_review_id)
+            .expect("waiting attempt")
+            .status,
+        PlanReviewAttemptStatus::WaitingForInput
+    );
+
+    let mut finalizing_session = Session::new("mock", "mock");
+    let finalizing_turn = source_turn(&finalizing_session, "msg-finalizing");
+    let finalizing_review_id = plan_review_id_for_source(&finalizing_turn);
+    let finalizing_attempt_id = plan_review_attempt_id_for_review(&finalizing_review_id);
+    let started = attempt_entry(
+        &finalizing_review_id,
+        &finalizing_attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &finalizing_turn,
+    );
+    finalizing_session.append_control(crate::ControlEntry::PlanReviewAttempt(started.clone()))?;
+    let mut finalizing = started;
+    finalizing.status = PlanReviewAttemptStatus::Finalizing;
+    finalizing.recorded_at_ms = 44;
+    finalizing_session.append_control(crate::ControlEntry::PlanReviewAttempt(finalizing))?;
+
+    reconcile_plan_review_attempts(&mut finalizing_session, 101)?;
+    let finalizing_projection = PlanReviewProjection::from_entries(finalizing_session.entries());
+    let recovered = finalizing_projection
+        .latest_attempt(&finalizing_review_id)
+        .expect("recovered finalizing attempt");
+    assert_eq!(recovered.status, PlanReviewAttemptStatus::Interrupted);
+    assert_eq!(
+        recovered.terminal_reason,
+        Some(PlanReviewTerminalReason::RunInterrupted)
+    );
+    Ok(())
+}
+
+#[test]
+fn reconcile_recovers_finalizer_child_draft_and_switches_revision_lineage_atomically() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let parent_path = temp.path().join("sessions/root.jsonl");
+    let store = crate::JsonlSessionStore::new(&parent_path)?;
+    let mut session = Session::new("mock", "mock").with_store(store);
+    let turn = source_turn(&session, "msg-revision-crash");
+    let review_id = plan_review_id_for_source(&turn);
+    let base_attempt_id = plan_review_attempt_id_for_review(&review_id);
+    let base_plan_id = plan_review_plan_id_for_attempt(&review_id, &base_attempt_id);
+    let plan_source = PlanSourceRef {
+        source_turn: Some(turn.clone()),
+        plan_review_id: Some(review_id.clone()),
+        ..PlanSourceRef::default()
+    };
+    let mut base_started = attempt_entry(
+        &review_id,
+        &base_attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &turn,
+    );
+    base_started.finalizer_session_ref = Some(crate::plan_review_finalizer_session_ref(
+        &review_id,
+        &base_attempt_id,
+        1,
+    ));
+    session.append_control(crate::ControlEntry::PlanReviewAttempt(base_started.clone()))?;
+    let mut base_draft = crate::plan_draft_created_entry(
+        "```sigil-plan-v2\n{\"schema_version\":2,\"summary\":\"base\",\"steps\":[{\"step_id\":\"s1\",\"title\":\"base\"}],\"target_paths\":[],\"suggested_checks\":[]}\n```",
+        plan_source,
+        2,
+        None,
+    )?
+    .expect("base draft");
+    base_draft.plan_id = base_plan_id.clone();
+    session.append_controls(vec![
+        crate::ControlEntry::PlanDraftCreated(base_draft.clone()),
+        crate::ControlEntry::PlanReviewAttempt(PlanReviewAttemptEntry {
+            status: PlanReviewAttemptStatus::DraftReady,
+            recorded_at_ms: 3,
+            ..base_started
+        }),
+    ])?;
+
+    let revision_request_id = crate::UserInputRequestId::new("revision-crash-request")?;
+    let revision_attempt_id =
+        crate::plan_review_attempt_id_for_revision_ordinal(&review_id, &revision_request_id, 1);
+    let revised_plan_id = plan_review_plan_id_for_attempt(&review_id, &revision_attempt_id);
+    let finalizer_ref =
+        crate::plan_review_finalizer_session_ref(&review_id, &revision_attempt_id, 1);
+    session.append_controls(vec![
+        crate::ControlEntry::PlanDecisionRecorded(crate::PlanDecisionRecordedEntry {
+            plan_id: base_plan_id.clone(),
+            plan_hash: base_draft.plan_hash.clone(),
+            decision: crate::PlanDecision::RevisionRequested,
+            decided_by: crate::PlanDecisionActor::User,
+            decided_at_ms: 4,
+            reason: Some("revise".to_owned()),
+        }),
+        crate::ControlEntry::PlanReviewAttempt(PlanReviewAttemptEntry {
+            plan_review_id: review_id.clone(),
+            attempt_id: revision_attempt_id.clone(),
+            plan_id: revised_plan_id.clone(),
+            source: PlanReviewSource::AutomaticConversationRoute,
+            source_turn: turn,
+            route_decision_id: None,
+            child_session_ref: plan_review_child_session_ref(&review_id, &revision_attempt_id),
+            finalizer_session_ref: Some(finalizer_ref.clone()),
+            revision_request_id: Some(revision_request_id),
+            attempt_ordinal: 1,
+            base_plan_id: Some(base_plan_id.clone()),
+            base_plan_hash: Some(base_draft.plan_hash.clone()),
+            workspace_snapshot_id: None,
+            pending_user_input: None,
+            status: PlanReviewAttemptStatus::Started,
+            terminal_reason: None,
+            recorded_at_ms: 5,
+        }),
+    ])?;
+
+    let parent_dir = parent_path.parent().expect("session parent");
+    let child_store = crate::JsonlSessionStore::new(finalizer_ref.resolve(parent_dir))?;
+    let mut child = Session::new("mock", "mock").with_store(child_store);
+    let mut revised_draft = base_draft.clone();
+    revised_draft.plan_id = revised_plan_id.clone();
+    revised_draft.plan_hash = format!("sha256:{}", "e".repeat(64));
+    revised_draft.summary = "recovered revised draft".to_owned();
+    child.append_control(crate::ControlEntry::PlanDraftCreated(revised_draft.clone()))?;
+    drop(child);
+
+    reconcile_plan_review_attempts(&mut session, 6)?;
+    let review = PlanReviewProjection::from_entries(session.entries());
+    assert_eq!(
+        review
+            .latest_attempt(&review_id)
+            .expect("recovered revision")
+            .status,
+        PlanReviewAttemptStatus::DraftReady
+    );
+    let plans = session.plan_artifact_projection();
+    assert_eq!(plans.plans.get(&revised_plan_id), Some(&revised_draft));
+    assert_eq!(
+        plans
+            .latest_decision(&base_plan_id)
+            .expect("recovered lineage decision")
+            .decision,
+        crate::PlanDecision::RevisionSucceeded
+    );
     Ok(())
 }
 

@@ -13,7 +13,8 @@ use crate::{
     HttpConversationRecoveryCommandReceipt, HttpIntentDropCommandReceipt,
     HttpPlanDecisionCommandReceipt, HttpRunCancelCommandReceipt, HttpRunStartCommandReceipt,
     HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskPauseCommandReceipt,
-    HttpTerminalTaskCancelCommandReceipt, HttpVerificationRerunCommandReceipt,
+    HttpTerminalTaskCancelCommandReceipt, HttpUserInputDecisionCommandReceipt,
+    HttpVerificationRerunCommandReceipt,
     durable_io::{acquire_exclusive_lease, atomic_replace, canonical_durable_path, read_bounded},
 };
 
@@ -48,8 +49,13 @@ impl HttpDurableCommandStore {
     /// Opens or creates a bounded command identity store.
     ///
     /// Reservations that did not receive a durable completion before a prior process stopped are
-    /// sealed as aborted. They remain retained so a retry cannot silently execute the command a
-    /// second time.
+    /// sealed as aborted. They remain retained so ordinary commands cannot silently execute a
+    /// second time. An exact `user_input_decision` identity is the narrow exception: its kernel
+    /// command is itself append-only and idempotent, so an aborted adapter attempt may be reserved
+    /// again to recover a durably accepted answer whose continuation was never registered. A
+    /// `Reserved` user-input identity is also retryable after its process-local reservation was
+    /// released because completion persistence failed; the registry remains the exclusive
+    /// in-process concurrency owner.
     ///
     /// # Errors
     ///
@@ -124,6 +130,23 @@ impl HttpDurableCommandStore {
         if let Some(existing) = state.entries.get(&identity.key) {
             if existing.identity != identity {
                 return Ok(HttpStoredCommandClaim::Conflict);
+            }
+            if matches!(
+                existing.completion,
+                HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted
+            ) && identity.kind == "user_input_decision"
+            {
+                if existing.completion == HttpStoredCommandCompletion::Aborted {
+                    let mut candidate = state.clone();
+                    candidate
+                        .entries
+                        .get_mut(&identity.key)
+                        .ok_or(HttpCommandStoreError::ReservationMissing)?
+                        .completion = HttpStoredCommandCompletion::Reserved;
+                    persist_state(&self.path, &candidate)?;
+                    *state = candidate;
+                }
+                return Ok(HttpStoredCommandClaim::Execute);
             }
             return Ok(HttpStoredCommandClaim::Existing(Box::new(
                 existing.completion.clone(),
@@ -287,6 +310,7 @@ pub(crate) enum HttpStoredCommandCompletion {
     Verification(Box<HttpVerificationRerunCommandReceipt>),
     Integration(Box<HttpTaskIntegrationAcceptanceCommandReceipt>),
     PlanDecision(HttpPlanDecisionCommandReceipt),
+    UserInputDecision(HttpUserInputDecisionCommandReceipt),
     IntentDrop(Box<HttpIntentDropCommandReceipt>),
     Queue(Box<HttpConversationQueueCommandReceipt>),
     Recovery(Box<HttpConversationRecoveryCommandReceipt>),
@@ -457,6 +481,20 @@ fn validate_completion(
                 && receipt.command_id == identity.key.command_id
                 && receipt.client_id == identity.key.client_id
                 && receipt.session_id == identity.key.session_id
+                && !receipt.replayed
+        }
+        HttpStoredCommandCompletion::UserInputDecision(receipt) => {
+            identity.kind == "user_input_decision"
+                && receipt.command_id == identity.key.command_id
+                && receipt.client_id == identity.key.client_id
+                && receipt.session_id == identity.key.session_id
+                && !receipt
+                    .request
+                    .identity
+                    .session_scope_id
+                    .as_str()
+                    .trim()
+                    .is_empty()
                 && !receipt.replayed
         }
         HttpStoredCommandCompletion::IntentDrop(receipt) => {

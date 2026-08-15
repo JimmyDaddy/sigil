@@ -12937,6 +12937,52 @@ async fn request_user_input_suspends_with_durable_request_and_cancels_extra_call
     Ok(())
 }
 
+#[tokio::test]
+async fn submit_only_plan_finalizer_rejects_non_submit_before_tool_dispatch() -> Result<()> {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadPathTool {
+        executions: Arc::clone(&executions),
+    }));
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![(
+            "call-finalizer-read".to_owned(),
+            "read_path".to_owned(),
+            r#"{"path":"src/lib.rs"}"#.to_owned(),
+        )]]),
+        registry,
+    );
+    let mut session = Session::new("mock-finalizer", "mock-model");
+    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+        "Submit the draft now.",
+    )])
+    .with_logical_run_id("submit-only-finalizer")
+    .with_plan_review_submit_only();
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(2), &mut handler)
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        0,
+        "a non-submit call must never enter the registry"
+    );
+    let result = settled_tool_results(&session)
+        .into_iter()
+        .find(|(call_id, _)| call_id == "call-finalizer-read")
+        .expect("typed protocol result");
+    assert!(result.1.contains("submit_only_protocol_violation"));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.call_id == "call-finalizer-read"
+                && execution.status == ToolExecutionStatus::Failed
+    )));
+    Ok(())
+}
+
 #[test]
 fn assistant_batch_floor_and_cap_hold_at_128_results() -> Result<()> {
     // RFC-0062 11.2 worst case: 128 results each with safe text keep their deterministic 512 B

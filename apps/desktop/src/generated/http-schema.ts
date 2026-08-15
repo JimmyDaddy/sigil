@@ -928,6 +928,150 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{id}/plans/{plan_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one exact immutable complete plan-review detail */
+        get: {
+            parameters: {
+                query: {
+                    expected_plan_hash: string;
+                };
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                    plan_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Exact complete plan detail */
+                200: {
+                    headers: {
+                        ETag?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlanReviewDetail"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{id}/user-input/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one exact immutable durable user-input request */
+        get: {
+            parameters: {
+                query: {
+                    generation: number;
+                    expected_request_hash: components["schemas"]["Sha256"];
+                };
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                    request_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Exact public user-input request */
+                200: {
+                    headers: {
+                        ETag?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UserInputRequest"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{id}/user-input/{request_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply one exact durable user-input decision */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                    request_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UserInputDecisionCommand"];
+                };
+            };
+            responses: {
+                /** @description User-input decision receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UserInputDecisionCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}": {
         parameters: {
             query?: never;
@@ -2657,6 +2801,7 @@ export interface components {
             terminal_frontier?: components["schemas"]["ConversationTerminalFrontier"] | null;
             through_session_stream_sequence: components["schemas"]["DecimalSequence"];
             total_items: components["schemas"]["DecimalSequence"];
+            user_input?: components["schemas"]["UserInputRequest"] | null;
         };
         ConversationDisplaySkillReference: {
             id: string;
@@ -2839,6 +2984,14 @@ export interface components {
             fork_points: components["schemas"]["ConversationForkPointView"][];
             /** Format: uint64 */
             through_stream_sequence: number;
+        };
+        ConversationRouteChangedEvent: {
+            decision_id: string;
+            /** @enum {string} */
+            route: "chat" | "plan_review" | "task";
+            status: string;
+            /** @constant */
+            type: "conversation_route_changed";
         };
         /** @description Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority. */
         ConversationTaskControl: {
@@ -3153,6 +3306,7 @@ export interface components {
             revision_run_id?: string | null;
             session_id: string;
             task_id?: string | null;
+            user_input_request?: components["schemas"]["UserInputRequest"] | null;
         };
         PlanDecisionRequest: {
             /** @enum {string} */
@@ -3161,20 +3315,84 @@ export interface components {
             permission_grant?: ("ask" | "workspace_edits") | null;
             plan_id: string;
         };
+        PlanLineage: {
+            attempt_id?: string | null;
+            /** Format: uint64 */
+            created_at_ms: number;
+            plan_review_id?: string | null;
+            source: Record<string, never>;
+        };
         PlanReview: {
             allowed_actions: ("run" | "save" | "revise" | "reject")[];
             plan_hash?: string | null;
             plan_id: string;
+            revision?: {
+                attempt_id?: string | null;
+                attempt_ordinal?: number | null;
+                request_id: string;
+                /** @enum {string} */
+                status: "awaiting_guidance" | "queued" | "researching" | "waiting_for_input" | "finalizing" | "failed" | "cancelled" | "succeeded";
+                terminal_reason?: string | null;
+            } | null;
             risk?: string | null;
             /** @enum {string} */
             source: "explicit_plan_command" | "automatic_conversation_route";
             stale: boolean;
             /** @enum {string} */
-            status: "started" | "draft_ready" | "completed_without_draft" | "failed" | "interrupted" | "cancelled";
+            status: "started" | "waiting_for_input" | "finalizing" | "draft_ready" | "completed_without_draft" | "failed" | "interrupted" | "cancelled";
             step_count?: number | null;
             suggested_check_count?: number | null;
             summary?: string | null;
+            summary_truncated: boolean;
             target_path_count?: number | null;
+        };
+        PlanReviewChangedEvent: {
+            plan_id: string;
+            plan_review_id: string;
+            /** @enum {string} */
+            status: "started" | "waiting_for_input" | "finalizing" | "draft_ready" | "completed_without_draft" | "failed" | "interrupted" | "cancelled";
+            /** @constant */
+            type: "plan_review_changed";
+        };
+        PlanReviewDetail: {
+            legacy_markdown?: string | null;
+            lineage: components["schemas"]["PlanLineage"];
+            notes: string[];
+            plan_hash: string;
+            plan_id: string;
+            risk?: string | null;
+            /** @enum {string} */
+            source: "explicit_plan_command" | "automatic_conversation_route";
+            steps: components["schemas"]["PlanReviewStepDetail"][];
+            suggested_checks: components["schemas"]["PlanSuggestedCheck"][];
+            summary: string;
+            target_paths: string[];
+            workspace_snapshot_id?: string | null;
+        };
+        PlanReviewStepDetail: {
+            depends_on: string[];
+            detail?: string | null;
+            display_name?: string | null;
+            isolation?: ("shared_read_only" | "sequential_workspace_write" | "changeset_only" | "worktree") | null;
+            mode?: ("read" | "write" | "review" | "verify") | null;
+            notes: string[];
+            risk?: string | null;
+            role?: ("planner" | "executor" | "subagent_read" | "subagent_write") | null;
+            step_id: string;
+            suggested_checks: components["schemas"]["PlanSuggestedCheck"][];
+            target_paths: string[];
+            title: string;
+        };
+        PlanSuggestedCheck: {
+            check_spec_id: string;
+            command: {
+                args: string[];
+                command: string;
+                cwd?: string | null;
+            };
+            /** @enum {string} */
+            effect: "read_only" | "workspace_write" | "external_write" | "network" | "unknown";
+            source_line?: string | null;
         };
         ProtocolEvent: {
             approval_request?: components["schemas"]["PendingApproval"];
@@ -3300,7 +3518,7 @@ export interface components {
             sequence: number;
             session_id: string;
         };
-        PublicRunEventPayload: components["schemas"]["RouteTransitionEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RouteRecoveryRequiredEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
+        PublicRunEventPayload: components["schemas"]["RouteTransitionEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["RunAwaitingUserInputEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["ConversationRouteChangedEvent"] | components["schemas"]["PlanReviewChangedEvent"] | components["schemas"]["UserInputChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RouteRecoveryRequiredEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
         PublicSessionRouteTransitionView: {
             connection_id: string | null;
             /** @enum {string} */
@@ -3383,6 +3601,14 @@ export interface components {
                 message: string;
                 route_recovery: components["schemas"]["SessionRouteRecoveryView"];
             };
+        };
+        RunAwaitingUserInputEvent: {
+            /** Format: uint32 */
+            generation: number;
+            request_hash: components["schemas"]["Sha256"];
+            request_id: string;
+            /** @constant */
+            type: "run_awaiting_user_input";
         };
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunCancelRequest"];
@@ -3490,6 +3716,7 @@ export interface components {
             conversation_recovery: boolean;
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
+            durable_user_input: boolean;
             intent_stack: boolean;
             live_events: boolean;
             provider_connections: boolean;
@@ -3511,7 +3738,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 13;
+            schema_version: 14;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
@@ -3735,6 +3962,7 @@ export interface components {
             /** Format: uint64 */
             total_messages: number;
         };
+        Sha256: string;
         SupportBundleExport: {
             content: string;
             /** Format: uint64 */
@@ -4096,6 +4324,179 @@ export interface components {
             usage: Record<string, never>;
         } & {
             [key: string]: unknown;
+        };
+        UserInputAnswerReceipt: {
+            answer_hash?: components["schemas"]["Sha256"] | null;
+            answered_question_ids?: string[];
+            command_id: string;
+            /** @enum {string} */
+            decision: "submitted" | "declined" | "run_cancelled";
+        };
+        UserInputAnswerValue: {
+            /** @constant */
+            kind: "text";
+            value: string;
+        } | {
+            /** @constant */
+            kind: "number";
+            value: string;
+        } | {
+            /** @constant */
+            kind: "integer";
+            /** Format: int64 */
+            value: number;
+        } | {
+            /** @constant */
+            kind: "boolean";
+            value: boolean;
+        } | {
+            /** @constant */
+            kind: "single_select";
+            option_id?: string | null;
+            other?: string | null;
+        } | {
+            /** @constant */
+            kind: "multi_select";
+            option_ids: string[];
+        };
+        UserInputChangedEvent: {
+            /** Format: uint32 */
+            generation: number;
+            request: components["schemas"]["UserInputRequest"];
+            request_hash: components["schemas"]["Sha256"];
+            request_id: string;
+            /** @enum {string} */
+            status: "requested" | "decision_accepted" | "continuation_claimed" | "continuation_started" | "resolved";
+            /** @constant */
+            type: "user_input_changed";
+        };
+        UserInputDecision: {
+            answers: {
+                question_id: string;
+                value: components["schemas"]["UserInputAnswerValue"];
+            }[];
+            /** @constant */
+            kind: "submitted";
+        } | {
+            /** @constant */
+            kind: "declined";
+        } | {
+            /** @constant */
+            kind: "run_cancelled";
+        };
+        UserInputDecisionCommand: {
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            expected_stream_sequence?: string | null;
+            payload: components["schemas"]["UserInputDecisionRequest"];
+            /** @constant */
+            protocol_version: 2;
+            session_id: string;
+        };
+        UserInputDecisionCommandReceipt: {
+            client_id: string;
+            command_id: string;
+            continuation_run_id?: string | null;
+            replayed: boolean;
+            request: components["schemas"]["UserInputRequest"];
+            session_id: string;
+        };
+        UserInputDecisionRequest: {
+            decision: components["schemas"]["UserInputDecision"];
+            expected_request_hash: components["schemas"]["Sha256"];
+            /** Format: uint32 */
+            generation: number;
+            permission_mode?: components["schemas"]["PermissionMode"] | null;
+        };
+        UserInputField: {
+            /** @constant */
+            kind: "text";
+            /** Format: uint32 */
+            max_chars: number;
+            multiline: boolean;
+        } | {
+            /** @constant */
+            kind: "number";
+        } | {
+            /** @constant */
+            kind: "integer";
+        } | {
+            /** @constant */
+            kind: "boolean";
+        } | {
+            allow_other: boolean;
+            /** @constant */
+            kind: "single_select";
+            options: components["schemas"]["UserInputOption"][];
+        } | {
+            /** @constant */
+            kind: "multi_select";
+            /** Format: uint32 */
+            max_selected: number;
+            options: components["schemas"]["UserInputOption"][];
+        };
+        UserInputIdentity: {
+            /** Format: uint32 */
+            generation: number;
+            request_id: string;
+            root_logical_run_id: string;
+            session_scope_id: string;
+            source_binding_hash: components["schemas"]["Sha256"];
+            source_thread_id: string;
+        };
+        UserInputOption: {
+            description?: string | null;
+            id: string;
+            label: string;
+        };
+        UserInputQuestion: {
+            description?: string | null;
+            field: components["schemas"]["UserInputField"];
+            header: string;
+            id: string;
+            question: string;
+            required: boolean;
+        };
+        UserInputRequest: {
+            allowed_actions: ("submit" | "decline" | "cancel_run")[];
+            answer_receipt?: components["schemas"]["UserInputAnswerReceipt"] | null;
+            identity: components["schemas"]["UserInputIdentity"];
+            prompt: string;
+            /** @enum {string} */
+            purpose: "clarification" | "choice" | "missing_constraint" | "revision_guidance" | "external_elicitation";
+            questions: components["schemas"]["UserInputQuestion"][];
+            request_hash: components["schemas"]["Sha256"];
+            /** Format: uint64 */
+            requested_at_unix_ms: number;
+            resolution?: ("consumed" | "declined" | "run_cancelled") | {
+                failed: {
+                    failure_class: string;
+                    retryable: boolean;
+                };
+            } | null;
+            source: "agent" | {
+                plan_review_research: {
+                    attempt_id: string;
+                    plan_review_id: string;
+                };
+            } | {
+                plan_revision: {
+                    base_plan_hash: components["schemas"]["Sha256"];
+                    base_plan_id: string;
+                };
+            } | {
+                planner: {
+                    task_id: string;
+                };
+            } | {
+                mcp: {
+                    call_id: string;
+                    server_id: string;
+                };
+            };
+            /** @enum {string} */
+            status: "requested" | "decision_accepted" | "continuation_claimed" | "continuation_started" | "resolved";
         };
         VerificationEvidence: {
             changeset_apply_event_id: string | null;

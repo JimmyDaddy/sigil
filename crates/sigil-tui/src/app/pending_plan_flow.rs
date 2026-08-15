@@ -1,35 +1,140 @@
-use crossterm::event::{KeyCode, KeyEvent};
-use sigil_kernel::{PlanApprovalPermission, PlanDraftCreatedEntry, PlanTaskStartMode};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+#[cfg(test)]
+use sigil_kernel::PlanDraftCreatedEntry;
+use sigil_kernel::{PlanApprovalPermission, PlanTaskStartMode};
 
-use super::{AppAction, AppState, PendingPlanApproval};
+use super::{AppAction, AppState, PendingPlanApproval, PlanWorkbenchAction};
 
 impl AppState {
     pub(in crate::app) fn handle_pending_plan_approval_key_event(
         &mut self,
         key: KeyEvent,
     ) -> Option<Option<AppAction>> {
+        let workbench_open = self
+            .composer
+            .pending_plan_approval
+            .as_ref()
+            .is_some_and(|pending| pending.workbench_open);
         self.composer.pending_plan_approval.as_ref()?;
+        if workbench_open {
+            return self.handle_plan_workbench_key_event(key);
+        }
         match key.code {
             KeyCode::Enter if self.composer.input.trim().is_empty() && key.modifiers.is_empty() => {
-                Some(self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None))
+                self.open_plan_workbench();
+                Some(None)
             }
-            KeyCode::Esc if key.modifiers.is_empty() => Some(self.reject_pending_plan()),
-            KeyCode::Char('s')
-                if self.composer.input.trim().is_empty() && key.modifiers.is_empty() =>
-            {
-                Some(self.save_pending_plan())
-            }
-            KeyCode::Char('r')
-                if self.composer.input.trim().is_empty() && key.modifiers.is_empty() =>
-            {
-                Some(self.revise_pending_plan())
+            KeyCode::BackTab if key.modifiers == KeyModifiers::SHIFT => {
+                self.open_plan_workbench();
+                Some(None)
             }
             _ => None,
         }
     }
 
+    fn handle_plan_workbench_key_event(&mut self, key: KeyEvent) -> Option<Option<AppAction>> {
+        let current_action = self
+            .composer
+            .pending_plan_approval
+            .as_ref()?
+            .selected_action;
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+                    pending.workbench_open = false;
+                }
+                self.last_notice = Some("plan review closed; Shift-Tab reopens it".to_owned());
+                Some(None)
+            }
+            KeyCode::Up if key.modifiers.is_empty() => {
+                self.update_plan_workbench_scroll(|scroll| scroll.saturating_sub(1));
+                Some(None)
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                self.update_plan_workbench_scroll(|scroll| scroll.saturating_add(1));
+                Some(None)
+            }
+            KeyCode::PageUp if key.modifiers.is_empty() => {
+                self.update_plan_workbench_scroll(|scroll| scroll.saturating_sub(8));
+                Some(None)
+            }
+            KeyCode::PageDown if key.modifiers.is_empty() => {
+                self.update_plan_workbench_scroll(|scroll| scroll.saturating_add(8));
+                Some(None)
+            }
+            KeyCode::Home if key.modifiers.is_empty() => {
+                self.update_plan_workbench_scroll(|_| 0);
+                Some(None)
+            }
+            KeyCode::End if key.modifiers.is_empty() => {
+                self.update_plan_workbench_scroll(|_| usize::MAX);
+                Some(None)
+            }
+            KeyCode::Tab | KeyCode::Right if key.modifiers.is_empty() => {
+                self.select_adjacent_plan_action(current_action, 1);
+                Some(None)
+            }
+            KeyCode::BackTab | KeyCode::Left
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.select_adjacent_plan_action(current_action, -1);
+                Some(None)
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => Some(match current_action {
+                PlanWorkbenchAction::Run => {
+                    self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None)
+                }
+                PlanWorkbenchAction::Save => self.save_pending_plan(),
+                PlanWorkbenchAction::Revise => self.revise_pending_plan(),
+                PlanWorkbenchAction::Reject => self.reject_pending_plan(),
+            }),
+            _ => Some(None),
+        }
+    }
+
+    fn open_plan_workbench(&mut self) {
+        if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+            pending.workbench_open = true;
+            self.last_notice = Some("reviewing complete plan".to_owned());
+        }
+    }
+
+    fn update_plan_workbench_scroll(&mut self, update: impl FnOnce(usize) -> usize) {
+        if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+            let max_scroll = pending.workbench_scroll_extent.get();
+            let current = pending.workbench_scroll.min(max_scroll);
+            pending.workbench_scroll = update(current).min(max_scroll);
+        }
+    }
+
+    fn select_adjacent_plan_action(&mut self, current: PlanWorkbenchAction, direction: isize) {
+        let Some(pending) = self.composer.pending_plan_approval.as_ref() else {
+            return;
+        };
+        let available = PlanWorkbenchAction::ORDER
+            .iter()
+            .copied()
+            .filter(|candidate| pending.action_allowed(*candidate))
+            .collect::<Vec<_>>();
+        if available.is_empty() {
+            return;
+        }
+        let index = available
+            .iter()
+            .position(|candidate| *candidate == current)
+            .unwrap_or(0) as isize;
+        let next = (index + direction).rem_euclid(available.len() as isize);
+        if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+            pending.selected_action = available[next as usize];
+        }
+    }
+
     fn save_pending_plan(&mut self) -> Option<AppAction> {
         let pending = self.composer.pending_plan_approval.as_ref()?;
+        if !pending.action_allowed(PlanWorkbenchAction::Save) {
+            self.last_notice = Some("save is unavailable in the current plan state".to_owned());
+            return None;
+        }
         if pending.stale {
             self.last_notice = Some(
                 pending
@@ -51,6 +156,10 @@ impl AppState {
 
     fn revise_pending_plan(&mut self) -> Option<AppAction> {
         let pending = self.composer.pending_plan_approval.as_ref()?;
+        if !pending.action_allowed(PlanWorkbenchAction::Revise) {
+            self.last_notice = Some("revision is unavailable in the current plan state".to_owned());
+            return None;
+        }
         let plan_id = pending.plan_id.clone()?;
         let expected_plan_hash = pending.plan_hash.clone();
         self.last_notice = Some("revising plan".to_owned());
@@ -63,6 +172,10 @@ impl AppState {
 
     fn reject_pending_plan(&mut self) -> Option<AppAction> {
         let pending = self.composer.pending_plan_approval.as_ref()?;
+        if !pending.action_allowed(PlanWorkbenchAction::Reject) {
+            self.last_notice = Some("reject is unavailable in the current plan state".to_owned());
+            return None;
+        }
         let Some(plan_id) = pending.plan_id.clone() else {
             self.clear_pending_plan_approval();
             self.last_notice = Some("plan dismissed".to_owned());
@@ -84,6 +197,10 @@ impl AppState {
         permission_grant: Option<PlanApprovalPermission>,
     ) -> Option<AppAction> {
         let pending = self.composer.pending_plan_approval.as_ref()?;
+        if !pending.action_allowed(PlanWorkbenchAction::Run) {
+            self.last_notice = Some("run is unavailable in the current plan state".to_owned());
+            return None;
+        }
         if pending.stale {
             self.last_notice = Some(
                 pending
@@ -119,30 +236,58 @@ impl AppState {
         self.composer.pending_plan_approval.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn set_pending_plan_approval_from_draft(
         &mut self,
         draft: &PlanDraftCreatedEntry,
         current_workspace_snapshot_id: Option<&str>,
     ) {
-        if draft.steps.is_empty() {
+        let entries = [sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::PlanDraftCreated(draft.clone()),
+        )];
+        let Ok(detail) = sigil_kernel::plan_review_detail_from_entries(
+            &entries,
+            &draft.plan_id,
+            &draft.plan_hash,
+        ) else {
+            self.composer.pending_plan_approval = None;
+            return;
+        };
+        self.set_pending_plan_approval_from_detail(&detail, current_workspace_snapshot_id);
+        if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+            pending.allowed_actions = vec![
+                sigil_kernel::PublicPlanAction::Run,
+                sigil_kernel::PublicPlanAction::Save,
+                sigil_kernel::PublicPlanAction::Revise,
+                sigil_kernel::PublicPlanAction::Reject,
+            ];
+        }
+    }
+
+    pub(crate) fn set_pending_plan_approval_from_detail(
+        &mut self,
+        detail: &sigil_kernel::PlanReviewDetailV1,
+        current_workspace_snapshot_id: Option<&str>,
+    ) {
+        if detail.steps.is_empty() {
             self.composer.pending_plan_approval = None;
             return;
         }
-        let plan_text = draft
-            .inline_text
+        let plan_text = detail
+            .legacy_markdown
             .clone()
-            .unwrap_or_else(|| draft.summary.clone());
+            .unwrap_or_else(|| detail.summary.clone());
         let plan_text = plan_text.trim();
         if plan_text.is_empty() {
             self.composer.pending_plan_approval = None;
             return;
         }
-        let steps = draft
+        let steps = detail
             .steps
             .iter()
             .map(|step| step.title.clone())
             .collect::<Vec<_>>();
-        let suggested_checks = draft
+        let suggested_checks = detail
             .suggested_checks
             .iter()
             .map(|check| {
@@ -153,27 +298,70 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         let stale_reason = sigil_runtime::plan_review_coordinator::plan_handoff_stale_reason(
-            draft.workspace_snapshot_id.as_deref(),
+            detail.workspace_snapshot_id.as_deref(),
             current_workspace_snapshot_id,
         );
         self.composer.pending_plan_approval = Some(PendingPlanApproval {
-            plan_id: Some(draft.plan_id.as_str().to_owned()),
+            plan_id: Some(detail.plan_id.as_str().to_owned()),
             plan_text: plan_text.to_owned(),
-            plan_hash: draft.plan_hash.clone(),
-            summary: draft.summary.clone(),
+            plan_hash: detail.plan_hash.clone(),
+            summary: detail.summary.clone(),
             steps,
-            target_paths: draft.target_paths.clone(),
+            target_paths: detail.target_paths.clone(),
             suggested_checks,
-            target_path_count: draft.target_paths.len(),
-            suggested_check_count: draft.suggested_checks.len(),
-            workspace_snapshot_id: draft.workspace_snapshot_id.clone(),
+            target_path_count: detail.target_paths.len(),
+            suggested_check_count: detail.suggested_checks.len(),
+            workspace_snapshot_id: detail.workspace_snapshot_id.clone(),
             stale: stale_reason.is_some(),
             stale_reason,
+            // Action authority comes only from the canonical public projection. A detail payload
+            // is immutable display data and must never grant actions by itself.
+            allowed_actions: Vec::new(),
+            revision: None,
+            detail: detail.clone(),
+            workbench_open: false,
+            workbench_scroll: 0,
+            workbench_scroll_extent: Default::default(),
+            selected_action: PlanWorkbenchAction::Run,
             rendered_text_row_counts: Default::default(),
         });
     }
 
+    pub(crate) fn apply_pending_plan_public_review(
+        &mut self,
+        review: &sigil_kernel::PublicPlanReview,
+    ) {
+        let Some(pending) = self.composer.pending_plan_approval.as_mut() else {
+            return;
+        };
+        if pending.plan_id.as_deref() != Some(review.plan_id.as_str()) {
+            return;
+        }
+        pending.allowed_actions = review.allowed_actions.clone();
+        pending.revision = review.revision.clone();
+        if !pending.action_allowed(pending.selected_action)
+            && let Some(action) = PlanWorkbenchAction::ORDER
+                .iter()
+                .copied()
+                .find(|action| pending.action_allowed(*action))
+        {
+            pending.selected_action = action;
+        }
+    }
+
     pub(in crate::app) fn clear_pending_plan_approval(&mut self) {
         self.composer.pending_plan_approval = None;
+    }
+}
+
+impl PendingPlanApproval {
+    pub(crate) fn action_allowed(&self, action: PlanWorkbenchAction) -> bool {
+        let public = match action {
+            PlanWorkbenchAction::Run => sigil_kernel::PublicPlanAction::Run,
+            PlanWorkbenchAction::Save => sigil_kernel::PublicPlanAction::Save,
+            PlanWorkbenchAction::Revise => sigil_kernel::PublicPlanAction::Revise,
+            PlanWorkbenchAction::Reject => sigil_kernel::PublicPlanAction::Reject,
+        };
+        self.allowed_actions.contains(&public)
     }
 }

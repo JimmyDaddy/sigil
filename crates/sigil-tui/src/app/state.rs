@@ -21,8 +21,8 @@ use crate::{
 
 use super::{
     ActiveAgentChildTranscript, AgentView, ComposerMode, ComposerPasteSpan, ComposerQueueAction,
-    MutationArtifactRetentionPreview, PendingPlanApproval, SessionViewCache, TimelineRenderStore,
-    TimelineTextSelection, ToolActivityCacheEntry,
+    MutationArtifactRetentionPreview, PendingPlanApproval, PendingUserInputForm, SessionViewCache,
+    TimelineRenderStore, TimelineTextSelection, ToolActivityCacheEntry,
     egress_disclosure_flow::{EgressDisclosureCard, PendingEgressDisclosure},
     modal_flow::PendingModelPickerRefresh,
     runtime_status::{McpProgressState, McpServerRuntimeStatus},
@@ -225,6 +225,7 @@ pub(crate) struct ComposerState {
     pub(crate) input: String,
     pub(crate) mode: ComposerMode,
     pub(crate) pending_plan_approval: Option<PendingPlanApproval>,
+    pub(crate) pending_user_input: Option<PendingUserInputForm>,
     pub(crate) input_history: Vec<String>,
     pub(crate) agent_panel_focused: bool,
     pub(crate) queue_panel_focused: bool,
@@ -250,6 +251,7 @@ impl Default for ComposerState {
             input: String::new(),
             mode: ComposerMode::Build,
             pending_plan_approval: None,
+            pending_user_input: None,
             input_history: Vec::new(),
             agent_panel_focused: false,
             queue_panel_focused: false,

@@ -32,6 +32,7 @@ use crate::{
     HttpDurableProtocolJournal, HttpForegroundRunOwner, HttpPermissionMode, HttpPlanDecisionAction,
     HttpPlanDecisionRequest, HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest,
     HttpSessionOpenRequest, HttpSessionSnapshot, HttpTaskContinuationRequest,
+    HttpUserInputDecisionRequest,
 };
 
 #[test]
@@ -3663,13 +3664,9 @@ async fn production_task_pause_returns_only_after_supervisor_acknowledges_activa
 /// Seeds a durable session log with a committed typed draft bound to the current workspace
 /// snapshot and returns the plan review id.
 fn seed_revision_session(
-    config_path: &std::path::Path,
     temp: &tempfile::TempDir,
     session: &HttpSessionSnapshot,
 ) -> sigil_kernel::PlanReviewId {
-    let root_config = sigil_kernel::RootConfig::load(config_path).expect("config should load");
-    let workspace_root =
-        sigil_kernel::resolve_workspace_root(config_path, temp.path(), &root_config.workspace.root);
     let store = JsonlSessionStore::new(&session.session_log_path).expect("session store");
     let (provider_name, route) = production_test_model_route(temp);
     let mut session_log =
@@ -3724,8 +3721,8 @@ fn seed_revision_session(
     let draft = PlanDraftCreatedEntry {
         plan_id: request.plan_id.clone(),
         schema_version: 2,
-        source: sigil_kernel::PlanSourceRef::default(),
-        plan_hash: "sha256:draft".to_owned(),
+        source: request.plan_source_ref(),
+        plan_hash: format!("sha256:{}", "d".repeat(64)),
         summary: "Migrate the coordinator".to_owned(),
         inline_text: None,
         steps: vec![sigil_kernel::PlanDraftStep {
@@ -3748,11 +3745,7 @@ fn seed_revision_session(
         suggested_checks: Vec::new(),
         risk: None,
         notes: Vec::new(),
-        workspace_snapshot_id: Some(
-            sigil_runtime::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
-                .expect("workspace snapshot should build")
-                .expect("workspace snapshot id"),
-        ),
+        workspace_snapshot_id: request.workspace_snapshot_id.clone(),
         created_at_ms: 110,
     };
     sigil_runtime::PlanReviewCoordinator::commit_draft_from_child(
@@ -3831,12 +3824,35 @@ credential = { source = "none" }
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
         .expect("durable session binding should not require provider assembly");
-    let review_id = seed_revision_session(&config_path, &temp, &session);
+    let review_id = seed_revision_session(&temp, &session);
 
-    // Pre-register the revision's deterministic child run id so spawn must reject the duplicate
-    // AFTER `application_plan_decision` persisted the RevisionRequested decision.
+    // Revise first creates durable guidance without dispatching a provider run.
     let attempt_1 = sigil_kernel::plan_review_attempt_id_for_review(&review_id);
-    let attempt_2 = sigil_kernel::plan_review_attempt_id_for_revision(&review_id, &attempt_1);
+    let guidance = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "revision-guidance-request-1",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_1)
+                        .as_str()
+                        .to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    action: HttpPlanDecisionAction::Revise,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Revise should create durable guidance")
+        .user_input_request
+        .expect("Revise must return the exact guidance request");
+    let attempt_2 = sigil_kernel::plan_review_attempt_id_for_revision_ordinal(
+        &review_id,
+        &guidance.identity.request_id,
+        1,
+    );
     let revision_run_id = format!("plan-review-{}-{}", review_id.as_str(), attempt_2.as_str());
     driver
         .active_runs
@@ -3851,24 +3867,38 @@ credential = { source = "none" }
             }),
         );
 
-    let error = registry
-        .plan_decision_command(
-            &session.id,
+    // Pre-register the deterministic child run id so submitting guidance must reject the
+    // duplicate only after the answer and RevisionRequested lineage are durable.
+    let answer_registry = Arc::clone(&registry);
+    let answer_session_id = session.id.clone();
+    let answer_request_id = guidance.identity.request_id.as_str().to_owned();
+    let error = tokio::task::spawn_blocking(move || {
+        answer_registry.user_input_decision_command(
+            &answer_session_id,
+            &answer_request_id,
             HttpCommandEnvelope::new(
                 "revision-dup-1",
                 "client-1",
-                &session.id,
-                HttpPlanDecisionRequest {
-                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_1)
-                        .as_str()
-                        .to_owned(),
-                    expected_plan_hash: "sha256:draft".to_owned(),
-                    action: HttpPlanDecisionAction::Revise,
-                    permission_grant: None,
+                &answer_session_id,
+                HttpUserInputDecisionRequest {
+                    generation: guidance.identity.generation,
+                    expected_request_hash: guidance.request_hash.clone(),
+                    decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                        answers: vec![sigil_kernel::UserInputAnswerV1 {
+                            question_id: "revision_guidance".to_owned(),
+                            value: sigil_kernel::UserInputAnswerValueV1::Text {
+                                value: "Preserve the existing compatibility boundary.".to_owned(),
+                            },
+                        }],
+                    },
+                    permission_mode: None,
                 },
             ),
         )
-        .expect_err("duplicate revision run id must be rejected before registration");
+    })
+    .await
+    .expect("user-input driver task should join")
+    .expect_err("duplicate revision run id must be rejected before registration");
     assert!(
         error.to_string().contains("already active"),
         "rejection must name the duplicate run: {error}"
@@ -3918,7 +3948,7 @@ credential = { source = "none" }
                 &session.id,
                 HttpPlanDecisionRequest {
                     plan_id: original_plan_id.as_str().to_owned(),
-                    expected_plan_hash: "sha256:draft".to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
                     action: HttpPlanDecisionAction::Save,
                     permission_grant: None,
                 },
@@ -4145,11 +4175,11 @@ credential = {{ source = "none" }}
         .expect("durable session binding should not require provider assembly");
     let mut subscriber = event_bus.subscribe();
 
-    let review_id = seed_revision_session(&config_path, &temp, &session);
+    let review_id = seed_revision_session(&temp, &session);
 
     // Revise through the registry: the driver runs a supervised revision, publishes an explicit
     // terminal event, closes the SSE stream, and releases the session foreground slot.
-    let receipt = registry
+    let plan_receipt = registry
         .plan_decision_command(
             &session.id,
             HttpCommandEnvelope::new(
@@ -4163,17 +4193,51 @@ credential = {{ source = "none" }}
                     )
                     .as_str()
                     .to_owned(),
-                    expected_plan_hash: "sha256:draft".to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
                     action: HttpPlanDecisionAction::Revise,
                     permission_grant: None,
                 },
             ),
         )
         .expect("Revise decision should be accepted");
-    assert_eq!(receipt.action, HttpPlanDecisionAction::Revise);
-    let revision_run_id = receipt
-        .revision_run_id
-        .expect("Revise receipt must expose the revision run identity");
+    assert_eq!(plan_receipt.action, HttpPlanDecisionAction::Revise);
+    assert!(plan_receipt.revision_run_id.is_none());
+    let guidance = plan_receipt
+        .user_input_request
+        .expect("Revise must expose durable guidance before dispatch");
+    let answer_registry = Arc::clone(&registry);
+    let answer_session_id = session.id.clone();
+    let answer_request_id = guidance.identity.request_id.as_str().to_owned();
+    let answer_receipt = tokio::task::spawn_blocking(move || {
+        answer_registry.user_input_decision_command(
+            &answer_session_id,
+            &answer_request_id,
+            HttpCommandEnvelope::new(
+                "revision-guidance-answer-1",
+                "client-1",
+                &answer_session_id,
+                HttpUserInputDecisionRequest {
+                    generation: guidance.identity.generation,
+                    expected_request_hash: guidance.request_hash.clone(),
+                    decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                        answers: vec![sigil_kernel::UserInputAnswerV1 {
+                            question_id: "revision_guidance".to_owned(),
+                            value: sigil_kernel::UserInputAnswerValueV1::Text {
+                                value: "Keep the public contract stable.".to_owned(),
+                            },
+                        }],
+                    },
+                    permission_mode: None,
+                },
+            ),
+        )
+    })
+    .await
+    .expect("user-input driver task should join")
+    .expect("revision guidance should start a supervised revision");
+    let revision_run_id = answer_receipt
+        .continuation_run_id
+        .expect("guidance receipt must expose the revision run identity");
 
     // The supervised revision owns the session foreground slot while it runs.
     assert!(

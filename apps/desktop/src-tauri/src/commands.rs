@@ -46,6 +46,7 @@ use crate::{
         DesktopExternalUrlInput, DesktopIntentDropExecutionSummary, DesktopIntentDropInput,
         DesktopIntentDropPreviewInput, DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
         DesktopPlanDecisionActionInput, DesktopPlanDecisionInput, DesktopPlanDecisionSummary,
+        DesktopPlanDetailInput, DesktopPlanReviewDetailSummary,
         DesktopProviderConnectionInventorySummary, DesktopProviderDefaultModelSaveInput,
         DesktopProviderDefaultModelSaveSummary, DesktopProviderSetupCatalogInput,
         DesktopProviderSetupCatalogSummary, DesktopProviderSetupSaveInput,
@@ -62,8 +63,9 @@ use crate::{
         DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
         DesktopTaskPauseInput, DesktopTerminalTaskCancelInput, DesktopTerminalTaskCancelSummary,
         DesktopToolArtifactPage, DesktopToolArtifactReadInput, DesktopToolArtifactSelector,
-        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
-        DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopUserInputDecisionInput,
+        DesktopUserInputDecisionSummary, DesktopUserInputReadInput, DesktopUserInputRequestSummary,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
         desktop_session_route_recovery_summary,
     },
     recent::RecentWorkspaceStoreError,
@@ -1345,6 +1347,110 @@ pub(crate) async fn desktop_plan_decision(
         },
         task_id: receipt.task_id,
         revision_run_id: receipt.revision_run_id,
+        user_input_request: receipt.user_input_request.map(Into::into),
+        replayed: receipt.replayed,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_plan_detail(
+    workspace_id: String,
+    input: DesktopPlanDetailInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopPlanReviewDetailSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_session_id(&input.plan_id)?;
+    if input.expected_plan_hash.is_empty() {
+        return Err(DesktopCommandError::new(
+            "invalid_plan_detail",
+            "The plan detail binding is invalid.",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .plan_review_detail(&input.session_id, &input.plan_id, &input.expected_plan_hash)
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_user_input_request(
+    workspace_id: String,
+    input: DesktopUserInputReadInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopUserInputRequestSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_session_id(&input.request_id)?;
+    if input.generation == 0 || input.expected_request_hash.is_empty() {
+        return Err(DesktopCommandError::new(
+            "invalid_user_input_request",
+            "The user-input request binding is invalid.",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .user_input_request(
+            &input.session_id,
+            &input.request_id,
+            input.generation,
+            &input.expected_request_hash,
+        )
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_user_input_decision(
+    workspace_id: String,
+    input: DesktopUserInputDecisionInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopUserInputDecisionSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_session_id(&input.request_id)?;
+    if input.generation == 0 || input.expected_request_hash.is_empty() {
+        return Err(DesktopCommandError::new(
+            "invalid_user_input_decision",
+            "The user-input decision binding is invalid.",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let receipt = client
+        .user_input_decision(
+            &input.session_id,
+            &input.request_id,
+            input.generation,
+            &input.expected_request_hash,
+            input.decision.into_native(),
+            input.permission_mode,
+        )
+        .await
+        .map_err(project_client_error)?;
+    Ok(DesktopUserInputDecisionSummary {
+        command_id: receipt.command_id,
+        client_id: receipt.client_id,
+        session_id: receipt.session_id,
+        request: receipt.request.into(),
+        continuation_run_id: receipt.continuation_run_id,
         replayed: receipt.replayed,
     })
 }

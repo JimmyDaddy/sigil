@@ -972,14 +972,30 @@ fn footer_hints(app: &AppState) -> String {
     if app.selected_timeline_text().is_some() {
         return format!("{agent} · Ctrl-C copy selection · Esc clear selection");
     }
+    if let Some(form) = app.pending_user_input() {
+        if form.open {
+            return format!(
+                "{agent} · Input required · Tab fields/actions · ↑↓ choose · Enter continue · Esc close"
+            );
+        }
+        return format!("{agent} · input required · Shift-Tab reopen");
+    }
     if app.pending_plan_approval().is_some() {
+        if app
+            .pending_plan_approval()
+            .is_some_and(|pending| pending.workbench_open)
+        {
+            return format!(
+                "{agent} · Plan review · ↑↓/Pg scroll · Tab/←→ action · Enter confirm · Esc close"
+            );
+        }
         if app
             .pending_plan_approval()
             .is_some_and(|pending| pending.stale)
         {
-            return format!("{agent} · plan stale · r revise · Esc reject");
+            return format!("{agent} · plan stale · Enter review · Shift-Tab reopen");
         }
-        return format!("{agent} · Enter run · s save · r revise · Esc reject");
+        return format!("{agent} · Enter review · Shift-Tab reopen");
     }
     if let Some(pending) = &app.approval.pending {
         if !pending.actions_available() {

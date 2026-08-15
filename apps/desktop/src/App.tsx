@@ -1213,6 +1213,24 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                   );
                   return entry === undefined ? false : openSession(entry, recoveryBinding);
                 }}
+                onResumeAcceptedUserInput={async () => {
+                  if (activeWorkspaceId === undefined) return false;
+                  const entry = catalog.entries.find(
+                    (candidate) => candidate.sessionId === selectedDurableSessionId,
+                  );
+                  if (entry?.sessionId === undefined) return false;
+                  try {
+                    const reopened = await bridge.openSession(activeWorkspaceId, {
+                      sessionRef: entry.sessionRef,
+                      sessionId: entry.sessionId,
+                      label: entry.title,
+                    });
+                    setSelectedSession(reopened);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                }}
               />
             </div>
           )}

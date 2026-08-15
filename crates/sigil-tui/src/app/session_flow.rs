@@ -301,6 +301,82 @@ impl AppState {
         self.refresh_usage_sidebar_cache();
     }
 
+    pub(super) fn restore_durable_attention_surfaces(&mut self) {
+        self.clear_pending_plan_approval();
+        self.clear_pending_user_input();
+
+        let recovery_command = sigil_kernel::recoverable_user_input_decision_from_entries(
+            &self.session_browser.current_entries,
+        );
+        match sigil_runtime::conversation_display::public_user_input_from_entries(
+            &self.session_browser.current_entries,
+        ) {
+            Ok(Some(request)) if request.status == sigil_kernel::UserInputStatusV1::Requested => {
+                self.set_pending_user_input(request);
+            }
+            Ok(Some(request))
+                if request.status == sigil_kernel::UserInputStatusV1::DecisionAccepted =>
+            {
+                match recovery_command {
+                    Ok(Some(command)) => {
+                        self.set_pending_user_input_recovery(request, command);
+                        self.last_notice =
+                            Some("an accepted answer is ready to resume; choose Resume".to_owned());
+                    }
+                    Ok(None) => {
+                        self.last_notice =
+                            Some("accepted input requires an external recovery owner".to_owned());
+                    }
+                    Err(error) => {
+                        self.last_notice =
+                            Some(format!("accepted input recovery is unavailable: {error}"));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.last_notice = Some(format!("user input recovery unavailable: {error}"));
+            }
+        }
+
+        let plans = sigil_kernel::PlanArtifactProjection::from_entries(
+            &self.session_browser.current_entries,
+        );
+        let Some(draft) = plans.latest_pending_plan().cloned() else {
+            return;
+        };
+        let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
+            sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &self.workspace_root)
+                .ok()
+                .flatten()
+        });
+        let detail = sigil_kernel::plan_review_detail_from_entries(
+            &self.session_browser.current_entries,
+            &draft.plan_id,
+            &draft.plan_hash,
+        );
+        match detail {
+            Ok(detail) => {
+                self.set_pending_plan_approval_from_detail(&detail, current_snapshot.as_deref());
+                match sigil_runtime::conversation_display::public_plan_review_from_entries(
+                    &self.session_browser.current_entries,
+                    current_snapshot.as_deref(),
+                ) {
+                    Some(review) => self.apply_pending_plan_public_review(&review),
+                    None => {
+                        self.last_notice = Some(
+                            "plan is readable, but its action projection is unavailable; actions remain disabled"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                self.last_notice = Some(format!("plan detail recovery unavailable: {error}"));
+            }
+        }
+    }
+
     pub(super) fn append_current_session_control(&mut self, control: ControlEntry) {
         self.session_browser
             .current_entries
@@ -535,6 +611,7 @@ impl AppState {
         self.agent_panel.active_view = super::AgentView::Main;
         self.agent_panel.active_child_transcript = None;
         self.sync_current_session_state(entries.clone());
+        self.restore_durable_attention_surfaces();
         self.approval.pending = None;
         self.runtime.run_phase = RunPhase::Idle;
         self.refresh_memory_summary();

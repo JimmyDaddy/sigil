@@ -16,6 +16,7 @@ use sigil_kernel::{
     JsonlSessionStore, MessageRole, ModelMessage, PublicRunEventKind, PublicTaskEventProjector,
     PublicTaskPhase, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
     ToolApprovalUserDecision, ToolArtifactRefV1, ToolArtifactStore, TypedDomainEvent,
+    UserInputLifecycleEntryV1, UserInputProjectionV1,
     conversation_run_lifecycle_record_from_stream, safe_persistence_text,
 };
 use thiserror::Error as ThisError;
@@ -365,6 +366,8 @@ pub struct ConversationDisplayPageV1 {
     pub task_control: Option<ConversationTaskControlV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_review: Option<sigil_kernel::PublicPlanReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input: Option<sigil_kernel::PublicUserInputRequestV1>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -886,6 +889,7 @@ pub fn conversation_display_page_from_records(
     let mut terminal_frontier = None;
     let mut task_control = ConversationTaskControlProjection::default();
     let mut plan_review = PlanReviewDisplayProjection::default();
+    let mut user_input = UserInputProjectionV1::default();
     let mut total_items = 0_u64;
     let mut eligible_items = 0_u64;
     let mut cursor_boundary_found = decoded_cursor.is_none();
@@ -895,6 +899,11 @@ pub fn conversation_display_page_from_records(
         .take_while(|record| record.stream_sequence() <= frontier.sequence)
     {
         plan_review.apply_record(record);
+        if let Some(SessionLogEntry::Control(control)) = record.session_log_entry()?
+            && let Some(entry) = UserInputLifecycleEntryV1::from_control(&control)
+        {
+            user_input.apply(entry)?;
+        }
         let mut projected = project_record(
             record,
             expected_scope,
@@ -971,6 +980,15 @@ pub fn conversation_display_page_from_records(
         None
     };
 
+    let plan_review_user_input = plan_review.pending_user_input();
+    let durable_user_input = user_input
+        .pending()
+        .max_by_key(|state| state.requested.request.requested_at_unix_ms)
+        .map(sigil_kernel::UserInputRequestStateV1::public_view);
+    let projected_user_input = durable_user_input
+        .into_iter()
+        .chain(plan_review_user_input)
+        .max_by_key(|request| request.requested_at_unix_ms);
     Ok(ConversationDisplayPageV1 {
         schema_version: CONVERSATION_DISPLAY_SCHEMA_VERSION,
         session_scope_id: expected_scope.to_owned(),
@@ -982,6 +1000,7 @@ pub fn conversation_display_page_from_records(
         has_more,
         task_control: task_control.current(),
         plan_review: plan_review.into_public(current_workspace_snapshot_id),
+        user_input: projected_user_input,
     })
 }
 
@@ -1947,13 +1966,17 @@ struct PlanReviewDisplayProjection {
         sigil_kernel::PlanId,
         Vec<sigil_kernel::TaskCreatedFromPlanEntry>,
     >,
+    revision_guidance:
+        std::collections::BTreeMap<sigil_kernel::UserInputIdentityV1, sigil_kernel::PlanId>,
+    pending_revision_guidance: std::collections::BTreeSet<sigil_kernel::PlanId>,
+    latest_revision_request:
+        std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::UserInputRequestId>,
+    revision_guidance_resolution:
+        std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::UserInputResolutionV1>,
 }
 
 impl PlanReviewDisplayProjection {
-    fn apply_record(&mut self, record: &sigil_kernel::SessionStreamRecord) {
-        let Ok(Some(entry)) = record.session_log_entry() else {
-            return;
-        };
+    fn apply_entry(&mut self, entry: sigil_kernel::SessionLogEntry) {
         match entry {
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::PlanReviewAttempt(attempt),
@@ -1965,22 +1988,62 @@ impl PlanReviewDisplayProjection {
             }
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::PlanDecisionRecorded(decision),
-            ) => {
-                self.decisions
-                    .entry(decision.plan_id.clone())
-                    .or_default()
-                    .push(decision);
-            }
+            ) => self
+                .decisions
+                .entry(decision.plan_id.clone())
+                .or_default()
+                .push(decision),
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::TaskCreatedFromPlan(created),
+            ) => self
+                .tasks_created
+                .entry(created.plan_id.clone())
+                .or_default()
+                .push(created),
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::UserInputRequested(requested),
             ) => {
-                self.tasks_created
-                    .entry(created.plan_id.clone())
-                    .or_default()
-                    .push(created);
+                if let sigil_kernel::UserInputSourceV1::PlanRevision { base_plan_id, .. } =
+                    &requested.request.source
+                {
+                    self.revision_guidance
+                        .insert(requested.request.identity.clone(), base_plan_id.clone());
+                    self.pending_revision_guidance.insert(base_plan_id.clone());
+                    self.latest_revision_request.insert(
+                        base_plan_id.clone(),
+                        requested.request.identity.request_id.clone(),
+                    );
+                }
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::UserInputResolved(resolved),
+            ) => {
+                if let Some(base_plan_id) = self.revision_guidance.get(&resolved.identity) {
+                    self.pending_revision_guidance.remove(base_plan_id);
+                    self.revision_guidance_resolution
+                        .insert(base_plan_id.clone(), resolved.resolution);
+                }
             }
             _ => {}
         }
+    }
+
+    fn pending_user_input(&self) -> Option<sigil_kernel::PublicUserInputRequestV1> {
+        self.attempts
+            .iter()
+            .rev()
+            .find(|attempt| {
+                attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+            })
+            .and_then(|attempt| attempt.pending_user_input.as_deref())
+            .cloned()
+    }
+
+    fn apply_record(&mut self, record: &sigil_kernel::SessionStreamRecord) {
+        let Ok(Some(entry)) = record.session_log_entry() else {
+            return;
+        };
+        self.apply_entry(entry);
     }
 
     fn into_public(
@@ -1988,9 +2051,21 @@ impl PlanReviewDisplayProjection {
         current_workspace_snapshot_id: Option<&str>,
     ) -> Option<sigil_kernel::PublicPlanReview> {
         let latest = self.attempts.iter().next_back()?;
+        let active_attempt = if latest.revision_request_id.is_some()
+            && latest.status != sigil_kernel::PlanReviewAttemptStatus::DraftReady
+        {
+            latest.base_plan_id.as_ref().and_then(|base_plan_id| {
+                self.attempts.iter().rev().find(|attempt| {
+                    &attempt.plan_id == base_plan_id
+                        && attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                })
+            })?
+        } else {
+            latest
+        };
         if self
             .decisions
-            .get(&latest.plan_id)
+            .get(&active_attempt.plan_id)
             .and_then(|entries| entries.last())
             .is_some_and(|decision| {
                 matches!(
@@ -2001,13 +2076,13 @@ impl PlanReviewDisplayProjection {
         {
             return None;
         }
-        if self.tasks_created.contains_key(&latest.plan_id) {
+        if self.tasks_created.contains_key(&active_attempt.plan_id) {
             return None;
         }
         // The attempt status always projects; draft-specific details exist only when the latest
         // attempt committed a typed draft (a Started/failed/interrupted/cancelled attempt must
         // stay visible across reloads instead of disappearing from the display).
-        let draft = self.drafts.get(&latest.plan_id);
+        let draft = self.drafts.get(&active_attempt.plan_id);
         let stale = draft
             .and_then(|draft| {
                 crate::plan_review_coordinator::plan_handoff_stale_reason(
@@ -2016,27 +2091,187 @@ impl PlanReviewDisplayProjection {
                 )
             })
             .is_some();
-        let allowed_actions = match latest.status {
-            sigil_kernel::PlanReviewAttemptStatus::DraftReady if draft.is_some() => vec![
-                sigil_kernel::PublicPlanAction::Run,
-                sigil_kernel::PublicPlanAction::Save,
-                sigil_kernel::PublicPlanAction::Revise,
-                sigil_kernel::PublicPlanAction::Reject,
-            ],
-            _ => Vec::new(),
+        let latest_decision = self
+            .decisions
+            .get(&active_attempt.plan_id)
+            .and_then(|entries| entries.last())
+            .map(|entry| entry.decision);
+        let revision_running = latest.revision_request_id.is_some()
+            && matches!(
+                latest.status,
+                sigil_kernel::PlanReviewAttemptStatus::Started
+                    | sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+                    | sigil_kernel::PlanReviewAttemptStatus::Finalizing
+            );
+        let guidance_pending = self
+            .pending_revision_guidance
+            .contains(&active_attempt.plan_id);
+        let allowed_actions = if active_attempt.status
+            == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+            && draft.is_some()
+            && !revision_running
+            && !guidance_pending
+        {
+            match latest_decision {
+                Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
+                Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
+                    sigil_kernel::PublicPlanAction::Run,
+                    sigil_kernel::PublicPlanAction::Revise,
+                    sigil_kernel::PublicPlanAction::Reject,
+                ],
+                _ => vec![
+                    sigil_kernel::PublicPlanAction::Run,
+                    sigil_kernel::PublicPlanAction::Save,
+                    sigil_kernel::PublicPlanAction::Revise,
+                    sigil_kernel::PublicPlanAction::Reject,
+                ],
+            }
+        } else {
+            Vec::new()
         };
+        let (summary, summary_truncated) = draft
+            .map(|draft| compact_plan_review_summary(&draft.summary))
+            .map_or((None, false), |(summary, truncated)| {
+                (Some(summary), truncated)
+            });
         Some(sigil_kernel::PublicPlanReview {
-            plan_id: latest.plan_id.as_str().to_owned(),
+            plan_id: active_attempt.plan_id.as_str().to_owned(),
             plan_hash: draft.map(|draft| draft.plan_hash.clone()),
-            status: latest.status.into(),
-            summary: draft.map(|draft| draft.summary.clone()),
+            status: active_attempt.status.into(),
+            summary,
+            summary_truncated,
             step_count: draft.map(|draft| draft.steps.len()),
             target_path_count: draft.map(|draft| draft.target_paths.len()),
             suggested_check_count: draft.map(|draft| draft.suggested_checks.len()),
             risk: draft.and_then(|draft| draft.risk.clone()),
             allowed_actions,
-            source: latest.source.into(),
+            source: active_attempt.source.into(),
             stale,
+            revision: if let Some(request_id) = latest.revision_request_id.as_ref() {
+                Some(sigil_kernel::PublicPlanRevisionSummaryV1 {
+                    request_id: request_id.as_str().to_owned(),
+                    attempt_id: Some(latest.attempt_id.as_str().to_owned()),
+                    attempt_ordinal: Some(latest.attempt_ordinal),
+                    status: match latest.status {
+                        sigil_kernel::PlanReviewAttemptStatus::Started => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Researching
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::WaitingForInput => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::Finalizing => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Finalizing
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::DraftReady => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Succeeded
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::Cancelled => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Cancelled
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::CompletedWithoutDraft
+                        | sigil_kernel::PlanReviewAttemptStatus::Failed
+                        | sigil_kernel::PlanReviewAttemptStatus::Interrupted => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Failed
+                        }
+                    },
+                    terminal_reason: latest
+                        .terminal_reason
+                        .map(|reason| reason.as_str().to_owned()),
+                })
+            } else {
+                self.latest_revision_request
+                    .get(&active_attempt.plan_id)
+                    .map(|request_id| sigil_kernel::PublicPlanRevisionSummaryV1 {
+                        request_id: request_id.as_str().to_owned(),
+                        attempt_id: None,
+                        attempt_ordinal: None,
+                        status: if guidance_pending {
+                            sigil_kernel::PublicPlanRevisionStatusV1::AwaitingGuidance
+                        } else if latest_decision
+                            == Some(sigil_kernel::PlanDecision::RevisionRequested)
+                        {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Queued
+                        } else {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Cancelled
+                        },
+                        terminal_reason: (!guidance_pending
+                            && latest_decision
+                                != Some(sigil_kernel::PlanDecision::RevisionRequested))
+                        .then(|| {
+                            self.revision_guidance_resolution
+                                .get(&active_attempt.plan_id)
+                                .map_or_else(
+                                    || "revision guidance resolved without dispatch".to_owned(),
+                                    |resolution| match resolution {
+                                        sigil_kernel::UserInputResolutionV1::Declined => {
+                                            "revision guidance declined".to_owned()
+                                        }
+                                        sigil_kernel::UserInputResolutionV1::RunCancelled => {
+                                            "revision guidance cancelled".to_owned()
+                                        }
+                                        sigil_kernel::UserInputResolutionV1::Consumed => {
+                                            "revision guidance consumed without dispatch".to_owned()
+                                        }
+                                        sigil_kernel::UserInputResolutionV1::Failed { .. } => {
+                                            "revision guidance failed".to_owned()
+                                        }
+                                    },
+                                )
+                        }),
+                    })
+            },
         })
     }
+}
+
+/// Projects the reducer-owned plan summary for an in-process surface that already owns a
+/// validated session snapshot.
+#[must_use]
+pub fn public_plan_review_from_entries(
+    entries: &[sigil_kernel::SessionLogEntry],
+    current_workspace_snapshot_id: Option<&str>,
+) -> Option<sigil_kernel::PublicPlanReview> {
+    let mut projection = PlanReviewDisplayProjection::default();
+    for entry in entries {
+        projection.apply_entry(entry.clone());
+    }
+    projection.into_public(current_workspace_snapshot_id)
+}
+
+/// Projects the newest unresolved attention request from ordinary session truth or a suspended
+/// PlanReview child mirror. Product surfaces use this on reload instead of keeping renderer-local
+/// question authority.
+pub fn public_user_input_from_entries(
+    entries: &[sigil_kernel::SessionLogEntry],
+) -> Result<Option<sigil_kernel::PublicUserInputRequestV1>> {
+    let user_input = sigil_kernel::UserInputProjectionV1::from_session_entries(entries)?;
+    let mut plan_review = PlanReviewDisplayProjection::default();
+    for entry in entries {
+        plan_review.apply_entry(entry.clone());
+    }
+    Ok(user_input
+        .pending()
+        .map(sigil_kernel::UserInputRequestStateV1::public_view)
+        .chain(plan_review.pending_user_input())
+        .max_by_key(|request| request.requested_at_unix_ms))
+}
+
+fn compact_plan_review_summary(summary: &str) -> (String, bool) {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    const COMPACT_SUMMARY_MAX_GRAPHEMES: usize = 160;
+    let mut graphemes = summary.graphemes(true);
+    let visible = graphemes
+        .by_ref()
+        .take(COMPACT_SUMMARY_MAX_GRAPHEMES)
+        .collect::<Vec<_>>();
+    if graphemes.next().is_none() {
+        return (summary.to_owned(), false);
+    }
+    let mut compact = visible
+        .into_iter()
+        .take(COMPACT_SUMMARY_MAX_GRAPHEMES.saturating_sub(1))
+        .collect::<String>();
+    compact.push('…');
+    (compact, true)
 }

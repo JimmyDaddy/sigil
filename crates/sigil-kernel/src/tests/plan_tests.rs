@@ -3,10 +3,11 @@ use serde_json::json;
 
 use crate::{
     ControlEntry, NetworkEffect, PlanApprovalPermission, PlanArtifactProjection, PlanDecision,
-    PlanDecisionActor, PlanDecisionRecordedEntry, PlanSourceRef, SessionLogEntry,
+    PlanDecisionActor, PlanDecisionRecordedEntry, PlanId, PlanSourceRef, SessionLogEntry,
     TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess, ToolCategory,
-    ToolPreviewCapability, ToolSpec, plan_draft_created_entry, plan_task_input_from_draft,
-    plan_text_hash, plan_workspace_paths, task_id_from_plan_draft, task_plan_from_plan_draft,
+    ToolPreviewCapability, ToolSpec, plan_draft_created_entry, plan_review_detail_from_entries,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, submit_plan_draft_entry,
+    task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 
 fn tool_spec(
@@ -489,6 +490,81 @@ fn plan_draft_projects_sensitive_model_text_before_hash_and_persistence() -> Res
                 .expect("sensitive plan should retain bounded safe inline text")
         )
     );
+    Ok(())
+}
+
+#[test]
+fn plan_review_detail_preserves_complete_typed_content_and_exact_hash() -> Result<()> {
+    let plan_id = PlanId::new("plan-detail-v1")?;
+    let args = json!({
+        "schema_version": 2,
+        "summary": "Inspect the durable lifecycle, repair recovery, and verify every public surface.",
+        "steps": [{
+            "step_id": "inspect",
+            "title": "Inspect durable lifecycle",
+            "detail": "Trace every append-only transition before changing the reducer.",
+            "role": "planner",
+            "depends_on": [],
+            "mode": "serial",
+            "isolation": "shared_workspace",
+            "target_paths": ["crates/sigil-kernel/src/plan.rs"],
+            "suggested_checks": ["cargo test -p sigil-kernel plan_review_detail"],
+            "risk": "medium",
+            "notes": ["Preserve exact identity bindings."]
+        }],
+        "target_paths": ["crates/sigil-kernel/src/plan.rs"],
+        "suggested_checks": ["cargo test -p sigil-kernel plan_review_detail"],
+        "notes": ["Use the shared converter."]
+    });
+    let draft = submit_plan_draft_entry(
+        &serde_json::to_string(&args)?,
+        plan_id.clone(),
+        PlanSourceRef::default(),
+        42,
+        Some("snapshot-detail".to_owned()),
+    )?
+    .expect("typed plan");
+    let entries = vec![SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+        draft.clone(),
+    ))];
+
+    let detail = plan_review_detail_from_entries(&entries, &plan_id, &draft.plan_hash)?;
+
+    assert_eq!(detail.summary, draft.summary);
+    assert_eq!(detail.steps.len(), 1);
+    assert_eq!(
+        detail.steps[0].detail.as_deref(),
+        Some("Trace every append-only transition before changing the reducer.")
+    );
+    assert_eq!(
+        detail.workspace_snapshot_id.as_deref(),
+        Some("snapshot-detail")
+    );
+    assert!(detail.legacy_markdown.is_none());
+    assert!(plan_review_detail_from_entries(&entries, &plan_id, "sha256:stale").is_err());
+    Ok(())
+}
+
+#[test]
+fn plan_review_rejects_oversized_summary_instead_of_truncating_detail() -> Result<()> {
+    let args = json!({
+        "schema_version": 2,
+        "summary": "x".repeat(2 * 1024 + 1),
+        "steps": [{"step_id": "inspect", "title": "Inspect"}],
+        "target_paths": [],
+        "suggested_checks": []
+    });
+
+    let error = submit_plan_draft_entry(
+        &serde_json::to_string(&args)?,
+        PlanId::new("plan-summary-too-large")?,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )
+    .expect_err("oversized summaries must fail closed");
+
+    assert!(error.to_string().contains("2048-byte"));
     Ok(())
 }
 #[test]

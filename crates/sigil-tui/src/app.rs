@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
@@ -45,6 +45,7 @@ mod timeline_render_store;
 mod tool_card_interaction;
 mod update_flow;
 mod usage_sidebar_flow;
+mod user_input_flow;
 mod verification_flow;
 mod worker_bridge;
 mod workspace_trust_flow;
@@ -284,8 +285,187 @@ pub(crate) struct PendingPlanApproval {
     pub(crate) workspace_snapshot_id: Option<String>,
     pub(crate) stale: bool,
     pub(crate) stale_reason: Option<String>,
+    pub(crate) allowed_actions: Vec<sigil_kernel::PublicPlanAction>,
+    pub(crate) revision: Option<sigil_kernel::PublicPlanRevisionSummaryV1>,
+    pub(crate) detail: sigil_kernel::PlanReviewDetailV1,
+    pub(crate) workbench_open: bool,
+    pub(crate) workbench_scroll: usize,
+    pub(crate) workbench_scroll_extent: ViewportScrollExtent,
+    pub(crate) selected_action: PlanWorkbenchAction,
     pub(crate) rendered_text_row_counts: PlanTextRowCountCache,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanWorkbenchAction {
+    Run,
+    Save,
+    Revise,
+    Reject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingUserInputForm {
+    pub(crate) request: sigil_kernel::PublicUserInputRequestV1,
+    pub(crate) recovery_command: Option<sigil_kernel::UserInputDecisionCommandV1>,
+    pub(crate) open: bool,
+    pub(crate) focused_question: usize,
+    pub(crate) focus_actions: bool,
+    pub(crate) selected_action: UserInputFormAction,
+    pub(crate) drafts: Vec<UserInputDraftValue>,
+    pub(crate) scroll: usize,
+    pub(crate) scroll_extent: ViewportScrollExtent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UserInputFormAction {
+    Resume,
+    Submit,
+    Decline,
+    CancelRun,
+}
+
+impl UserInputFormAction {
+    pub(crate) const ORDER: [Self; 4] =
+        [Self::Resume, Self::Submit, Self::Decline, Self::CancelRun];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Resume => "Resume",
+            Self::Submit => "Submit",
+            Self::Decline => "Decline",
+            Self::CancelRun => "Cancel run",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UserInputDraftValue {
+    Text(String),
+    Number(String),
+    Integer(String),
+    Boolean(Option<bool>),
+    SingleSelect {
+        selected: Option<usize>,
+        other: String,
+    },
+    MultiSelect {
+        cursor: usize,
+        selected: Vec<String>,
+    },
+}
+
+impl PlanWorkbenchAction {
+    pub(crate) const ORDER: [Self; 4] = [Self::Run, Self::Save, Self::Revise, Self::Reject];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Run => "Run",
+            Self::Save => "Save",
+            Self::Revise => "Revise",
+            Self::Reject => "Reject",
+        }
+    }
+}
+
+#[cfg(test)]
+impl PendingPlanApproval {
+    pub(crate) fn test_fixture(
+        plan_id: &str,
+        plan_text: &str,
+        plan_hash: &str,
+        summary: &str,
+        steps: Vec<String>,
+        target_paths: Vec<String>,
+        suggested_checks: Vec<String>,
+    ) -> Self {
+        let detail_steps = steps
+            .iter()
+            .enumerate()
+            .map(|(index, title)| sigil_kernel::PlanReviewStepDetailV1 {
+                step_id: format!("step-{}", index + 1),
+                title: title.clone(),
+                display_name: None,
+                detail: None,
+                role: None,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
+                target_paths: target_paths.clone(),
+                suggested_checks: Vec::new(),
+                risk: None,
+                notes: Vec::new(),
+            })
+            .collect();
+        let target_path_count = target_paths.len();
+        let suggested_check_count = suggested_checks.len();
+        Self {
+            plan_id: Some(plan_id.to_owned()),
+            plan_text: plan_text.to_owned(),
+            plan_hash: plan_hash.to_owned(),
+            summary: summary.to_owned(),
+            steps,
+            target_paths: target_paths.clone(),
+            suggested_checks,
+            target_path_count,
+            suggested_check_count,
+            workspace_snapshot_id: None,
+            stale: false,
+            stale_reason: None,
+            allowed_actions: vec![
+                sigil_kernel::PublicPlanAction::Run,
+                sigil_kernel::PublicPlanAction::Save,
+                sigil_kernel::PublicPlanAction::Revise,
+                sigil_kernel::PublicPlanAction::Reject,
+            ],
+            revision: None,
+            detail: sigil_kernel::PlanReviewDetailV1 {
+                plan_id: sigil_kernel::PlanId::new(plan_id).expect("test plan id"),
+                plan_hash: plan_hash.to_owned(),
+                workspace_snapshot_id: None,
+                source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+                summary: summary.to_owned(),
+                steps: detail_steps,
+                target_paths,
+                suggested_checks: Vec::new(),
+                risk: None,
+                notes: Vec::new(),
+                lineage: sigil_kernel::PlanLineageV1 {
+                    source: sigil_kernel::PlanSourceRef::default(),
+                    plan_review_id: None,
+                    attempt_id: None,
+                    created_at_ms: 0,
+                },
+                legacy_markdown: Some(plan_text.to_owned()),
+            },
+            workbench_open: false,
+            workbench_scroll: 0,
+            workbench_scroll_extent: Default::default(),
+            selected_action: PlanWorkbenchAction::Run,
+            rendered_text_row_counts: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ViewportScrollExtent(Rc<Cell<usize>>);
+
+impl ViewportScrollExtent {
+    pub(crate) fn get(&self) -> usize {
+        self.0.get()
+    }
+
+    pub(crate) fn set(&self, value: usize) {
+        self.0.set(value);
+    }
+}
+
+impl PartialEq for ViewportScrollExtent {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Eq for ViewportScrollExtent {}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PlanTextRowCountCache(Rc<RefCell<BTreeMap<usize, usize>>>);
@@ -448,6 +628,13 @@ pub enum AppAction {
     RevisePlan {
         plan_id: String,
         expected_plan_hash: String,
+    },
+    SubmitUserInputDecision {
+        command_id: Option<String>,
+        request_id: String,
+        generation: u32,
+        expected_request_hash: String,
+        decision: sigil_kernel::UserInputDecisionV1,
     },
     SubmitTask(String),
     InvokeInlineSkill {
@@ -1211,6 +1398,10 @@ impl AppState {
                 outcome => self.apply_modal_outcome(outcome),
             }
             return Ok(None);
+        }
+
+        if let Some(outcome) = self.handle_user_input_form_key_event(key) {
+            return Ok(outcome);
         }
 
         if key.code == KeyCode::Esc && key.modifiers.is_empty() && self.runtime.is_busy {

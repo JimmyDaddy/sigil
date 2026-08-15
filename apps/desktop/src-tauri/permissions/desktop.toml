@@ -70,8 +70,13 @@ commands.allow = ["desktop_resolve_approval"]
 
 [[permission]]
 identifier = "allow-desktop-plan-decision"
-description = "Allows the main local window to submit one hash-bound Run, Save, Revise, or Reject decision for a draft plan."
-commands.allow = ["desktop_plan_decision"]
+description = "Allows the main local window to inspect one exact plan and submit one hash-bound Run, Save, Revise, or Reject decision for a draft plan."
+commands.allow = ["desktop_plan_detail", "desktop_plan_decision"]
+
+[[permission]]
+identifier = "allow-desktop-user-input"
+description = "Allows the main local window to inspect and resolve one exact durable user-input request."
+commands.allow = ["desktop_user_input_request", "desktop_user_input_decision"]
 
 [[permission]]
 identifier = "allow-desktop-verification"

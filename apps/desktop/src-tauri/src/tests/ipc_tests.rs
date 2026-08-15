@@ -100,6 +100,40 @@ fn run_start_input_preserves_the_exact_same_session_model_route() {
 }
 
 #[test]
+fn user_input_select_answers_decode_renderer_camel_case_fields() {
+    let single = serde_json::from_value::<DesktopUserInputAnswerInput>(serde_json::json!({
+        "questionId": "scope",
+        "value": {
+            "kind": "single_select",
+            "optionId": "workspace",
+            "other": null
+        }
+    }))
+    .expect("single-select answer should decode from the renderer contract");
+    assert!(matches!(
+        single.value,
+        DesktopUserInputAnswerValueInput::SingleSelect {
+            option_id: Some(ref option_id),
+            other: None,
+        } if option_id == "workspace"
+    ));
+
+    let multiple = serde_json::from_value::<DesktopUserInputAnswerInput>(serde_json::json!({
+        "questionId": "checks",
+        "value": {
+            "kind": "multi_select",
+            "optionIds": ["fmt", "test"]
+        }
+    }))
+    .expect("multi-select answer should decode from the renderer contract");
+    assert!(matches!(
+        multiple.value,
+        DesktopUserInputAnswerValueInput::MultiSelect { ref option_ids }
+            if option_ids == &["fmt".to_owned(), "test".to_owned()]
+    ));
+}
+
+#[test]
 fn compaction_projection_preserves_prepared_stage_and_bounded_tool_artifact() {
     let native = serde_json::from_value::<NativeCompactionReview>(serde_json::json!({
         "preview_id": "preview-1",

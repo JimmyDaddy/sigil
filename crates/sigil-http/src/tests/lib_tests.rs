@@ -61,23 +61,26 @@ use super::{
     HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackDriverError, HttpIntentStackView,
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPermissionMode, HttpPlanAction, HttpPlanDecisionAction,
-    HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpPlanReview, HttpPlanReviewSource,
-    HttpPlanReviewStatus, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
-    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpProviderModelRef,
-    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError,
-    HttpRunAdmissionError, HttpRunCancelRequest, HttpRunContextView, HttpRunDriver,
-    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpRunEventSequencer,
-    HttpRunSnapshot, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig,
-    HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
-    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
+    HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpPlanReview, HttpPlanReviewDetail,
+    HttpPlanReviewSource, HttpPlanReviewStatus, HttpProtocolEvent, HttpProtocolEventBuffer,
+    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
+    HttpProtocolVersionError, HttpProviderModelRef, HttpQueuedRunAdmission,
+    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunAdmissionError,
+    HttpRunCancelRequest, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
+    HttpRunDriverTerminalTaskCancel, HttpRunEventSequencer, HttpRunSnapshot, HttpRunStartRequest,
+    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionSnapshot,
     HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
     HttpSupportContext, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView, HttpTerminalLifecycleView,
     HttpTerminalTaskCancelRequest, HttpToolArtifactPage, HttpToolArtifactPageEncoding,
     HttpToolArtifactReadDriverError, HttpToolArtifactReadRequest, HttpToolArtifactSelector,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpUserInputDecisionCommandReceipt,
+    HttpUserInputDecisionDriverCommand, HttpUserInputDecisionRequest, HttpUserInputRequest,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 fn unavailable_session_grant_reason() -> Option<ToolApprovalSessionGrantUnavailableReason> {
@@ -2013,6 +2016,7 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
         live_provisional_anchor: None,
         task_control: None,
         plan_review: None,
+        user_input: None,
     });
 
     let path = format!("/sessions/{session_id}/display?limit=1");
@@ -2168,6 +2172,7 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
             plan_hash: Some(plan_hash.clone()),
             status: HttpPlanReviewStatus::DraftReady,
             summary: Some("Refactor the recovery binding".to_owned()),
+            summary_truncated: false,
             step_count: Some(2),
             target_path_count: Some(1),
             suggested_check_count: Some(0),
@@ -2180,7 +2185,9 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
             ],
             source: HttpPlanReviewSource::AutomaticConversationRoute,
             stale: false,
+            revision: None,
         }),
+        user_input: None,
     });
 
     let path = format!("/sessions/{session_id}/display?limit=1");
@@ -2271,6 +2278,182 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
     .await;
     assert_eq!(status, 401);
     assert_eq!(body["error"]["code"], "unauthorized");
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_reads_and_resolves_exact_user_input_without_persisting_answer_values() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "user input"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let session_scope_id = session["durable_session_scope_id"]
+        .as_str()
+        .expect("durable session scope");
+    let request_hash = "b".repeat(64);
+    let request: HttpUserInputRequest = serde_json::from_value(json!({
+        "identity": {
+            "session_scope_id": session_scope_id,
+            "root_logical_run_id": "root-input-test",
+            "source_thread_id": "main",
+            "request_id": "request-input-test",
+            "generation": 1,
+            "source_binding_hash": "a".repeat(64)
+        },
+        "request_hash": request_hash,
+        "source": "agent",
+        "purpose": "missing_constraint",
+        "prompt": "Choose the target scope",
+        "questions": [{
+            "id": "scope",
+            "header": "Scope",
+            "question": "Which scope should be changed?",
+            "required": true,
+            "field": {"kind": "text", "multiline": false, "max_chars": 120}
+        }],
+        "allowed_actions": ["submit", "decline", "cancel_run"],
+        "requested_at_unix_ms": 7,
+        "status": "requested"
+    }))
+    .expect("user input fixture should decode");
+    driver.set_user_input_request(request);
+
+    let path = format!(
+        "/sessions/{session_id}/user-input/request-input-test?generation=1&expected_request_hash={request_hash}"
+    );
+    let (status, _content_type, response_head, response_body) =
+        http_raw_exchange_with_head(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert!(
+        response_head
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case(&format!("etag: \"{request_hash}\""))),
+        "exact user-input reads must expose an immutable request-hash ETag"
+    );
+    let detail: serde_json::Value =
+        serde_json::from_str(&response_body).expect("user-input body should be JSON");
+    assert_eq!(detail["prompt"], "Choose the target scope");
+    assert_eq!(detail["questions"][0]["id"], "scope");
+    assert!(detail.get("answers").is_none());
+
+    let decision = HttpCommandEnvelope::new(
+        "user-input-command-1",
+        "desktop-client",
+        session_id,
+        HttpUserInputDecisionRequest {
+            generation: 1,
+            expected_request_hash: request_hash.clone(),
+            decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                answers: vec![sigil_kernel::UserInputAnswerV1 {
+                    question_id: "scope".to_owned(),
+                    value: sigil_kernel::UserInputAnswerValueV1::Text {
+                        value: "kernel and TUI".to_owned(),
+                    },
+                }],
+            },
+            permission_mode: Some(HttpPermissionMode::Manual),
+        },
+    );
+    let body = serde_json::to_string(&decision).expect("user input decision should serialize");
+    let decision_path = format!("/sessions/{session_id}/user-input/request-input-test/decision");
+    let (status, receipt) = http_raw_request(
+        address,
+        http_post(&decision_path, Some("secret-token"), &body),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(receipt["command_id"], "user-input-command-1");
+    assert_eq!(receipt["continuation_run_id"], "input-continuation-test");
+    assert_eq!(receipt["replayed"], false);
+    assert!(
+        !receipt.to_string().contains("kernel and TUI"),
+        "public and durable command receipts must not retain answer values"
+    );
+
+    let (status, replay) = http_raw_request(
+        address,
+        http_post(&decision_path, Some("secret-token"), &body),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(driver.user_input_decisions().len(), 1);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_reads_exact_complete_plan_detail_with_immutable_etag() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "plan detail"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let draft = sigil_kernel::plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{"summary":"Review every durable step without compact-card truncation","steps":[{"step_id":"inspect","title":"Inspect lifecycle","detail":"Trace the exact append-only lifecycle and recovery state.","target_paths":["crates/sigil-kernel/src/plan.rs"]}],"target_paths":["crates/sigil-kernel/src/plan.rs"],"suggested_checks":["cargo test -p sigil-http plan_detail"]}
+```"#,
+        sigil_kernel::PlanSourceRef::default(),
+        42,
+        Some("snapshot-plan-detail".to_owned()),
+    )
+    .expect("draft parse")
+    .expect("typed draft");
+    let detail = sigil_kernel::plan_review_detail_from_entries(
+        &[SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+            draft.clone(),
+        ))],
+        &draft.plan_id,
+        &draft.plan_hash,
+    )
+    .expect("detail conversion");
+    driver.set_plan_review_detail(detail);
+
+    let path = format!(
+        "/sessions/{session_id}/plans/{}?expected_plan_hash={}",
+        draft.plan_id.as_str(),
+        draft.plan_hash
+    );
+    let (status, _content_type, head, body) =
+        http_raw_exchange_with_head(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert!(
+        head.lines()
+            .any(|line| line.eq_ignore_ascii_case(&format!("etag: \"{}\"", draft.plan_hash)))
+    );
+    let detail: Value = serde_json::from_str(&body).expect("plan detail response");
+    assert_eq!(
+        detail["summary"],
+        "Review every durable step without compact-card truncation"
+    );
+    assert_eq!(
+        detail["steps"][0]["detail"],
+        "Trace the exact append-only lifecycle and recovery state."
+    );
+    assert_eq!(detail["workspace_snapshot_id"], "snapshot-plan-detail");
+
+    let stale_path = format!(
+        "/sessions/{session_id}/plans/{}?expected_plan_hash=sha256:{}",
+        draft.plan_id.as_str(),
+        "0".repeat(64)
+    );
+    let (status, _) =
+        http_raw_request(address, http_get(&stale_path, Some("secret-token"), None)).await;
+    assert_ne!(status, 200);
     let _ = shutdown.send(());
 }
 
@@ -4033,6 +4216,12 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             ["foreground_owner_revision"]["pattern"],
         "^sha256:[0-9a-f]{64}$"
     );
+    assert_eq!(
+        document["components"]["schemas"]["Sha256"]["pattern"],
+        "^sha256:[0-9a-fA-F]{64}$"
+    );
+    assert_eq!(document["components"]["schemas"]["Sha256"]["minLength"], 71);
+    assert_eq!(document["components"]["schemas"]["Sha256"]["maxLength"], 71);
     assert!(
         document["components"]["schemas"]["ConversationQueueCommandReceipt"]["required"]
             .as_array()
@@ -4287,7 +4476,11 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     for component in [
         "TaskRunStartedEvent",
         "TaskRunFinishedEvent",
+        "RunAwaitingUserInputEvent",
         "TaskRoutingChangedEvent",
+        "ConversationRouteChangedEvent",
+        "PlanReviewChangedEvent",
+        "UserInputChangedEvent",
         "TaskPhaseChangedEvent",
         "TaskPlanUpdatedEvent",
         "TaskBatchChangedEvent",
@@ -6598,6 +6791,74 @@ fn session_open_validates_wire_identity_and_reuses_existing_handle() {
 }
 
 #[test]
+fn session_open_retries_one_accepted_user_input_through_the_exact_command_path() {
+    let (registry, driver) = registry_with_driver();
+    let request_hash = format!("sha256:{}", "b".repeat(64));
+    let request: HttpUserInputRequest = serde_json::from_value(json!({
+        "identity": {
+            "session_scope_id": "durable-recovery-1",
+            "root_logical_run_id": "root-recovery-1",
+            "source_thread_id": "main",
+            "request_id": "request-recovery-1",
+            "generation": 1,
+            "source_binding_hash": format!("sha256:{}", "a".repeat(64))
+        },
+        "request_hash": request_hash,
+        "source": "agent",
+        "purpose": "clarification",
+        "prompt": "Choose the recovery scope",
+        "questions": [{
+            "id": "scope",
+            "header": "Scope",
+            "question": "Which scope?",
+            "required": true,
+            "field": {"kind": "text", "multiline": false, "max_chars": 128}
+        }],
+        "allowed_actions": ["submit", "decline", "cancel_run"],
+        "requested_at_unix_ms": 1,
+        "status": "decision_accepted",
+        "answer_receipt": {
+            "command_id": "accepted-command-1",
+            "decision": "submitted",
+            "answer_hash": format!("sha256:{}", "c".repeat(64)),
+            "answered_question_ids": ["scope"]
+        }
+    }))
+    .expect("accepted request fixture should decode");
+    driver.set_user_input_request(request);
+    let recovery = HttpUserInputDecisionDriverCommand {
+        command_id: "accepted-command-1".to_owned(),
+        client_id: "session-recovery".to_owned(),
+        request_id: "request-recovery-1".to_owned(),
+        request: HttpUserInputDecisionRequest {
+            generation: 1,
+            expected_request_hash: request_hash,
+            decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                answers: vec![sigil_kernel::UserInputAnswerV1 {
+                    question_id: "scope".to_owned(),
+                    value: sigil_kernel::UserInputAnswerValueV1::Text {
+                        value: "kernel".to_owned(),
+                    },
+                }],
+            },
+            permission_mode: None,
+        },
+    };
+    driver.set_recoverable_user_input(recovery.clone());
+
+    registry
+        .open_session(HttpSessionOpenRequest {
+            session_ref: "session-recovery.jsonl".to_owned(),
+            session_id: "durable-recovery-1".to_owned(),
+            label: None,
+            recovery_binding: None,
+        })
+        .expect("historical session should remain available while recovery starts");
+
+    assert_eq!(driver.user_input_decisions(), vec![recovery]);
+}
+
+#[test]
 fn concurrent_session_open_creates_one_process_local_handle() {
     let (registry, _driver) = registry_with_driver();
     let registry = Arc::new(registry);
@@ -7236,6 +7497,32 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     assert_eq!(
         starts[0].reasoning_effort_binding.as_deref(),
         Some("effort-binding")
+    );
+}
+
+#[test]
+fn unresolved_user_input_owns_the_session_frontier_before_run_allocation() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    driver.set_unresolved_user_input(true);
+
+    assert_eq!(
+        registry.start_run(
+            &session.id,
+            run_start("unrelated new turn", HttpPermissionMode::Manual),
+        ),
+        Err(HttpRegistryError::SessionAwaitingUserInput {
+            session_id: session.id.clone(),
+        })
+    );
+    assert!(driver.starts().is_empty());
+    assert!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain readable")
+            .run_ids
+            .is_empty(),
+        "admission must fail before allocating an unrelated foreground run"
     );
 }
 
@@ -8779,6 +9066,11 @@ struct RecordingRunDriver {
     terminal_cancels: Mutex<Vec<HttpRunDriverTerminalTaskCancel>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
     plan_decisions: Mutex<Vec<HttpPlanDecisionRequest>>,
+    plan_review_detail: Mutex<Option<HttpPlanReviewDetail>>,
+    user_input_request: Mutex<Option<HttpUserInputRequest>>,
+    user_input_decisions: Mutex<Vec<HttpUserInputDecisionDriverCommand>>,
+    recoverable_user_input: Mutex<Option<HttpUserInputDecisionDriverCommand>>,
+    unresolved_user_input: Mutex<bool>,
     next_start_error: Mutex<Option<String>>,
     next_admission_error: Mutex<Option<HttpRunAdmissionError>>,
     next_session_mutation_attachment_error: Mutex<Option<HttpRunAdmissionError>>,
@@ -8850,6 +9142,26 @@ impl RecordingRunDriver {
 
     fn plan_decisions(&self) -> Vec<HttpPlanDecisionRequest> {
         lock(&self.plan_decisions).clone()
+    }
+
+    fn set_plan_review_detail(&self, detail: HttpPlanReviewDetail) {
+        *lock(&self.plan_review_detail) = Some(detail);
+    }
+
+    fn set_user_input_request(&self, request: HttpUserInputRequest) {
+        *lock(&self.user_input_request) = Some(request);
+    }
+
+    fn user_input_decisions(&self) -> Vec<HttpUserInputDecisionDriverCommand> {
+        lock(&self.user_input_decisions).clone()
+    }
+
+    fn set_recoverable_user_input(&self, command: HttpUserInputDecisionDriverCommand) {
+        *lock(&self.recoverable_user_input) = Some(command);
+    }
+
+    fn set_unresolved_user_input(&self, unresolved: bool) {
+        *lock(&self.unresolved_user_input) = unresolved;
     }
 
     fn reject_next_start(&self, message: &str) {
@@ -9032,6 +9344,13 @@ impl HttpRunDriver for RecordingRunDriver {
         })
     }
 
+    fn recoverable_session_attention_command(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<Option<HttpUserInputDecisionDriverCommand>, HttpRunDriverError> {
+        Ok(lock(&self.recoverable_user_input).take())
+    }
+
     fn purge_session_local_state(&self, durable_session_scope_id: &str) {
         lock(&self.purged_session_scopes).push(durable_session_scope_id.to_owned());
     }
@@ -9057,6 +9376,13 @@ impl HttpRunDriver for RecordingRunDriver {
         }
         lock(&self.starts).push(start);
         Ok(())
+    }
+
+    fn has_unresolved_user_input(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<bool, HttpRunDriverError> {
+        Ok(*lock(&self.unresolved_user_input))
     }
 
     fn cancel_run(&self, cancel: HttpRunDriverCancel) -> Result<(), HttpRunDriverError> {
@@ -9095,6 +9421,63 @@ impl HttpRunDriver for RecordingRunDriver {
             action: request.action,
             task_id: None,
             revision_run_id: None,
+            user_input_request: None,
+            replayed: false,
+        })
+    }
+
+    fn plan_review_detail(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        plan_id: &str,
+        expected_plan_hash: &str,
+    ) -> Result<HttpPlanReviewDetail, HttpRunDriverError> {
+        let detail = lock(&self.plan_review_detail)
+            .clone()
+            .ok_or_else(|| HttpRunDriverError::new("synthetic plan detail is unavailable"))?;
+        if detail.plan_id.as_str() != plan_id || detail.plan_hash != expected_plan_hash {
+            return Err(HttpRunDriverError::new("synthetic plan detail is stale"));
+        }
+        Ok(detail)
+    }
+
+    fn user_input_request(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        request_id: &str,
+        generation: u32,
+        expected_request_hash: &str,
+    ) -> Result<HttpUserInputRequest, HttpRunDriverError> {
+        let request = lock(&self.user_input_request)
+            .clone()
+            .ok_or_else(|| HttpRunDriverError::new("synthetic user input is unavailable"))?;
+        if request.identity.request_id.as_str() != request_id
+            || request.identity.generation != generation
+            || request.request_hash != expected_request_hash
+        {
+            return Err(HttpRunDriverError::new("synthetic user input is stale"));
+        }
+        Ok(request)
+    }
+
+    fn user_input_decision(
+        &self,
+        session: &super::HttpSessionSnapshot,
+        command: &HttpUserInputDecisionDriverCommand,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRunDriverError> {
+        lock(&self.user_input_decisions).push(command.clone());
+        let request = self.user_input_request(
+            session,
+            &command.request_id,
+            command.request.generation,
+            &command.request.expected_request_hash,
+        )?;
+        Ok(HttpUserInputDecisionCommandReceipt {
+            command_id: command.command_id.clone(),
+            client_id: command.client_id.clone(),
+            session_id: session.id.clone(),
+            request,
+            continuation_run_id: Some("input-continuation-test".to_owned()),
             replayed: false,
         })
     }
@@ -9638,6 +10021,14 @@ async fn http_raw_request(address: SocketAddr, request: String) -> (u16, Value) 
 }
 
 async fn http_raw_exchange(address: SocketAddr, request: String) -> (u16, String, String) {
+    let (status, content_type, _head, body) = http_raw_exchange_with_head(address, request).await;
+    (status, content_type, body)
+}
+
+async fn http_raw_exchange_with_head(
+    address: SocketAddr,
+    request: String,
+) -> (u16, String, String, String) {
     let mut stream = TcpStream::connect(address)
         .await
         .expect("test client should connect");
@@ -9672,7 +10063,7 @@ async fn http_raw_exchange(address: SocketAddr, request: String) -> (u16, String
             })
         })
         .unwrap_or_default();
-    (status, content_type, body.to_owned())
+    (status, content_type, head.to_owned(), body.to_owned())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

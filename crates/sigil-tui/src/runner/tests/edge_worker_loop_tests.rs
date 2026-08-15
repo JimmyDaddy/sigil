@@ -23,10 +23,11 @@ use sigil_kernel::{
     TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
     ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
     ToolResultMeta, UsageStats, VerificationScope, WorkspaceMutationDetected,
-    WorkspaceRootSnapshot, plan_draft_created_entry, plan_task_input_from_draft,
-    session_io_lock_metrics, task_id_from_plan_draft, task_plan_from_plan_draft,
+    WorkspaceRootSnapshot, plan_draft_created_entry, plan_draft_created_entry_with_plan_id,
+    plan_task_input_from_draft, session_io_lock_metrics, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
 };
-use sigil_runtime::McpRuntimeEventHandler;
+use sigil_runtime::{McpRuntimeEventHandler, PlanReviewCoordinator};
 use tempfile::tempdir;
 
 use super::{
@@ -57,6 +58,32 @@ struct ManualLoopWorker {
     command_tx: WorkerCommandSender,
     message_rx: mpsc::Receiver<WorkerMessage>,
     handle: Option<thread::JoinHandle<()>>,
+}
+
+fn commit_explicit_plan_review_draft(
+    session: &mut Session,
+    objective: &str,
+    logical_run_id: &str,
+    plan_text: &str,
+    workspace_snapshot_id: Option<String>,
+) -> Result<sigil_kernel::PlanDraftCreatedEntry> {
+    let request = PlanReviewCoordinator::prepare_explicit_plan_review(
+        session,
+        objective,
+        logical_run_id,
+        workspace_snapshot_id.clone(),
+        1,
+    )?;
+    let draft = plan_draft_created_entry_with_plan_id(
+        request.plan_id.clone(),
+        plan_text,
+        request.plan_source_ref(),
+        2,
+        workspace_snapshot_id,
+    )?
+    .expect("structured plan review draft");
+    PlanReviewCoordinator::commit_draft_from_child(session, &draft, &request, 3)?;
+    Ok(draft)
 }
 
 #[test]
@@ -104,16 +131,15 @@ fn task_from_plan_reconciles_decision_only_crash_prefix_with_the_same_task_id() 
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
-    let draft = plan_draft_created_entry(
+    let draft = commit_explicit_plan_review_draft(
+        &mut session,
+        "Implement retry and telemetry",
+        "intent-plan-review",
         r#"```sigil-plan-v2
 {"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
-        PlanSourceRef::default(),
-        1,
         base_snapshot,
-    )?
-    .expect("structured plan draft");
-    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    )?;
     let stable_task_id = task_id_from_plan_draft(&draft)?;
     session.append_control(ControlEntry::PlanDecisionRecorded(
         PlanDecisionRecordedEntry {
@@ -183,7 +209,10 @@ fn task_from_plan_acceptance_atomically_admits_and_binds_model_proposed_intents(
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
-    let draft = plan_draft_created_entry(
+    let draft = commit_explicit_plan_review_draft(
+        &mut session,
+        "Implement retry and telemetry",
+        "intent-plan-review",
         r#"```sigil-plan-v2
 {
   "summary": "Implement retry and telemetry",
@@ -236,12 +265,8 @@ fn task_from_plan_acceptance_atomically_admits_and_binds_model_proposed_intents(
   "target_paths": ["src/retry.rs", "src/telemetry.rs"]
 }
 ```"#,
-        PlanSourceRef::default(),
-        1,
         base_snapshot,
-    )?
-    .expect("structured intent plan draft");
-    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    )?;
     let mut current_session = Some(session);
 
     let created = create_task_from_plan(
@@ -418,7 +443,7 @@ fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates
 }
 
 #[test]
-fn task_from_plan_without_base_snapshot_uses_compatibility_planner() -> Result<()> {
+fn task_from_plan_without_base_snapshot_fails_closed() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -439,7 +464,7 @@ fn task_from_plan_without_base_snapshot_uses_compatibility_planner() -> Result<(
     session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
     let mut current_session = Some(session);
 
-    let created = create_task_from_plan(
+    let error = create_task_from_plan(
         &root_config,
         &workspace_root,
         &session_log_path,
@@ -451,27 +476,17 @@ fn task_from_plan_without_base_snapshot_uses_compatibility_planner() -> Result<(
             permission_grant: None,
         },
     )
-    .map_err(anyhow::Error::msg)?;
+    .expect_err("a legacy plan without a canonical review must not create task authority");
 
-    assert_eq!(created.entry.task_plan_version, 0);
-    assert!(created.entry.step_mapping.is_empty());
+    assert!(error.contains("no canonical review projection"));
     assert!(
-        created
-            .entry
-            .stale_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("base workspace snapshot is unavailable"))
+        current_session
+            .as_ref()
+            .expect("session remains available")
+            .task_state_projection()
+            .tasks
+            .is_empty()
     );
-    let task = current_session
-        .as_ref()
-        .expect("session remains available")
-        .task_state_projection()
-        .tasks
-        .get(&created.task_id)
-        .cloned()
-        .expect("task remains projected");
-    assert!(task.plans.is_empty());
-    assert_eq!(task.status, TaskRunStatus::Started);
     Ok(())
 }
 
@@ -487,16 +502,15 @@ fn task_from_plan_refuses_stale_retry_after_promoted_plan_crash_prefix() -> Resu
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
-    let draft = plan_draft_created_entry(
+    let draft = commit_explicit_plan_review_draft(
+        &mut session,
+        "Inspect the workspace",
+        "drift-plan-review",
         r#"```sigil-plan-v2
 {"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
-        PlanSourceRef::default(),
-        1,
         base_snapshot,
-    )?
-    .expect("structured plan draft");
-    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    )?;
     let stable_task_id = task_id_from_plan_draft(&draft)?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: stable_task_id.clone(),

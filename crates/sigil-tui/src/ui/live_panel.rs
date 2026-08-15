@@ -1397,17 +1397,9 @@ fn render_plan_action_line(stale: bool, width: usize, theme: &Theme) -> Line<'st
     let bg = palette.surface_panel_alt;
     let primary = Style::default().fg(palette.text_primary).bg(bg);
     let secondary = Style::default().fg(palette.text_secondary).bg(bg);
-    let full_text = if stale {
-        "r revise  Esc reject"
-    } else {
-        "Enter run  s save  r revise  Esc reject"
-    };
+    let full_text = "Enter review";
     if width < terminal_cell_width(full_text) {
-        let keys = if stale {
-            ["r", "Esc"].as_slice()
-        } else {
-            ["Enter", "s", "r", "Esc"].as_slice()
-        };
+        let keys = ["Enter"].as_slice();
         let mut spans = Vec::with_capacity(keys.len().saturating_mul(2));
         for (index, key) in keys.iter().enumerate() {
             if index > 0 {
@@ -1418,29 +1410,16 @@ fn render_plan_action_line(stale: bool, width: usize, theme: &Theme) -> Line<'st
         return status_band_line(Line::from(spans), width, bg);
     }
 
-    if stale {
-        return Line::from(vec![
-            Span::styled("r", primary),
-            Span::styled(" revise  ", secondary),
-            Span::styled("Esc", primary),
-            Span::styled(" reject", secondary),
-        ]);
-    }
+    let _ = stale;
     Line::from(vec![
         Span::styled("Enter", primary),
-        Span::styled(" run  ", secondary),
-        Span::styled("s", primary),
-        Span::styled(" save  ", secondary),
-        Span::styled("r", primary),
-        Span::styled(" revise  ", secondary),
-        Span::styled("Esc", primary),
-        Span::styled(" reject", secondary),
+        Span::styled(" review complete plan", secondary),
     ])
 }
 
 fn render_plan_overflow_line(theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
-        "... plan details truncated",
+        "... compact preview; Enter opens complete plan",
         Style::default()
             .fg(theme.palette.text_muted)
             .bg(theme.palette.surface_panel_alt),
@@ -1449,12 +1428,12 @@ fn render_plan_overflow_line(theme: &Theme) -> Line<'static> {
 
 fn render_hidden_plan_action_line(action: Line<'static>, theme: &Theme) -> Line<'static> {
     let bg = theme.palette.surface_panel_alt;
-    let supports_run = action
+    let supports_review = action
         .spans
         .iter()
         .any(|span| span.content.contains("Enter"));
     let mut spans = Vec::new();
-    if supports_run {
+    if supports_review {
         spans.push(Span::styled(
             "Enter",
             Style::default()
@@ -1463,26 +1442,26 @@ fn render_hidden_plan_action_line(action: Line<'static>, theme: &Theme) -> Line<
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            " run plan… ",
+            " review plan… ",
             Style::default()
                 .fg(theme.palette.accent_warning)
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            "· s/r/Esc",
+            "· full detail",
             Style::default().fg(theme.palette.text_secondary).bg(bg),
         ));
     } else {
         spans.push(Span::styled(
-            "r revise hidden",
+            "Enter review",
             Style::default()
                 .fg(theme.palette.accent_warning)
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            " · Esc reject",
+            " · full detail",
             Style::default().fg(theme.palette.text_secondary).bg(bg),
         ));
     }

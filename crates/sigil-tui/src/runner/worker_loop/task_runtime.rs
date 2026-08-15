@@ -1269,17 +1269,17 @@ pub(in crate::runner) fn reject_plan(
     Ok((rejected.entry, rejected.entries))
 }
 
-pub(in crate::runner) struct RevisedPlanRequest {
-    pub(in crate::runner) request: sigil_runtime::PlanReviewRunRequest,
+pub(in crate::runner) struct RequestedPlanRevisionGuidance {
+    pub(in crate::runner) request: sigil_kernel::PublicUserInputRequestV1,
+    pub(in crate::runner) entries: Vec<SessionLogEntry>,
 }
 
 pub(in crate::runner) fn revise_plan(
     root_config: &RootConfig,
-    workspace_root: &Path,
     current_session_log_path: &Path,
     current_session: &mut Option<Session>,
     request: RejectPlanRequest,
-) -> std::result::Result<RevisedPlanRequest, String> {
+) -> std::result::Result<RequestedPlanRevisionGuidance, String> {
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for revision: {error}"))?;
     let mut session = load_session_with_runtime_attachments(
@@ -1289,24 +1289,31 @@ pub(in crate::runner) fn revise_plan(
         current_session.as_ref(),
     )
     .map_err(|error| format!("failed to load session before revising plan: {error:#}"))?;
-    let revision_request = match sigil_runtime::PlanReviewCoordinator::prepare_plan_review_revision(
-        &mut session,
-        &plan_id,
-        &request.expected_plan_hash,
-        sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, workspace_root)
-            .ok()
-            .flatten(),
-        current_unix_time_ms(),
-    ) {
-        Ok(request) => request,
-        Err(error) => {
-            *current_session = Some(session);
-            return Err(format!("{error:#}"));
-        }
-    };
+    let revision_request =
+        match sigil_runtime::PlanReviewCoordinator::request_plan_revision_guidance(
+            &mut session,
+            &plan_id,
+            &request.expected_plan_hash,
+            current_unix_time_ms(),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                *current_session = Some(session);
+                return Err(format!("{error:#}"));
+            }
+        };
+    let public = session
+        .user_input_projection()
+        .map_err(|error| format!("failed to project revision guidance: {error:#}"))?
+        .request(&revision_request.request.identity)
+        .cloned()
+        .ok_or_else(|| "durable revision guidance request is unavailable".to_owned())?
+        .public_view();
+    let entries = session.entries().to_vec();
     *current_session = Some(session);
-    Ok(RevisedPlanRequest {
-        request: revision_request,
+    Ok(RequestedPlanRevisionGuidance {
+        request: public,
+        entries,
     })
 }
 

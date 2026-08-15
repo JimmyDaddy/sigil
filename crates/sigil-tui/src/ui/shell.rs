@@ -22,10 +22,12 @@ use super::{
     layout_snapshot::{live_transcript_rows_for_app, shell_layout},
     live_panel::render_live_panel_with_theme,
     modal::render_modal,
+    plan_workbench::render_plan_workbench,
     setup_config::{render_config, render_setup},
     slash_overlay::render_slash_selector_overlay_with_theme,
     text::{terminal_cell_width, truncate_display_width},
     theme::{self, styles},
+    user_input_form::render_user_input_form,
 };
 
 pub fn render(frame: &mut Frame, app: &AppState) {
@@ -49,26 +51,55 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         frame.area(),
     );
 
-    let shell = shell_layout(
-        frame.area(),
-        app.footer_strip_height(),
-        app.composer_height(),
-        app.info_rail_visible(),
-    );
+    let user_input_takeover = app
+        .pending_user_input()
+        .is_some_and(|form| form.open && frame.area().height <= 11);
+    let plan_takeover = app
+        .pending_plan_approval()
+        .is_some_and(|pending| pending.workbench_open && frame.area().height <= 11)
+        && !user_input_takeover;
+    let shell = if plan_takeover || user_input_takeover {
+        shell_layout(frame.area(), 0, 0, false)
+    } else {
+        shell_layout(
+            frame.area(),
+            app.footer_strip_height(),
+            app.composer_height(),
+            app.info_rail_visible(),
+        )
+    };
 
     let view_model = UiViewModel::from_app(app);
     let (egress_disclosure, live_panel) = egress_disclosure_layout(shell.live_panel, app);
     let live_transcript_rows = live_transcript_rows_for_app(frame.area(), app);
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 
-    if let Some(area) = egress_disclosure {
+    if let Some(area) = egress_disclosure
+        && !app.pending_user_input().is_some_and(|form| form.open)
+        && !app
+            .pending_plan_approval()
+            .is_some_and(|pending| pending.workbench_open)
+    {
         let _ = render_active_egress_disclosure_card(frame, area, app, &theme);
     }
-    render_live_panel_with_theme(frame, live_panel, &live_view_model, &theme);
-    render_input_with_theme(frame, shell.composer, &view_model.composer, &theme);
-    render_agent_panel_with_theme(frame, shell.agent_panel, &view_model.composer, &theme);
+    if let Some(form) = app.pending_user_input().filter(|form| form.open) {
+        render_user_input_form(frame, shell.live_panel, form, &theme);
+    } else if let Some(pending) = app
+        .pending_plan_approval()
+        .filter(|pending| pending.workbench_open)
+    {
+        render_plan_workbench(frame, shell.live_panel, pending, &theme);
+    } else {
+        render_live_panel_with_theme(frame, live_panel, &live_view_model, &theme);
+    }
+    if !plan_takeover && !user_input_takeover {
+        render_input_with_theme(frame, shell.composer, &view_model.composer, &theme);
+        render_agent_panel_with_theme(frame, shell.agent_panel, &view_model.composer, &theme);
+    }
     render_footer_status(frame, shell.footer, &view_model.footer, &theme);
-    render_slash_selector_overlay_with_theme(frame, live_panel, shell.composer, app, &theme);
+    if !plan_takeover && !user_input_takeover {
+        render_slash_selector_overlay_with_theme(frame, live_panel, shell.composer, app, &theme);
+    }
     if shell.info_rail.width > 0 {
         render_info_rail_with_theme(frame, shell.info_rail, &view_model.info_rail, &theme);
     }
@@ -79,6 +110,10 @@ pub fn render(frame: &mut Frame, app: &AppState) {
 
     if app.active_pane == PaneFocus::Composer
         && !app.has_modal()
+        && !app.pending_user_input().is_some_and(|form| form.open)
+        && !app
+            .pending_plan_approval()
+            .is_some_and(|pending| pending.workbench_open)
         && !app.is_composer_queue_panel_focused()
         && !app.is_composer_agent_panel_focused()
         && let Some(cursor_position) =

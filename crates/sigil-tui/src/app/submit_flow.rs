@@ -59,6 +59,13 @@ impl AppState {
             return self.execute_slash_command(command, prompt);
         }
 
+        if self.composer.pending_user_input.is_some() {
+            self.last_notice =
+                Some("answer or cancel the pending input before starting another turn".to_owned());
+            self.push_event("user_input:foreground-owner", "new input kept");
+            return Ok(None);
+        }
+
         if prompt.trim_start().starts_with('@') {
             if self.runtime.is_busy {
                 self.push_timeline(TimelineRole::Notice, "busy; @agent input kept for later");

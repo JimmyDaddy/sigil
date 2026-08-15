@@ -11,6 +11,7 @@ mod layout_snapshot;
 mod live_panel;
 mod markdown;
 mod modal;
+mod plan_workbench;
 mod primitives;
 mod setup_config;
 mod shell;
@@ -21,6 +22,7 @@ mod text;
 pub(crate) mod theme;
 mod timeline;
 mod tool_card;
+mod user_input_form;
 
 pub use shell::render;
 

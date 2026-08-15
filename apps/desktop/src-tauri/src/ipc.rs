@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+
+mod plan_input;
+pub(crate) use plan_input::*;
 use sigil_desktop::{
     DesktopAgentActivityStatus, DesktopAgentActivityView, DesktopAgentHandoffStatus,
     DesktopApplicationClientAction, DesktopApprovalCommandReceipt as NativeApprovalCommandReceipt,
@@ -1348,6 +1351,8 @@ pub(crate) struct DesktopConversationDisplayPage {
     pub(crate) task_control: Option<DesktopConversationTaskControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) plan_review: Option<DesktopPlanReview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) user_input: Option<DesktopUserInputRequestSummary>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1925,6 +1930,8 @@ pub(crate) struct DesktopPlanDecisionSummary {
     pub(crate) task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) revision_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) user_input_request: Option<DesktopUserInputRequestSummary>,
     pub(crate) replayed: bool,
 }
 
@@ -1937,6 +1944,7 @@ pub(crate) struct DesktopPlanReview {
     pub(crate) status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) summary: Option<String>,
+    pub(crate) summary_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) step_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1948,6 +1956,21 @@ pub(crate) struct DesktopPlanReview {
     pub(crate) allowed_actions: Vec<&'static str>,
     pub(crate) source: &'static str,
     pub(crate) stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) revision: Option<DesktopPlanRevisionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopPlanRevisionSummary {
+    pub(crate) request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) attempt_ordinal: Option<u32>,
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal_reason: Option<String>,
 }
 
 impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
@@ -1957,6 +1980,8 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
             plan_hash: value.plan_hash,
             status: match value.status {
                 sigil_desktop::DesktopPlanReviewStatus::Started => "started",
+                sigil_desktop::DesktopPlanReviewStatus::WaitingForInput => "waiting_for_input",
+                sigil_desktop::DesktopPlanReviewStatus::Finalizing => "finalizing",
                 sigil_desktop::DesktopPlanReviewStatus::DraftReady => "draft_ready",
                 sigil_desktop::DesktopPlanReviewStatus::CompletedWithoutDraft => {
                     "completed_without_draft"
@@ -1966,6 +1991,7 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
                 sigil_desktop::DesktopPlanReviewStatus::Cancelled => "cancelled",
             },
             summary: value.summary,
+            summary_truncated: value.summary_truncated,
             step_count: value.step_count,
             target_path_count: value.target_path_count,
             suggested_check_count: value.suggested_check_count,
@@ -1989,6 +2015,26 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
                 }
             },
             stale: value.stale,
+            revision: value.revision.map(|revision| DesktopPlanRevisionSummary {
+                request_id: revision.request_id,
+                attempt_id: revision.attempt_id,
+                attempt_ordinal: revision.attempt_ordinal,
+                status: match revision.status {
+                    sigil_desktop::DesktopPlanRevisionStatus::AwaitingGuidance => {
+                        "awaiting_guidance"
+                    }
+                    sigil_desktop::DesktopPlanRevisionStatus::Queued => "queued",
+                    sigil_desktop::DesktopPlanRevisionStatus::Researching => "researching",
+                    sigil_desktop::DesktopPlanRevisionStatus::WaitingForInput => {
+                        "waiting_for_input"
+                    }
+                    sigil_desktop::DesktopPlanRevisionStatus::Finalizing => "finalizing",
+                    sigil_desktop::DesktopPlanRevisionStatus::Failed => "failed",
+                    sigil_desktop::DesktopPlanRevisionStatus::Cancelled => "cancelled",
+                    sigil_desktop::DesktopPlanRevisionStatus::Succeeded => "succeeded",
+                },
+                terminal_reason: revision.terminal_reason,
+            }),
         }
     }
 }
@@ -2830,6 +2876,7 @@ impl From<NativeConversationDisplayPage> for DesktopConversationDisplayPage {
             }),
             task_control: value.task_control.map(Into::into),
             plan_review: value.plan_review.map(Into::into),
+            user_input: value.user_input.map(Into::into),
         }
     }
 }

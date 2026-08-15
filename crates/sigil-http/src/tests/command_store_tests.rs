@@ -30,6 +30,12 @@ fn identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
     }
 }
 
+fn user_input_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
+    let mut identity = identity(command_id, fingerprint);
+    identity.kind = "user_input_decision".to_owned();
+    identity
+}
+
 fn queue_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
     let mut identity = identity(command_id, fingerprint);
     identity.kind = "queue".to_owned();
@@ -284,6 +290,34 @@ fn durable_command_store_seals_incomplete_reservation_and_never_evicts_at_capaci
     assert!(matches!(
         store.reserve(identity("command-2", 'b')),
         Err(crate::HttpCommandStoreError::Saturated)
+    ));
+}
+
+#[test]
+fn aborted_user_input_decision_can_recover_only_with_the_exact_identity() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let exact = user_input_identity("answer-command-1", 'a');
+    {
+        let store = HttpDurableCommandStore::open(&path, 1).expect("store should open");
+        assert!(matches!(
+            store.reserve(exact.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+    }
+
+    let store = HttpDurableCommandStore::open(&path, 1).expect("store should reopen");
+    assert!(matches!(
+        store.reserve(user_input_identity("answer-command-1", 'b')),
+        Ok(HttpStoredCommandClaim::Conflict)
+    ));
+    assert!(matches!(
+        store.reserve(exact.clone()),
+        Ok(HttpStoredCommandClaim::Execute)
+    ));
+    assert!(matches!(
+        store.reserve(exact),
+        Ok(HttpStoredCommandClaim::Execute)
     ));
 }
 

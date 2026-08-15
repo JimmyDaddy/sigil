@@ -1211,8 +1211,9 @@ TUI 响应式规则：
   pending plan。
 
 TUI durable projection 与 local navigation state 分离。reload/reconnect 只重建 plan/status/actions，scroll、
-focus 与 temporary close 状态重新初始化。`PendingPlanApproval` 不再作为 detail authority；它至多保存 plan
-identity 与 transient UI state。
+focus 与 temporary close 状态重新初始化。`PendingPlanApproval` 不再作为 detail authority；它可以缓存从
+durable projection 得到的 immutable public detail 以供同一帧渲染，但 identity/hash/actions 才是 command
+binding，cache 不能授予或扩大 authority。
 
 ### 13.9.2 Complete plan detail contract
 
