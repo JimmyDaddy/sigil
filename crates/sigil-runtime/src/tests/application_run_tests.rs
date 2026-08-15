@@ -15,17 +15,17 @@ use sigil_kernel::{
     AgentRunResult, AgentRunTerminalReason, ApprovalHandler, AssistantMessageKind,
     AutoApproveHandler, CompletionRequest, ControlEntry, ConversationRunLifecycleRecordV1,
     ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DisclosurePresentationError,
-    DisclosurePresentationReceipt, EgressDisclosurePresenter, IntegrationPlanId, InteractionMode,
-    JsonlSessionStore, ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider,
-    ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
-    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
-    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry,
-    SessionRef, StartDurableTaskAction, StartPlanReviewAction, TASK_GUIDANCE_APPLY_TOOL_NAME,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId, TaskIntegrationReviewRequest,
-    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy,
-    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval,
-    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
+    DisclosurePresentationReceipt, EgressDisclosurePresenter, EventHandler, IntegrationPlanId,
+    InteractionMode, JsonlSessionStore, ModelMessage, NoopEventHandler, PreEgressDisclosure,
+    Provider, ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind,
+    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
+    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
+    Session, SessionLogEntry, SessionRef, StartDurableTaskAction, StartPlanReviewAction,
+    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId,
+    TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess,
+    ToolApproval, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
     ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
     ToolRegistryScope, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec, UsageStats,
     UserInputActionV1, UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId,
@@ -647,6 +647,16 @@ struct RecordingApplicationRunEvents(Vec<PublicRunEvent>);
 
 impl ApplicationRunEventHandler for RecordingApplicationRunEvents {
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+        self.0.push(event);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingRunEvents(Vec<RunEvent>);
+
+impl EventHandler for RecordingRunEvents {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
         self.0.push(event);
         Ok(())
     }
@@ -2103,6 +2113,51 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         admit_application_agent_binding(&request, &root_config, temp.path(), &[]),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn builtin_plan_agent_binding_prepares_a_durable_explicit_review() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let catalog = crate::application_extension_catalog_view(&root_config, temp.path(), &[])?;
+    let plan = catalog
+        .agents
+        .iter()
+        .find(|agent| agent.id == "plan" && agent.available)
+        .expect("the built-in plan agent should be available");
+    let mut request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "inspect the runtime before implementation",
+        "run-explicit-plan-review",
+    );
+    request.agent_binding = plan.binding.clone();
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+
+    let prepared = prepare_application_run(request, &services).await?;
+
+    assert!(matches!(
+        prepared.execution.kind,
+        ApplicationRunExecutionKind::ExplicitPlanReview { .. }
+    ));
+    let projection =
+        sigil_kernel::PlanReviewProjection::from_entries(prepared.execution.session.entries());
+    let attempt = projection
+        .reviews()
+        .next()
+        .and_then(sigil_kernel::PlanReviewProjectionEntry::latest_attempt)
+        .expect("explicit plan preparation should append one attempt");
+    assert_eq!(
+        attempt.source,
+        sigil_kernel::PlanReviewSource::ExplicitPlanCommand
+    );
+    assert_eq!(
+        attempt.status,
+        sigil_kernel::PlanReviewAttemptStatus::Started
+    );
     Ok(())
 }
 
@@ -5238,7 +5293,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         workspace_snapshot_id: None,
     };
     let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
-    let mut handler = sigil_kernel::NoopEventHandler;
+    let mut handler = RecordingRunEvents::default();
     let mut approval_handler = sigil_kernel::AutoApproveHandler;
     let output = super::continue_application_plan_review(
         &mut session,
@@ -5254,6 +5309,22 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         AgentRunDisposition::FinalAnswer
     ));
     assert!(output.result.final_text.contains("Plan ready"));
+    let final_message_id = output
+        .result
+        .final_message_id
+        .as_deref()
+        .expect("plan-ready success must bind a durable final assistant");
+    assert!(handler.0.iter().any(|event| matches!(
+        event,
+        RunEvent::Control(ControlEntry::PlanReviewAttempt(attempt))
+            if attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+    )));
+    assert!(handler.0.iter().any(|event| matches!(
+        event,
+        RunEvent::AssistantMessage(message)
+            if message.id == final_message_id
+                && message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
+    )));
     let plan_projection = session.plan_artifact_projection();
     let draft = plan_projection
         .plans

@@ -1030,6 +1030,49 @@ fn route_resume_apply_is_quiescent_durable_and_idempotent() -> anyhow::Result<()
 }
 
 #[test]
+fn identical_explicit_route_is_a_noop_while_an_execution_owner_is_live() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = local_catalog_root("https://models.example.test/v1".to_owned(), "local-model");
+    let (provider_name, route) = resolve_default_model_route(&root)?;
+    let connection = load_provider_connections(&root)
+        .connections
+        .get(&route.model_ref.connection_id)
+        .expect("connection")
+        .config
+        .clone();
+    let trust = connection_egress_trust_binding(&connection);
+    let store = sigil_kernel::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = sigil_kernel::Session::load_from_store_with_route_and_trust(
+        provider_name.clone(),
+        route.model_ref.model_id.clone(),
+        Some(route.clone()),
+        Some(trust),
+        store,
+    )?;
+    let snapshot = ResolvedRouteConfigSnapshot::from_root_config(&root);
+    let authority = SessionRouteMutationAuthority::new(session.session_scope_id());
+    let background_owner = authority.acquire_execution_owner()?;
+
+    assert!(explicit_session_route_selection_is_already_applied(
+        &snapshot,
+        &session,
+        &provider_name,
+        &route,
+    )?);
+    let foreground_owner = authority.acquire_execution_owner()?;
+    assert_eq!(
+        authority
+            .issue_quiescence_permit()
+            .expect_err("live execution owners must still block a real route mutation"),
+        SessionRouteAuthorityError::ActiveOwners
+    );
+
+    foreground_owner.release();
+    background_owner.release();
+    Ok(())
+}
+
+#[test]
 fn legacy_route_loader_is_exact_only_and_cannot_fabricate_mutation_authority() -> anyhow::Result<()>
 {
     let temp = tempfile::tempdir()?;

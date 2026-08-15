@@ -8,7 +8,18 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-- No user-facing changes since v0.0.1-beta.4.
+- Plan review now opens a complete, scrollable workbench instead of truncating the plan inside a
+  compact status card. All plan steps remain reachable on 32x8 through wide terminals; `Esc` closes
+  without rejecting, printable input returns to the composer, and actions stay bound to the exact
+  durable plan.
+- Revise now asks what should change, keeps the original plan active until a replacement succeeds,
+  and restores it after every terminal revision failure. Older affected sessions are recovered by a
+  strict read-only compatibility view, and `sigil doctor` reports ambiguous legacy lineage.
+- Agents can ask bounded, typed questions through a durable attention queue. Pending questions
+  survive TUI exit and resume without a timeout, background-agent questions route to the root
+  session, and an accepted answer resumes exactly one provider attempt without replaying the turn
+  that asked the question. MCP elicitation reuses the form renderer without inheriting durable
+  replay semantics.
 
 ## v0.0.1-beta.4 - 2026-08-11
 

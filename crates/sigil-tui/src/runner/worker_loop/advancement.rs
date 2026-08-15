@@ -1956,6 +1956,9 @@ where
             .session
             .record_durably_appended_controls(state.session.detached_durable_controls.drain(..));
         state.session.current = Some(task_result.session);
+        if let Some(maintenance) = task_result.post_run_maintenance.take() {
+            state.session_maintenance.spawn(runtime, maintenance);
+        }
         match task_result.payload {
             RunTaskPayload::AwaitingUserInput { request } => {
                 let projected = state.session.current.as_ref().and_then(|session| {

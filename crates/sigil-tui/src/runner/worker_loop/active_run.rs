@@ -375,6 +375,8 @@ pub(in crate::runner) struct RunTaskResult {
     pub(in crate::runner) run_id: u64,
     pub(in crate::runner) session: Session,
     pub(in crate::runner) payload: RunTaskPayload,
+    pub(in crate::runner) post_run_maintenance:
+        Option<sigil_runtime::application_run::ApplicationPostRunMaintenance>,
 }
 
 pub(in crate::runner) enum RunTaskPayload {

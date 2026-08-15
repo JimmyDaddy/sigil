@@ -338,6 +338,7 @@ where
                 provider_logical_run_id: None,
                 agent_result_continuation_thread_ids: completed_thread_ids,
             },
+            post_run_maintenance: None,
         });
     });
 
@@ -583,6 +584,7 @@ where
             run_id,
             session: run_session,
             payload,
+            post_run_maintenance: None,
         });
     });
     Ok(Some(ActiveRun {
@@ -1304,6 +1306,7 @@ where
             run_id,
             session: run_session,
             payload,
+            post_run_maintenance: None,
         });
     });
 
@@ -1415,6 +1418,7 @@ where
                 provider_logical_run_id: None,
                 agent_result_continuation_thread_ids: Vec::new(),
             },
+            post_run_maintenance: None,
         });
     });
 

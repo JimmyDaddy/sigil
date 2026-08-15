@@ -143,7 +143,7 @@ where
                     let title_session_log_path = state.session.log_path.clone();
                     let title_session_id = run_session.session_scope_id().to_owned();
                     let title_prompt = prompt.clone();
-                    Some((
+                    Some(sigil_runtime::application_run::ApplicationPostRunMaintenance::session_title(
                         title_root_config,
                         title_workspace_root,
                         route.model_ref,
@@ -644,33 +644,11 @@ where
                             },
                         };
                     }
-                    if let Some((
-                        title_root_config,
-                        title_workspace_root,
-                        title_model_ref,
-                        title_session_log_path,
-                        title_session_id,
-                        title_prompt,
-                    )) = pending_session_title
-                        && let Err(error) = sigil_runtime::generate_and_persist_session_title(
-                            title_root_config,
-                            title_workspace_root,
-                            title_model_ref,
-                            title_session_log_path,
-                            title_session_id,
-                            title_prompt,
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            %error,
-                            "semantic session title generation was not applied"
-                        );
-                    }
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
                         payload,
+                        post_run_maintenance: pending_session_title,
                     });
                 });
 
@@ -813,6 +791,7 @@ where
                             provider_logical_run_id: None,
                             agent_result_continuation_thread_ids: Vec::new(),
                         },
+                        post_run_maintenance: None,
                     });
                 });
 
@@ -1408,6 +1387,7 @@ where
                             run_id,
                             session: run_session,
                             payload,
+                            post_run_maintenance: None,
                         });
                     });
                     state.run.active = Some(ActiveRun {

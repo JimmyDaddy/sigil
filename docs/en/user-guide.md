@@ -80,6 +80,21 @@ When enabled, search and fetch activity shows where data is going. Search result
 
 Use `/plan` for a read-only plan and accept the Plan ready card only when you want execution to begin. Use `/task` when you already want Sigil to split and run multi-step work. With the default `routing_policy = "auto"`, task-worthy ordinary input is first routed through an automatic plan review; chat never continues an unfinished task by itself.
 
+Open a Plan ready item to review the complete, immutable plan before choosing an action. The
+workbench keeps every step, dependency, path, check, risk, and note reachable even on a short or
+narrow terminal. Use the arrow keys, `PageUp`/`PageDown`, `Home`/`End`, and `Tab`/`Shift-Tab` to
+navigate. `Esc` only closes the workbench; it never rejects the plan. Typing a printable character
+returns to the composer and preserves that character, while `Shift-Tab` reopens the pending plan.
+Run, Save, Revise, and Reject remain explicit actions bound to the exact plan id and hash.
+
+Revise first asks what should change. The original plan remains reviewable while revision research
+runs, and a failed or cancelled revision restores its actions instead of replacing it with an empty
+failed draft. Questions from an agent use the same durable attention area: Submit, Decline, and
+Cancel run are distinct actions; `Esc` closes the form without answering it. Pending questions have
+no wall-clock timeout and are restored by `sigil resume`; `Shift-Tab` returns to them from the
+composer. Sigil resumes the exact suspended continuation after an accepted answer instead of
+replaying the provider turn that asked the question.
+
 The task view shows steps, current status, child-agent work, and a Verification card when a check is needed. `Alt-V` focuses the card. Restoring a session shows the saved task state but never continues it automatically.
 
 The release default is `auto / explicit_request_only`: ordinary input is routed

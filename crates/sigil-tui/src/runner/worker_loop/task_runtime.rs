@@ -1155,6 +1155,7 @@ pub(in crate::runner) fn send_task_result(
             queue_id: None,
             result,
         },
+        post_run_maintenance: None,
     });
 }
 

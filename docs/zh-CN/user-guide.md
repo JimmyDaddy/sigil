@@ -80,6 +80,18 @@ TUI 保持相同的内容顺序，但不会伪装成浏览器排版：公式显�
 
 使用 `/plan` 获取只读计划；确认需要执行且计划内容合适时，再接受“计划就绪”卡片。已经确定需要多步骤执行时使用 `/task`。普通对话不会擅自继续尚未完成的任务。
 
+打开“计划就绪”后，应先在工作台审阅完整、不可变的计划，再选择动作。即使终端很窄或很矮，所有
+步骤、依赖、路径、检查项、风险和备注也都可以访问。使用方向键、`PageUp`/`PageDown`、
+`Home`/`End` 与 `Tab`/`Shift-Tab` 导航。`Esc` 只关闭工作台，绝不等于拒绝计划；输入可打印字符会
+返回 composer 并保留该字符，`Shift-Tab` 可以重新打开待审计划。Run、Save、Revise、Reject 都是绑定
+精确 plan id 与 hash 的显式动作。
+
+选择 Revise 后，Sigil 会先询问“希望修改什么”。修改研究期间原计划始终可以审阅；修改失败或取消后，
+原计划动作会恢复，不会被空的失败草稿替代。智能体提出的问题也进入同一个 durable attention 区：
+Submit、Decline、Cancel run 是三个不同动作，`Esc` 只关闭表单，不会作答。待回答问题没有 wall-clock
+超时，`sigil resume` 会恢复它，composer 中按 `Shift-Tab` 可以重新打开。回答被接受后，Sigil 继续精确
+的 suspended continuation，不会重放提出问题的 provider turn。
+
 任务界面会显示步骤、当前状态和子智能体的工作；需要你检查时，还会显示验证卡片。按 `Alt-V` 可以直接聚焦。恢复会话只会还原已保存的任务状态，不会自动继续执行。
 
 release 默认值是 `auto / explicit_request_only`：普通输入在 review-first 基线上自动路由

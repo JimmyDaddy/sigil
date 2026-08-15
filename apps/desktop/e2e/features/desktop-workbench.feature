@@ -14,7 +14,7 @@ Feature: Desktop workbench remains usable
     Then the follow-up is recorded in the durable queue
     When I approve the pending command
     Then the accepted approval stops offering actions before the next run event
-    Then the initial run and queued follow-up both complete
+    Then the approved action and queued follow-up both settle
     And terminal completion releases continuity and history controls
     And the generated semantic title is synchronized into the conversation page
 

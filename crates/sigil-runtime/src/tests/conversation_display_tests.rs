@@ -282,6 +282,40 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
 }
 
 #[test]
+fn only_the_initial_user_message_reconciles_the_live_run_started_slot() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&ConversationRunStartedEntryV1::new("run-queued-input", 10)?)?;
+    session.append_user_message(ModelMessage::user("initial prompt"))?;
+    session.append_user_message(ModelMessage::user("queued safe-point follow-up"))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    let users = page
+        .items
+        .iter()
+        .filter(|item| item.kind == ConversationDisplayItemKindV1::UserMessage)
+        .collect::<Vec<_>>();
+    assert_eq!(users.len(), 2);
+    assert_eq!(
+        users[0].reconciles.as_deref(),
+        Some(
+            &[conversation_live_provisional_id(
+                &scope,
+                "run-queued-input",
+                &ConversationLiveProvisionalSlotV1::User,
+            )?][..]
+        )
+    );
+    assert_eq!(
+        users[1].reconciles, None,
+        "a later durable user message has no matching RunStarted live slot"
+    );
+    Ok(())
+}
+
+#[test]
 fn user_selected_skill_is_projected_on_its_durable_prompt() -> Result<()> {
     let (_temp, store, mut session) = durable_session()?;
     let scope = session.session_scope_id().to_owned();

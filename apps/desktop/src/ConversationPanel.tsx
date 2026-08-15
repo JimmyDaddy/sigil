@@ -150,7 +150,17 @@ interface TimelineViewportSnapshot {
 const TIMELINE_USER_SCROLL_INTENT_MS = 1_200;
 const TIMELINE_VIEWPORT_RESTORE_FRAMES = 4;
 const QUEUED_SUCCESSOR_PROBE_DELAYS_MS = [50, 100, 200, 400, 800] as const;
+const CANONICAL_REFRESH_RETRY_DELAYS_MS = [
+  0,
+  100,
+  250,
+  500,
+  1_000,
+  2_000,
+  4_000,
+] as const;
 const CANONICAL_DISPLAY_RETRY_DELAYS_MS = [75, 150, 300, 600] as const;
+const POST_RUN_CATALOG_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000, 6_000, 12_000, 20_000] as const;
 
 export function ConversationPanel({
   bridge,
@@ -316,6 +326,7 @@ export function ConversationPanel({
   const initialContinuitySessionId = useRef<string | undefined>(undefined);
   const initialLoadReportedSessionId = useRef<string | undefined>(undefined);
   const catalogChangeReportedRunId = useRef<string | undefined>(undefined);
+  const catalogRefreshTimers = useRef<number[]>([]);
   const startRunPendingRef = useRef(false);
   const retryableRunStartRef = useRef<RetryableRunStartRequest | undefined>(undefined);
   const markTimelineScrollIntent = useCallback(() => {
@@ -376,7 +387,16 @@ export function ConversationPanel({
   const reportSessionCatalogChange = useCallback((runId: string) => {
     if (catalogChangeReportedRunId.current === runId) return;
     catalogChangeReportedRunId.current = runId;
+    for (const timer of catalogRefreshTimers.current) window.clearTimeout(timer);
+    catalogRefreshTimers.current = [];
     onSessionCatalogChangeRef.current?.();
+    catalogRefreshTimers.current = POST_RUN_CATALOG_RETRY_DELAYS_MS.map((delayMs) => (
+      window.setTimeout(() => onSessionCatalogChangeRef.current?.(), delayMs)
+    ));
+  }, []);
+  useEffect(() => () => {
+    for (const timer of catalogRefreshTimers.current) window.clearTimeout(timer);
+    catalogRefreshTimers.current = [];
   }, []);
   const onNotice = useCallback((message: string, error = false) => {
     if (!error) return;
@@ -963,8 +983,10 @@ export function ConversationPanel({
       ) {
         // These events carry only bounded lifecycle facts. Reconcile the full canonical
         // workbench/request projection instead of trying to maintain a second renderer state
-        // machine from event order alone.
-        setContinuityReload((value) => value + 1);
+        // machine from event order alone. Do not restart continuity attachment here: replaying
+        // the same lifecycle event would recursively schedule another attachment and keep the
+        // surface forever in its owner-probe state.
+        setDisplayReload((value) => value + 1);
       }
       if (
         event.kind === "integration_lane_changed"
@@ -1202,7 +1224,7 @@ export function ConversationPanel({
     const pendingRunId = observed?.runId ?? continuityState.pendingTerminalRunId;
     if (
       pendingRunId === undefined
-      || continuityState.refreshState !== "needed"
+      || continuityState.refreshState === "failed"
       || canonicalRefreshRunId.current === pendingRunId
     ) return;
 
@@ -1213,14 +1235,16 @@ export function ConversationPanel({
       : captureTimelineAnchor(timelineRef.current);
     dispatchContinuity({ type: "refresh_started", sessionId: session.id });
     const refresh = async () => {
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+      for (let attempt = 0; attempt < CANONICAL_REFRESH_RETRY_DELAYS_MS.length; attempt += 1) {
         canonicalRefreshAttempts.current = attempt + 1;
-        if (attempt > 0) await waitForCanonicalProjection(attempt * 75);
-        if (cancelled) return;
-        try {
-          const page = toContinuityPage(await bridge.display(workspaceId, session.id, { limit: 50 }));
+        const retryDelay = CANONICAL_REFRESH_RETRY_DELAYS_MS[attempt];
+        if (retryDelay > 0) await waitForCanonicalProjection(retryDelay);
           if (cancelled) return;
-          dispatchContinuity({ type: "refresh_page_received", sessionId: session.id, page });
+          try {
+            const page = toContinuityPage(await bridge.display(workspaceId, session.id, { limit: 50 }));
+            if (cancelled) return;
+            setDisplayError(false);
+            dispatchContinuity({ type: "refresh_page_received", sessionId: session.id, page });
           dispatchLiveEvent({
             type: "anchor_received",
             sessionId: session.id,
@@ -1742,6 +1766,15 @@ export function ConversationPanel({
         review.planHash,
         action,
       );
+      if (summary.action === "run") {
+        if (summary.taskId === undefined) {
+          throw new Error("Run plan decision did not return a task identity.");
+        }
+        // `Run` durably creates the Task; execution is intentionally owned by the existing
+        // Task continuation path so it gets the same foreground ownership, event attachment,
+        // cancellation, and restart semantics as every other Task run.
+        await continueTask(summary.taskId);
+      }
       if (summary.action === "revise" && summary.revisionRunId !== undefined) {
         notify({ message: t("planRevisionStarted"), tone: "info" });
       }

@@ -392,6 +392,7 @@ struct FixedFrontier {
 struct ActiveRunProjection {
     run_id: String,
     final_message_id: Option<String>,
+    user_provisional_reconciled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1251,6 +1252,7 @@ fn project_lifecycle(
             *active_run = Some(ActiveRunProjection {
                 run_id: started.run_id().to_owned(),
                 final_message_id: None,
+                user_provisional_reconciled: false,
             });
             Ok(Vec::new())
         }
@@ -1322,12 +1324,26 @@ fn project_session_entry(
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match entry {
         SessionLogEntry::User(message) => {
-            let run_id = active_run_id(active_run);
+            let (run_id, reconcile_live_user) = match active_run.as_mut() {
+                Some(active) => {
+                    let reconcile_live_user = !active.user_provisional_reconciled;
+                    active.user_provisional_reconciled = true;
+                    (Some(active.run_id.clone()), reconcile_live_user)
+                }
+                None => (None, false),
+            };
             let skill = run_id
                 .as_ref()
                 .and_then(|run_id| run_skills.get(run_id))
                 .cloned();
-            project_durable_user_message(record, expected_scope, message, run_id, skill)
+            project_durable_user_message(
+                record,
+                expected_scope,
+                message,
+                run_id,
+                skill,
+                reconcile_live_user,
+            )
         }
         SessionLogEntry::Assistant(message) => {
             if message.role != MessageRole::Assistant {
@@ -1548,7 +1564,7 @@ fn project_control(
     record: &SessionStreamRecord,
     expected_scope: &str,
     control: ControlEntry,
-    active_run: &Option<ActiveRunProjection>,
+    active_run: &mut Option<ActiveRunProjection>,
     approval_items: &mut HashMap<String, String>,
     run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
@@ -1662,20 +1678,29 @@ fn project_promoted_user_message(
     record: &SessionStreamRecord,
     expected_scope: &str,
     promotion: ConversationInputPromotedEntry,
-    active_run: &Option<ActiveRunProjection>,
+    active_run: &mut Option<ActiveRunProjection>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     promotion.validate_for_session(expected_scope)?;
-    if let Some(active) = active_run
+    if let Some(active) = active_run.as_ref()
         && active.run_id != promotion.dispatch_run_id
     {
         bail!("conversation input promotion overlaps another durable run");
     }
+    let reconcile_live_user = match active_run.as_mut() {
+        Some(active) => {
+            let reconcile_live_user = !active.user_provisional_reconciled;
+            active.user_provisional_reconciled = true;
+            reconcile_live_user
+        }
+        None => true,
+    };
     project_durable_user_message(
         record,
         expected_scope,
         promotion.durable_user_message,
         Some(promotion.dispatch_run_id),
         None,
+        reconcile_live_user,
     )
 }
 
@@ -1685,6 +1710,7 @@ fn project_durable_user_message(
     message: ModelMessage,
     run_id: Option<String>,
     skill: Option<ConversationDisplaySkillReferenceV1>,
+    reconcile_live_user: bool,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     if message.role != MessageRole::User {
         bail!("conversation display user entry has a non-user role");
@@ -1704,7 +1730,7 @@ fn project_durable_user_message(
         None,
         message.image_attachments.len(),
     );
-    if let Some(run_id) = run_id {
+    if reconcile_live_user && let Some(run_id) = run_id {
         item.reconciles = Some(vec![conversation_live_provisional_id(
             expected_scope,
             &run_id,

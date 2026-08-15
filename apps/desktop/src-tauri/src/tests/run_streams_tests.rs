@@ -55,6 +55,24 @@ fn canonical_snapshot_keeps_terminal_follower_live_until_later_exit() {
 }
 
 #[test]
+fn settled_terminal_reattach_does_not_reenter_the_live_stream_owner() {
+    let mut foreground_done = run_snapshot(12, Vec::new());
+    foreground_done.status = DesktopRunStatus::Finished;
+
+    let snapshot =
+        settled_terminal_reattach_snapshot(&foreground_done).expect("settled terminal snapshot");
+    assert_eq!(snapshot.stream_state, DesktopRunStreamState::Terminal);
+    assert!(snapshot.has_gap);
+    assert!(snapshot.events.is_empty());
+
+    foreground_done.terminal_tasks = vec![terminal_snapshot(1, "running")];
+    assert!(settled_terminal_reattach_snapshot(&foreground_done).is_none());
+
+    foreground_done.terminal_tasks = vec![terminal_snapshot(2, "exited")];
+    assert!(settled_terminal_reattach_snapshot(&foreground_done).is_some());
+}
+
+#[test]
 fn terminal_snapshot_projection_preserves_interrupted_status() {
     assert_eq!(
         terminal_timeline_projection(DesktopRunStatus::Interrupted),

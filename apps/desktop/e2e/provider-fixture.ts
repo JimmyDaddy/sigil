@@ -34,7 +34,7 @@ const AUTO_PLAN_ARGS = JSON.stringify({
   })),
 });
 const PLAN_REVIEW_REQUEST_ARGS = JSON.stringify({
-  reason_codes: ["parallel_research", "multi_stage_change"],
+  reason_codes: ["explicit_review_intent", "architectural_tradeoff"],
 });
 const PLAN_REVIEW_DRAFT_SUMMARY = "DESKTOP_E2E_PLAN_DRAFT";
 const planReviewDraftArgs = (summary: string) => JSON.stringify({
@@ -91,6 +91,13 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
           object: "list",
           data: [{ id: "sigil-e2e-model", object: "model" }],
         });
+        return;
+      }
+      if (request.method === "POST" && request.url?.endsWith("/__reset-evidence")) {
+        requestCounts.clear();
+        concurrentReads = 0;
+        maxConcurrentReads = 0;
+        sendJson(response, { reset: true });
         return;
       }
       if (request.method !== "POST" || !request.url?.endsWith("/chat/completions")) {
@@ -176,6 +183,11 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
           "task_plan_update",
           AUTO_PLAN_ARGS,
         );
+      } else if (requestText.includes("Produce the single user-visible final answer")) {
+        // Synthesis includes the approved plan and therefore also contains the read-role labels.
+        // Match the dedicated synthesis instruction before the participant-step branch.
+        recordRequest("auto_synthesis");
+        sendText(response, AUTO_ORCHESTRATION_FINAL_CANARY);
       } else if (requestText.includes("Role: subagent_read")) {
         const stepId = AUTO_READ_STEP_IDS.find((candidate) =>
           requestText.includes(`Step: ${candidate}`),
@@ -189,9 +201,6 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         await new Promise((resolve) => setTimeout(resolve, 350));
         concurrentReads -= 1;
         sendText(response, `bounded result for ${stepId}`);
-      } else if (requestText.includes("Produce the single user-visible final answer")) {
-        recordRequest("auto_synthesis");
-        sendText(response, AUTO_ORCHESTRATION_FINAL_CANARY);
       } else if (requestText.includes(SKILL_INSTRUCTION_MARKER)) {
         recordRequest("workspace_skill");
         sendText(response, SKILL_RUN_CANARY);

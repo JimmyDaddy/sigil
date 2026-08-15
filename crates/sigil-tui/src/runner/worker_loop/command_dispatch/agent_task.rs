@@ -170,6 +170,7 @@ where
                         run_id,
                         session: run_session,
                         payload: RunTaskPayload::Agent { profile_id, result },
+                        post_run_maintenance: None,
                     });
                 });
 

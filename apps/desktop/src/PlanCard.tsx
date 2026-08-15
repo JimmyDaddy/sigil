@@ -97,6 +97,7 @@ export function PlanCard({
           <Button
             type="button"
             variant="quiet"
+            data-plan-detail-toggle
             disabled={detailBusy}
             aria-expanded={detailOpen}
             onClick={detailOpen ? onCloseDetail : onOpenDetail}
@@ -186,6 +187,7 @@ export function PlanCard({
               key={action}
               type="button"
               variant={action === "run" ? "primary" : "secondary"}
+              data-plan-action={action}
               disabled={actionDisabled(action)}
               onClick={() => onDecision(action)}
             >

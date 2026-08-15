@@ -19,6 +19,7 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) refresh: RefreshWorkerState,
     pub(in crate::runner) agent: AgentWorkerState,
     pub(in crate::runner) mcp_oauth: McpOAuthWorkerState,
+    pub(in crate::runner) session_maintenance: SessionMaintenanceTaskManager,
     pub(in crate::runner) approval_command_receipts: BTreeMap<String, WorkerApprovalCommandReceipt>,
     approval_command_receipt_order: VecDeque<String>,
     pub(in crate::runner) last_observed_run_active: bool,
@@ -144,6 +145,7 @@ impl WorkerLoopState {
                 result_tx: WorkerEventPayloadSender::mcp_oauth(event_tx),
                 active: BTreeMap::new(),
             },
+            session_maintenance: SessionMaintenanceTaskManager::default(),
             approval_command_receipts: BTreeMap::new(),
             approval_command_receipt_order: VecDeque::new(),
             last_observed_run_active: false,
@@ -249,6 +251,37 @@ impl WorkerLoopState {
         .into_iter()
         .flatten()
         .min()
+    }
+}
+
+#[derive(Default)]
+pub(in crate::runner) struct SessionMaintenanceTaskManager {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl SessionMaintenanceTaskManager {
+    pub(in crate::runner) fn spawn(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        maintenance: sigil_runtime::application_run::ApplicationPostRunMaintenance,
+    ) {
+        self.tasks.retain(|task| !task.is_finished());
+        self.tasks.push(runtime.spawn(async move {
+            if let Err(error) = maintenance.execute().await {
+                tracing::debug!(
+                    %error,
+                    "post-run semantic session maintenance was not applied"
+                );
+            }
+        }));
+    }
+}
+
+impl Drop for SessionMaintenanceTaskManager {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 

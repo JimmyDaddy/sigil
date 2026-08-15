@@ -789,7 +789,14 @@ function observeTerminalTransport(
     return rejectContract(state, {
         code: "terminal_conflict",
         message: "A second terminal transport fact conflicts with the run being finalized.",
-      });
+    });
+  }
+  // A terminal stream-status event can race behind the canonical refresh that already settled
+  // the same run. Reopening finalization here would strand the UI: the run identity does not
+  // change, so no new refresh trigger is guaranteed. The durable frontier is authoritative and
+  // makes the duplicate transport observation an idempotent no-op.
+  if (terminalRunIsCovered(runId, state.canonicalTerminal, state.throughSessionStreamSequence)) {
+    return state;
   }
   return beginTerminalTransportSettlement(state, runId);
 }

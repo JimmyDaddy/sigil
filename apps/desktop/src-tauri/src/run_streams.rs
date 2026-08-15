@@ -7,7 +7,8 @@ use std::{
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalLifecycleState, DesktopHttpClient, DesktopRunSnapshot, DesktopRunStatus,
-    DesktopTimelineEvent, DesktopTimelineEventKind, DesktopTimelineTerminalTask,
+    DesktopTerminalTaskStatus, DesktopTimelineEvent, DesktopTimelineEventKind,
+    DesktopTimelineTerminalTask,
 };
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter};
@@ -140,6 +141,9 @@ impl DesktopRunStreamOwner {
         owner_revision: String,
         run: DesktopRunSnapshot,
     ) -> DesktopRunProjectionSnapshot {
+        if let Some(snapshot) = settled_terminal_reattach_snapshot(&run) {
+            return snapshot;
+        }
         let initial_gap = run.stream_sequence > 0;
         self.attach_inner(
             app,
@@ -354,6 +358,30 @@ impl DesktopRunStreamOwner {
             settled: stream.projection.is_settled(),
         })
     }
+}
+
+fn settled_terminal_reattach_snapshot(
+    run: &DesktopRunSnapshot,
+) -> Option<DesktopRunProjectionSnapshot> {
+    if !run.status.is_terminal()
+        || run.terminal_tasks.iter().any(|task| {
+            !matches!(
+                &task.status,
+                DesktopTerminalTaskStatus::Exited { .. }
+                    | DesktopTerminalTaskStatus::Failed { .. }
+                    | DesktopTerminalTaskStatus::Cancelled
+                    | DesktopTerminalTaskStatus::Interrupted
+            )
+        })
+    {
+        return None;
+    }
+    Some(DesktopRunProjectionSnapshot {
+        events: Vec::new(),
+        has_gap: run.stream_sequence > 0,
+        stream_state: DesktopRunStreamState::Terminal,
+        stream_message: Some("Run reconciled from the server snapshot."),
+    })
 }
 
 impl RunProjection {

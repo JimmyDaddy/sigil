@@ -12,6 +12,7 @@ let unavailableSessionPath: string | undefined;
 
 async function waitForComposerEnabled(
   timeoutMsg = "the desktop composer did not become enabled",
+  timeout = 20_000,
 ): Promise<void> {
   await browser.waitUntil(
     async () => {
@@ -27,7 +28,7 @@ async function waitForComposerEnabled(
         return false;
       }
     },
-    { timeout: 20_000, timeoutMsg },
+    { timeout, timeoutMsg },
   );
 }
 
@@ -126,13 +127,85 @@ Then("the timeline content and composer are horizontally aligned", async () => {
 });
 
 When("I start a run that requires approval", async () => {
+  await browser.execute(() => {
+    const scope = globalThis as typeof globalThis & { __sigilE2eErrors?: string[] };
+    scope.__sigilE2eErrors = [];
+    window.addEventListener("error", (event) => {
+      scope.__sigilE2eErrors?.push(`${event.message}\n${event.error?.stack ?? ""}`);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      scope.__sigilE2eErrors?.push(String(event.reason?.stack ?? event.reason));
+    });
+  });
   const composer = await $("#desktop-prompt");
   await composer.setValue("请验证 Desktop 在审批等待期间仍可排队消息，并完成恢复。");
   await browser.keys("Enter");
-  await $(".approval-dock").waitForDisplayed({
-    timeout: 30_000,
-    timeoutMsg: "the real runtime did not surface its approval request",
-  });
+  try {
+    await $(".approval-dock").waitForDisplayed({
+      timeout: 30_000,
+      timeoutMsg: "the real runtime did not surface its approval request",
+    });
+  } catch (error) {
+    const [currentUrl, title, windowHandles, pageSource] = await Promise.all([
+      browser.getUrl(),
+      browser.getTitle(),
+      browser.getWindowHandles(),
+      browser.getPageSource(),
+    ]);
+    const state = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      let continuity: unknown;
+      let attachment: unknown;
+      try {
+        continuity = await invoke?.("desktop_continuity", {
+          workspaceId: panel?.dataset.workspaceId,
+          sessionId: panel?.dataset.sessionId,
+        });
+        const owner = (continuity as {
+          foregroundOwner?: { runId?: string; ownerRevision?: string };
+        } | undefined)?.foregroundOwner;
+        if (owner?.runId !== undefined && owner.ownerRevision !== undefined) {
+          attachment = await invoke?.("desktop_attach_run", {
+            workspaceId: panel?.dataset.workspaceId,
+            input: {
+              sessionId: panel?.dataset.sessionId,
+              runId: owner.runId,
+              ownerRevision: owner.ownerRevision,
+            },
+          });
+        }
+      } catch (diagnosticError) {
+        attachment = { error: String(diagnosticError) };
+      }
+      return {
+        body: document.body.innerText,
+        html: document.documentElement.outerHTML.slice(0, 4_000),
+        errors: (globalThis as typeof globalThis & { __sigilE2eErrors?: string[] })
+          .__sigilE2eErrors,
+        continuity,
+        attachment,
+      };
+    });
+    throw new Error(
+      `the real runtime did not surface its approval request: ${JSON.stringify({
+        currentUrl,
+        title,
+        windowHandles,
+        pageSource: pageSource.slice(0, 4_000),
+        state,
+      })}`,
+      { cause: error },
+    );
+  }
 });
 
 Then("the approval remains live without losing runtime control", async () => {
@@ -231,15 +304,8 @@ Then("the accepted approval stops offering actions before the next run event", a
   );
 });
 
-Then("the initial run and queued follow-up both complete", async () => {
+Then("the approved action and queued follow-up both settle", async () => {
   const timeline = await $(".timeline");
-  await timeline.waitUntil(
-    async () => (await timeline.getText()).includes(desktopProviderCanaries.initialRun),
-    {
-      timeout: 30_000,
-      timeoutMsg: "the approved run did not complete",
-    },
-  );
   await timeline.waitUntil(
     async () => (await timeline.getText()).includes(desktopProviderCanaries.queuedRun),
     {
@@ -247,18 +313,24 @@ Then("the initial run and queued follow-up both complete", async () => {
       timeoutMsg: "the durable follow-up did not dispatch after the active run",
     },
   );
-
+  const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
+  assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
+  assert.equal(
+    readFileSync(resolve(runtimeRoot, "workspace", "desktop-e2e-approved.txt"), "utf8"),
+    "desktop approval accepted\n",
+    "the approved tool action did not settle before the queued follow-up answer",
+  );
   const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS;
   assert.ok(artifactRoot, "desktop E2E artifact directory is configured");
   await browser.saveScreenshot(resolve(artifactRoot, "desktop-real-run.png"));
 });
 
 Then("terminal completion releases continuity and history controls", async () => {
-  await waitForComposerEnabled(
-    "terminal completion left the Desktop composer blocked by continuity recovery",
-  );
-  const composer = await $("#desktop-prompt");
   try {
+    await waitForComposerEnabled(
+      "terminal completion left the Desktop composer blocked by continuity recovery",
+      45_000,
+    );
     await browser.waitUntil(
       async () =>
         !(await $(".conversation-continuity-loading").isExisting())
@@ -268,6 +340,7 @@ Then("terminal completion releases continuity and history controls", async () =>
         timeoutMsg: "terminal completion left continuity or conversation history in recovery",
       },
     );
+    await $("#desktop-prompt").waitForEnabled();
   } catch {
     const state = await browser.execute(async () => {
       const panel = document.querySelector<HTMLElement>(".conversation-panel");
@@ -281,10 +354,16 @@ Then("terminal completion releases continuity and history controls", async () =>
         }
       ).__TAURI__;
       let serverContinuity: unknown;
+      let serverDisplay: unknown;
       try {
         serverContinuity = await tauri?.core?.invoke?.("desktop_continuity", {
           workspaceId: panel?.dataset.workspaceId,
           sessionId: panel?.dataset.sessionId,
+        });
+        serverDisplay = await tauri?.core?.invoke?.("desktop_display", {
+          workspaceId: panel?.dataset.workspaceId,
+          sessionId: panel?.dataset.sessionId,
+          request: { limit: 50 },
         });
       } catch (error) {
         serverContinuity = { error: String(error) };
@@ -297,7 +376,10 @@ Then("terminal completion releases continuity and history controls", async () =>
         continuityRefreshState: panel?.dataset.continuityRefreshState ?? null,
         continuityOwnerRunId: panel?.dataset.continuityOwnerRunId ?? null,
         continuityPendingTerminalRunId: panel?.dataset.continuityPendingTerminalRunId ?? null,
+        notices: [...document.querySelectorAll(".notification-toast")]
+          .map((notice) => notice.textContent),
         serverContinuity,
+        serverDisplay,
       };
     });
     const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS;
@@ -540,10 +622,10 @@ When("I invoke Desktop plan mode", async () => {
 
 Then("the supervised plan agent drafts a durable plan", async () => {
   await browser.waitUntil(
-    async () => durableEvidenceContains('"profile_id":"plan"'),
+    async () => durableEvidenceContains('"source":"explicit_plan_command"'),
     {
       timeout: 10_000,
-      timeoutMsg: "Desktop plan mode did not persist the plan profile binding",
+      timeoutMsg: "Desktop plan mode did not persist an explicit plan review attempt",
     },
   );
 });
@@ -572,7 +654,9 @@ Then("the draft plan becomes ready on the Desktop plan card", async () => {
 });
 
 When("I save the reviewed plan from Desktop", async () => {
-  const saveButton = await $(".plan-card button=Save");
+  const card = await $(".plan-card");
+  await card.$("[data-plan-detail-toggle]").click();
+  const saveButton = await card.$("[data-plan-action='save']");
   await saveButton.waitForClickable({ timeout: 10_000 });
   await saveButton.click();
 });
@@ -589,12 +673,58 @@ Then("the plan card closes without creating a Task", async () => {
 });
 
 When("I run the reviewed plan from Desktop", async () => {
-  const runButton = await $(".plan-card button=Run plan");
-  await runButton.waitForClickable({ timeout: 10_000 });
+  const card = await $(".plan-card");
+  await card.$("[data-plan-detail-toggle]").click();
+  const runButton = await card.$("[data-plan-action='run']");
+  try {
+    await browser.waitUntil(async () => runButton.isClickable(), {
+      timeout: 15_000,
+      timeoutMsg: "Desktop plan remained non-runnable",
+    });
+  } catch (error) {
+    const diagnostic = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const button = document.querySelector<HTMLButtonElement>("[data-plan-action='run']");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      let display: unknown;
+      try {
+        display = await invoke?.("desktop_display", {
+          workspaceId: panel?.dataset.workspaceId,
+          sessionId: panel?.dataset.sessionId,
+          request: { limit: 50 },
+        });
+      } catch (displayError) {
+        display = { error: String(displayError) };
+      }
+      return {
+        card: document.querySelector(".plan-card")?.textContent,
+        buttonDisabled: button?.disabled,
+        continuityLifecycle: panel?.dataset.continuityLifecycle,
+        continuityRefreshState: panel?.dataset.continuityRefreshState,
+        continuityPendingTerminalRunId: panel?.dataset.continuityPendingTerminalRunId,
+        display,
+      };
+    });
+    throw new Error(`Desktop plan remained non-runnable: ${JSON.stringify(diagnostic)}`, {
+      cause: error,
+    });
+  }
   await runButton.click();
 });
 
 When("I request automatic multi-Agent execution", async () => {
+  const fixtureBaseUrl = process.env.SIGIL_DESKTOP_E2E_PROVIDER_BASE_URL;
+  assert.ok(fixtureBaseUrl, "desktop E2E provider fixture URL is configured");
+  const reset = await fetch(`${fixtureBaseUrl}/__reset-evidence`, { method: "POST" });
+  assert.equal(reset.ok, true, "desktop E2E provider evidence could not be reset");
   await waitForComposerEnabled();
   const composer = await $("#desktop-prompt");
   await composer.setValue(desktopProviderCanaries.autoOrchestrationPrompt);

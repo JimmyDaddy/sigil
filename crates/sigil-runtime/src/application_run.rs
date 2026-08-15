@@ -1730,6 +1730,7 @@ pub struct ApplicationRunExecution {
     _session_lease: Arc<ApplicationSessionLease>,
 }
 
+#[derive(Debug, Clone)]
 struct ApplicationSessionTitleRequest {
     root_config: RootConfig,
     workspace_root: PathBuf,
@@ -1737,6 +1738,67 @@ struct ApplicationSessionTitleRequest {
     session_log_path: PathBuf,
     session_id: String,
     prompt: String,
+}
+
+/// Non-critical maintenance produced by a completed foreground application run.
+///
+/// Adapters must release their foreground-run ownership before awaiting this work. A failed
+/// maintenance action never changes the already durable terminal outcome of the run.
+#[derive(Debug, Clone)]
+pub struct ApplicationPostRunMaintenance {
+    session_title: Option<ApplicationSessionTitleRequest>,
+}
+
+impl ApplicationPostRunMaintenance {
+    fn from_session_title(request: Option<ApplicationSessionTitleRequest>) -> Option<Self> {
+        request.map(|request| Self {
+            session_title: Some(request),
+        })
+    }
+
+    /// Builds the bounded semantic-title maintenance used by adapters that own their own
+    /// foreground execution loop.
+    #[must_use]
+    pub fn session_title(
+        root_config: RootConfig,
+        workspace_root: PathBuf,
+        model_ref: ModelRef,
+        session_log_path: PathBuf,
+        session_id: String,
+        prompt: String,
+    ) -> Self {
+        Self {
+            session_title: Some(ApplicationSessionTitleRequest {
+                root_config,
+                workspace_root,
+                model_ref,
+                session_log_path,
+                session_id,
+                prompt,
+            }),
+        }
+    }
+
+    /// Executes all bounded, non-critical maintenance associated with the completed run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when title generation or its durable catalog update fails. The caller
+    /// should report this diagnostically and must not rewrite the foreground terminal result.
+    pub async fn execute(mut self) -> Result<()> {
+        if let Some(request) = self.session_title.take() {
+            crate::generate_and_persist_session_title(
+                request.root_config,
+                request.workspace_root,
+                request.model_ref,
+                request.session_log_path,
+                request.session_id,
+                request.prompt,
+            )
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 struct ApplicationTaskExecutionRuntime {
@@ -1764,6 +1826,9 @@ enum ApplicationRunExecutionKind {
     AgentProfile {
         runtime: Box<crate::AgentToolRuntime>,
         profile_id: AgentProfileId,
+    },
+    ExplicitPlanReview {
+        request: Box<crate::PlanReviewRunRequest>,
     },
 }
 
@@ -1795,6 +1860,8 @@ pub struct ApplicationRunOutput {
     pub route_transition: crate::provider_connections::SessionRouteTransitionView,
     /// Kernel agent output.
     pub agent_output: AgentRunOutput,
+    /// Non-critical work that adapters must execute only after releasing foreground ownership.
+    pub post_run_maintenance: Option<ApplicationPostRunMaintenance>,
 }
 
 impl ApplicationRunExecution {
@@ -1963,6 +2030,30 @@ impl ApplicationRunExecution {
                 )
                 .await
             }
+            ApplicationRunExecutionKind::ExplicitPlanReview { request } => {
+                let runtime = self
+                    .plan_review_runtime
+                    .take()
+                    .ok_or_else(|| anyhow!("explicit plan review runtime is unavailable"))?;
+                run_application_plan_review_request(
+                    &mut self.session,
+                    AgentRunOutput {
+                        disposition: AgentRunDisposition::FinalAnswer,
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: 0,
+                            final_message_id: None,
+                        },
+                        outcome: AgentRunOutcome::default(),
+                    },
+                    runtime,
+                    *request,
+                    &mut bridge,
+                    approval_handler,
+                    &self.cancellation_handle,
+                )
+                .await
+            }
         };
         let run = match run {
             Ok(agent_output) => {
@@ -2062,22 +2153,9 @@ impl ApplicationRunExecution {
                     &self.redactor,
                 )?;
                 bridge.emit(terminal_event)?;
-                if let Some(request) = self.pending_session_title.take()
-                    && let Err(error) = crate::generate_and_persist_session_title(
-                        request.root_config,
-                        request.workspace_root,
-                        request.model_ref,
-                        request.session_log_path,
-                        request.session_id,
-                        request.prompt,
-                    )
-                    .await
-                {
-                    tracing::debug!(
-                        %error,
-                        "semantic session title generation was not applied"
-                    );
-                }
+                let post_run_maintenance = ApplicationPostRunMaintenance::from_session_title(
+                    self.pending_session_title.take(),
+                );
                 Ok(ApplicationRunOutput {
                     session_id: self.session_id,
                     run_id: self.run_id,
@@ -2085,6 +2163,7 @@ impl ApplicationRunExecution {
                     terminal_status,
                     route_transition: self.route_transition,
                     agent_output,
+                    post_run_maintenance,
                 })
             }
             Err(error) if self.cancellation_handle.is_cancel_requested() => Err(error)
@@ -2297,18 +2376,44 @@ where
     let Some(runtime) = plan_review_runtime else {
         return Ok(output);
     };
+    let request = crate::PlanReviewCoordinator::prepare_automatic_plan_review(
+        session,
+        &action,
+        runtime.workspace_snapshot_id.clone(),
+        current_unix_time_ms(),
+    )?;
+    run_application_plan_review_request(
+        session,
+        output,
+        runtime,
+        request,
+        handler,
+        approval_handler,
+        cancellation_handle,
+    )
+    .await
+}
+
+async fn run_application_plan_review_request<H, A>(
+    session: &mut Session,
+    output: AgentRunOutput,
+    runtime: ApplicationPlanReviewRuntime,
+    request: crate::PlanReviewRunRequest,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: &RunCancellationHandle,
+) -> Result<AgentRunOutput>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
     let ApplicationPlanReviewRuntime {
         options,
         agent,
         tool_registry,
-        workspace_snapshot_id,
+        ..
     } = runtime;
-    let request = crate::PlanReviewCoordinator::prepare_automatic_plan_review(
-        session,
-        &action,
-        workspace_snapshot_id,
-        current_unix_time_ms(),
-    )?;
+    emit_current_plan_review_attempt(session, &request, handler)?;
     let outcome = match crate::PlanReviewCoordinator::run_plan_review(
         session,
         &request,
@@ -2336,6 +2441,7 @@ where
                     "plan review run failed ({error:#}) and its terminal closure also failed ({close_error:#})"
                 );
             }
+            emit_current_plan_review_attempt(session, &request, handler)?;
             return Err(error);
         }
     };
@@ -2349,6 +2455,7 @@ where
                 },
                 current_unix_time_ms(),
             )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
             Ok(AgentRunOutput {
                 result: sigil_kernel::AgentRunResult {
                     final_text: String::new(),
@@ -2371,11 +2478,15 @@ where
                 &request,
                 current_unix_time_ms(),
             )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
+            let final_text = format!("Plan ready: {}", draft.summary);
+            let final_message_id =
+                append_application_final_answer(session, handler, final_text.clone())?;
             Ok(AgentRunOutput {
                 result: sigil_kernel::AgentRunResult {
-                    final_text: format!("Plan ready: {}", draft.summary),
+                    final_text,
                     tool_calls: output.result.tool_calls,
-                    final_message_id: None,
+                    final_message_id: Some(final_message_id),
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::FinalAnswer,
@@ -2387,13 +2498,17 @@ where
                 &request,
                 current_unix_time_ms(),
             )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
+            let final_text =
+                "Plan review closed without a draft; no task was created. Send a more specific request or use /plan with explicit steps."
+                    .to_owned();
+            let final_message_id =
+                append_application_final_answer(session, handler, final_text.clone())?;
             Ok(AgentRunOutput {
                 result: sigil_kernel::AgentRunResult {
-                    final_text:
-                        "Plan review closed without a draft; no task was created. Send a more specific request or use /plan with explicit steps."
-                            .to_owned(),
+                    final_text,
                     tool_calls: output.result.tool_calls,
-                    final_message_id: None,
+                    final_message_id: Some(final_message_id),
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::FinalAnswer,
@@ -2406,6 +2521,7 @@ where
                 &crate::PlanReviewRunOutcome::Cancelled,
                 current_unix_time_ms(),
             )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -2428,6 +2544,7 @@ where
                 &crate::PlanReviewRunOutcome::Interrupted(reason.clone()),
                 current_unix_time_ms(),
             )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -2450,6 +2567,7 @@ where
                 &crate::PlanReviewRunOutcome::Failed(error.clone()),
                 current_unix_time_ms(),
             )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -2473,6 +2591,7 @@ where
                 &crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone()),
                 current_unix_time_ms(),
             )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -2492,6 +2611,41 @@ where
             ))
         }
     }
+}
+
+fn emit_current_plan_review_attempt(
+    session: &Session,
+    request: &crate::PlanReviewRunRequest,
+    handler: &mut (impl EventHandler + ?Sized),
+) -> Result<()> {
+    let attempt = session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if attempt.plan_review_id == request.plan_review_id
+                    && attempt.attempt_id == request.attempt_id =>
+            {
+                Some(attempt.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("plan review transition has no durable attempt"))?;
+    handler.handle(RunEvent::Control(ControlEntry::PlanReviewAttempt(attempt)))
+}
+
+fn append_application_final_answer(
+    session: &mut Session,
+    handler: &mut (impl EventHandler + ?Sized),
+    text: String,
+) -> Result<String> {
+    let mut message = ModelMessage::assistant(Some(safe_persistence_text(&text)), Vec::new());
+    message.assistant_kind = Some(AssistantMessageKind::FinalAnswer);
+    let final_message_id = message.id.clone();
+    session.append_assistant_message(message.clone())?;
+    handler.handle(RunEvent::AssistantMessage(message))?;
+    Ok(final_message_id)
 }
 
 struct ApplicationTaskFinalAnswer {
@@ -3042,6 +3196,25 @@ async fn prepare_application_run_internal(
             None
         };
     let session_id = session.session_scope_id().to_owned();
+    let plan_review_workspace_snapshot_id =
+        crate::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+            .ok()
+            .flatten();
+    let explicit_plan_review = agent_invocation
+        .as_ref()
+        .is_some_and(|(_, profile_id)| profile_id.as_str() == "plan");
+    let explicit_plan_review_request = explicit_plan_review
+        .then(|| {
+            crate::PlanReviewCoordinator::prepare_explicit_plan_review(
+                &mut session,
+                &prompt,
+                &run_id,
+                plan_review_workspace_snapshot_id.clone(),
+                current_unix_time_ms(),
+            )
+        })
+        .transpose()
+        .map_err(ApplicationRunPrepareError::execution)?;
     let pending_session_title =
         (queued_first_request.is_none() && generate_session_title).then(|| {
             ApplicationSessionTitleRequest {
@@ -3057,7 +3230,11 @@ async fn prepare_application_run_internal(
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
     let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
-    let kind = if let Some((registry_snapshot, profile_id)) = agent_invocation {
+    let kind = if let Some(request) = explicit_plan_review_request {
+        ApplicationRunExecutionKind::ExplicitPlanReview {
+            request: Box::new(request),
+        }
+    } else if let Some((registry_snapshot, profile_id)) = agent_invocation {
         let supervisor = crate::AgentSupervisor::new(
             registry_snapshot,
             crate::AgentBudgetPolicy::from_root_config(&root_config),
@@ -3084,12 +3261,7 @@ async fn prepare_application_run_internal(
         execution: ApplicationRunExecution {
             plan_review_runtime: Some(ApplicationPlanReviewRuntime {
                 options: options.clone(),
-                workspace_snapshot_id: crate::plan_handoff_workspace_snapshot_id(
-                    &root_config,
-                    &workspace_root,
-                )
-                .ok()
-                .flatten(),
+                workspace_snapshot_id: plan_review_workspace_snapshot_id,
                 agent: Box::new(Agent::new(
                     crate::build_provider_for_model_ref_async(&root_config, &model_ref)
                         .await
@@ -4708,17 +4880,32 @@ fn prepare_application_run_blocking(
         });
     }
     if let Some((provider_name, selected_route)) = selected_model {
-        let permit = route_authority
-            .issue_quiescence_permit()
-            .map_err(|error| application_route_authority_prepare_error(error, &recovery_binding))?;
-        let outcome = crate::provider_connections::apply_explicit_session_route_selection(
-            &config_snapshot,
-            &mut session,
-            &provider_name,
-            selected_route,
-            permit,
-        )
-        .map_err(ApplicationRunPrepareError::execution)?;
+        let outcome =
+            if crate::provider_connections::explicit_session_route_selection_is_already_applied(
+                &config_snapshot,
+                &session,
+                &provider_name,
+                &selected_route,
+            )
+            .map_err(ApplicationRunPrepareError::execution)?
+            {
+                crate::provider_connections::SessionRouteResumeOutcome {
+                    status: crate::provider_connections::SessionRouteResumeStatus::AlreadyApplied,
+                    private_state_reset: false,
+                }
+            } else {
+                let permit = route_authority.issue_quiescence_permit().map_err(|error| {
+                    application_route_authority_prepare_error(error, &recovery_binding)
+                })?;
+                crate::provider_connections::apply_explicit_session_route_selection(
+                    &config_snapshot,
+                    &mut session,
+                    &provider_name,
+                    selected_route,
+                    permit,
+                )
+                .map_err(ApplicationRunPrepareError::execution)?
+            };
         route_transition_kind =
             crate::provider_connections::SessionRouteTransitionKind::ExplicitlyConfirmed;
         route_remote_context_reset = outcome.private_state_reset;

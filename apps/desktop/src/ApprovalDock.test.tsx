@@ -47,3 +47,32 @@ it("offers settings and diagnostics recovery for unsupported shell syntax", () =
   expect(onOpenSettings).toHaveBeenCalledOnce();
   expect(onOpenSupport).toHaveBeenCalledOnce();
 });
+
+it("keeps an approval actionable when its wire expiry exceeds the JavaScript date range", () => {
+  const approval: TimelineApproval = {
+    callId: "call-long-lived",
+    toolName: "bash",
+    approvalRequestId: "approval-long-lived",
+    toolCallHash: "b".repeat(64),
+    policyVersion: "policy-v2",
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+    snapshotRequired: false,
+  };
+
+  render(
+    <LocaleProvider>
+      <ApprovalDock
+        approval={approval}
+        phase="pending"
+        busy={false}
+        composerRef={createRef<HTMLTextAreaElement>()}
+        onDecision={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenSupport={() => undefined}
+      />
+    </LocaleProvider>,
+  );
+
+  expect(screen.getAllByText("not described")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+});

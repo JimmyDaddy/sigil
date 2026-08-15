@@ -49,9 +49,9 @@ use sigil_runtime::application_recovery::{
     preview_application_checkpoint_restore, restore_application_checkpoint,
 };
 use sigil_runtime::application_run::{
-    ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunExecution,
-    ApplicationRunInteraction, ApplicationRunRequest, ApplicationRunServices,
-    ApplicationRunTerminalStatus, ApplicationTaskContinuationExecution,
+    ApplicationPostRunMaintenance, ApplicationRunControl, ApplicationRunEventHandler,
+    ApplicationRunExecution, ApplicationRunInteraction, ApplicationRunRequest,
+    ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationTaskContinuationExecution,
     ApplicationTaskContinuationRequest, ApplicationTerminalTaskControl, ApplicationTranscriptRole,
     ApplicationUserInputDecisionRequest, PreparedApplicationRun,
     PreparedApplicationTaskContinuation, PreparedApplicationUserInputDecision,
@@ -295,12 +295,18 @@ impl HttpApplicationRunExecution {
         self,
         event_handler: HttpProductionEventHandler,
         approval_handler: HttpProductionApprovalHandler,
+        post_run_maintenance: Arc<Mutex<Option<ApplicationPostRunMaintenance>>>,
     ) -> Result<ApplicationRunTerminalStatus> {
         match self {
-            Self::Conversation(execution) => (*execution)
-                .execute_on_owned_blocking(event_handler, approval_handler)
-                .await
-                .map(|output| output.terminal_status),
+            Self::Conversation(execution) => {
+                let output = (*execution)
+                    .execute_on_owned_blocking(event_handler, approval_handler)
+                    .await?;
+                *post_run_maintenance
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = output.post_run_maintenance;
+                Ok(output.terminal_status)
+            }
             Self::Task(execution) => (*execution)
                 .execute_on_owned_blocking(event_handler, approval_handler)
                 .await
@@ -1178,6 +1184,7 @@ impl HttpProductionRunDriver {
         });
         let queued_session = start.session.clone();
         let terminal_exact_queue_prompts = Arc::clone(&self.exact_queue_prompts);
+        let post_run_maintenance = Arc::new(Mutex::new(None));
 
         let supervisor = HttpRunSupervisor {
             options: self.options.clone(),
@@ -1192,6 +1199,7 @@ impl HttpProductionRunDriver {
             exact_queue_prompts: Arc::clone(&self.exact_queue_prompts),
             terminal_owners: Arc::clone(&self.terminal_owners),
             cancel_receiver,
+            post_run_maintenance: Arc::clone(&post_run_maintenance),
         };
         let task = self.runtime.spawn(supervisor.run(preprepared));
         let active_runs = Arc::clone(&self.active_runs);
@@ -1253,6 +1261,18 @@ impl HttpProductionRunDriver {
                 }
             } else if let Ok(mut owners) = terminal_owners.lock() {
                 owners.remove(&run_id);
+            }
+            let maintenance = post_run_maintenance
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(maintenance) = maintenance
+                && let Err(error) = maintenance.execute().await
+            {
+                tracing::debug!(
+                    %error,
+                    "post-run semantic session maintenance was not applied"
+                );
             }
         });
         Ok(())
@@ -4055,6 +4075,7 @@ struct HttpRunSupervisor {
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
     cancel_receiver: mpsc::UnboundedReceiver<HttpProductionRunControlCommand>,
+    post_run_maintenance: Arc<Mutex<Option<ApplicationPostRunMaintenance>>>,
 }
 
 impl HttpRunSupervisor {
@@ -4322,8 +4343,11 @@ impl HttpRunSupervisor {
             run_id: self.start.run.id.clone(),
             broker: Arc::clone(&self.broker),
         };
-        let mut execution =
-            Box::pin(execution.execute_on_owned_blocking(event_handler.clone(), approval_handler));
+        let mut execution = Box::pin(execution.execute_on_owned_blocking(
+            event_handler.clone(),
+            approval_handler,
+            Arc::clone(&self.post_run_maintenance),
+        ));
         'run: loop {
             tokio::select! {
                 biased;

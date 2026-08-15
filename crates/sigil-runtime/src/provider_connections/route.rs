@@ -733,20 +733,20 @@ pub fn apply_explicit_session_route_selection(
     quiescence: SessionRouteMutationPermit,
 ) -> Result<SessionRouteResumeOutcome, SessionRouteResumeError> {
     let _mutation_guard = quiescence.enter(session.session_scope_id())?;
-    let current = config_snapshot
-        .resolve_model_ref(&selected_route.model_ref)
-        .map_err(|_| SessionRouteResumeError::SnapshotStale)?;
-    if current.provider_name != provider_name || current.route != selected_route {
-        return Err(SessionRouteResumeError::SnapshotStale);
-    }
-    if session.resolved_model_route() == Some(&selected_route)
-        && session.route_egress_trust_binding() == Some(current.egress_trust_binding.clone())
-    {
+    if explicit_session_route_selection_is_already_applied(
+        config_snapshot,
+        session,
+        provider_name,
+        &selected_route,
+    )? {
         return Ok(SessionRouteResumeOutcome {
             status: SessionRouteResumeStatus::AlreadyApplied,
             private_state_reset: false,
         });
     }
+    let current = config_snapshot
+        .resolve_model_ref(&selected_route.model_ref)
+        .map_err(|_| SessionRouteResumeError::SnapshotStale)?;
     session
         .select_model_route_with_trust(
             provider_name.to_owned(),
@@ -758,6 +758,27 @@ pub fn apply_explicit_session_route_selection(
         status: SessionRouteResumeStatus::Applied,
         private_state_reset: true,
     })
+}
+
+/// Returns whether an explicit selection is a validated no-op for the current durable route.
+///
+/// This check does not mutate the session and therefore does not require global route quiescence.
+/// A caller may use it to admit another execution owner on the same route while unrelated
+/// background provider-free work, such as a persistent terminal, remains live.
+pub fn explicit_session_route_selection_is_already_applied(
+    config_snapshot: &ResolvedRouteConfigSnapshot,
+    session: &Session,
+    provider_name: &str,
+    selected_route: &ResolvedModelRoute,
+) -> Result<bool, SessionRouteResumeError> {
+    let current = config_snapshot
+        .resolve_model_ref(&selected_route.model_ref)
+        .map_err(|_| SessionRouteResumeError::SnapshotStale)?;
+    if current.provider_name != provider_name || &current.route != selected_route {
+        return Err(SessionRouteResumeError::SnapshotStale);
+    }
+    Ok(session.resolved_model_route() == Some(selected_route)
+        && session.route_egress_trust_binding() == Some(current.egress_trust_binding.clone()))
 }
 
 /// Loads safe session truth and returns a pure decision without requiring provider readiness.

@@ -8,7 +8,16 @@
 
 ## 尚未发布 - main
 
-- 自 v0.0.1-beta.4 起暂无面向用户的新变更。
+- Plan review 现在会打开完整、可滚动的工作台，不再把主要内容截断在紧凑状态卡片中。从 32x8 到
+  宽屏终端都可以访问全部步骤；`Esc` 只关闭、不拒绝，输入可打印字符会返回 composer，所有动作继续
+  绑定精确的 durable plan。
+- Revise 现在会先询问“希望修改什么”，新方案成功前原计划始终保持 active；任何 terminal revision
+  failure 都会恢复原计划。受影响的旧 session 通过严格只读兼容投影恢复，`sigil doctor` 会报告无法
+  证明 lineage 的旧数据。
+- 智能体现在可以通过 durable attention queue 提出 bounded typed 问题。待回答问题在退出和恢复 TUI
+  后仍然存在且没有超时；后台智能体的问题会路由到 root session；一个已接受回答只会继续一次
+  provider attempt，不会重放提出问题的 turn。MCP elicitation 复用同一表单 renderer，但不会继承
+  durable replay 语义。
 
 ## v0.0.1-beta.4 - 2026-08-11
 

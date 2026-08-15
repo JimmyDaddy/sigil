@@ -856,6 +856,7 @@ mod reactor_tests {
                     profile_id: "reviewer".to_owned(),
                     result: Err("done".to_owned()),
                 },
+                post_run_maintenance: None,
             })
             .expect("run completion should send");
         let event =

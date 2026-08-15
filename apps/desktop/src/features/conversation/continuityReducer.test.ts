@@ -265,6 +265,38 @@ describe("conversation continuity reducer", () => {
     ]);
   });
 
+  it("ignores a late duplicate terminal transport after canonical settlement", () => {
+    let state = receiveInitial([]);
+    state = reduceConversationContinuity(state, {
+      type: "terminal_transport_observed",
+      sessionId: SESSION_ID,
+      runId: "run-status-only",
+    });
+    state = reduceConversationContinuity(state, {
+      type: "refresh_page_received",
+      sessionId: SESSION_ID,
+      page: page([
+        assistantFinal("status-only-final", "20", "run-status-only", "answer"),
+      ], "21", {
+        runId: "run-status-only",
+        sessionStreamSequence: "21",
+        status: "succeeded",
+      }),
+    });
+
+    expect(state.lifecycle).toBe("idle");
+    expect(state.refreshState).toBe("idle");
+    const settled = state;
+    state = reduceConversationContinuity(state, {
+      type: "terminal_transport_observed",
+      sessionId: SESSION_ID,
+      runId: "run-status-only",
+    });
+
+    expect(state).toBe(settled);
+    expect(state.pendingTerminalRunId).toBeUndefined();
+  });
+
   it("accepts a proven queued successor while retaining fail-closed unrelated terminal facts", () => {
     let state = receiveInitial([]);
     state = reduceConversationContinuity(state, {

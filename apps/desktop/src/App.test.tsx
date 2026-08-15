@@ -2780,9 +2780,18 @@ describe("desktop workspace and history shell", () => {
       kind: "run_started",
       text: "Resume this work",
     };
-    const approvalEvent: TimelineEvent = {
+    const routeEvent: TimelineEvent = {
       ...activeEvent,
       sequence: 2, runSequence: "2",
+      provisionalId: undefined,
+      kind: "conversation_route_changed",
+      itemId: "route-active",
+      status: "decided",
+      text: undefined,
+    };
+    const approvalEvent: TimelineEvent = {
+      ...activeEvent,
+      sequence: 3, runSequence: "3",
       provisionalId: "live-active-approval",
       kind: "approval_requested",
       itemId: "call-active",
@@ -2826,7 +2835,7 @@ describe("desktop workspace and history shell", () => {
         foregroundRunId: "run-active",
       }),
       continuity: async () => ({
-        durableFrontier: { throughStreamSequence: 2 },
+        durableFrontier: { throughStreamSequence: 3 },
         foregroundOwner: {
           runId: "run-active",
           ownerRevision: `sha256:${"a".repeat(64)}`,
@@ -2859,9 +2868,9 @@ describe("desktop workspace and history shell", () => {
             sessionId: "http-session-active",
             status: "waiting_for_approval",
             permissionMode: "manual",
-            streamSequence: 2,
+            streamSequence: 3,
           },
-          events: [activeEvent, approvalEvent],
+          events: [activeEvent, routeEvent, approvalEvent],
           streamState: "live",
           hasGap: true,
         };
@@ -2878,6 +2887,9 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText("Resume this work")).toBeTruthy();
     expect(screen.getByText(/Some live details were not retained/)).toBeTruthy();
     expect(screen.getByText("Review the resumed edit")).toBeTruthy();
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    });
     expect(order).toEqual(["events", "status", "attach"]);
 
     await waitFor(() => expect(conversationQueue).toHaveBeenCalled());
@@ -4178,8 +4190,9 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("Finish before attach")).toBeNull();
   });
 
-  it("keeps a status-only terminal run finalizing until its interrupted durable frontier is loaded", async () => {
+  it("restarts canonical settlement when a typed terminal races a status-only refresh", async () => {
     const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
     let statusListener: ((status: RunStreamStatus) => void) | undefined;
     let resolveRefresh: ((page: ConversationDisplayPage) => void) | undefined;
     const owner = {
@@ -4217,6 +4230,9 @@ describe("desktop workspace and history shell", () => {
           hasMore: false,
           gapFacts: [],
         });
+      }
+      if (displayCall <= 5) {
+        return Promise.reject(new Error("durable terminal projection is still settling"));
       }
       return new Promise<ConversationDisplayPage>((resolve) => {
         resolveRefresh = resolve;
@@ -4258,6 +4274,10 @@ describe("desktop workspace and history shell", () => {
         statusListener = listener;
         return () => undefined;
       },
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
     })} />);
 
     await user.click(await screen.findByRole("button", { name: /^Status-only session/ }));
@@ -4271,11 +4291,22 @@ describe("desktop workspace and history shell", () => {
       state: "terminal",
     }));
 
-    await waitFor(() => expect(display).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(display).toHaveBeenCalledTimes(6), { timeout: 4_000 });
     await waitFor(() => expect(continuity).toHaveBeenCalledTimes(3));
     const send = await screen.findByRole("button", { name: "Send message" });
     expect((send as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getAllByText("Run finished. Review the final response and verification status.")).toHaveLength(2);
+
+    act(() => eventListener?.({
+      workspaceId: workspace.id,
+      sessionId: "http-status-only",
+      runId: owner.runId,
+      sequence: 2,
+      runSequence: "2",
+      replayable: true,
+      kind: "run_finished",
+    }));
+    await waitFor(() => expect(display).toHaveBeenCalledTimes(7));
 
     await act(async () => {
       resolveRefresh?.({
@@ -4315,7 +4346,7 @@ describe("desktop workspace and history shell", () => {
         terminalFrontier: {
           runId: owner.runId,
           sessionStreamSequence: "2",
-          status: "interrupted",
+          status: "succeeded",
         },
         hasMore: false,
         gapFacts: [],
@@ -5663,6 +5694,18 @@ describe("desktop workspace and history shell", () => {
     const user = userEvent.setup();
     const planHash = `sha256:${"d".repeat(64)}`;
     let displayCalls = 0;
+    const continueTask = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      _taskId: string,
+      permissionMode: PermissionMode,
+    ) => ({
+      id: "run-plan-task-1",
+      sessionId,
+      status: "running" as const,
+      permissionMode,
+      streamSequence: 0,
+    }));
     const planDecision = vi.fn(async (
       _workspaceId: string,
       sessionId: string,
@@ -5676,6 +5719,7 @@ describe("desktop workspace and history shell", () => {
       planId,
       planHash: expectedPlanHash,
       action: action as "run",
+      taskId: "task-plan-1",
       replayed: false,
     }));
     const bridge = bridgeWith({
@@ -5711,6 +5755,7 @@ describe("desktop workspace and history shell", () => {
         };
       },
       planDecision,
+      continueTask,
     });
     render(<App bridge={bridge} />);
 
@@ -5733,6 +5778,13 @@ describe("desktop workspace and history shell", () => {
       "plan-review-1",
       planHash,
       "run",
+    ));
+    await waitFor(() => expect(continueTask).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "task-plan-1",
+      "manual",
+      undefined,
     ));
     await waitFor(() => expect(screen.queryByText("Refactor the workspace snapshot binding")).toBeNull());
   });

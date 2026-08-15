@@ -41,11 +41,14 @@ export function ApprovalDock({
     };
   }, [approval.approvalRequestId, composerRef, phase]);
 
-  const expires = new Intl.DateTimeFormat(locale, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(approval.expiresAtMs);
+  const expiresAt = new Date(approval.expiresAtMs);
+  const expires = Number.isFinite(expiresAt.getTime())
+    ? new Intl.DateTimeFormat(locale, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(expiresAt)
+    : t("notDescribed");
   const expired = Date.now() >= approval.expiresAtMs;
   const unsupportedShellAnalysis = approval.analysisStatus === "unsupported"
     || approval.analysisStatus === "invalid"
