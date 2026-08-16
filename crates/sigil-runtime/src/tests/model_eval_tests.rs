@@ -402,8 +402,30 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
         }
         match orchestration.case_class {
             sigil_kernel::OrchestrationEvalCaseClass::Chat => chat += 1,
-            sigil_kernel::OrchestrationEvalCaseClass::PlanReview => plan_review += 1,
-            sigil_kernel::OrchestrationEvalCaseClass::DirectTask => direct_task += 1,
+            sigil_kernel::OrchestrationEvalCaseClass::PlanReview => {
+                assert!(
+                    !fixture
+                        .manifest
+                        .allowed_tools
+                        .iter()
+                        .any(|tool| { matches!(tool.as_str(), "edit_file" | "write_file") })
+                );
+                plan_review += 1;
+            }
+            sigil_kernel::OrchestrationEvalCaseClass::DirectTask => {
+                for required_tool in ["edit_file", "write_file"] {
+                    assert!(
+                        fixture
+                            .manifest
+                            .allowed_tools
+                            .iter()
+                            .any(|tool| tool == required_tool),
+                        "fixture {} must expose the production execution tool {required_tool}",
+                        fixture.manifest.id
+                    );
+                }
+                direct_task += 1;
+            }
         }
     }
 

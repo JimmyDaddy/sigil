@@ -1404,6 +1404,29 @@ change set，并显式列出三个只读路径。该轮后半段还遭遇连续 
 必须从新 commit 重新生成 exact route contract 并重跑 `1×50`；旧 campaign 只作为失败证据，不能计入 release
 qualification。RFC 状态仍为 `implementation-in-progress`。
 
+## 13.12 Candidate qualification remediation（2026-08-16）
+
+`3f9b0ee3` 的重新生成候选先以完整 `1×50` 预检证明 50/50 provider-admitted、50/50 completed、
+50/50 accepted，实际路由精确为 20 Chat / 15 PlanReview / 15 DirectTask，且 hard invariant violation 为
+0。随后两次 `3×50` 均保留为不可合并的完整 campaign 证据：
+
+- 首次 campaign 错把 `--timeout-secs 3600` 当作 per-case timeout，实际是一小时 campaign deadline；因此
+  只有 89 provider-admitted、87 completed，后续 61 次为 `DeadlineSkipped`。deadline 前另有一次 DeepSeek
+  TLS `close_notify` 瞬断；该外部失败不能计入 qualification，也不能通过拼接 campaign 补齐；
+- 第二次 campaign 使用 10800 秒 deadline，150/150 provider-admitted、150/150 completed、0 skipped，
+  路由精确为 20/15/15 且 hard invariant violation 为 0，但只有 149/150 accepted。唯一失败
+  `orch-dt-06` repetition 1 的行为 oracle 未被篡改，根 run 也正常完成；失败原因是 executor 合理选择新增
+  `src/normalize.rs`，而 committed DirectTask fixture 只暴露不能创建新文件的 `edit_file`，最终 verification
+  以缺少 module file 失败。另两次 repetition 恰好只修改已有文件而通过，证明这是 capability contract
+  漏洞，不能靠再次抽样掩盖。
+
+DirectTask committed fixture 的生产执行 surface 现同时暴露 `edit_file` 与受 workspace/permission 约束的
+`write_file`；PlanReview 仍只暴露 `read_file/glob/grep`，Chat negative surface 不变。corpus contract test
+显式断言 DirectTask 两种写能力与 PlanReview 零写能力，generator `--check` 和 runtime `model_eval` 定向
+测试均通过。该变更会改变 tool-profile/corpus/route identity，必须从新 commit 重新生成 exact route contract，
+重跑 `1×50` 与同一 campaign 内的 `3×50`；旧报告仍只作失败证据。RFC 状态保持
+`implementation-in-progress`。
+
 ## 14. Validation plan
 
 按 slice 运行最小相关 gate，最终至少包括：

@@ -153,7 +153,11 @@ const frozenCrossLayerOrder = [
 // surface read-only but complete enough to enumerate and search repository evidence instead of
 // forcing agents to guess conventional paths with read_file alone.
 const readDiscoveryTools = ["read_file", "glob", "grep"];
-const writeExecutionTools = [...readDiscoveryTools, "edit_file"];
+const writeExecutionTools = [
+  ...readDiscoveryTools,
+  "edit_file",
+  "write_file",
+];
 
 const cases = [];
 
