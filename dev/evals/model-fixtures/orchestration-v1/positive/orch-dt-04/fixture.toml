@@ -1,7 +1,7 @@
 schema_version = 1
 id = "orch-dt-04"
 prompt_file = "prompt.txt"
-prompt_sha256 = "sha256:12365b95605a12e301fba52eb9395108edddb7afd2f1e276f3f4354cfc32595e"
+prompt_sha256 = "sha256:d04426f590ff67e5cbd1554ccfd7c8df155423482c5ebd1c751dce2bf5bf6743"
 allowed_tools = ["read_file", "glob", "grep", "edit_file"]
 max_turns = 16
 max_output_tokens = 16384

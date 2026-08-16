@@ -1394,6 +1394,12 @@ planner 会在计划前调用 RFC-0064 `request_user_input`，而 orchestrator �
 - 该 1× 样本还观察到一个跨层实施请求与一个中文比较设计评审各漏判为 Chat。routing contract 补强通用的
   跨层协调、比较设计评审和跨语言语义规则，不按 case id 或关键词特判。
 
+第二次预检进一步发现两条 committed fixture 自身不满足其 capability contract：一个 direct-task prompt
+要求修改 frozen workspace 中不存在的 `quota.rs`，一个 Chat trace 只授予 `read_file` 却没有给出所谓“三个
+source files”的路径；两者都会合理触发 user-input suspension。fixture 已分别改回真实 parser/formatter
+change set，并显式列出三个只读路径。该轮后半段还遭遇连续 DeepSeek TLS handshake EOF；所有外部失败均
+保留为 provider outage 证据，不计入 candidate qualification。
+
 受影响 kernel/runtime 全量测试与两 crate `clippy -D warnings` 已通过。上述修改改变 route/corpus identity，
 必须从新 commit 重新生成 exact route contract 并重跑 `1×50`；旧 campaign 只作为失败证据，不能计入 release
 qualification。RFC 状态仍为 `implementation-in-progress`。

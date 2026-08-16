@@ -78,7 +78,7 @@ const questionPrompts = [
   "Which module removes surrounding whitespace, and how is it called? Do not edit the workspace.",
   "Describe the output produced by render_record for the input `  alpha  `. Do not change code.",
   "Explain the responsibility boundary between parser and formatter. Make no file changes.",
-  "Review the three source files and summarize the call flow. Do not modify the repository.",
+  "Review src/lib.rs, src/parser.rs, and src/formatter.rs, then summarize the call flow. Do not modify the repository.",
   "What string prefix is added by the formatter, and where is that behavior defined? Do not edit.",
   "Explain whether parse borrows or owns its returned value. Keep the workspace unchanged.",
 ];
@@ -105,7 +105,7 @@ const directTaskPrompts = [
   "Finish the workspace by applying the pending normalization across parser and formatter so render_record outputs [mixed-42] for input \"  MiXeD-42  \".",
   "Implement the cross-layer parser/formatter normalization end to end; the public facade must compile and render_record must emit [mixed-42].",
   "执行并收尾当前工作区所有待定变更：parser 归一化与 formatter 方括号输出，验证 cargo test 通过。",
-  "Apply the independent modules change set now: update quota.rs handling and the parser normalization in one durable task.",
+  "Apply the parser/formatter change set now: update parser normalization and formatter rendering together in one durable task.",
   "Complete the workspace changes without asking for a plan: normalize parsing and update formatter output.",
   "Ship the normalization across all modules and verify with cargo check and cargo test.",
   "执行跨层变更：parser 小写归一化 + formatter 输出格式，最终 render_record 必须输出 [mixed-42]。",

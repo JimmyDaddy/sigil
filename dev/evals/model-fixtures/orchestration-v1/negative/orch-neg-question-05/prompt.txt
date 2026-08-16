@@ -1,1 +1,1 @@
-Review the three source files and summarize the call flow. Do not modify the repository.
+Review src/lib.rs, src/parser.rs, and src/formatter.rs, then summarize the call flow. Do not modify the repository.

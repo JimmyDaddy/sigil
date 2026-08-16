@@ -1,7 +1,7 @@
 schema_version = 1
 id = "orch-neg-question-05"
 prompt_file = "prompt.txt"
-prompt_sha256 = "sha256:3cc457882b60092d28689a670429f2091bcb03740b4e0ec1d1e9214e3ac4c8a9"
+prompt_sha256 = "sha256:7a8f5c47832ddf3a2e9a2077885fd77266e7c38ae3a1733b50cf4014c47627ed"
 allowed_tools = ["read_file"]
 max_turns = 16
 max_output_tokens = 16384
