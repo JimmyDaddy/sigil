@@ -367,32 +367,36 @@ class StatefulSurfaceCampaignTests(unittest.TestCase):
         self.assertNotEqual(MODULE.ESCAPE_KEY_SEQUENCE, b"\x1b")
         self.assertEqual(MODULE.ESCAPE_KEY_SEQUENCE, b"\x1b[27u")
 
-    def test_plan_rejection_retries_the_complete_escape_sequence(self) -> None:
+    def test_plan_rejection_selects_the_explicit_workbench_action(self) -> None:
         runner = mock.Mock()
-        runner.wait_until.side_effect = [TimeoutError("redraw race"), "dismissed"]
+        runner.wait_until.return_value = "dismissed"
 
-        self.assertEqual(MODULE.reject_visible_plan_preview(runner, 2), "dismissed")
+        self.assertEqual(MODULE.reject_open_plan_workbench(runner, 2), "dismissed")
         self.assertEqual(
             runner.send.call_args_list,
             [
-                mock.call(MODULE.ESCAPE_KEY_SEQUENCE),
-                mock.call(MODULE.ESCAPE_KEY_SEQUENCE),
+                mock.call("\t"),
+                mock.call("\t"),
+                mock.call("\t"),
+                mock.call("\r"),
             ],
         )
-        self.assertEqual(runner.wait_until.call_count, 2)
-        for call in runner.wait_until.call_args_list:
-            self.assertTrue(call.kwargs["final_screen"])
+        self.assertEqual(runner.wait_until.call_count, 1)
+        self.assertTrue(runner.wait_until.call_args.kwargs["final_screen"])
 
-    def test_plan_fixture_recognizes_legacy_plan_mode_and_builds_a_schema_v2_draft(
+    def test_plan_fixture_recognizes_current_research_and_submit_only_turns(
         self,
     ) -> None:
-        payload = {
+        research_payload = {
             "messages": [
                 {
                     "role": "system",
-                    "content": f"{MODULE.PLAN_MODE_MARKER} Inspect first.",
+                    "content": f"{MODULE.PLAN_RESEARCH_MARKER} Inspect first.",
                 }
-            ],
+            ]
+        }
+        finalizer_payload = {
+            "messages": [{"role": "system", "content": "Finalize the recorded evidence."}],
             "tools": [
                 {
                     "type": "function",
@@ -401,14 +405,30 @@ class StatefulSurfaceCampaignTests(unittest.TestCase):
             ]
         }
 
-        self.assertTrue(MODULE.is_plan_mode_request(payload))
-        self.assertTrue(MODULE.advertises_tool(payload, "submit_plan_draft"))
+        self.assertTrue(MODULE.is_plan_mode_request(research_payload))
+        self.assertFalse(MODULE.advertises_tool(research_payload, "submit_plan_draft"))
+        self.assertTrue(MODULE.is_plan_mode_request(finalizer_payload))
+        self.assertTrue(MODULE.advertises_tool(finalizer_payload, "submit_plan_draft"))
         draft = json.loads(MODULE.PLAN_DRAFT_ARGUMENTS)
         self.assertEqual(draft["schema_version"], 2)
         self.assertEqual(draft["summary"], MODULE.PLAN_SUMMARY_CANARY)
         self.assertEqual(len(draft["steps"]), 1)
         self.assertIn("```sigil-plan-v2", MODULE.PLAN_DRAFT_TEXT)
         self.assertIn(MODULE.PLAN_SUMMARY_CANARY, MODULE.PLAN_DRAFT_TEXT)
+
+    def test_plan_fixture_keeps_legacy_plan_mode_compatibility(self) -> None:
+        self.assertTrue(
+            MODULE.is_plan_mode_request(
+                {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": f"{MODULE.PLAN_MODE_MARKER} Inspect first.",
+                        }
+                    ]
+                }
+            )
+        )
 
     def test_plan_fixture_does_not_misclassify_an_ordinary_conversation(self) -> None:
         self.assertFalse(
@@ -427,7 +447,7 @@ class StatefulSurfaceCampaignTests(unittest.TestCase):
             body.index("verified-history"),
         )
 
-    def test_plan_preview_waits_for_the_run_to_be_idle_before_escape(self) -> None:
+    def test_plan_preview_and_workbench_wait_for_the_run_to_be_idle(self) -> None:
         preview = f"Plan ready · {MODULE.PLAN_SUMMARY_CANARY}"
         self.assertFalse(MODULE.looks_like_ready_plan_preview(f"{preview}\nReplying..."))
         self.assertFalse(MODULE.looks_like_ready_plan_preview(f"{preview}\nThinking..."))
@@ -436,9 +456,15 @@ class StatefulSurfaceCampaignTests(unittest.TestCase):
         )
         self.assertTrue(MODULE.looks_like_ready_plan_preview(preview))
         self.assertFalse(MODULE.looks_like_dismissed_plan_preview(preview))
+        workbench = (
+            f"Plan Review\nSummary\n{MODULE.PLAN_SUMMARY_CANARY}\n"
+            "Run Save Revise Reject\nEsc close"
+        )
+        self.assertTrue(MODULE.looks_like_open_plan_workbench(workbench))
+        self.assertFalse(MODULE.looks_like_open_plan_workbench(f"{workbench}\nThinking..."))
         self.assertTrue(
             MODULE.looks_like_dismissed_plan_preview(
-                f"{MODULE.PLAN_SUMMARY_CANARY}\nBuild · agent: main"
+                "plan rejected\nBuild · agent: main"
             )
         )
 

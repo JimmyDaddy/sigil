@@ -555,7 +555,7 @@ R64.0–R64.4 与 §16 的剩余验证已按同一当前源码关闭：
   answer-before-start、started-before-send、hidden retry、transport uncertain 与 child-answer-durable/
   parent-registration-before-crash 窗口都有确定性测试，恢复后仍是同一 participant、child session、command
   identity 与 physical attempt，且 continuation 最多一次；
-- TUI stateful PTY 47/47、orchestration PTY 7/7 与独立 durable-input PTY 均通过。后者从
+- TUI stateful PTY 48/48、orchestration PTY 7/7 与独立 durable-input PTY 均通过。后者从
   `f4baccee` binary 实际生成 request，退出并恢复同一表单，再提交 answer；manifest 断言 request 在退出前
   durable、同一 physical attempt binding、一个 tool result 与一个 final answer；
 - `rfc0064-live-model-f4baccee` 使用 DeepSeek V4 Flash 实际调用 `request_user_input`，manifest 记录

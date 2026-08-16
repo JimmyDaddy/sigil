@@ -43,6 +43,10 @@ PLAN_TOOL_CALL_ID = "stateful-plan-draft-call"
 PLAN_PROMPT = "review the stateful TUI rendering path without modifying files"
 PLAN_SUMMARY_CANARY = "STATEFUL-PLAN-PREVIEW-CANARY-5821"
 PLAN_MODE_MARKER = "Plan mode is active for this turn."
+PLAN_RESEARCH_MARKER = "You are running a read-only plan review for the current request."
+PLAN_FINALIZER_MARKER = (
+    "The research phase is complete and this is the single submit-only finalization turn."
+)
 QUEUED_FOLLOW_UP_PROMPT = "STATEFUL-QUEUED-FOLLOW-UP-PROMPT-7346"
 QUEUED_FOLLOW_UP_REPLY = "STATEFUL-QUEUED-FOLLOW-UP-REPLY-8462"
 HISTORY_HEAD_CANARY_PREFIX = "STATEFUL-HISTORY-HEAD-"
@@ -379,13 +383,25 @@ def advertises_tool(payload: object, name: str) -> bool:
 
 def is_plan_mode_request(payload: object) -> bool:
     request = payload if isinstance(payload, dict) else {}
+    # The submit-only finalizer is capability-bound even when its prompt wording evolves. The
+    # research turn has no submit tool, so retain explicit markers for both the current durable
+    # workbench and the pre-workbench `/plan` protocol used by older release binaries.
+    if advertises_tool(payload, "submit_plan_draft"):
+        return True
     messages = request.get("messages")
     if not isinstance(messages, list):
         return False
     return any(
         isinstance(message, dict)
         and isinstance(message.get("content"), str)
-        and PLAN_MODE_MARKER in message["content"]
+        and any(
+            marker in message["content"]
+            for marker in (
+                PLAN_RESEARCH_MARKER,
+                PLAN_FINALIZER_MARKER,
+                PLAN_MODE_MARKER,
+            )
+        )
         for message in messages
     )
 
@@ -1350,11 +1366,22 @@ def looks_like_ready_plan_preview(text: str) -> bool:
     )
 
 
+def looks_like_open_plan_workbench(text: str) -> bool:
+    return (
+        "Plan Review" in text
+        and "Summary" in text
+        and PLAN_SUMMARY_CANARY in text
+        and "Reject" in text
+        and "Esc close" in text
+        and not looks_like_busy_tui(text)
+    )
+
+
 def looks_like_dismissed_plan_preview(text: str) -> bool:
     lowered = text.lower()
     return (
-        PLAN_SUMMARY_CANARY in text
-        and "Plan ready" not in text
+        "Plan ready" not in text
+        and "Plan Review" not in text
         and not looks_like_busy_tui(text)
         and "build · agent:" in lowered
     )
@@ -1371,24 +1398,18 @@ def looks_like_visible_queued_follow_up(text: str) -> bool:
     )
 
 
-def reject_visible_plan_preview(runner: PtyRunner, timeout: float) -> str:
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("timed out waiting for dismissed plan preview after rejection")
-        runner.send(ESCAPE_KEY_SEQUENCE)
-        try:
-            return runner.wait_until(
-                looks_like_dismissed_plan_preview,
-                min(0.75, remaining),
-                "dismissed plan preview after rejection",
-                final_screen=True,
-            )
-        except TimeoutError:
-            # A resize/redraw can race the first decoded key event. Retry the same complete key
-            # encoding without sending any printable input or bypassing the application's action.
-            continue
+def reject_open_plan_workbench(runner: PtyRunner, timeout: float) -> str:
+    # Run is selected initially. Move across Save and Revise to the explicit Reject action; Esc is
+    # intentionally not used because the durable workbench contract defines it as close-only.
+    for _ in range(3):
+        runner.send("\t")
+    runner.send("\r")
+    return runner.wait_until(
+        looks_like_dismissed_plan_preview,
+        timeout,
+        "dismissed plan preview after explicit rejection",
+        final_screen=True,
+    )
 
 
 def wait_for_busy_tui(runner: PtyRunner, timeout: float, description: str) -> str:
@@ -1908,23 +1929,30 @@ def main() -> int:
             "visible stateful plan preview",
             final_screen=True,
         )
+        first_runner.send("\r")
+        first_runner.wait_until(
+            looks_like_open_plan_workbench,
+            deadline.remaining(),
+            "open complete plan workbench",
+            final_screen=True,
+        )
         plan_shrink_boundary = first_runner.resize(28, 100)
         first_runner.wait_until(
             lambda text: len(first_runner.output) > plan_shrink_boundary
-            and looks_like_ready_plan_preview(text),
+            and looks_like_open_plan_workbench(text),
             deadline.remaining(),
-            "plan preview redraw after shrink",
+            "plan workbench redraw after shrink",
             final_screen=True,
         )
         plan_grow_boundary = first_runner.resize(42, 140)
         first_runner.wait_until(
             lambda text: len(first_runner.output) > plan_grow_boundary
-            and looks_like_ready_plan_preview(text),
+            and looks_like_open_plan_workbench(text),
             deadline.remaining(),
-            "plan preview redraw after grow",
+            "plan workbench redraw after grow",
             final_screen=True,
         )
-        reject_visible_plan_preview(first_runner, deadline.remaining())
+        reject_open_plan_workbench(first_runner, deadline.remaining())
 
         first_runner.type_text("stateful history turn 1")
         first_runner.send("\r")
@@ -2011,12 +2039,15 @@ def main() -> int:
         wait_for_session_audit(
             source_path,
             lambda audit: audit.final_canary_count == 1
-            and audit.event_counts.get("run_finalized", 0) == 4
+            # PlanReview now owns a dedicated attempt lifecycle instead of synthesizing a root
+            # conversation run. The four user messages therefore settle as three foreground runs
+            # (the queued follow-up remains part of the first run) plus one rejected plan decision.
+            and audit.event_counts.get("run_finalized", 0) == 3
             and audit.event_counts.get("plan_draft_created", 0) == 1
             and audit.event_counts.get("plan_decision_recorded", 0) == 1
             and audit.failed_run_count == 0,
             deadline.remaining(),
-            "four finalized turns, rejected plan, and one durable final-answer canary",
+            "three finalized runs, rejected plan, and one durable final-answer canary",
         )
         live_screen = first_runner.wait_until(
             lambda text: FINAL_CANARY in text

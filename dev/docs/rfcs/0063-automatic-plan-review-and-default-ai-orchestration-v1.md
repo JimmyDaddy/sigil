@@ -1464,7 +1464,7 @@ campaign；此前各轮失败证据不参与拼接：
   `implemented` 不把旧 sidecar 外推为任意未来 build 的 DirectTask authority。
 
 最终 deterministic、产品面与工程验证同时关闭：three-way deterministic eval 通过；TUI stateful PTY
-47/47、orchestration PTY 7/7 与 durable-input PTY 通过；从当前源码构建的 Desktop Gherkin 74/74、renderer
+48/48、orchestration PTY 7/7 与 durable-input PTY 通过；从当前源码构建的 Desktop Gherkin 74/74、renderer
 check 281/281（含 production build）通过；OpenAPI/generated Desktop contract、docs drift、workspace tests、
 fmt、check 与 clippy 均通过。用户可见迁移、ReviewFirst fallback、`routing_policy = "manual"` coarse
 rollback 与 Doctor 三项 orchestration 事实已同步到双语配置、用户指南、README 与 changelog。
