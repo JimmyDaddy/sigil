@@ -55,6 +55,18 @@ Feature: Desktop workbench remains usable
     When I reload Desktop while the retained terminal task is owned by the session
     Then Desktop restores the retained terminal task from continuity
 
+  @durable-input
+  Scenario: Restore and answer a durable Agent question after a renderer reload
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And an Agent asks a durable question from Desktop
+    Then Desktop presents the exact unresolved question
+    When I reload Desktop while the Agent question is unresolved
+    Then Desktop restores the same question without starting a continuation
+    When I answer the restored Agent question
+    Then Desktop resumes exactly one continuation and completes the answer
+    And the durable user-input lifecycle is fully settled
+
   Scenario: Execute the supervised plan agent
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation

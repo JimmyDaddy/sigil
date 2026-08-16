@@ -13,7 +13,7 @@ export type ConversationDisplayStatus = SharedConversationDisplayStatus | "runni
 export type ConversationDisplayContent = SharedConversationDisplayContent;
 export type ConversationTerminalStatus = Extract<
   SharedConversationDisplayStatus,
-  "succeeded" | "failed" | "cancelled" | "interrupted"
+  "succeeded" | "failed" | "cancelled" | "interrupted" | "awaiting_user_input"
 >;
 
 type WithOptionalDurabilityMetadata<
@@ -1037,6 +1037,7 @@ function statusRank(status: ConversationDisplayStatus): number {
     case "cancelled":
     case "interrupted":
     case "blocked":
+    case "awaiting_user_input":
       return 4;
   }
 }

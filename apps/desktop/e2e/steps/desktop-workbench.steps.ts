@@ -9,6 +9,12 @@ import { desktopProviderCanaries } from "../provider-fixture";
 
 const unavailableSessionRef = "desktop-e2e-unsupported.jsonl";
 let unavailableSessionPath: string | undefined;
+interface DurableUserInputIdentity {
+  readonly requestId: string;
+  readonly generation: number;
+  readonly requestHash: string;
+}
+let durableUserInputIdentity: DurableUserInputIdentity | undefined;
 
 async function waitForComposerEnabled(
   timeoutMsg = "the desktop composer did not become enabled",
@@ -593,6 +599,171 @@ Then("Desktop restores the retained terminal task from continuity", async () => 
   );
 });
 
+When("an Agent asks a durable question from Desktop", async () => {
+  durableUserInputIdentity = undefined;
+  const fixtureBaseUrl = process.env.SIGIL_DESKTOP_E2E_PROVIDER_BASE_URL;
+  assert.ok(fixtureBaseUrl, "desktop E2E provider fixture URL is configured");
+  const reset = await fetch(`${fixtureBaseUrl}/__reset-evidence`, { method: "POST" });
+  assert.equal(reset.ok, true, "desktop E2E provider evidence could not be reset");
+
+  await waitForComposerEnabled();
+  const composer = await $("#desktop-prompt");
+  await composer.setValue(desktopProviderCanaries.durableUserInputPrompt);
+  await browser.keys("Enter");
+});
+
+Then("Desktop presents the exact unresolved question", async () => {
+  const card = await $(".user-input-card");
+  try {
+    await card.waitForDisplayed({
+      timeout: 30_000,
+      timeoutMsg: "Desktop did not render the durable Agent question",
+    });
+  } catch (error) {
+    const diagnostic = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      let display: unknown;
+      try {
+        display = await invoke?.("desktop_display", {
+          workspaceId: panel?.dataset.workspaceId,
+          sessionId: panel?.dataset.sessionId,
+          request: { limit: 50 },
+        });
+      } catch (displayError) {
+        display = { error: String(displayError) };
+      }
+      return {
+        body: document.body.textContent,
+        continuityLifecycle: panel?.dataset.continuityLifecycle,
+        continuityRefreshState: panel?.dataset.continuityRefreshState,
+        display,
+      };
+    });
+    throw new Error(`Desktop did not render the durable Agent question: ${JSON.stringify(diagnostic)}`, {
+      cause: error,
+    });
+  }
+  const cardText = await card.getText();
+  assert.ok(cardText.includes(desktopProviderCanaries.durableUserInputCardPrompt));
+  assert.ok(cardText.includes(desktopProviderCanaries.durableUserInputQuestion));
+
+  const requested = matchingUserInputControls("user_input_requested");
+  assert.equal(requested.length, 1, "the Agent question was not persisted exactly once");
+  durableUserInputIdentity = requestedIdentity(requested[0]);
+
+  const evidence = await providerEvidence();
+  assert.equal(evidence.requestCounts.durable_user_input_request, 1);
+  assert.equal(evidence.requestCounts.durable_user_input_continuation ?? 0, 0);
+});
+
+When("I reload Desktop while the Agent question is unresolved", async () => {
+  assert.ok(durableUserInputIdentity, "the unresolved Agent question identity was not captured");
+  await browser.refresh();
+});
+
+Then("Desktop restores the same question without starting a continuation", async () => {
+  await $(".app-shell").waitForDisplayed({ timeout: 20_000 });
+  const workspace = await $(".workspace-switcher");
+  await workspace.waitUntil(
+    async () => (await workspace.getText()).includes("desktop-e2e-workspace"),
+    {
+      timeout: 20_000,
+      timeoutMsg: "Desktop did not restore the workspace after the question reload",
+    },
+  );
+  const card = await $(".user-input-card");
+  await card.waitForDisplayed({
+    timeout: 20_000,
+    timeoutMsg: "Desktop did not restore the unresolved Agent question",
+  });
+  assert.ok((await card.getText()).includes(desktopProviderCanaries.durableUserInputQuestion));
+
+  const requested = matchingUserInputControls("user_input_requested");
+  assert.equal(requested.length, 1, "renderer reload duplicated the durable question");
+  assert.deepEqual(requestedIdentity(requested[0]), durableUserInputIdentity);
+  const evidence = await providerEvidence();
+  assert.equal(evidence.requestCounts.durable_user_input_request, 1);
+  assert.equal(evidence.requestCounts.durable_user_input_continuation ?? 0, 0);
+});
+
+When("I answer the restored Agent question", async () => {
+  const card = await $(".user-input-card");
+  const select = await card.$("select");
+  await browser.execute((element, label) => {
+    const control = element as HTMLSelectElement;
+    const option = [...control.options].find((candidate) => candidate.text === label);
+    if (option === undefined) throw new Error(`missing durable user-input option: ${label}`);
+    control.value = option.value;
+    control.dispatchEvent(new Event("change", { bubbles: true }));
+  }, select, desktopProviderCanaries.durableUserInputOption);
+  await select.waitUntil(
+    async () => (await select.getValue()) !== "",
+    {
+      timeout: 5_000,
+      timeoutMsg: "the restored Agent question did not retain the selected answer",
+    },
+  );
+  const submit = await card.$(".plan-card-actions .sg-button-primary");
+  await submit.waitForClickable({
+    timeout: 10_000,
+    timeoutMsg: "the restored Agent question did not accept an answer",
+  });
+  await submit.click();
+  await browser.waitUntil(
+    async () => matchingUserInputControls("user_input_decision_accepted").length === 1,
+    {
+      timeout: 10_000,
+      timeoutMsg: `Desktop did not durably accept the restored answer: ${await card.getText()}`,
+    },
+  );
+});
+
+Then("Desktop resumes exactly one continuation and completes the answer", async () => {
+  const timeline = await $(".timeline");
+  await timeline.waitUntil(
+    async () => (await timeline.getText()).includes(desktopProviderCanaries.durableUserInputFinal),
+    {
+      timeout: 30_000,
+      timeoutMsg: "Desktop did not complete the durable user-input continuation",
+    },
+  );
+  const evidence = await providerEvidence();
+  assert.equal(evidence.requestCounts.durable_user_input_request, 1);
+  assert.equal(evidence.requestCounts.durable_user_input_continuation, 1);
+});
+
+Then("the durable user-input lifecycle is fully settled", async () => {
+  assert.ok(durableUserInputIdentity, "the durable Agent question identity is unavailable");
+  await browser.waitUntil(
+    async () => matchingUserInputControls("user_input_resolved").length === 1,
+    {
+      timeout: 10_000,
+      timeoutMsg: "Desktop rendered the continuation answer before its durable input resolution settled",
+    },
+  );
+  assert.equal(matchingUserInputControls("user_input_requested").length, 1);
+  assert.equal(matchingUserInputControls("user_input_decision_accepted").length, 1);
+  assert.equal(matchingUserInputControls("user_input_continuation_claimed").length, 1);
+  assert.equal(matchingUserInputControls("user_input_continuation_started").length, 1);
+  const resolved = matchingUserInputControls("user_input_resolved");
+  assert.equal(resolved.length, 1);
+  assert.deepEqual(resolved[0]?.resolution, { kind: "consumed" });
+  await $(".user-input-card").waitForDisplayed({
+    timeout: 10_000,
+    reverse: true,
+    timeoutMsg: "Desktop retained a resolved Agent question",
+  });
+});
+
 Then("the later terminal exit settles the Desktop task card", async () => {
   const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
   await browser.waitUntil(
@@ -1024,6 +1195,55 @@ function durableControls(key: string): Array<Record<string, unknown>> {
     }
   }
   return controls;
+}
+
+function matchingUserInputControls(key: string): Array<Record<string, unknown>> {
+  return durableControls(key).filter((control) => {
+    if (key === "user_input_requested") {
+      const request = control.request;
+      return request !== null
+        && typeof request === "object"
+        && !Array.isArray(request)
+        && (request as Record<string, unknown>).prompt
+          === desktopProviderCanaries.durableUserInputCardPrompt;
+    }
+    if (durableUserInputIdentity === undefined) return false;
+    const identity = control.identity;
+    return identity !== null
+      && typeof identity === "object"
+      && !Array.isArray(identity)
+      && (identity as Record<string, unknown>).request_id === durableUserInputIdentity.requestId
+      && (identity as Record<string, unknown>).generation === durableUserInputIdentity.generation
+      && control.request_hash === durableUserInputIdentity.requestHash;
+  });
+}
+
+function requestedIdentity(control: Record<string, unknown>): DurableUserInputIdentity {
+  const request = control.request;
+  assert.ok(request !== null && typeof request === "object" && !Array.isArray(request));
+  const identity = (request as Record<string, unknown>).identity;
+  assert.ok(identity !== null && typeof identity === "object" && !Array.isArray(identity));
+  const requestId = (identity as Record<string, unknown>).request_id;
+  const generation = (identity as Record<string, unknown>).generation;
+  const requestHash = control.request_hash;
+  assert.equal(typeof requestId, "string");
+  assert.equal(typeof generation, "number");
+  assert.equal(typeof requestHash, "string");
+  return { requestId, generation, requestHash };
+}
+
+async function providerEvidence(): Promise<{
+  maxConcurrentReads: number;
+  requestCounts: Record<string, number>;
+}> {
+  const fixtureBaseUrl = process.env.SIGIL_DESKTOP_E2E_PROVIDER_BASE_URL;
+  assert.ok(fixtureBaseUrl, "desktop E2E provider fixture URL is configured");
+  const response = await fetch(`${fixtureBaseUrl}/__evidence`);
+  assert.equal(response.ok, true, "desktop E2E provider evidence is unavailable");
+  return await response.json() as {
+    maxConcurrentReads: number;
+    requestCounts: Record<string, number>;
+  };
 }
 
 function filesUnder(root: string): string[] {

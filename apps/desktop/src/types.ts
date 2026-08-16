@@ -646,7 +646,8 @@ export type ConversationDisplayStatus =
   | "failed"
   | "cancelled"
   | "interrupted"
-  | "blocked";
+  | "blocked"
+  | "awaiting_user_input";
 
 export type ConversationDisplayContent =
   | {

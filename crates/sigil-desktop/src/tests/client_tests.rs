@@ -385,6 +385,11 @@ fn recovery_receipt_decodes_compaction_without_weakening_durable_identity() {
 
 #[test]
 fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
+    assert_eq!(
+        serde_json::from_str::<crate::DesktopConversationDisplayStatus>("\"awaiting_user_input\"")
+            .expect("durable user-input terminal status should decode"),
+        crate::DesktopConversationDisplayStatus::AwaitingUserInput,
+    );
     let page: crate::DesktopConversationDisplayPage = serde_json::from_value(serde_json::json!({
         "schema_version": 1,
         "request_scope": "http-session-1",

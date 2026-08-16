@@ -685,6 +685,7 @@ pub enum DesktopConversationDisplayStatus {
     Cancelled,
     Interrupted,
     Blocked,
+    AwaitingUserInput,
 }
 
 /// Provider-neutral message author.

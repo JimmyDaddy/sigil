@@ -5911,6 +5911,11 @@ describe("desktop workspace and history shell", () => {
         throughSessionStreamSequence: "11",
         totalItems: "0",
         items: [],
+        terminalFrontier: {
+          runId: "root-run-1",
+          sessionStreamSequence: "11",
+          status: "awaiting_user_input" as const,
+        },
         hasMore: false,
         gapFacts: [],
         userInput: {

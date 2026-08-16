@@ -18,6 +18,29 @@ const TERMINAL_LIFECYCLE_READY_CANARY = "DESKTOP_E2E_TERMINAL_READY";
 const TERMINAL_LIFECYCLE_FINAL_CANARY = "DESKTOP_E2E_TERMINAL_FOREGROUND_DONE";
 const TERMINAL_SUCCESSOR_PROMPT = "DESKTOP_E2E_TERMINAL_SUCCESSOR";
 const TERMINAL_SUCCESSOR_FINAL_CANARY = "DESKTOP_E2E_TERMINAL_SUCCESSOR_DONE";
+const DURABLE_USER_INPUT_PROMPT = "DESKTOP_E2E_DURABLE_USER_INPUT";
+const DURABLE_USER_INPUT_CARD_PROMPT = "Choose the compatibility boundary before continuing.";
+const DURABLE_USER_INPUT_QUESTION = "Which compatibility target must this change preserve?";
+const DURABLE_USER_INPUT_OPTION = "Legacy sessions";
+const DURABLE_USER_INPUT_FINAL_CANARY = "DESKTOP_E2E_DURABLE_USER_INPUT_DONE";
+const DURABLE_USER_INPUT_ARGS = JSON.stringify({
+  prompt: DURABLE_USER_INPUT_CARD_PROMPT,
+  questions: [{
+    id: "compatibility",
+    header: "Compatibility",
+    question: DURABLE_USER_INPUT_QUESTION,
+    description: "Choose the target that constrains the implementation.",
+    required: true,
+    field: {
+      kind: "single_select",
+      options: [
+        { id: "current", label: "Current release" },
+        { id: "legacy", label: DURABLE_USER_INPUT_OPTION },
+      ],
+      allow_other: false,
+    },
+  }],
+});
 const AUTO_READ_STEP_IDS = ["desktop_inspect_kernel", "desktop_inspect_runtime"] as const;
 const AUTO_HANDOFF_ARGS = JSON.stringify({
   reason_codes: ["parallel_research", "multi_stage_change"],
@@ -133,6 +156,27 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       ) {
         recordRequest("title");
         sendText(response, TITLE_CANARY);
+      } else if (
+        toolNames.has("request_user_input")
+        && typeof lastUserText === "string"
+        && lastUserText.includes(DURABLE_USER_INPUT_PROMPT)
+        && lastMessage?.role === "tool"
+        && typeof lastMessage.content === "string"
+        && lastMessage.content.includes("ordinary conversation routing accepted")
+      ) {
+        recordRequest("durable_user_input_request");
+        sendNamedToolCall(
+          response,
+          "desktop-e2e-durable-user-input",
+          "request_user_input",
+          DURABLE_USER_INPUT_ARGS,
+        );
+      } else if (
+        lastMessage?.role === "tool"
+        && requestText.includes(DURABLE_USER_INPUT_PROMPT)
+      ) {
+        recordRequest("durable_user_input_continuation");
+        sendText(response, DURABLE_USER_INPUT_FINAL_CANARY);
       } else if (
         toolNames.has("request_plan_review")
         && typeof lastUserText === "string"
@@ -361,6 +405,11 @@ export const desktopProviderCanaries = {
   autoOrchestrationFinal: AUTO_ORCHESTRATION_FINAL_CANARY,
   autoOrchestrationPrompt: AUTO_ORCHESTRATION_PROMPT,
   autoReadStepIds: AUTO_READ_STEP_IDS,
+  durableUserInputCardPrompt: DURABLE_USER_INPUT_CARD_PROMPT,
+  durableUserInputFinal: DURABLE_USER_INPUT_FINAL_CANARY,
+  durableUserInputOption: DURABLE_USER_INPUT_OPTION,
+  durableUserInputPrompt: DURABLE_USER_INPUT_PROMPT,
+  durableUserInputQuestion: DURABLE_USER_INPUT_QUESTION,
   planDraftSummary: PLAN_REVIEW_DRAFT_SUMMARY,
   planRun: PLAN_RUN_CANARY,
   queuedPrompt: QUEUED_PROMPT,

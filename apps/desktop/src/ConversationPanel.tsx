@@ -2870,6 +2870,7 @@ const TERMINAL_DISPLAY_STATUSES: readonly ConversationTerminalObservation["statu
   "failed",
   "cancelled",
   "interrupted",
+  "awaiting_user_input",
 ] as const;
 
 function toContinuityPage(page: BridgeConversationDisplayPage): ConversationDisplayPage {

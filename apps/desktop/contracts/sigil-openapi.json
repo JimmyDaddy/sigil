@@ -2371,7 +2371,8 @@
           "failed",
           "cancelled",
           "interrupted",
-          "blocked"
+          "blocked",
+          "awaiting_user_input"
         ],
         "type": "string"
       },

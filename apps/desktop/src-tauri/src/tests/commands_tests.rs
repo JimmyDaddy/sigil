@@ -389,7 +389,7 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
             terminal_frontier: Some(DesktopConversationTerminalFrontier {
                 run_id: "run-1".to_owned(),
                 session_stream_sequence: "9007199254740994".to_owned(),
-                status: DesktopConversationDisplayStatus::Succeeded,
+                status: DesktopConversationDisplayStatus::AwaitingUserInput,
             }),
             total_items: "9007199254740995".to_owned(),
             items: vec![DesktopConversationDisplayItem {
@@ -469,6 +469,10 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
     assert_eq!(
         json["terminalFrontier"]["sessionStreamSequence"],
         serde_json::json!("9007199254740994")
+    );
+    assert_eq!(
+        json["terminalFrontier"]["status"],
+        serde_json::json!("awaiting_user_input")
     );
     assert_eq!(json["totalItems"], serde_json::json!("9007199254740995"));
     assert_eq!(

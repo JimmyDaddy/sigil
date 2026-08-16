@@ -3182,6 +3182,7 @@ fn conversation_display_status(status: NativeConversationDisplayStatus) -> &'sta
         NativeConversationDisplayStatus::Cancelled => "cancelled",
         NativeConversationDisplayStatus::Interrupted => "interrupted",
         NativeConversationDisplayStatus::Blocked => "blocked",
+        NativeConversationDisplayStatus::AwaitingUserInput => "awaiting_user_input",
     }
 }
 
