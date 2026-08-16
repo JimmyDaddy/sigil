@@ -290,15 +290,14 @@ for (const [index, prompt] of directTaskPrompts.entries()) {
     manifestFileOrder: frozenCrossLayerOrder,
     assertions: [
       {
-        kind: "file_contains",
-        path: "src/parser.rs",
-        text: ".to_ascii_lowercase()",
-      },
-      {
         kind: "file_unchanged",
         path: "tests/acceptance.rs",
       },
     ],
+    // Exercise the public behavior instead of pinning one valid lowercase implementation.
+    // The committed acceptance test distinguishes parser normalization and formatter rendering,
+    // while file_unchanged prevents an agent from weakening that oracle.
+    checkCommand: ["cargo", "test", "--quiet"],
   });
 }
 

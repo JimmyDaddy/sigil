@@ -180,6 +180,26 @@ fn submitted_draft_chunks(call_id: &str) -> Vec<Result<ProviderChunk>> {
     ]
 }
 
+fn invalid_draft_chunks(call_id: &str) -> Vec<Result<ProviderChunk>> {
+    let args = r#"{"schema_version":2,"summary":"broken","steps":[}"#;
+    vec![
+        Ok(ProviderChunk::ToolCallStart {
+            id: call_id.to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+        }),
+        Ok(ProviderChunk::ToolCallArgsDelta {
+            id: call_id.to_owned(),
+            delta: args.to_owned(),
+        }),
+        Ok(ProviderChunk::ToolCallComplete(ToolCall {
+            id: call_id.to_owned(),
+            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            args_json: args.to_owned(),
+        })),
+        Ok(ProviderChunk::Done),
+    ]
+}
+
 struct PlanReviewInspectionTool;
 
 #[async_trait]
@@ -342,6 +362,45 @@ struct UncertainPlanReviewProvider {
 #[derive(Clone, Default)]
 struct ViolatingFinalizerProvider {
     request_tools: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[derive(Clone, Default)]
+struct InvalidThenValidFinalizerProvider {
+    request_tools: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl Provider for InvalidThenValidFinalizerProvider {
+    fn name(&self) -> &str {
+        "invalid-then-valid-plan-finalizer"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        plan_review_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let index = {
+            let mut requests = self
+                .request_tools
+                .lock()
+                .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?;
+            let index = requests.len();
+            requests.push(request.tools.iter().map(|tool| tool.name.clone()).collect());
+            index
+        };
+        Ok(Box::pin(stream::iter(match index {
+            0 => vec![
+                Ok(ProviderChunk::TextDelta("research complete".to_owned())),
+                Ok(ProviderChunk::Done),
+            ],
+            1 => invalid_draft_chunks("invalid-draft"),
+            _ => submitted_draft_chunks("corrected-draft"),
+        })))
+    }
 }
 
 #[async_trait]
@@ -685,6 +744,48 @@ async fn plan_revision_submit_only_non_submit_is_never_dispatched_and_closes_typ
             .iter()
             .all(|tools| { tools == &[sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned()] })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_review_invalid_typed_finalizer_retries_once_in_a_fresh_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (parent_session, request) = session_with_route_decision()?;
+    let mut parent_session = parent_session.with_store(JsonlSessionStore::new(
+        temp.path().join("sessions/session.jsonl"),
+    )?);
+    let provider = InvalidThenValidFinalizerProvider::default();
+    let request_tools = Arc::clone(&provider.request_tools);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let mut handler = RecordingPlanReviewEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let outcome = PlanReviewCoordinator::run_plan_review(
+        &mut parent_session,
+        &request,
+        &agent,
+        plan_review_test_options(temp.path()),
+        ToolRegistry::new(),
+        &mut handler,
+        &mut approval_handler,
+        RunCancellationOwner::new().handle(),
+    )
+    .await?;
+
+    assert!(matches!(outcome, PlanReviewRunOutcome::DraftReady { .. }));
+    let requests = request_tools
+        .lock()
+        .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?;
+    assert_eq!(requests.len(), 3, "research plus two submit-only attempts");
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|tools| tools == &[sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned()])
+    );
+    assert!(handler.0.iter().any(|event| matches!(
+        event,
+        RunEvent::Notice(message) if message.contains("invalid typed draft")
+    )));
     Ok(())
 }
 

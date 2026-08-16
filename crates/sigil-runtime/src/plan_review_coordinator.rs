@@ -671,6 +671,20 @@ impl PlanReviewCoordinator {
                     PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
                 );
             }
+            if let Some(reason) = invalid_plan_draft_submission_reason(&finalizer_session) {
+                last_violation = Some(reason.clone());
+                if corrective_ordinal == 1 {
+                    handler.handle(RunEvent::Notice(
+                        "Plan finalization produced an invalid typed draft; retrying once in a fresh submit-only context."
+                            .to_owned(),
+                    ))?;
+                    continue;
+                }
+                return complete_plan_review_run(
+                    &cancellation,
+                    PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
+                );
+            }
             let outcome = match output.disposition {
                 AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
                     plan_review_draft_ready_outcome(&finalizer_session, &action.plan_id)?
@@ -2038,6 +2052,28 @@ impl PlanReviewCoordinator {
         let entries = session.entries().to_vec();
         Ok(RejectedPlan { entry, entries })
     }
+}
+
+fn invalid_plan_draft_submission_reason(session: &Session) -> Option<String> {
+    session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::ToolResultV3(result) = entry else {
+            return None;
+        };
+        if result.tool_name != sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME
+            || result.facts.status != "error"
+        {
+            return None;
+        }
+        let detail = result
+            .facts
+            .error
+            .as_ref()
+            .map(|error| error.message.as_str())
+            .unwrap_or("typed draft validation failed");
+        Some(format!(
+            "submit-only finalizer produced an invalid draft: {detail}"
+        ))
+    })
 }
 
 /// Typed plan rejection command shared by TUI, HTTP, and Desktop surfaces.

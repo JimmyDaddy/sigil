@@ -1379,6 +1379,25 @@ planner 会在计划前调用 RFC-0064 `request_user_input`，而 orchestrator �
 先执行并逐条审阅新的 `1×50` smoke；只有零 invariant failure 且 route/plan-review/direct-task 分布符合门槛，
 才允许执行 `3×50` paid campaign。RFC 状态仍为 `implementation-in-progress`。
 
+## 13.11 Candidate smoke remediation（2026-08-16）
+
+基于 §13.10 candidate 的首次完整 `1×50` 预检真实执行了 50/50 provider-admitted repetition，全部完成且
+没有 hard invariant violation，但只得到 41/50 base acceptance，因此未进入 `3×50`。逐条 session 审计确认：
+
+- 8 个 `orch-dt-*` 都已完成目标行为并通过 root verification，但旧 fixture 用
+  `.to_ascii_lowercase()` 源码片段绑定一种实现，合法的 `.to_lowercase()` 被误判失败；corpus 改为运行未修改
+  的 public acceptance test (`cargo test --quiet`)，不再以实现字符串替代行为 oracle；
+- `orch-pr-06` 的 research 正常进入 submit-only finalizer，但模型提交了损坏 JSON。coordinator 原有的 fresh
+  corrective attempt 只覆盖 non-submit tool，正确工具的 typed validation error 会错误终止为
+  `Interrupted`；现在同样在独立 finalizer session 自动纠正一次，两次均失败才以 typed protocol violation
+  关闭；
+- 该 1× 样本还观察到一个跨层实施请求与一个中文比较设计评审各漏判为 Chat。routing contract 补强通用的
+  跨层协调、比较设计评审和跨语言语义规则，不按 case id 或关键词特判。
+
+受影响 kernel/runtime 全量测试与两 crate `clippy -D warnings` 已通过。上述修改改变 route/corpus identity，
+必须从新 commit 重新生成 exact route contract 并重跑 `1×50`；旧 campaign 只作为失败证据，不能计入 release
+qualification。RFC 状态仍为 `implementation-in-progress`。
+
 ## 14. Validation plan
 
 按 slice 运行最小相关 gate，最终至少包括：

@@ -497,6 +497,8 @@ turn 抢占 pending continuation。
   ids 并提供 Resume，不回显私有值；TUI restore 同样恢复 exact resume action；
 - RFC-0063 Revise 已先创建 durable guidance request，提交 guidance 后才创建新的 revision attempt；失败恢复
   base plan，finalizer 只暴露 `submit_plan_draft`，非 submit tool call 不执行并产生 typed protocol violation；
+- submit-only plan finalizer 调用正确工具但 typed draft 参数损坏时，也会在 fresh child session 自动纠正一次；
+  不再把单次 invalid JSON 误报为不可恢复的 `Interrupted`，连续失败则以 typed protocol violation 关闭；
 - OpenAPI/generated TypeScript/strict Desktop DTO/SSE event variants 已同步；Plan detail 使用 hash/ETag 绑定，
   UI action authority 来自 canonical reducer 而不是 renderer 本地猜测。
 - background child 的 pending request 已以 public bounded form + child session binding 镜像到 root session；

@@ -67,7 +67,9 @@ fn task_routing_prompt_assigns_semantic_decision_to_the_model() {
     assert!(prompt.contains("Multiple files alone do not require planning"));
     assert!(prompt.contains("one linear call-flow trace"));
     assert!(prompt.contains("independently useful requested outcomes"));
-    assert!(prompt.contains("independently useful requested outcomes"));
+    assert!(prompt.contains("comparative design review across components"));
+    assert!(prompt.contains("coordinated implementation across two or more named layers"));
+    assert!(prompt.contains("equally in every user language"));
 }
 
 #[test]

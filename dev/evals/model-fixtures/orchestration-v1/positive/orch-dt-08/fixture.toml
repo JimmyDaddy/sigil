@@ -14,12 +14,6 @@ corpus_version = "rfc-0063-orchestration-v1"
 
 [[assertions]]
 id = "acceptance-1"
-kind = "file_contains"
-path = "src/parser.rs"
-text = ".to_ascii_lowercase()"
-
-[[assertions]]
-id = "acceptance-2"
 kind = "file_unchanged"
 path = "tests/acceptance.rs"
 
@@ -54,6 +48,6 @@ source = "files/src/parser.rs"
 sha256 = "sha256:5ccbce1958df9f7a5961e167efb05e925beda13a8051a91371ae805a32900492"
 
 [[checks]]
-id = "cargo-check"
-command = ["cargo", "check", "--quiet"]
+id = "cargo-test"
+command = ["cargo", "test", "--quiet"]
 timeout_ms = 30000
