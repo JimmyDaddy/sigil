@@ -1,6 +1,6 @@
 # RFC-0064 Durable User Input Requests V1
 
-状态：implementation-in-progress（协议冻结；代码实施与 release validation 尚未完成）
+状态：implemented（R64.0–R64.4 与 §16 release validation 已完成；见 §20）
 
 创建日期：2026-08-15
 
@@ -479,12 +479,13 @@ turn 抢占 pending continuation。
 
 ## 18. Completion boundary
 
-本文状态保持 `implementation-in-progress`，直到 R64.0–R64.4、§16 所有 acceptance 与 release validation
-完成。局部 DTO、单一 UI 表单或 Plan-only guidance 不得被描述为 RFC 已实现。
+R64.0–R64.4、§16 所有 acceptance 与 release validation 已在 §20 关闭。RFC 的 `implemented` 状态指
+provider-neutral durable request/answer、exact continuation、跨重启恢复和三个一等产品表面已经形成同一
+协议；局部 DTO、单一 UI 表单或 Plan-only guidance 仍不得单独被描述为本 RFC 的实现。
 
 ## 19. Implementation ledger（2026-08-15）
 
-本轮已落地但不足以把 RFC 标记为 `implemented` 的能力：
+本节记录 2026-08-15 实施阶段已经落地的能力；其后 release closure 见 §20：
 
 - kernel 已有 provider-neutral V1 request/answer/lifecycle contract、稳定 hash/bounds、append-only reducer、
   `AwaitingUserInput` disposition 与 typed `request_user_input` tool；request durable 后当前 worker 才退出；
@@ -534,11 +535,42 @@ turn 抢占 pending continuation。
   `cargo clippy --all-targets -- -D warnings` 均通过。并行 gate 暴露的 rollout-manifest 环境变量测试 race
   已改为独立统一锁域并由 runtime 全量复跑验证；这不替代下述 release validation。
 
-仍未关闭的 release blocker：
+该阶段仍未关闭、并在 §20 后续关闭的 release blocker：
 
 1. unresolved request 的 compaction property/chaos campaign、真实 TUI PTY、真实 `sigil serve` + Desktop E2E、
    real-model campaign 尚未全部执行；
 2. migration/compatibility 与 release notes/Doctor 仍需在 release closure slice 完成。
 
-因此本节只记录当前事实，不放宽 §16 acceptance，也不把已通过定向 restart/transport 回归的能力外推为
-release 全链路完成。
+因此本节只记录当时事实，不把已通过定向 restart/transport 回归的能力外推为 release 全链路完成；最终
+结论以 §20 为准。
+
+## 20. Release qualification closure（2026-08-17）
+
+R64.0–R64.4 与 §16 的剩余验证已按同一当前源码关闭：
+
+- deterministic crash/compaction matrix 覆盖 history 0/2/8、Requested/Accepted/Claimed/Started 与
+  4/8/64 KiB payload，断言 unresolved exact frontier 始终被 pin；Resolved 后再追加 20 个 complete turn
+  可以正常 aging/fold，不把已结算请求永久钉在 context；
+- ordinary、PlanReview、background child 与 interactive Task planner 均使用同一 durable lifecycle。
+  answer-before-start、started-before-send、hidden retry、transport uncertain 与 child-answer-durable/
+  parent-registration-before-crash 窗口都有确定性测试，恢复后仍是同一 participant、child session、command
+  identity 与 physical attempt，且 continuation 最多一次；
+- TUI stateful PTY 47/47、orchestration PTY 7/7 与独立 durable-input PTY 均通过。后者从
+  `f4baccee` binary 实际生成 request，退出并恢复同一表单，再提交 answer；manifest 断言 request 在退出前
+  durable、同一 physical attempt binding、一个 tool result 与一个 final answer；
+- `rfc0064-live-model-f4baccee` 使用 DeepSeek V4 Flash 实际调用 `request_user_input`，manifest 记录
+  `UserInputRequested`、`DecisionAccepted`、`ContinuationClaimed`、`ContinuationStarted`、`Resolved`
+  各一次，request 在 answer 前 durable，且 final canary 只渲染一次；manifest SHA-256 为
+  `d9b8d40d9511f2a68dccf74c0a007db13bb8dbd6b45573209e99f83f4e13cd39`；
+- 从当前源码构建的 Desktop Gherkin 74/74 通过；reload 场景实际证明 pending request 复现为同一 strict
+  DTO form、回答前没有 continuation、回答后恰有一次 continuation、五个 lifecycle fact 各一次且表单移除。
+  renderer check 281/281 与 production build、真实 `sigil serve` strict DTO/ETag/SSE contract、生成契约
+  drift check 均通过；
+- 完整 workspace tests、fmt、check、clippy、docs 与 touched-file full gate 均通过。双语 changelog 已说明
+  typed question、无 timeout、background root attention 与 exact-once resume；旧 session 不含新 facts 时
+  保持原行为，新增 public/IPC 字段按兼容投影读取，ambiguous legacy Plan lineage 由只读兼容视图与 Doctor
+  fail closed，不猜测或重写历史事实。
+
+本地 PTY、session 与 live-model raw artifact 保持 `.repo-local-dev` local-only，不自动上传；持久化 session
+也不会包含 MCP live elicitation answer 或 secret value。至此 §16 的 12 项 acceptance 全部满足，RFC-0064
+标记为 `implemented`。

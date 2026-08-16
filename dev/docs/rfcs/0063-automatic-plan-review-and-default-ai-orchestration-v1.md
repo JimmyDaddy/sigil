@@ -1,6 +1,6 @@
 # RFC-0063 Automatic Plan Review and Default AI Orchestration V1
 
-状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5；2026-08-14 的真实 PlanReview session 复盘与收敛修复见 §13.8；Plan Review workbench、revision guidance/recovery 与 isolated finalizer 增补见 §13.9；real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
+状态：implemented（R63.0–R63.7、§15 acceptance 与 2026-08-17 release qualification 已完成；见 §13.14）
 
 创建日期：2026-08-03
 
@@ -1444,6 +1444,33 @@ PlanReview draft-ready qualification。
 仍由独立的 deterministic、PTY、HTTP 与 Desktop gate 验收。prompt digest 与 corpus identity 已改变，
 必须从新 commit 重新生成 exact route contract，并重新执行完整 `1×50` 与单一 `3×50` campaign；
 `f77a58bb` 的 49/50 报告只保留为 durable question 的真实证据，不与后续报告拼接。
+
+## 13.14 Release qualification closure（2026-08-17）
+
+`f4baccee` 在修正 fixture scope 后重新生成 exact route contract，并从同一候选独立完成预检与 paid
+campaign；此前各轮失败证据不参与拼接：
+
+- `rfc0063-smoke-f4baccee` 的 `1×50` 预检为 50/50 provider-admitted、50/50 completed、50/50
+  accepted、0 skipped，实际路由分布为 20 Chat / 15 PlanReview / 15 DirectTask，hard invariant
+  violation 为 0；其 2,000,000 µUSD 是 campaign 上限收费，不作为正式 qualification；
+- `rfc0063-final-model-f4baccee` 的单一 `3×50` campaign 为 150/150 provider-admitted、150/150
+  completed、150/150 accepted、0 skipped，三路 eligible case 仍为 20/15/15，所有五项 misroute 指标、
+  duplicate repetition identity 与 hard invariant violation 均为 0；charged cost 为 4,999,950 µUSD，
+  provider reported cost 为 295,765 µUSD；
+- `orch-pr-04` 三次 repetition 均实际调用 `request_plan_review`，得到 `completed` + `passed`，证明修正后的
+  durable-input-aware fixture 不再依赖禁用提问能力来通过；
+- 由该 campaign 生成的 `rfc0063-rollout-f4baccee.json` 只 qualification 其完整 route identity 与
+  `f4baccee` build。后续源码若没有匹配 sidecar，运行时按设计保持 ReviewFirst fallback；本文的
+  `implemented` 不把旧 sidecar 外推为任意未来 build 的 DirectTask authority。
+
+最终 deterministic、产品面与工程验证同时关闭：three-way deterministic eval 通过；TUI stateful PTY
+47/47、orchestration PTY 7/7 与 durable-input PTY 通过；从当前源码构建的 Desktop Gherkin 74/74、renderer
+check 281/281（含 production build）通过；OpenAPI/generated Desktop contract、docs drift、workspace tests、
+fmt、check 与 clippy 均通过。用户可见迁移、ReviewFirst fallback、`routing_policy = "manual"` coarse
+rollback 与 Doctor 三项 orchestration 事实已同步到双语配置、用户指南、README 与 changelog。
+
+因此 §12、§15 与本节要求均已满足，RFC-0063 可标记 `implemented`。上述本地 raw campaign/session
+artifact 不自动上传；release 只消费经过 schema 与 exact identity 校验的 rollout manifest。
 
 ## 14. Validation plan
 
