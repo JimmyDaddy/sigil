@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use sigil_kernel::{
@@ -16,6 +16,12 @@ use crate::{
 
 static MANIFEST_LOCK: Mutex<()> = Mutex::new(());
 static MANIFEST_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn rollout_manifest_env_lock() -> MutexGuard<'static, ()> {
+    MANIFEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn manifest_dir() -> PathBuf {
     MANIFEST_DIR
@@ -86,9 +92,7 @@ fn qualified_gate(root_config: &RootConfig) -> OrchestrationEvalRouteGateV1 {
 /// and the variable is removed when the guard drops. Async test bodies must keep the guard alive
 /// across the whole await.
 pub fn qualified_rollout_manifest_guard(root_config: &RootConfig) -> QualifiedRolloutManifestGuard {
-    let lock = MANIFEST_LOCK
-        .lock()
-        .expect("rollout manifest lock should not be poisoned");
+    let lock = rollout_manifest_env_lock();
     let path = manifest_dir().join("sigil-orchestration-rollout-v1.json");
     let report = OrchestrationEvalReportManifestV1 {
         report_schema_version: 2,

@@ -135,6 +135,7 @@ fn rollout_manifest_is_path_free_and_round_trips() -> Result<()> {
 #[test]
 fn quick_setup_applies_only_the_exact_qualified_auto_proactive_route() -> Result<()> {
     let _lock = crate::test_env::lock();
+    let _rollout_lock = crate::tests::rollout_manifest_test_support::rollout_manifest_env_lock();
     let temp = tempfile::tempdir()?;
     let path = temp.path().join(ORCHESTRATION_ROLLOUT_MANIFEST_FILE_NAME);
     let mut config = default_setup_config()?;
@@ -157,6 +158,7 @@ fn quick_setup_applies_only_the_exact_qualified_auto_proactive_route() -> Result
 #[test]
 fn quick_setup_applies_the_qualified_route_after_v2_materialization() -> Result<()> {
     let _lock = crate::test_env::lock();
+    let _rollout_lock = crate::tests::rollout_manifest_test_support::rollout_manifest_env_lock();
     let temp = tempfile::tempdir()?;
     let path = temp.path().join(ORCHESTRATION_ROLLOUT_MANIFEST_FILE_NAME);
     let mut config = v2_setup_config()?;
@@ -183,6 +185,7 @@ fn quick_setup_applies_the_qualified_route_after_v2_materialization() -> Result<
 #[test]
 fn quick_setup_fails_closed_for_missing_stale_or_mismatched_manifests() -> Result<()> {
     let _lock = crate::test_env::lock();
+    let _rollout_lock = crate::tests::rollout_manifest_test_support::rollout_manifest_env_lock();
     let temp = tempfile::tempdir()?;
     let missing = temp.path().join("missing.json");
     let _manifest = crate::test_env::EnvScope::set(
@@ -224,6 +227,7 @@ fn quick_setup_fails_closed_for_missing_stale_or_mismatched_manifests() -> Resul
 #[test]
 fn rollout_rejects_tampered_gate_and_custom_endpoint() -> Result<()> {
     let _lock = crate::test_env::lock();
+    let _rollout_lock = crate::tests::rollout_manifest_test_support::rollout_manifest_env_lock();
     let temp = tempfile::tempdir()?;
     let path = temp.path().join(ORCHESTRATION_ROLLOUT_MANIFEST_FILE_NAME);
     let mut config = default_setup_config()?;

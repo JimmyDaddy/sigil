@@ -33,6 +33,7 @@ fn check_names(report: &DoctorReport) -> Vec<&str> {
 
 #[test]
 fn doctor_reports_fresh_auto_default_as_review_first_facts() {
+    let _rollout_lock = crate::tests::rollout_manifest_test_support::rollout_manifest_env_lock();
     let config = root_config();
     let mut report = DoctorReport::default();
 
@@ -111,6 +112,7 @@ fn doctor_reports_qualified_release_route_facts() {
 #[test]
 fn doctor_warns_when_proactive_agents_are_configured_without_qualification() {
     let _lock = crate::test_env::lock();
+    let _rollout_lock = crate::tests::rollout_manifest_test_support::rollout_manifest_env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
     let missing = temp.path().join("missing-rollout.json");
     let _manifest = crate::test_env::EnvScope::set(
