@@ -49,7 +49,7 @@ cache_root = "{}"
 log_dir = "{}"
 
 [agent]
-connection = "deepseek-test"
+connection = "local-test"
 model = "deepseek-v4-flash"
 tool_timeout_secs = 5
 
@@ -64,12 +64,12 @@ osc52_clipboard = false
 [task]
 routing_policy = "manual"
 
-[connections.deepseek-test]
-label = "DeepSeek test"
-provider = "deepseek"
-protocol = "deepseek"
-base_url = "https://api.deepseek.com"
-credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+[connections.local-test]
+label = "Local session lifecycle test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1"
+credential = {{ source = "none" }}
 "#,
         workspace.display(),
         workspace.join("state").display(),
@@ -83,14 +83,15 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
 fn write_trusted_finalized_session(
     path: &Path,
     workspace: &Path,
-    resolved_model_route: Option<ResolvedModelRoute>,
+    resolved_model_route: ResolvedModelRoute,
 ) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let provider_name = resolved_model_route.provider_family.as_str();
+    let mut session = Session::new(provider_name, "deepseek-v4-flash").with_store(store);
     session.append_control(ControlEntry::SessionIdentity {
-        provider_name: "deepseek".to_owned(),
+        provider_name: provider_name.to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
-        resolved_model_route,
+        resolved_model_route: Some(resolved_model_route),
     })?;
     let workspace_id = stable_workspace_id(workspace)?;
     session.append_control(ControlEntry::WorkspaceTrustDecision(
@@ -562,7 +563,7 @@ fn real_plain_tui_process_starts_fresh_instead_of_reopening_latest() -> Result<(
         sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
             .map_err(anyhow::Error::new)?;
     let existing_path = session_dir.join("session-existing.jsonl");
-    write_trusted_finalized_session(&existing_path, &workspace, Some(model_route))?;
+    write_trusted_finalized_session(&existing_path, &workspace, model_route)?;
 
     run_tui_process(
         &config_path,
@@ -802,7 +803,7 @@ fn real_tui_process_opens_session_actions_and_exports_safe_transcript() -> Resul
     write_trusted_finalized_session(
         &session_dir.join("session-process-e2e.jsonl"),
         &workspace,
-        Some(model_route),
+        model_route,
     )?;
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
 
