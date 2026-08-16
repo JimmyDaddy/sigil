@@ -119,7 +119,7 @@ const planReviewPrompts = [
   "只分析当前工作区应该如何把变更分成安全的批次，不要修改或提交任何文件。",
   "Assess the workspace and propose how to sequence these changes into reviewable batches. Do not edit or commit anything.",
   "Weigh the trade-offs of replacing the parser's allocation strategy before any implementation; return the design decision.",
-  "评估把 formatter 输出格式从 record: 改为方括号渲染的影响范围和迁移风险，先给出审查结论。",
+  "评估把 public render_record 输出从 record: 改为方括号渲染、并按现有验收要求把输入归一化为小写的影响范围和迁移风险；目标输出明确为 [mixed-42]，先给出审查结论，不要修改文件。",
   "The exact scope of this refactor is unclear; research the dependencies and recommend a review-first plan.",
   "Plan the normalization migration carefully and wait for review before touching any files.",
   "对比 parser 与 formatter 的 ownership 模型，输出完整设计评审，不改动文件。",

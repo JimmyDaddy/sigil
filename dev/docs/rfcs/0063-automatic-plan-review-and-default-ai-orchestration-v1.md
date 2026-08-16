@@ -1427,6 +1427,24 @@ DirectTask committed fixture 的生产执行 surface 现同时暴露 `edit_file`
 重跑 `1×50` 与同一 campaign 内的 `3×50`；旧报告仍只作失败证据。RFC 状态保持
 `implementation-in-progress`。
 
+### 13.13 Durable-input-aware fixture remediation（2026-08-17）
+
+`f77a58bb` 的新 `1×50` 预检实际完成 50/50 provider-admitted repetition，route 分布仍为精确的
+20 Chat / 15 PlanReview / 15 DirectTask，hard invariant violation 为 0；此前暴露 capability 漏洞的
+`orch-dt-06` 也已通过行为 oracle。但该轮只有 49/50 accepted：`orch-pr-04` 的 research agent 读取
+formatter、parser 与 acceptance test 后，发现用户只要求 formatter 方括号迁移，而 committed acceptance
+又额外要求小写归一化，因此正确调用 RFC-0064 `request_user_input`。child request 先 durable，parent
+PlanReview attempt 进入 `waiting_for_input`，没有 workspace mutation，也没有 dangling provider worker；旧
+model-eval terminal mapper 把合法 `AwaitingUserInput` 归为 `Interrupted`，所以该样本不能计入 §12 的
+PlanReview draft-ready qualification。
+
+该失败不是通过禁用 `request_user_input` 修复。`orch-pr-04` 本来用于验证明确目标下的自动 PlanReview，
+不是 durable input continuation campaign；fixture prompt 现明确方括号渲染、小写归一化和最终
+`[mixed-42]` 均属于目标，消除 corpus 自身制造的范围冲突。RFC-0064 的 suspend/answer/restart/continuation
+仍由独立的 deterministic、PTY、HTTP 与 Desktop gate 验收。prompt digest 与 corpus identity 已改变，
+必须从新 commit 重新生成 exact route contract，并重新执行完整 `1×50` 与单一 `3×50` campaign；
+`f77a58bb` 的 49/50 报告只保留为 durable question 的真实证据，不与后续报告拼接。
+
 ## 14. Validation plan
 
 按 slice 运行最小相关 gate，最终至少包括：
