@@ -59,6 +59,7 @@ pub use user_input::{
     application_recoverable_user_input_decision, application_session_has_unresolved_user_input,
     application_user_input_request_view, application_user_input_request_view_by_key,
     prepare_application_user_input_decision,
+    recoverable_agent_user_input_decision_from_child_sessions,
 };
 
 const DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1840,6 +1841,12 @@ enum ApplicationRunExecutionKind {
     ExplicitPlanReview {
         request: Box<crate::PlanReviewRunRequest>,
     },
+    TaskPlannerUserInput {
+        runtime: Box<crate::agent_supervisor::task_role_runtime::TaskRoleRuntime>,
+        route: Box<sigil_kernel::AgentUserInputRouteEntryV1>,
+        command: Box<sigil_kernel::UserInputDecisionCommandV1>,
+        max_plan_steps: usize,
+    },
 }
 
 /// Provider-neutral terminal classification for one completed application run.
@@ -2063,6 +2070,69 @@ impl ApplicationRunExecution {
                     &self.cancellation_handle,
                 )
                 .await
+            }
+            ApplicationRunExecutionKind::TaskPlannerUserInput {
+                runtime,
+                route,
+                command,
+                max_plan_steps,
+            } => {
+                let task = self
+                    .session
+                    .task_state_projection()
+                    .tasks
+                    .get(&route.budget_scope_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("planner continuation task is unavailable"))?;
+                let crate::agent_supervisor::task_role_runtime::TaskRoleRuntime {
+                    orchestrator,
+                    planner_options,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                } = *runtime;
+                let status = orchestrator
+                    .resume_planner_after_user_input(
+                        &mut self.session,
+                        sigil_kernel::SequentialTaskRequest {
+                            task_id: task.task_id.clone(),
+                            parent_session_ref: task.parent_session_ref.clone(),
+                            objective: task.objective.clone(),
+                        },
+                        *route,
+                        *command,
+                        planner_options,
+                        executor_options,
+                        subagent_read_options,
+                        subagent_write_options,
+                        max_plan_steps,
+                        &mut bridge,
+                        approval_handler,
+                    )
+                    .await
+                    .map(|output| output.status);
+                let status = crate::agent_supervisor::task_execution::finalize_task_root(
+                    &mut self.session,
+                    &task.task_id,
+                    &task.parent_session_ref,
+                    &task.objective,
+                    &self.cancellation_handle,
+                    status,
+                )?;
+                application_task_terminal_output(
+                    &self.session,
+                    &task.task_id,
+                    status,
+                    AgentRunOutput {
+                        disposition: AgentRunDisposition::FinalAnswer,
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: 0,
+                            final_message_id: None,
+                        },
+                        outcome: AgentRunOutcome::default(),
+                    },
+                )
             }
         };
         let run = match run {
@@ -2716,10 +2786,33 @@ fn application_task_terminal_output(
             output.disposition = AgentRunDisposition::Interrupted;
             output.outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;
         }
-        TaskRunStatus::Started
-        | TaskRunStatus::Running
-        | TaskRunStatus::Paused
-        | TaskRunStatus::Failed => {
+        TaskRunStatus::Paused => {
+            output.result.final_text.clear();
+            output.result.final_message_id = None;
+            let pending = sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+                session.entries(),
+            )?
+            .pending()
+            .find(|route| {
+                matches!(
+                    &route.request.source,
+                    sigil_kernel::UserInputSourceV1::Planner { task_id: source_task_id }
+                        if source_task_id == task_id
+                )
+            })
+            .map(|route| sigil_kernel::UserInputRequestRefV1 {
+                identity: route.request.identity.clone(),
+                request_hash: route.request.request_hash.clone(),
+            });
+            if let Some(request) = pending {
+                output.disposition = AgentRunDisposition::AwaitingUserInput(request);
+                output.outcome.terminal_reason = AgentRunTerminalReason::AwaitingUserInput;
+            } else {
+                output.disposition = AgentRunDisposition::Blocked;
+                output.outcome.terminal_reason = AgentRunTerminalReason::DelegationUnsatisfied;
+            }
+        }
+        TaskRunStatus::Started | TaskRunStatus::Running | TaskRunStatus::Failed => {
             output.result.final_text.clear();
             output.result.final_message_id = None;
             output.disposition = AgentRunDisposition::Blocked;

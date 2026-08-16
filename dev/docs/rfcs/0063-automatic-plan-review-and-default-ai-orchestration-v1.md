@@ -1354,6 +1354,31 @@ revision terminal branch、retry new attempt、non-submit no-dispatch、child du
 `sigil serve` strict DTO 与 Desktop E2E。上述三 slice 与 RFC-0064 release validation 未全部通过前，
 RFC-0063 保持 `implementation-in-progress`。
 
+## 13.10 Interactive Task planner suspension and recovery（2026-08-16）
+
+首轮 qualified-route real-model smoke 暴露出一个此前 deterministic fixture 未覆盖的真实行为：Task
+planner 会在计划前调用 RFC-0064 `request_user_input`，而 orchestrator 把合法的
+`AwaitingUserInput` 当成“isolated planner did not produce an accepted plan”，导致 Task 失败，用户问题也无法
+从 root surface 回答。该失败不是 route 误判；它说明 interactive planner 的 suspend/resume contract 尚未
+接入 Task participant 生命周期。
+
+本轮已完成以下闭环：
+
+- planner 初始 turn 可返回 typed suspension；Task durable 转为 `Paused`，planner participant 与 child
+  session 保持非终态，root session 写入 exact-bound public attention route；
+- TUI 与 application/HTTP decision path 都在同一 supervised foreground owner 下回答，重新装配 planner
+  provider/read-only discovery surface，并以同一 participant、同一 child transcript、新 physical attempt
+  继续；guidance assessment 仍禁止提问，避免已接受计划的 control microturn 被悬挂；
+- parent route 镜像 public answer lifecycle，私有答案只从 child session 恢复。child answer durable 后任意
+  controller crash 都复用原 command；provider dispatch 后则按 physical-attempt evidence 安全释放或 fail
+  closed，不盲目双发；
+- kernel/runtime/TUI 分别新增 participant identity、application crash gap、真实 parent+child TUI restore 与
+  supervised worker E2E。受影响 crate 全量测试与 `clippy -D warnings` 通过，具体计数见 RFC-0064 §19。
+
+此前 smoke 在用户问题处中止的结果不得计入 §12 campaign。代码提交后必须重新生成 exact route identity，
+先执行并逐条审阅新的 `1×50` smoke；只有零 invariant failure 且 route/plan-review/direct-task 分布符合门槛，
+才允许执行 `3×50` paid campaign。RFC 状态仍为 `implementation-in-progress`。
+
 ## 14. Validation plan
 
 按 slice 运行最小相关 gate，最终至少包括：

@@ -223,9 +223,10 @@ pub struct SequentialTaskRequest {
 #[derive(Debug, Clone)]
 pub struct SequentialTaskRunOutput {
     pub task_id: TaskId,
-    pub plan_version: u32,
+    pub plan_version: Option<u32>,
     pub steps: Vec<SequentialTaskStepOutput>,
     pub status: TaskRunStatus,
+    pub pending_user_input: Option<PublicUserInputRequestV1>,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +355,35 @@ pub struct TaskPlannerSessionRunOutput {
     pub accepted_plan: TaskPlanEntry,
     pub guidance_applied: Option<crate::TaskGuidanceAppliedEntry>,
     pub child_session_ref: SessionRef,
+}
+
+/// Durable suspension returned by an isolated planner after it requested root-visible input.
+#[derive(Debug, Clone)]
+pub struct TaskPlannerSessionAwaitingUserInput {
+    pub attempt_id: TaskParticipantAttemptId,
+    pub request: PublicUserInputRequestV1,
+    pub child_session_ref: SessionRef,
+}
+
+/// Result of one physical planner run. Awaiting input is a successful logical suspension, not a
+/// participant failure.
+#[derive(Debug, Clone)]
+pub enum TaskPlannerSessionRunOutcome {
+    Accepted(Box<TaskPlannerSessionRunOutput>),
+    AwaitingUserInput(Box<TaskPlannerSessionAwaitingUserInput>),
+}
+
+/// Exact child-session continuation request for an already accepted planner answer.
+#[derive(Debug, Clone)]
+pub struct TaskPlannerSessionResumeRequest {
+    pub task: SequentialTaskRequest,
+    pub attempt_id: TaskParticipantAttemptId,
+    pub child_session_ref: SessionRef,
+    pub route: AgentUserInputRouteEntryV1,
+    pub command: UserInputDecisionCommandV1,
+    pub child_input: AgentRunInput,
+    pub options: AgentRunOptions,
+    pub discovery_options: AgentRunOptions,
 }
 
 /// Input for the isolated, read-only final synthesis transcript.

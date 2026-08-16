@@ -111,22 +111,34 @@ fn agent_user_input_route(request: &UserInputRequestedV1) -> Result<AgentUserInp
 #[test]
 fn agent_user_input_route_replay_preserves_binding_and_terminal_state() -> Result<()> {
     let request = text_request("child_request", 1)?;
-    let route = agent_user_input_route(&request)?;
+    let mut route = agent_user_input_route(&request)?;
+    route.request = UserInputRequestStateV1 {
+        requested: request.clone(),
+        status: UserInputStatusV1::DecisionAccepted,
+        decision: Some(submitted_decision(&request)?),
+        claim: None,
+        continuation: None,
+        resolution: None,
+    }
+    .public_view();
     let mut projection = AgentUserInputRouteProjectionV1::default();
     projection.apply(route.clone())?;
     assert_eq!(projection.pending().count(), 1);
+    assert_eq!(projection.unresolved().count(), 1);
 
     let mut registered = route.clone();
     registered.status = AgentRouteStatus::Registered;
     registered.updated_at_unix_ms = 20;
     projection.apply(registered.clone())?;
     assert_eq!(projection.pending().count(), 0);
+    assert_eq!(projection.unresolved().count(), 1);
 
     let mut resolved = registered;
     resolved.status = AgentRouteStatus::Resolved;
     resolved.updated_at_unix_ms = 30;
     projection.apply(resolved.clone())?;
     assert_eq!(projection.route(&resolved.route_id), Some(&resolved));
+    assert_eq!(projection.unresolved().count(), 0);
 
     let mut changed_binding = resolved.clone();
     changed_binding.child_session_ref = SessionRef::new_relative("children/agents/other.jsonl")?;

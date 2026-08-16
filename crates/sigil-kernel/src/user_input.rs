@@ -1868,8 +1868,11 @@ impl AgentUserInputRouteEntryV1 {
         if self.request.identity.source_thread_id != self.source_thread_id {
             bail!("agent user-input route source thread does not match its request identity");
         }
-        if !matches!(self.request.source, UserInputSourceV1::Agent) {
-            bail!("agent user-input route must reference an agent-owned request");
+        if !matches!(
+            self.request.source,
+            UserInputSourceV1::Agent | UserInputSourceV1::Planner { .. }
+        ) {
+            bail!("agent user-input route must reference an agent- or planner-owned request");
         }
         if !matches!(
             self.status,
@@ -1882,9 +1885,14 @@ impl AgentUserInputRouteEntryV1 {
             bail!("agent user-input route has an unsupported lifecycle status");
         }
         if self.status == AgentRouteStatus::Requested
-            && self.request.status != UserInputStatusV1::Requested
+            && !matches!(
+                self.request.status,
+                UserInputStatusV1::Requested | UserInputStatusV1::DecisionAccepted
+            )
         {
-            bail!("open agent user-input route must mirror a requested child input");
+            bail!(
+                "unregistered agent user-input route must mirror a requested or recoverable accepted child input"
+            );
         }
         Ok(())
     }
@@ -1967,6 +1975,19 @@ impl AgentUserInputRouteProjectionV1 {
         self.routes
             .values()
             .filter(|route| route.status == AgentRouteStatus::Requested)
+    }
+
+    /// Returns routes that still own an unresolved child user-input lifecycle.
+    ///
+    /// `Requested` has not acquired a continuation owner yet. `Registered` has acquired one, but
+    /// remains foreground-blocking until the child result settles the route terminally.
+    pub fn unresolved(&self) -> impl Iterator<Item = &AgentUserInputRouteEntryV1> {
+        self.routes.values().filter(|route| {
+            matches!(
+                route.status,
+                AgentRouteStatus::Requested | AgentRouteStatus::Registered
+            )
+        })
     }
 
     pub fn routes_for_thread(

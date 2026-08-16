@@ -518,6 +518,19 @@ turn 抢占 pending continuation。
   protection，TUI app 与 worker admission 也都拒绝 pending attention owner 期间插入无关 foreground turn。
   deterministic tests 覆盖 answer-before-start、started-before-send crash、exact physical id、hidden retry 禁止、
   transport uncertain fail-closed 与 suspended turn compaction pin。
+- interactive Task planner 现已接入相同协议：首次 planner provider turn 可以 durable suspend，parent Task
+  保持 `Paused`、同一 planner participant 保持 `Started`，root attention route 绑定 child session；提交答案后
+  复用同一 participant/child transcript 创建新的 physical attempt，而不是把 `AwaitingUserInput` 误判为
+  “planner 未生成计划”并终止 Task。guidance-review planner 与 finalizer 继续显式隐藏该工具。
+- planner answer 的 parent route 只镜像 public `DecisionAccepted/Continuation*` 状态，私有 answer value 仍只
+  保存在 authoritative child session。若进程在 child answer durable 后、supervised continuation 注册前退出，
+  HTTP/TUI 会从 parent route 定位 child session、恢复原 command id 与答案，并 exact replay；route 注册后失败
+  则根据 provider physical-attempt evidence 回到可恢复状态或 fail closed。deterministic application 与 TUI
+  reload 测试覆盖这一 crash window，且断言没有第二个 planner participant。
+- 本轮受影响 crate gate：`cargo test -p sigil-kernel`（1568 passed / 0 failed / 6 ignored）、
+  `cargo test -p sigil-runtime`（1079 / 0 / 3）、`cargo test -p sigil-tui`（1662 / 0 / 3），以及三 crate
+  `cargo clippy --all-targets -- -D warnings` 均通过。并行 gate 暴露的 rollout-manifest 环境变量测试 race
+  已改为独立统一锁域并由 runtime 全量复跑验证；这不替代下述 release validation。
 
 仍未关闭的 release blocker：
 

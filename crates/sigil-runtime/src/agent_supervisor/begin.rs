@@ -21,6 +21,87 @@ use super::{
 };
 
 impl AgentSupervisor {
+    /// Re-acquires process-local ownership for a foreground task planner suspended on user input.
+    pub fn resume_task_planner_thread<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        route: &AgentUserInputRouteEntryV1,
+    ) -> Result<AgentTaskChildThread>
+    where
+        H: EventHandler + Send + ?Sized,
+    {
+        route.validate()?;
+        if !matches!(
+            route.status,
+            sigil_kernel::AgentRouteStatus::Requested | sigil_kernel::AgentRouteStatus::Registered
+        ) || !matches!(
+            route.request.source,
+            sigil_kernel::UserInputSourceV1::Planner { .. }
+        ) {
+            bail!("task planner user-input route is no longer pending");
+        }
+        let projection = session.agent_thread_state_projection();
+        let thread = projection
+            .threads
+            .get(&route.source_thread_id)
+            .context("task planner input route references an unknown thread")?;
+        if !matches!(
+            thread.status,
+            AgentThreadStatus::Blocked | AgentThreadStatus::Interrupted
+        ) || thread.profile_id.as_ref() != Some(&route.profile_id)
+            || thread.parent_thread_id.as_ref() != Some(&route.parent_thread_id)
+            || thread.thread_session_ref.as_ref() != Some(&route.child_session_ref)
+            || thread.invocation_mode != Some(AgentInvocationMode::Foreground)
+            || !thread.attempts.contains_key(&route.source_attempt_id)
+        {
+            bail!("task planner user-input route does not match its suspended thread");
+        }
+        let run_context = thread
+            .run_context
+            .as_ref()
+            .context("suspended task planner thread lost its run context")?;
+        let attempt_id = AgentRunAttemptId::new(format!(
+            "attempt_{}",
+            short_digest(&hash_text(&format!(
+                "{}\0{}\0{}\0resume",
+                route.route_id.as_str(),
+                route.request.identity.generation,
+                route.request.request_hash,
+            )))
+        ))?;
+        self.reserve_thread(
+            &route.source_thread_id,
+            &attempt_id,
+            &route.profile_id,
+            &route.budget_scope_id,
+            AgentRole::Planner,
+            AgentInvocationMode::Foreground,
+            1,
+            None,
+        )
+        .map_err(anyhow::Error::msg)?;
+        if let Err(error) = append_thread_running_and_attempt(
+            session,
+            handler,
+            &route.source_thread_id,
+            &attempt_id,
+            run_context.provider.clone(),
+            run_context.model.clone(),
+            AgentInvocationMode::Foreground,
+            "task planner resumed after user input",
+        ) {
+            self.release_thread(&route.source_thread_id);
+            return Err(error);
+        }
+        Ok(AgentTaskChildThread {
+            thread_id: route.source_thread_id.clone(),
+            attempt_id,
+            profile_id: route.profile_id.clone(),
+            parent_thread_id: route.parent_thread_id.clone(),
+        })
+    }
+
     /// Re-acquires process-local ownership for a durable background chat thread suspended on
     /// user input. The immutable route binding is checked against the parent thread projection
     /// before a new physical attempt and mailbox are registered.

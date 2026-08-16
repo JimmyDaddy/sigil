@@ -39,16 +39,16 @@ use sigil_kernel::{
     TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal, TaskIntegrationRunRequest,
     TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose, TaskParticipantRetryError,
     TaskParticipantRetryProof, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability, TaskRouteStatus, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest,
-    Tool, ToolAccess, ToolAnalysisStatus, ToolCall, ToolCategory, ToolContext, ToolError,
-    ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolPermissionEffect,
-    ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, UsageStats, VerificationScope, WorkspaceConfig, WriteIsolationMode,
-    build_integration_plan, build_workspace_snapshot, child_session_ref,
-    declared_tool_permission_plan, decode_changeset_only_child_output, stable_event_hash,
-    stable_workspace_id, task_participant_attempt_id, task_participant_logical_run_id,
-    task_participant_session_ref,
+    TaskPlannerSessionResumeRequest, TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability,
+    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolAnalysisStatus, ToolCall, ToolCategory,
+    ToolContext, ToolError, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolOperation,
+    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats, VerificationScope,
+    WorkspaceConfig, WriteIsolationMode, build_integration_plan, build_workspace_snapshot,
+    child_session_ref, declared_tool_permission_plan, decode_changeset_only_child_output,
+    stable_event_hash, stable_workspace_id, task_participant_attempt_id,
+    task_participant_logical_run_id, task_participant_session_ref,
 };
 
 use super::{
@@ -175,6 +175,10 @@ struct TextProvider {
 
 struct GuidanceApplyPlannerProvider;
 
+struct PlannerQuestionProvider {
+    calls: Arc<AtomicUsize>,
+}
+
 struct PlannerDiscoveryProvider {
     observed_results: Arc<Mutex<Option<String>>>,
 }
@@ -266,8 +270,15 @@ impl Provider for GuidanceApplyPlannerProvider {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        assert!(
+            request
+                .tools
+                .iter()
+                .all(|tool| tool.name != sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME),
+            "guidance review must not expose a user-input suspension it cannot resume"
+        );
         let args = r#"{"reason":"clarifies_existing_step","target_step_ids":["step_1"]}"#;
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::ToolCallStart {
@@ -283,6 +294,71 @@ impl Provider for GuidanceApplyPlannerProvider {
                 name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
                 args_json: args.to_owned(),
             })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for PlannerQuestionProvider {
+    fn name(&self) -> &str {
+        "planner-question"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            request
+                .tools
+                .iter()
+                .any(|tool| tool.name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME),
+            "interactive task planner must receive request_user_input"
+        );
+        let tool_call = if call == 0 {
+            ToolCall {
+                id: "call-planner-question".to_owned(),
+                name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "prompt": "Choose the subsystem to inspect",
+                    "questions": [{
+                        "id": "scope",
+                        "header": "Scope",
+                        "question": "Which subsystem should the task inspect?",
+                        "required": true,
+                        "field": {
+                            "kind": "text",
+                            "multiline": false,
+                            "max_chars": 128
+                        }
+                    }]
+                })
+                .to_string(),
+            }
+        } else {
+            ToolCall {
+                id: "call-plan-after-answer".to_owned(),
+                name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "plan_version": 1,
+                    "status": "accepted",
+                    "steps": [{
+                        "step_id": "inspect_runtime",
+                        "title": "Inspect the selected runtime subsystem",
+                        "role": "executor"
+                    }]
+                })
+                .to_string(),
+            }
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallComplete(tool_call)),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -3068,6 +3144,179 @@ async fn planner_postprocess_failure_marks_thread_failed_and_releases_slot() -> 
 }
 
 #[tokio::test]
+async fn planner_user_input_suspends_and_resumes_the_exact_child_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor.clone(),
+        Agent::new(
+            Box::new(PlannerQuestionProvider {
+                calls: Arc::clone(&calls),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "executor done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "reader done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "synthesis done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(parent_store);
+    let task_id = TaskId::new("task_planner_question_runtime")?;
+    let task = sigil_kernel::SequentialTaskRequest {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "plan after one clarification".to_owned(),
+    };
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let planner_context = TaskPlanUpdateContext {
+        task_id: task_id.clone(),
+        max_plan_steps: 4,
+        max_plan_versions: 2,
+        worktree_availability: TaskPlannerWorktreeAvailability::UnavailableRunner,
+    };
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let first = runner
+        .run_planner_session(
+            &mut session,
+            TaskPlannerSessionRunRequest {
+                task: task.clone(),
+                attempt_id: attempt_id.clone(),
+                child_session_ref: child_session_ref.clone(),
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user("plan the task"),
+                ])
+                .with_task_plan_update(planner_context.clone())
+                .with_run_purpose(sigil_kernel::AgentRunPurpose::TaskPlanner(
+                    sigil_kernel::TaskPlannerContext {
+                        task_id: task_id.clone(),
+                        attempt_id: Some(attempt_id.clone()),
+                    },
+                )),
+                options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+    let sigil_kernel::TaskPlannerSessionRunOutcome::AwaitingUserInput(waiting) = first else {
+        panic!("planner must suspend for its requested clarification");
+    };
+    assert_eq!(waiting.child_session_ref, child_session_ref);
+    assert!(supervisor.active_profile_ids().is_empty());
+    let route =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
+            .pending()
+            .next()
+            .cloned()
+            .expect("planner suspension must create a root attention route");
+    assert_eq!(route.child_session_ref, child_session_ref);
+    assert_eq!(route.request, waiting.request);
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: waiting.request.identity.clone(),
+        request_hash: waiting.request.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("planner-runtime-answer")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "runtime".to_owned(),
+                },
+            }],
+        },
+    };
+    let logical_run_id = sigil_kernel::user_input_continuation_logical_run_id(
+        &command.identity,
+        &command.request_hash,
+    )?;
+    let resumed = runner
+        .resume_planner_session(
+            &mut session,
+            TaskPlannerSessionResumeRequest {
+                task,
+                attempt_id: attempt_id.clone(),
+                child_session_ref: child_session_ref.clone(),
+                route: route.clone(),
+                command: command.clone(),
+                child_input: AgentRunInput::without_persisted_user_message(Vec::new())
+                    .with_task_plan_update(planner_context)
+                    .with_run_purpose(sigil_kernel::AgentRunPurpose::TaskPlanner(
+                        sigil_kernel::TaskPlannerContext {
+                            task_id,
+                            attempt_id: Some(attempt_id.clone()),
+                        },
+                    ))
+                    .with_logical_run_id(logical_run_id.as_str())
+                    .with_user_input_continuation_context(
+                        command.identity.root_logical_run_id.as_str(),
+                        route.source_thread_id.clone(),
+                    ),
+                options: run_options(temp.path().to_path_buf()),
+                discovery_options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+    let sigil_kernel::TaskPlannerSessionRunOutcome::Accepted(resumed) = resumed else {
+        panic!("answered planner must produce its accepted plan");
+    };
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(resumed.attempt_id, attempt_id);
+    assert_eq!(resumed.child_session_ref, child_session_ref);
+    assert_eq!(resumed.accepted_plan.plan_version, 1);
+    assert!(supervisor.active_profile_ids().is_empty());
+    let route =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
+            .route(&route.route_id)
+            .cloned()
+            .expect("planner route must remain auditable");
+    assert_eq!(route.status, sigil_kernel::AgentRouteStatus::Resolved);
+    let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
+    let child = Session::load_from_store("deepseek", "deepseek-v4-flash", child_store)?;
+    let answered = child
+        .user_input_projection()?
+        .request(&command.identity)
+        .cloned()
+        .expect("planner child must retain the exact answered request");
+    assert_eq!(answered.status, sigil_kernel::UserInputStatusV1::Resolved);
+    assert_eq!(
+        answered
+            .resolution
+            .as_ref()
+            .map(|resolution| &resolution.resolution),
+        Some(&sigil_kernel::UserInputResolutionV1::Consumed)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn planner_output_returns_model_owned_task_guidance_decision() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
@@ -3162,6 +3411,9 @@ async fn planner_output_returns_model_owned_task_guidance_decision() -> Result<(
             &mut approval,
         )
         .await?;
+    let sigil_kernel::TaskPlannerSessionRunOutcome::Accepted(output) = output else {
+        panic!("guidance planner unexpectedly suspended for user input");
+    };
 
     let applied = output
         .guidance_applied
@@ -3267,6 +3519,9 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
     )
     .await
     .expect("planner discovery should complete without polling")?;
+    let sigil_kernel::TaskPlannerSessionRunOutcome::Accepted(output) = output else {
+        panic!("planner discovery unexpectedly suspended for user input");
+    };
 
     assert_eq!(output.accepted_plan.plan_version, 1);
     assert_eq!(
@@ -3419,6 +3674,9 @@ async fn planner_discovery_rejects_overlapping_batch_without_consuming_valid_ret
             &mut approval,
         )
         .await?;
+    let sigil_kernel::TaskPlannerSessionRunOutcome::Accepted(output) = output else {
+        panic!("planner discovery unexpectedly suspended for user input");
+    };
 
     assert_eq!(output.accepted_plan.plan_version, 1);
     assert_eq!(
@@ -3525,6 +3783,9 @@ async fn planner_discovery_allows_only_one_batch_per_planning_attempt() -> Resul
             &mut approval,
         )
         .await?;
+    let sigil_kernel::TaskPlannerSessionRunOutcome::Accepted(output) = output else {
+        panic!("planner discovery unexpectedly suspended for user input");
+    };
 
     assert_eq!(output.accepted_plan.plan_version, 1);
     assert_eq!(starts.load(Ordering::SeqCst), 1);

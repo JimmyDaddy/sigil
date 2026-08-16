@@ -714,7 +714,7 @@ where
                     )
                     .await;
                 match planner_output {
-                    Ok(output) => {
+                    Ok(TaskPlannerSessionRunOutcome::Accepted(output)) => {
                         validate_isolated_planner_output(&request, &attempt, &output)?;
                         append_task_control(
                             session,
@@ -742,6 +742,23 @@ where
                             None,
                         )?;
                         break;
+                    }
+                    Ok(TaskPlannerSessionRunOutcome::AwaitingUserInput(waiting)) => {
+                        validate_isolated_planner_suspension(&request, &attempt, &waiting)?;
+                        append_task_run(
+                            session,
+                            handler,
+                            &request,
+                            TaskRunStatus::Paused,
+                            Some("task planner is awaiting user input".to_owned()),
+                        )?;
+                        return Ok(SequentialTaskRunOutput {
+                            task_id: request.task_id,
+                            plan_version: None,
+                            steps: Vec::new(),
+                            status: TaskRunStatus::Paused,
+                            pending_user_input: Some(waiting.request),
+                        });
                     }
                     Err(error) => {
                         if self.abort_participant_failure_for_cancellation(
@@ -812,6 +829,168 @@ where
                     )?;
                 }
                 Err(error)
+            }
+        }
+    }
+
+    /// Resumes an initial task planner from its exact durable child-session user-input frontier.
+    ///
+    /// The original participant remains `Started` while suspended. A successful continuation
+    /// settles that same participant and immediately proceeds into normal task execution; another
+    /// question keeps the task paused without replaying the provider turn that produced it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_planner_after_user_input<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        route: crate::AgentUserInputRouteEntryV1,
+        command: crate::UserInputDecisionCommandV1,
+        planner_options: AgentRunOptions,
+        executor_options: AgentRunOptions,
+        subagent_read_options: AgentRunOptions,
+        subagent_write_options: AgentRunOptions,
+        max_plan_steps: usize,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        route.validate()?;
+        if route.status != crate::AgentRouteStatus::Requested
+            || route.budget_scope_id != request.task_id
+            || route.request.identity != command.identity
+            || route.request.request_hash != command.request_hash
+            || !matches!(
+                &route.request.source,
+                crate::UserInputSourceV1::Planner { task_id } if task_id == &request.task_id
+            )
+        {
+            bail!("planner answer does not match the pending task route");
+        }
+        let projection = session.task_state_projection();
+        let task = projection
+            .tasks
+            .get(&request.task_id)
+            .ok_or_else(|| anyhow!("planner continuation task is missing"))?;
+        if task.status != TaskRunStatus::Paused || task.latest_plan_version.is_some() {
+            bail!("planner continuation requires an unplanned paused task");
+        }
+        let mut attempts = task
+            .participant_attempts_for(TaskParticipantPurpose::Planner, None, None)
+            .into_iter()
+            .filter(|attempt| {
+                attempt.status == TaskParticipantAttemptStatus::Started
+                    && attempt.child_session_ref == route.child_session_ref
+            });
+        let attempt = attempts
+            .next()
+            .cloned()
+            .ok_or_else(|| anyhow!("planner continuation has no matching started participant"))?;
+        if attempts.next().is_some() {
+            bail!("planner continuation has multiple matching started participants");
+        }
+        let worktree_availability = self
+            .child_runner
+            .planner_worktree_availability(&subagent_write_options)
+            .await;
+        let continuation_logical_run_id = crate::user_input_continuation_logical_run_id(
+            &command.identity,
+            &command.request_hash,
+        )?;
+        let child_input = self.bind_cancellation(
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_task_plan_update(TaskPlanUpdateContext {
+                    task_id: request.task_id.clone(),
+                    max_plan_steps,
+                    max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                    worktree_availability,
+                })
+                .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
+                    task_id: request.task_id.clone(),
+                    attempt_id: Some(attempt.attempt_id.clone()),
+                }))
+                .with_logical_run_id(continuation_logical_run_id.as_str())
+                .with_user_input_continuation_context(
+                    command.identity.root_logical_run_id.as_str(),
+                    route.source_thread_id.clone(),
+                ),
+        );
+        let outcome = self
+            .child_runner
+            .resume_planner_session(
+                session,
+                TaskPlannerSessionResumeRequest {
+                    task: request.clone(),
+                    attempt_id: attempt.attempt_id.clone(),
+                    child_session_ref: attempt.child_session_ref.clone(),
+                    route,
+                    command,
+                    child_input,
+                    options: planner_options,
+                    discovery_options: subagent_read_options.clone(),
+                },
+                handler,
+                approval_handler,
+            )
+            .await?;
+        match outcome {
+            TaskPlannerSessionRunOutcome::Accepted(output) => {
+                validate_isolated_planner_output(&request, &attempt, &output)?;
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::TaskPlan(output.accepted_plan.clone()),
+                )?;
+                let result = participant_result_entry(
+                    &attempt,
+                    &format!(
+                        "accepted task plan v{} with {} steps",
+                        output.accepted_plan.plan_version,
+                        output.accepted_plan.steps.len()
+                    ),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )?;
+                append_participant_result_and_terminal(
+                    session,
+                    handler,
+                    &attempt,
+                    result,
+                    TaskParticipantAttemptStatus::Completed,
+                    None,
+                )?;
+                self.continue_run(
+                    session,
+                    request,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    None,
+                    handler,
+                    approval_handler,
+                )
+                .await
+            }
+            TaskPlannerSessionRunOutcome::AwaitingUserInput(waiting) => {
+                validate_isolated_planner_suspension(&request, &attempt, &waiting)?;
+                append_task_run(
+                    session,
+                    handler,
+                    &request,
+                    TaskRunStatus::Paused,
+                    Some("task planner is awaiting user input".to_owned()),
+                )?;
+                Ok(SequentialTaskRunOutput {
+                    task_id: request.task_id,
+                    plan_version: None,
+                    steps: Vec::new(),
+                    status: TaskRunStatus::Paused,
+                    pending_user_input: Some(waiting.request),
+                })
             }
         }
     }
@@ -1158,7 +1337,10 @@ where
                 )
                 .await;
             let output = match planner_output {
-                Ok(output) => output,
+                Ok(TaskPlannerSessionRunOutcome::Accepted(output)) => output,
+                Ok(TaskPlannerSessionRunOutcome::AwaitingUserInput(_)) => {
+                    bail!("task guidance review cannot suspend for user input")
+                }
                 Err(error) => {
                     if self.abort_participant_failure_for_cancellation(
                         session,
@@ -1437,9 +1619,10 @@ where
                 };
                 return Ok(SequentialTaskRunOutput {
                     task_id: request.task_id,
-                    plan_version,
+                    plan_version: Some(plan_version),
                     steps: step_outputs,
                     status,
+                    pending_user_input: None,
                 });
             }
             if !await_pending_step_retries(
@@ -1459,9 +1642,10 @@ where
                 )?;
                 return Ok(SequentialTaskRunOutput {
                     task_id: request.task_id,
-                    plan_version,
+                    plan_version: Some(plan_version),
                     steps: step_outputs,
                     status: TaskRunStatus::Cancelled,
+                    pending_user_input: None,
                 });
             }
 
@@ -1747,9 +1931,10 @@ where
                     append_task_run(session, handler, &request, status, Some(reason))?;
                     return Ok(SequentialTaskRunOutput {
                         task_id: request.task_id,
-                        plan_version,
+                        plan_version: Some(plan_version),
                         steps: step_outputs,
                         status,
+                        pending_user_input: None,
                     });
                 }
                 if retry_scheduled {
@@ -1839,9 +2024,10 @@ where
                         )?;
                         return Ok(SequentialTaskRunOutput {
                             task_id: request.task_id,
-                            plan_version,
+                            plan_version: Some(plan_version),
                             steps: step_outputs,
                             status: TaskRunStatus::Failed,
+                            pending_user_input: None,
                         });
                     }
                 };
@@ -1872,9 +2058,10 @@ where
                     )?;
                     return Ok(SequentialTaskRunOutput {
                         task_id: request.task_id,
-                        plan_version,
+                        plan_version: Some(plan_version),
                         steps: step_outputs,
                         status: task_status,
+                        pending_user_input: None,
                     });
                 }
             }
@@ -2312,7 +2499,7 @@ where
                 )?;
                 return Ok(SequentialTaskRunOutput {
                     task_id: request.task_id,
-                    plan_version,
+                    plan_version: Some(plan_version),
                     steps: vec![SequentialTaskStepOutput {
                         step_id: step.step_id,
                         status: TaskStepStatus::Failed,
@@ -2321,6 +2508,7 @@ where
                         outcome: AgentRunOutcome::default(),
                     }],
                     status: TaskRunStatus::Failed,
+                    pending_user_input: None,
                 });
             }
         };
@@ -2427,7 +2615,7 @@ where
         }
         Ok(SequentialTaskRunOutput {
             task_id: request.task_id,
-            plan_version,
+            plan_version: Some(plan_version),
             steps: vec![SequentialTaskStepOutput {
                 step_id: step.step_id,
                 status,
@@ -2436,6 +2624,7 @@ where
                 outcome: output.outcome,
             }],
             status: task_status,
+            pending_user_input: None,
         })
     }
 
@@ -3722,6 +3911,22 @@ fn validate_isolated_planner_output(
         bail!("isolated planner did not return a non-empty accepted plan");
     }
     TaskGraphProjection::from_plan_entry(plan)?;
+    Ok(())
+}
+
+fn validate_isolated_planner_suspension(
+    request: &SequentialTaskRequest,
+    attempt: &TaskParticipantAttemptEntry,
+    waiting: &TaskPlannerSessionAwaitingUserInput,
+) -> Result<()> {
+    validate_participant_output_identity(attempt, &waiting.attempt_id, &waiting.child_session_ref)?;
+    match &waiting.request.source {
+        crate::UserInputSourceV1::Planner { task_id } if *task_id == request.task_id => {}
+        _ => bail!("planner suspension is not bound to the active task"),
+    }
+    if waiting.request.status != crate::UserInputStatusV1::Requested {
+        bail!("planner suspension must expose a requested user input");
+    }
     Ok(())
 }
 

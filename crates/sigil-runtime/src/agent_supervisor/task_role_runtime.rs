@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunOptions, Provider, RootConfig, SequentialTaskOrchestrator,
-    TaskConfig, ToolRegistry,
+    Agent, AgentRole, AgentRouteStatus, AgentRunOptions, AgentUserInputRouteEntryV1, ControlEntry,
+    Provider, RootConfig, SequentialTaskOrchestrator, Session, TaskConfig,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskRunStatus, ToolRegistry,
+    UserInputDecisionCommandV1, UserInputDecisionReceiptV1, UserInputSourceV1,
 };
 
 use super::{AgentSupervisor, AgentSupervisorTaskChildRunner};
@@ -30,6 +32,202 @@ pub struct TaskRoleRuntime {
     pub executor_options: AgentRunOptions,
     pub subagent_read_options: AgentRunOptions,
     pub subagent_write_options: AgentRunOptions,
+}
+
+/// Fully prepared planner-answer continuation. Construction finishes every provider and role-tool
+/// failure point before the child-session answer is durably accepted.
+pub struct PreparedTaskPlannerUserInputContinuation {
+    pub runtime: TaskRoleRuntime,
+    pub receipt: UserInputDecisionReceiptV1,
+    pub route: AgentUserInputRouteEntryV1,
+}
+
+/// Builds every task role, validates the exact parent/child route, then durably accepts one
+/// submitted planner answer as the final fallible preparation step.
+pub async fn prepare_task_planner_user_input_continuation(
+    root_config: &RootConfig,
+    options: &AgentRunOptions,
+    base_registry: &ToolRegistry,
+    agent_supervisor: AgentSupervisor,
+    role_provider_builder: &dyn TaskRoleProviderBuilder,
+    parent_session: &mut Session,
+    route: &AgentUserInputRouteEntryV1,
+    command: &UserInputDecisionCommandV1,
+) -> Result<PreparedTaskPlannerUserInputContinuation> {
+    validate_task_planner_user_input_route(parent_session, route)?;
+    if route.request.identity != command.identity
+        || route.request.request_hash != command.request_hash
+        || !matches!(
+            command.decision,
+            sigil_kernel::UserInputDecisionV1::Submitted { .. }
+        )
+    {
+        anyhow::bail!("task planner answer does not match its submitted durable route");
+    }
+    let runtime = build_task_role_runtime(
+        root_config,
+        options,
+        base_registry,
+        agent_supervisor,
+        role_provider_builder,
+    )
+    .await?;
+    let mut child = super::build_child_session(parent_session, &route.child_session_ref)?;
+    sigil_kernel::preview_user_input_decision(&child, command, crate::current_unix_time_ms())?;
+    let receipt = sigil_kernel::accept_user_input_decision(
+        &mut child,
+        command.clone(),
+        crate::current_unix_time_ms(),
+    )?;
+    let mut accepted_route = route.clone();
+    accepted_route.request = receipt.request.clone();
+    accepted_route.updated_at_unix_ms = crate::current_unix_time_ms();
+    parent_session.append_control(ControlEntry::AgentUserInputRoute(accepted_route.clone()))?;
+    Ok(PreparedTaskPlannerUserInputContinuation {
+        runtime,
+        receipt,
+        route: accepted_route,
+    })
+}
+
+/// Validates the immutable parent facts needed to resume an initial planner transcript.
+pub fn validate_task_planner_user_input_route(
+    session: &Session,
+    route: &AgentUserInputRouteEntryV1,
+) -> Result<()> {
+    route.validate()?;
+    if !matches!(
+        route.status,
+        AgentRouteStatus::Requested | AgentRouteStatus::Registered
+    ) {
+        anyhow::bail!("task planner user-input route is no longer pending");
+    }
+    let task_id = match &route.request.source {
+        UserInputSourceV1::Planner { task_id } => task_id,
+        _ => anyhow::bail!("user-input route is not owned by a task planner"),
+    };
+    if task_id != &route.budget_scope_id {
+        anyhow::bail!("task planner user-input route has a mismatched task binding");
+    }
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(task_id)
+        .context("task planner user-input route references an unknown task")?;
+    if task.status != TaskRunStatus::Paused || task.latest_plan_version.is_some() {
+        anyhow::bail!("task planner answer requires an unplanned paused task");
+    }
+    let matching = task
+        .participant_attempts_for(TaskParticipantPurpose::Planner, None, None)
+        .into_iter()
+        .filter(|attempt| {
+            attempt.status == TaskParticipantAttemptStatus::Started
+                && attempt.child_session_ref == route.child_session_ref
+        })
+        .count();
+    if matching != 1 {
+        anyhow::bail!("task planner user-input route has no unique started participant");
+    }
+    Ok(())
+}
+
+/// Applies a decline/cancel decision to the authoritative planner child and atomically closes the
+/// parent route, participant and task lifecycle without starting a provider continuation.
+pub fn settle_task_planner_user_input_without_continuation(
+    parent_session: &mut Session,
+    route: &AgentUserInputRouteEntryV1,
+    command: UserInputDecisionCommandV1,
+) -> Result<(UserInputDecisionReceiptV1, Vec<ControlEntry>)> {
+    validate_task_planner_user_input_route(parent_session, route)?;
+    if matches!(
+        command.decision,
+        sigil_kernel::UserInputDecisionV1::Submitted { .. }
+    ) {
+        anyhow::bail!("submitted planner answers require a supervised continuation");
+    }
+    let mut child = super::build_child_session(parent_session, &route.child_session_ref)?;
+    sigil_kernel::preview_user_input_decision(&child, &command, crate::current_unix_time_ms())?;
+    let receipt = sigil_kernel::accept_user_input_decision(
+        &mut child,
+        command.clone(),
+        crate::current_unix_time_ms(),
+    )?;
+    let task = parent_session
+        .task_state_projection()
+        .tasks
+        .get(&route.budget_scope_id)
+        .cloned()
+        .context("task planner settlement lost its task")?;
+    let mut attempts = task
+        .participant_attempts_for(TaskParticipantPurpose::Planner, None, None)
+        .into_iter()
+        .filter(|attempt| {
+            attempt.status == TaskParticipantAttemptStatus::Started
+                && attempt.child_session_ref == route.child_session_ref
+        });
+    let mut attempt = attempts
+        .next()
+        .cloned()
+        .context("task planner settlement lost its participant")?;
+    if attempts.next().is_some() {
+        anyhow::bail!("task planner settlement has multiple started participants");
+    }
+    let cancelled = matches!(
+        command.decision,
+        sigil_kernel::UserInputDecisionV1::RunCancelled
+    );
+    let reason = if cancelled {
+        "task planning cancelled by user"
+    } else {
+        "task planner question declined by user"
+    };
+    attempt.status = if cancelled {
+        TaskParticipantAttemptStatus::Cancelled
+    } else {
+        TaskParticipantAttemptStatus::Interrupted
+    };
+    attempt.reason = Some(reason.to_owned());
+    let mut route_update = route.clone();
+    route_update.request = receipt.request.clone();
+    route_update.status = if cancelled {
+        sigil_kernel::AgentRouteStatus::Cancelled
+    } else {
+        sigil_kernel::AgentRouteStatus::Resolved
+    };
+    route_update.updated_at_unix_ms = crate::current_unix_time_ms();
+    let controls = vec![
+        ControlEntry::AgentUserInputRoute(route_update),
+        ControlEntry::AgentThreadStatusChanged(sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: route.source_thread_id.clone(),
+            status: if cancelled {
+                sigil_kernel::AgentThreadStatus::Cancelled
+            } else {
+                sigil_kernel::AgentThreadStatus::Interrupted
+            },
+            reason: Some(reason.to_owned()),
+            updated_at_ms: Some(crate::current_unix_time_ms()),
+        }),
+        ControlEntry::TaskParticipantAttempt(attempt),
+        ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task.task_id,
+            parent_session_ref: task.parent_session_ref,
+            objective: task.objective,
+            title: None,
+            status: if cancelled {
+                TaskRunStatus::Cancelled
+            } else {
+                TaskRunStatus::Paused
+            },
+            reason: Some(if cancelled {
+                reason.to_owned()
+            } else {
+                "task planner question declined; explicit continuation may retry planning"
+                    .to_owned()
+            }),
+        }),
+    ];
+    parent_session.append_controls(controls.clone())?;
+    Ok((receipt, controls))
 }
 
 /// Builds the provider-neutral task runtime shared by every product adapter.

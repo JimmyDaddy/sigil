@@ -44,6 +44,26 @@ pub(in crate::runner) struct TaskContinueSpawn {
     pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
+pub(in crate::runner) struct TaskPlannerInputSpawn {
+    pub(in crate::runner) run_id: u64,
+    pub(in crate::runner) session: Session,
+    pub(in crate::runner) task_id: TaskId,
+    pub(in crate::runner) task_id_value: String,
+    pub(in crate::runner) parent_session_ref: SessionRef,
+    pub(in crate::runner) objective: String,
+    pub(in crate::runner) route: sigil_kernel::AgentUserInputRouteEntryV1,
+    pub(in crate::runner) command: sigil_kernel::UserInputDecisionCommandV1,
+    pub(in crate::runner) task_runtime: TaskRoleRuntime,
+    pub(in crate::runner) max_plan_steps: usize,
+    pub(in crate::runner) task_result_tx: WorkerEventPayloadSender<RunTaskResult>,
+    pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
+    pub(in crate::runner) handler: ChannelEventHandler,
+    pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
+    pub(in crate::runner) cancellation_handle: RunCancellationHandle,
+    pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
+    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
+}
+
 pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) run_id: u64,
     pub(in crate::runner) session: Session,
@@ -190,6 +210,80 @@ pub(in crate::runner) fn spawn_task_continue(
             &terminal_objective,
             &terminal_cancellation,
             continuation_entry_frontier,
+            result,
+        );
+        let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+    })
+}
+
+pub(in crate::runner) fn spawn_task_planner_input(
+    runtime: &tokio::runtime::Runtime,
+    spawn: TaskPlannerInputSpawn,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        let TaskPlannerInputSpawn {
+            run_id,
+            mut session,
+            task_id,
+            task_id_value,
+            parent_session_ref,
+            objective,
+            route,
+            command,
+            task_runtime,
+            max_plan_steps,
+            task_result_tx,
+            approval_rx,
+            mut handler,
+            elicitation_audit_buffer,
+            cancellation_handle,
+            cancellation_task_guard,
+            tool_artifact_read_budget,
+        } = spawn;
+        let _cancellation_task_guard = cancellation_task_guard;
+        let terminal_cancellation = cancellation_handle.clone();
+        let TaskRoleRuntime {
+            orchestrator,
+            planner_options,
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+        } = task_runtime;
+        let orchestrator = orchestrator
+            .with_cancellation(cancellation_handle)
+            .with_tool_artifact_read_budget(tool_artifact_read_budget);
+        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+        let result = orchestrator
+            .resume_planner_after_user_input(
+                &mut session,
+                SequentialTaskRequest {
+                    task_id: task_id.clone(),
+                    parent_session_ref: parent_session_ref.clone(),
+                    objective: objective.clone(),
+                },
+                route,
+                command,
+                planner_options,
+                executor_options,
+                subagent_read_options,
+                subagent_write_options,
+                max_plan_steps,
+                &mut handler,
+                &mut approval_handler,
+            )
+            .await
+            .map(|output| output.status)
+            .map_err(|error| format!("{error:#}"));
+        let result = finalize_task_root(
+            &mut session,
+            &task_id,
+            &parent_session_ref,
+            &objective,
+            &terminal_cancellation,
             result,
         );
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {

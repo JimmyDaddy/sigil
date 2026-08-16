@@ -997,7 +997,7 @@ pub fn conversation_display_page_from_records(
             .chain(plan_review.pending_user_input())
             .chain(
                 agent_user_input
-                    .pending()
+                    .unresolved()
                     .map(|route| route.request.clone()),
             ),
     );

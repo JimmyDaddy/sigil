@@ -2294,11 +2294,36 @@ where
                     .as_ref()
                     .map(|session| session.entries().to_vec())
                     .unwrap_or_default();
+                let planner_input = (status == TaskRunStatus::Paused)
+                    .then(|| TaskId::new(task_id.clone()).ok())
+                    .flatten()
+                    .and_then(|task_id| {
+                        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+                            &entries,
+                        )
+                        .ok()
+                        .and_then(|projection| {
+                            projection
+                                .pending()
+                                .filter(|route| route.budget_scope_id == task_id)
+                                .filter(|route| {
+                                    matches!(
+                                        route.request.source,
+                                        sigil_kernel::UserInputSourceV1::Planner { .. }
+                                    )
+                                })
+                                .max_by_key(|route| route.request.requested_at_unix_ms)
+                                .map(|route| route.request.clone())
+                        })
+                    });
                 let _ = message_tx.send(WorkerMessage::TaskRunFinished {
                     task_id,
                     status,
-                    entries,
+                    entries: entries.clone(),
                 });
+                if let Some(request) = planner_input {
+                    let _ = message_tx.send(WorkerMessage::UserInputRequested { request, entries });
+                }
             }
             RunTaskPayload::Task {
                 task_id,

@@ -195,6 +195,218 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
 }
 
 #[test]
+fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-task-planner-question-e2e.jsonl");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let handoff_args = r#"{"reason_codes":["cross_layer","long_verification"]}"#;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::ToolCallStart {
+            id: "question-handoff-call".to_owned(),
+            name: "request_task_planning".to_owned(),
+        },
+        ProviderChunk::ToolCallArgsDelta {
+            id: "question-handoff-call".to_owned(),
+            delta: handoff_args.to_owned(),
+        },
+        ProviderChunk::ToolCallComplete(ToolCall {
+            id: "question-handoff-call".to_owned(),
+            name: "request_task_planning".to_owned(),
+            args_json: handoff_args.to_owned(),
+        }),
+        ProviderChunk::Done,
+    ])]);
+    let question_args = r#"{
+        "prompt": "Choose the subsystem to inspect",
+        "questions": [{
+            "id": "scope",
+            "header": "Scope",
+            "question": "Which subsystem should the task inspect?",
+            "required": true,
+            "field": {
+                "kind": "text",
+                "multiline": false,
+                "max_chars": 128
+            }
+        }]
+    }"#;
+    let plan_args = r#"{
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [{
+            "step_id": "inspect_runtime",
+            "title": "Inspect the selected runtime subsystem",
+            "role": "executor",
+            "mode": "read",
+            "isolation": "shared_read_only"
+        }]
+    }"#;
+    let role_provider_builder = planned_role_provider_builder(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "task-planner-question-call".to_owned(),
+                name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "task-planner-question-call".to_owned(),
+                delta: question_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "task-planner-question-call".to_owned(),
+                name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                args_json: question_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "task-plan-after-answer".to_owned(),
+                name: sigil_kernel::TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "task-plan-after-answer".to_owned(),
+                delta: plan_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "task-plan-after-answer".to_owned(),
+                name: sigil_kernel::TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                args_json: plan_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("task step completed after clarification".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("task synthesis completed after clarification".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+        role_provider_builder,
+    )?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "inspect the selected subsystem and verify the handoff".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
+    let paused = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(
+            message,
+            WorkerMessage::TaskRunFinished {
+                status: TaskRunStatus::Paused,
+                ..
+            }
+        )
+    })?;
+    let WorkerMessage::TaskRunFinished { entries, .. } = paused else {
+        unreachable!("recv_until only returns paused TaskRunFinished");
+    };
+    let task_id = entries
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskRun(run)) => Some(run.task_id.clone()),
+            _ => None,
+        })
+        .expect("paused task must remain projected");
+    let route_id = entries
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::AgentUserInputRoute(route))
+                if route.budget_scope_id == task_id =>
+            {
+                Some(route.route_id.clone())
+            }
+            _ => None,
+        })
+        .expect("paused planner task must retain its exact attention route");
+    let requested = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::UserInputRequested { .. })
+    })?;
+    let WorkerMessage::UserInputRequested { request, .. } = requested else {
+        unreachable!("recv_until only returns UserInputRequested");
+    };
+    assert!(matches!(
+        request.source,
+        sigil_kernel::UserInputSourceV1::Planner { .. }
+    ));
+
+    worker.send(WorkerCommand::SubmitUserInputDecision {
+        command_id: Some("task-planner-question-e2e-answer".to_owned()),
+        request_id: request.identity.request_id.as_str().to_owned(),
+        generation: request.identity.generation,
+        expected_request_hash: request.request_hash.clone(),
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "runtime".to_owned(),
+                },
+            }],
+        },
+    })?;
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::TaskRunStarted { .. })
+    })?;
+    let completed = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(
+            message,
+            WorkerMessage::TaskRunFinished {
+                status: TaskRunStatus::Completed,
+                ..
+            }
+        )
+    })?;
+    let WorkerMessage::TaskRunFinished {
+        status, entries, ..
+    } = completed
+    else {
+        unreachable!("recv_until only returns completed TaskRunFinished");
+    };
+    assert_eq!(status, TaskRunStatus::Completed);
+    let projection = sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&entries)?;
+    assert_eq!(projection.pending().count(), 0);
+    assert_eq!(
+        projection.route(&route_id).map(|route| route.status),
+        Some(sigil_kernel::AgentRouteStatus::Resolved)
+    );
+    let task = Session::load_from_store(
+        "planned",
+        "planned-model",
+        JsonlSessionStore::new(&session_log_path)?,
+    )?
+    .task_state_projection()
+    .tasks
+    .get(&task_id)
+    .cloned()
+    .expect("completed task must remain durable");
+    let planner_attempts = task
+        .participant_attempts_for(sigil_kernel::TaskParticipantPurpose::Planner, None, None)
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(planner_attempts.len(), 1);
+    assert_eq!(
+        planner_attempts[0].status,
+        sigil_kernel::TaskParticipantAttemptStatus::Completed
+    );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn automatic_handoff_task_can_pause_and_resume_on_its_inherited_run_scope() -> Result<()> {
     let worker_timeout = Duration::from_secs(30);
     let temp = tempdir()?;

@@ -459,6 +459,10 @@ impl EgressDisclosurePresenter for RejectingDisclosurePresenter {
 
 struct ApplicationTaskRoleProviderBuilder;
 
+struct QuestioningApplicationTaskRoleProviderBuilder {
+    planner_calls: Arc<AtomicUsize>,
+}
+
 #[async_trait]
 impl TaskRoleProviderBuilder for ApplicationTaskRoleProviderBuilder {
     async fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
@@ -466,8 +470,23 @@ impl TaskRoleProviderBuilder for ApplicationTaskRoleProviderBuilder {
     }
 }
 
+#[async_trait]
+impl TaskRoleProviderBuilder for QuestioningApplicationTaskRoleProviderBuilder {
+    async fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(QuestioningApplicationTaskRoleProvider {
+            role,
+            planner_calls: Arc::clone(&self.planner_calls),
+        }))
+    }
+}
+
 struct ApplicationTaskRoleProvider {
     role: AgentRole,
+}
+
+struct QuestioningApplicationTaskRoleProvider {
+    role: AgentRole,
+    planner_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -547,6 +566,103 @@ impl Provider for ApplicationTaskRoleProvider {
             vec![
                 Ok(ProviderChunk::TextDelta(
                     "application durable task completed".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ]
+        } else {
+            vec![
+                Ok(ProviderChunk::TextDelta(
+                    "application task step completed".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ]
+        };
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+}
+
+#[async_trait]
+impl Provider for QuestioningApplicationTaskRoleProvider {
+    fn name(&self) -> &str {
+        "questioning-application-task-test"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        application_task_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let is_planning = self.role == AgentRole::Planner
+            && request
+                .tools
+                .iter()
+                .any(|tool| tool.name == TASK_PLAN_UPDATE_TOOL_NAME);
+        let chunks = if is_planning && self.planner_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let args = r#"{
+                "prompt": "Choose the application subsystem",
+                "questions": [{
+                    "id": "scope",
+                    "header": "Scope",
+                    "question": "Which subsystem should the task inspect?",
+                    "required": true,
+                    "field": {
+                        "kind": "text",
+                        "multiline": false,
+                        "max_chars": 128
+                    }
+                }]
+            }"#;
+            vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "application-task-question".to_owned(),
+                    name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "application-task-question".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "application-task-question".to_owned(),
+                    name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ]
+        } else if is_planning {
+            let args = r#"{
+                "plan_version": 1,
+                "status": "accepted",
+                "steps": [{
+                    "step_id": "inspect_application",
+                    "title": "Inspect the selected application subsystem",
+                    "role": "executor",
+                    "mode": "read",
+                    "isolation": "shared_read_only"
+                }]
+            }"#;
+            vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "application-task-plan-after-answer".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "application-task-plan-after-answer".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "application-task-plan-after-answer".to_owned(),
+                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ]
+        } else if self.role == AgentRole::Planner {
+            vec![
+                Ok(ProviderChunk::TextDelta(
+                    "application task completed after clarification".to_owned(),
                 )),
                 Ok(ProviderChunk::Done),
             ]
@@ -2999,6 +3115,268 @@ credential = { source = "none" }
             .as_ref()
             .map(|answer| answer.message_id.as_str()),
         output.result.final_message_id.as_deref()
+    );
+    Ok(())
+}
+
+#[test]
+fn application_task_planner_question_resumes_through_the_public_decision_path() -> Result<()> {
+    std::thread::Builder::new()
+        .name("application-planner-input-recovery".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| -> Result<()> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(application_task_planner_question_resumes_through_the_public_decision_path_inner())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("application planner input recovery test panicked"))?
+}
+
+async fn application_task_planner_question_resumes_through_the_public_decision_path_inner()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "application-task-test"
+model = "application-task-model"
+
+[connections.application-task-test]
+label = "Application task test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
+"#,
+    )?;
+    let mut root_config = RootConfig::load(&config_path)?;
+    root_config.task.enabled = true;
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let requested_session_path = temp.path().join("session.jsonl");
+    let binding =
+        bind_application_session(&config_path, temp.path(), Some(&requested_session_path))?;
+    let session_path = binding.session_log_path.clone();
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        Session::load_from_store("application-task-test", "application-task-model", store)?;
+    let session_scope_id = binding.session_scope_id;
+    let task_id = TaskId::new("task-application-planner-question")?;
+    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref,
+        objective: "inspect an application subsystem after clarification".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: Some("accepted by the application conversation coordinator".to_owned()),
+    }))?;
+    let profile_registry =
+        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            temp.path(),
+            session.entries(),
+        )?;
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let provider_builder: Arc<dyn TaskRoleProviderBuilder> =
+        Arc::new(QuestioningApplicationTaskRoleProviderBuilder {
+            planner_calls: Arc::clone(&planner_calls),
+        });
+    let task_execution = ApplicationTaskExecutionRuntime {
+        root_config: root_config.clone(),
+        options: crate::build_run_options(
+            &root_config,
+            temp.path().to_path_buf(),
+            InteractionMode::Headless,
+            None,
+        ),
+        base_registry: ToolRegistry::new(),
+        agent_supervisor: crate::AgentSupervisor::new(
+            profile_registry,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            application_task_provider_capabilities(),
+        ),
+        role_provider_builder: Arc::clone(&provider_builder),
+    };
+    let cancellation_owner = RunCancellationOwner::new();
+    let cancellation_handle = cancellation_owner.handle();
+    let action = StartDurableTaskAction {
+        handoff_id: TaskHandoffId::new("handoff-application-planner-question")?,
+        task_id: task_id.clone(),
+        source_turn: sigil_kernel::ConversationTurnRef::new(
+            &session_scope_id,
+            "message-application-planner-question",
+            "run-application-planner-question",
+        )?,
+    };
+    let root_output = AgentRunOutput {
+        disposition: AgentRunDisposition::StartDurableTask(action),
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome {
+            terminal_reason: AgentRunTerminalReason::TaskHandoff,
+            tool_calls: 1,
+            ..AgentRunOutcome::default()
+        },
+    };
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let suspended = Box::pin(continue_application_task_handoff(
+        &mut session,
+        root_output,
+        Some(task_execution),
+        &mut handler,
+        &mut approval_handler,
+        &cancellation_handle,
+    ))
+    .await?;
+    let AgentRunDisposition::AwaitingUserInput(request_ref) = suspended.disposition else {
+        panic!("application task planner must surface its question to the root run");
+    };
+    let route =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
+            .pending()
+            .next()
+            .cloned()
+            .expect("planner question must have a root attention route");
+    assert_eq!(route.request.identity, request_ref.identity);
+    assert_eq!(route.request.request_hash, request_ref.request_hash);
+    assert_eq!(
+        session
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .map(|task| task.status),
+        Some(TaskRunStatus::Paused)
+    );
+    drop(session);
+
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(provider_builder);
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: route.request.identity.clone(),
+        request_hash: route.request.request_hash.clone(),
+        command_id: UserInputCommandId::new("application-planner-answer-command")?,
+        decision: UserInputDecisionV1::Submitted {
+            answers: vec![UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: UserInputAnswerValueV1::Text {
+                    value: "runtime".to_owned(),
+                },
+            }],
+        },
+    };
+    let stranded = Box::pin(prepare_application_user_input_decision(
+        ApplicationUserInputDecisionRequest {
+            config_path: config_path.clone(),
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: session_path.clone(),
+            session_attachment: None,
+            expected_session_scope_id: session_scope_id.clone(),
+            run_id: "application-planner-answer-run".to_owned(),
+            identity: command.identity.clone(),
+            request_hash: command.request_hash.clone(),
+            command_id: command.command_id.clone(),
+            decision: command.decision.clone(),
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    ))
+    .await?;
+    assert!(stranded.has_continuation());
+    drop(stranded);
+
+    let recovered_command = crate::application_run::application_recoverable_user_input_decision(
+        &session_path,
+        &session_scope_id,
+    )?
+    .expect("accepted planner answer must survive a controller crash before registration");
+    assert_eq!(recovered_command, command);
+    let recovered_request = crate::application_run::application_user_input_request_view(
+        &session_path,
+        &session_scope_id,
+        &command.identity,
+        &command.request_hash,
+    )?;
+    assert_eq!(
+        recovered_request.status,
+        sigil_kernel::UserInputStatusV1::DecisionAccepted
+    );
+
+    let prepared = Box::pin(prepare_application_user_input_decision(
+        ApplicationUserInputDecisionRequest {
+            config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: session_path.clone(),
+            session_attachment: None,
+            expected_session_scope_id: session_scope_id.clone(),
+            run_id: "application-planner-answer-recovery-run".to_owned(),
+            identity: recovered_command.identity,
+            request_hash: recovered_command.request_hash,
+            command_id: recovered_command.command_id,
+            decision: recovered_command.decision,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    ))
+    .await?;
+    assert!(prepared.has_continuation());
+    assert!(prepared.receipt().continuation_required);
+    let (_, continuation, revision) = prepared.into_parts();
+    assert!(revision.is_none());
+    let (execution, control) = continuation
+        .expect("submitted planner answer must prepare a supervised continuation")
+        .into_parts();
+    let mut events = RecordingApplicationRunEvents::default();
+    let completed = Box::pin(execution.execute(&mut events, &mut approval_handler)).await?;
+    drop(control);
+
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        completed.agent_output.disposition,
+        AgentRunDisposition::FinalAnswer
+    );
+    assert_eq!(
+        completed.agent_output.result.final_text,
+        "application task completed after clarification"
+    );
+    let recovered = Session::load_from_store(
+        "application-task-test",
+        "application-task-model",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    assert_eq!(
+        recovered
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .map(|task| task.status),
+        Some(TaskRunStatus::Completed)
+    );
+    assert_eq!(
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(recovered.entries(),)?
+            .route(&route.route_id)
+            .map(|route| route.status),
+        Some(sigil_kernel::AgentRouteStatus::Resolved)
+    );
+    assert!(
+        events
+            .0
+            .iter()
+            .any(|event| matches!(event.event, PublicRunEventKind::RunFinished { .. }))
     );
     Ok(())
 }

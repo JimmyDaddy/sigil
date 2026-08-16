@@ -5630,6 +5630,107 @@ fn accepted_user_input_restores_an_exact_resume_action_without_echoing_answers()
 }
 
 #[test]
+fn accepted_planner_child_answer_restores_from_parent_route_and_private_child_session() -> Result<()>
+{
+    let temp = tempdir()?;
+    let parent_path = temp.path().join("parent.jsonl");
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/planner.jsonl")?;
+    let child_path = child_ref.resolve(temp.path());
+    let mut child = sigil_kernel::Session::new("planned", "planned-model")
+        .with_store(JsonlSessionStore::new(&child_path)?);
+    let task_id = sigil_kernel::TaskId::new("task-tui-planner-recovery")?;
+    let mut public = pending_text_user_input_request()?;
+    public.identity.session_scope_id = sigil_kernel::SessionScopeId::new(child.session_scope_id())?;
+    public.source = sigil_kernel::UserInputSourceV1::Planner {
+        task_id: task_id.clone(),
+    };
+    let requested = sigil_kernel::UserInputRequestedV1::new(sigil_kernel::UserInputRequestV1 {
+        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+        identity: public.identity.clone(),
+        source: public.source.clone(),
+        purpose: public.purpose,
+        prompt: public.prompt.clone(),
+        questions: public.questions.clone(),
+        allowed_actions: public.allowed_actions.clone(),
+        requested_at_unix_ms: public.requested_at_unix_ms,
+        continuation: Some(sigil_kernel::UserInputContinuationBindingV1 {
+            assistant_message_id: "planner-question-message".to_owned(),
+            tool_call_id: "planner-question-call".to_owned(),
+            provider_name: "planned".to_owned(),
+            model_name: "planned-model".to_owned(),
+        }),
+    })?;
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: requested.request.identity.clone(),
+        request_hash: requested.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("tui-planner-recovery-command")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "private planner answer".to_owned(),
+                },
+            }],
+        },
+    };
+    child.append_user_input_lifecycle(vec![sigil_kernel::UserInputLifecycleEntryV1::Requested(
+        Box::new(requested.clone()),
+    )])?;
+    let _receipt = sigil_kernel::accept_user_input_decision(&mut child, command.clone(), 20)?;
+    let route = sigil_kernel::AgentUserInputRouteEntryV1 {
+        schema_version: sigil_kernel::AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION,
+        route_id: sigil_kernel::AgentRouteId::new("route-tui-planner-recovery")?,
+        source_thread_id: command.identity.source_thread_id.clone(),
+        source_attempt_id: sigil_kernel::AgentRunAttemptId::new("attempt-tui-planner-recovery")?,
+        profile_id: sigil_kernel::AgentProfileId::new("planner")?,
+        parent_thread_id: sigil_kernel::AgentThreadId::new("root")?,
+        batch_id: None,
+        budget_scope_id: task_id,
+        isolation: sigil_kernel::TaskIsolationMode::SharedReadOnly,
+        child_session_ref: child_ref,
+        request: sigil_kernel::UserInputRequestStateV1 {
+            requested,
+            status: sigil_kernel::UserInputStatusV1::Requested,
+            decision: None,
+            claim: None,
+            continuation: None,
+            resolution: None,
+        }
+        .public_view(),
+        status: sigil_kernel::AgentRouteStatus::Requested,
+        updated_at_unix_ms: 20,
+    };
+
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &test_config());
+    app.session_log_path = parent_path;
+    app.session_browser.current_entries = vec![SessionLogEntry::Control(
+        ControlEntry::AgentUserInputRoute(route),
+    )];
+    app.restore_durable_attention_surfaces();
+
+    assert_eq!(
+        app.last_notice(),
+        Some("an accepted answer is ready to resume; choose Resume")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitUserInputDecision {
+            command_id: Some(command_id),
+            request_id,
+            generation,
+            expected_request_hash,
+            decision,
+        }) if command_id == command.command_id.as_str()
+            && request_id == command.identity.request_id.as_str()
+            && generation == command.identity.generation
+            && expected_request_hash == command.request_hash
+            && decision == command.decision
+    ));
+    Ok(())
+}
+
+#[test]
 fn multiline_user_input_uses_enter_for_newline_and_control_enter_for_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let mut request = pending_text_user_input_request()?;

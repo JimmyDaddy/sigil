@@ -307,7 +307,17 @@ impl AppState {
 
         let recovery_command = sigil_kernel::recoverable_user_input_decision_from_entries(
             &self.session_browser.current_entries,
-        );
+        )
+        .and_then(|command| {
+            if command.is_some() {
+                Ok(command)
+            } else {
+                sigil_runtime::application_run::recoverable_agent_user_input_decision_from_child_sessions(
+                    &self.session_log_path,
+                    &self.session_browser.current_entries,
+                )
+            }
+        });
         match sigil_runtime::conversation_display::public_user_inputs_from_entries(
             &self.session_browser.current_entries,
         ) {

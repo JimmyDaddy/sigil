@@ -204,6 +204,11 @@ struct AlwaysRateLimitedControlChildRunner {
     synthesis_calls: Arc<AtomicUsize>,
     planner_succeeds: bool,
 }
+#[derive(Clone)]
+struct SuspendingPlannerChildRunner {
+    initial_calls: Arc<AtomicUsize>,
+    resume_calls: Arc<AtomicUsize>,
+}
 #[derive(Debug, Default)]
 struct FakeTaskExecutionBackend;
 #[derive(Default)]
@@ -615,7 +620,7 @@ impl TaskChildSessionRunner for RetryingPlannerSynthesisChildRunner {
         request: crate::TaskPlannerSessionRunRequest,
         _handler: &mut H,
         _approval_handler: &mut A,
-    ) -> Result<crate::TaskPlannerSessionRunOutput>
+    ) -> Result<crate::TaskPlannerSessionRunOutcome>
     where
         H: crate::EventHandler + Send,
         A: crate::ApprovalHandler + Send,
@@ -634,22 +639,24 @@ impl TaskChildSessionRunner for RetryingPlannerSynthesisChildRunner {
             )?
             .into());
         }
-        Ok(crate::TaskPlannerSessionRunOutput {
-            attempt_id: request.attempt_id,
-            accepted_plan: TaskPlanEntry {
-                task_id: request.task.task_id,
-                plan_version: 1,
-                status: TaskPlanStatus::Accepted,
-                steps: vec![read_executor_step(
-                    "inspect",
-                    "Inspect provider retry",
-                    Vec::new(),
-                )?],
-                reason: None,
+        Ok(crate::TaskPlannerSessionRunOutcome::Accepted(Box::new(
+            crate::TaskPlannerSessionRunOutput {
+                attempt_id: request.attempt_id,
+                accepted_plan: TaskPlanEntry {
+                    task_id: request.task.task_id,
+                    plan_version: 1,
+                    status: TaskPlanStatus::Accepted,
+                    steps: vec![read_executor_step(
+                        "inspect",
+                        "Inspect provider retry",
+                        Vec::new(),
+                    )?],
+                    reason: None,
+                },
+                guidance_applied: None,
+                child_session_ref: request.child_session_ref,
             },
-            guidance_applied: None,
-            child_session_ref: request.child_session_ref,
-        })
+        )))
     }
 
     async fn run_child_session<H, A>(
@@ -716,7 +723,7 @@ impl TaskChildSessionRunner for AlwaysRateLimitedControlChildRunner {
         request: crate::TaskPlannerSessionRunRequest,
         _handler: &mut H,
         _approval_handler: &mut A,
-    ) -> Result<crate::TaskPlannerSessionRunOutput>
+    ) -> Result<crate::TaskPlannerSessionRunOutcome>
     where
         H: crate::EventHandler + Send,
         A: crate::ApprovalHandler + Send,
@@ -736,22 +743,24 @@ impl TaskChildSessionRunner for AlwaysRateLimitedControlChildRunner {
             )?
             .into());
         }
-        Ok(crate::TaskPlannerSessionRunOutput {
-            attempt_id: request.attempt_id,
-            accepted_plan: TaskPlanEntry {
-                task_id: request.task.task_id,
-                plan_version: 1,
-                status: TaskPlanStatus::Accepted,
-                steps: vec![read_executor_step(
-                    "inspect",
-                    "Inspect provider retry",
-                    Vec::new(),
-                )?],
-                reason: None,
+        Ok(crate::TaskPlannerSessionRunOutcome::Accepted(Box::new(
+            crate::TaskPlannerSessionRunOutput {
+                attempt_id: request.attempt_id,
+                accepted_plan: TaskPlanEntry {
+                    task_id: request.task.task_id,
+                    plan_version: 1,
+                    status: TaskPlanStatus::Accepted,
+                    steps: vec![read_executor_step(
+                        "inspect",
+                        "Inspect provider retry",
+                        Vec::new(),
+                    )?],
+                    reason: None,
+                },
+                guidance_applied: None,
+                child_session_ref: request.child_session_ref,
             },
-            guidance_applied: None,
-            child_session_ref: request.child_session_ref,
-        })
+        )))
     }
 
     async fn run_child_session<H, A>(
@@ -792,6 +801,151 @@ impl TaskChildSessionRunner for AlwaysRateLimitedControlChildRunner {
             anyhow::anyhow!("fixture synthesis remains rate limited"),
         )?
         .into())
+    }
+}
+
+#[async_trait]
+impl TaskChildSessionRunner for SuspendingPlannerChildRunner {
+    async fn run_planner_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: crate::TaskPlannerSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskPlannerSessionRunOutcome>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        self.initial_calls.fetch_add(1, Ordering::SeqCst);
+        let requested = crate::UserInputRequestedV1::new(crate::UserInputRequestV1 {
+            schema_version: crate::USER_INPUT_SCHEMA_VERSION,
+            identity: crate::UserInputIdentityV1 {
+                session_scope_id: crate::SessionScopeId::new(parent_session.session_scope_id())?,
+                root_logical_run_id: crate::LogicalRunId::new("planner-root-run")?,
+                source_thread_id: crate::AgentThreadId::new("planner")?,
+                request_id: crate::UserInputRequestId::new("planner-scope-question")?,
+                generation: 1,
+                source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+            },
+            source: crate::UserInputSourceV1::Planner {
+                task_id: request.task.task_id.clone(),
+            },
+            purpose: crate::UserInputPurposeV1::Clarification,
+            prompt: "Choose the subsystem to inspect".to_owned(),
+            questions: vec![crate::UserInputQuestionV1 {
+                id: "scope".to_owned(),
+                header: "Scope".to_owned(),
+                question: "Which subsystem should the task inspect?".to_owned(),
+                description: None,
+                required: true,
+                field: crate::UserInputFieldKindV1::Text {
+                    multiline: false,
+                    max_chars: 128,
+                },
+            }],
+            allowed_actions: vec![
+                crate::UserInputActionV1::Submit,
+                crate::UserInputActionV1::Decline,
+                crate::UserInputActionV1::CancelRun,
+            ],
+            requested_at_unix_ms: 10,
+            continuation: Some(crate::UserInputContinuationBindingV1 {
+                assistant_message_id: "planner-assistant-message".to_owned(),
+                tool_call_id: "planner-user-input-call".to_owned(),
+                provider_name: "test".to_owned(),
+                model_name: "planner".to_owned(),
+            }),
+        })?;
+        let public = crate::UserInputRequestStateV1 {
+            requested,
+            status: crate::UserInputStatusV1::Requested,
+            decision: None,
+            claim: None,
+            continuation: None,
+            resolution: None,
+        }
+        .public_view();
+        Ok(crate::TaskPlannerSessionRunOutcome::AwaitingUserInput(
+            Box::new(crate::TaskPlannerSessionAwaitingUserInput {
+                attempt_id: request.attempt_id,
+                request: public,
+                child_session_ref: request.child_session_ref,
+            }),
+        ))
+    }
+
+    async fn resume_planner_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskPlannerSessionResumeRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskPlannerSessionRunOutcome>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        self.resume_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::TaskPlannerSessionRunOutcome::Accepted(Box::new(
+            crate::TaskPlannerSessionRunOutput {
+                attempt_id: request.attempt_id,
+                accepted_plan: TaskPlanEntry {
+                    task_id: request.task.task_id,
+                    plan_version: 1,
+                    status: TaskPlanStatus::Accepted,
+                    steps: vec![read_executor_step(
+                        "inspect_runtime",
+                        "Inspect the runtime",
+                        Vec::new(),
+                    )?],
+                    reason: None,
+                },
+                guidance_applied: None,
+                child_session_ref: request.child_session_ref,
+            },
+        )))
+    }
+
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        Ok(successful_read_child_output(request))
+    }
+
+    async fn run_synthesis_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskSynthesisSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskSynthesisSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        let final_text = "task completed after planner clarification".to_owned();
+        Ok(crate::TaskSynthesisSessionRunOutput {
+            attempt_id: request.attempt_id,
+            outcome: crate::AgentRunOutcome::default(),
+            child_session_ref: request.child_session_ref.clone(),
+            final_answer_ref: AgentFinalAnswerRef {
+                session_ref: request.child_session_ref,
+                message_id: "planner-clarification-synthesis-final".to_owned(),
+                content_hash: super::hash_text(&final_text),
+                char_count: final_text.chars().count(),
+            },
+            artifact_refs: Vec::new(),
+            final_text,
+        })
     }
 }
 
@@ -1401,6 +1555,136 @@ async fn task_child_output_must_match_the_admitted_attempt_identity() -> Result<
                     })
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn planner_question_pauses_and_resumes_the_same_participant() -> Result<()> {
+    let initial_calls = Arc::new(AtomicUsize::new(0));
+    let resume_calls = Arc::new(AtomicUsize::new(0));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(SuspendingPlannerChildRunner {
+            initial_calls: Arc::clone(&initial_calls),
+            resume_calls: Arc::clone(&resume_calls),
+        });
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_planner_question")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect the selected subsystem".to_owned(),
+    };
+    let mut session = Session::new("planner", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let suspended = orchestrator
+        .run(
+            &mut session,
+            request.clone(),
+            options(),
+            options(),
+            options(),
+            options(),
+            8,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+    assert_eq!(suspended.status, TaskRunStatus::Paused);
+    assert_eq!(suspended.plan_version, None);
+    let pending = suspended
+        .pending_user_input
+        .expect("planner suspension must return the exact request");
+    assert!(matches!(
+        &pending.source,
+        crate::UserInputSourceV1::Planner { task_id } if task_id == &request.task_id
+    ));
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&request.task_id)
+        .cloned()
+        .expect("suspended task must remain projected");
+    let planner_attempts = task
+        .participant_attempts_for(TaskParticipantPurpose::Planner, None, None)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let [planner_attempt] = planner_attempts.as_slice() else {
+        panic!("suspension must retain one planner participant");
+    };
+    assert_eq!(
+        planner_attempt.status,
+        TaskParticipantAttemptStatus::Started
+    );
+
+    let route = crate::AgentUserInputRouteEntryV1 {
+        schema_version: crate::AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION,
+        route_id: crate::AgentRouteId::new("planner-question-route")?,
+        source_thread_id: pending.identity.source_thread_id.clone(),
+        source_attempt_id: crate::AgentRunAttemptId::new("root-attempt")?,
+        profile_id: crate::AgentProfileId::new("planner")?,
+        parent_thread_id: crate::AgentThreadId::new("root")?,
+        batch_id: None,
+        budget_scope_id: request.task_id.clone(),
+        isolation: TaskIsolationMode::SharedReadOnly,
+        child_session_ref: planner_attempt.child_session_ref.clone(),
+        request: pending.clone(),
+        status: crate::AgentRouteStatus::Requested,
+        updated_at_unix_ms: 11,
+    };
+    let command = crate::UserInputDecisionCommandV1 {
+        identity: pending.identity,
+        request_hash: pending.request_hash,
+        command_id: crate::UserInputCommandId::new("planner-question-answer")?,
+        decision: crate::UserInputDecisionV1::Submitted {
+            answers: vec![crate::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: crate::UserInputAnswerValueV1::Text {
+                    value: "runtime".to_owned(),
+                },
+            }],
+        },
+    };
+    let completed = orchestrator
+        .resume_planner_after_user_input(
+            &mut session,
+            request.clone(),
+            route,
+            command,
+            options(),
+            options(),
+            options(),
+            options(),
+            8,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resume_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(completed.status, TaskRunStatus::Completed);
+    assert_eq!(completed.plan_version, Some(1));
+    assert!(completed.pending_user_input.is_none());
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&request.task_id)
+        .cloned()
+        .expect("resumed task must remain projected");
+    let planner_attempts = task
+        .participant_attempts_for(TaskParticipantPurpose::Planner, None, None)
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(planner_attempts.len(), 1);
+    assert_eq!(
+        planner_attempts[0].attempt_id, planner_attempt.attempt_id,
+        "answer continuation must not create a second planner participant"
+    );
+    assert_eq!(
+        planner_attempts[0].status,
+        TaskParticipantAttemptStatus::Completed
+    );
     Ok(())
 }
 
@@ -2772,7 +3056,7 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
         .await?;
 
     assert_eq!(output.status, TaskRunStatus::Completed);
-    assert_eq!(output.plan_version, 1);
+    assert_eq!(output.plan_version, Some(1));
     assert_eq!(output.steps.len(), 1);
     assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
     assert_eq!(
@@ -3377,7 +3661,7 @@ async fn continue_run_skips_completed_steps_and_executes_remaining() -> Result<(
         .await?;
 
     assert_eq!(output.status, TaskRunStatus::Completed);
-    assert_eq!(output.plan_version, 1);
+    assert_eq!(output.plan_version, Some(1));
     assert_eq!(output.steps.len(), 1);
     assert_eq!(output.steps[0].step_id, TaskStepId::new("step_2")?);
     assert!(session.entries().iter().any(|entry| {
@@ -3495,7 +3779,7 @@ async fn guidance_review_applies_exact_text_only_to_model_selected_pending_steps
         .await?;
 
     assert_eq!(output.status, TaskRunStatus::Completed);
-    assert_eq!(output.plan_version, 1);
+    assert_eq!(output.plan_version, Some(1));
     let requests = executor_requests
         .lock()
         .expect("executor request lock should not be poisoned");
@@ -3592,7 +3876,7 @@ async fn guidance_review_replans_and_carries_completed_steps_forward() -> Result
         .await?;
 
     assert_eq!(output.status, TaskRunStatus::Completed);
-    assert_eq!(output.plan_version, 2);
+    assert_eq!(output.plan_version, Some(2));
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
@@ -3702,7 +3986,7 @@ async fn conversation_continuation_guidance_replans_v1_to_v2() -> Result<()> {
         .await?;
 
     assert_eq!(output.status, TaskRunStatus::Completed);
-    assert_eq!(output.plan_version, 2);
+    assert_eq!(output.plan_version, Some(2));
     let projection = session.task_state_projection();
     let task = projection
         .tasks

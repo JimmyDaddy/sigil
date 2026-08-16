@@ -24,15 +24,16 @@ use sigil_kernel::{
     TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskId, TaskIntegrationRunOutput, TaskIntegrationRunRequest,
     TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability,
-    TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId, TaskRouteStatus, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
-    TaskSynthesisSessionRunRequest, ToolApproval, ToolApprovalContext, ToolCall, ToolErrorKind,
-    ToolExecutionStatus, ToolOperation, ToolSpec, VerificationPolicy, WriteIsolationMode,
-    build_task_promotion_preview, changeset_only_child_tool_registry,
-    decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
-    task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
-    task_step_owner_agent_id,
+    TaskPlannerSessionAwaitingUserInput, TaskPlannerSessionResumeRequest,
+    TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
+    TaskPlannerWorktreeAvailability, TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId,
+    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
+    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval,
+    ToolApprovalContext, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolSpec,
+    VerificationPolicy, WriteIsolationMode, build_task_promotion_preview,
+    changeset_only_child_tool_registry, decode_changeset_only_child_output, stable_event_uuid,
+    stable_workspace_id, task_participant_child_task_id, task_participant_input_hash,
+    task_participant_logical_run_id, task_step_owner_agent_id,
 };
 use sigil_tools_builtin::LocalExecutionBackend;
 
@@ -2196,7 +2197,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         request: TaskPlannerSessionRunRequest,
         handler: &mut H,
         approval_handler: &mut A,
-    ) -> Result<TaskPlannerSessionRunOutput>
+    ) -> Result<TaskPlannerSessionRunOutcome>
     where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
@@ -2205,6 +2206,14 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             .planner
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("task planner role is not configured"))?;
+        let planner_input = if request.child_input.task_guidance_assessment.is_some() {
+            request
+                .child_input
+                .clone()
+                .suppress_tool(sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME)
+        } else {
+            request.child_input.clone()
+        };
         let step = participant_control_step("planner", "Plan task", AgentRole::Planner)?;
         let (mut child_session, child_thread, _child_task_id) = self.begin_isolated_participant(
             parent_session,
@@ -2213,11 +2222,12 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             request.attempt_id.clone(),
             0,
             request.child_session_ref.clone(),
-            request.child_input.clone(),
+            planner_input.clone(),
             request.options.clone(),
             step,
             planner,
         )?;
+        let planner_input = planner_input.with_source_thread_id(child_thread.thread_id.clone());
         let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
         let planner_run = {
             let mut participant_handler = TaskParticipantEventHandler { inner: handler };
@@ -2229,7 +2239,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 planner
                     .run_with_approval_input_and_tool_registry(
                         &mut child_session,
-                        request.child_input.clone(),
+                        planner_input.clone(),
                         request.options.clone(),
                         tools,
                         &mut participant_handler,
@@ -2250,7 +2260,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 planner
                     .run_with_approval_input_tool_registry_and_agent_delegate(
                         &mut child_session,
-                        request.child_input.clone(),
+                        planner_input.clone(),
                         request.options.clone(),
                         tools,
                         &mut participant_handler,
@@ -2279,6 +2289,31 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 return Err(error);
             }
         };
+        if let sigil_kernel::AgentRunDisposition::AwaitingUserInput(request_ref) =
+            &output.disposition
+        {
+            let pending = child_session
+                .user_input_projection()?
+                .request(&request_ref.identity)
+                .filter(|state| state.requested.request_hash == request_ref.request_hash)
+                .map(sigil_kernel::UserInputRequestStateV1::public_view)
+                .context("planner suspension lost its exact durable user-input request")?;
+            self.supervisor.record_task_planner_waiting_for_input(
+                parent_session,
+                handler,
+                &child_thread,
+                &request.task.task_id,
+                &request.child_session_ref,
+                pending.clone(),
+            )?;
+            return Ok(TaskPlannerSessionRunOutcome::AwaitingUserInput(Box::new(
+                TaskPlannerSessionAwaitingUserInput {
+                    attempt_id: request.attempt_id,
+                    request: pending,
+                    child_session_ref: request.child_session_ref,
+                },
+            )));
+        }
         let postprocessed = (|| -> Result<TaskPlannerSessionRunOutput> {
             let accepted_plan = child_session
                 .task_state_projection()
@@ -2338,7 +2373,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             })
         })();
         match postprocessed {
-            Ok(output) => Ok(output),
+            Ok(output) => Ok(TaskPlannerSessionRunOutcome::Accepted(Box::new(output))),
             Err(error) => {
                 self.supervisor.record_task_child_failure(
                     parent_session,
@@ -2349,6 +2384,269 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 Err(error)
             }
         }
+    }
+
+    async fn resume_planner_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskPlannerSessionResumeRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<TaskPlannerSessionRunOutcome>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let planner = self
+            .planner
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("task planner role is not configured"))?;
+        if request.route.child_session_ref != request.child_session_ref
+            || request.route.budget_scope_id != request.task.task_id
+            || request.route.request.identity != request.command.identity
+            || request.route.request.request_hash != request.command.request_hash
+            || !matches!(
+                &request.route.request.source,
+                sigil_kernel::UserInputSourceV1::Planner { task_id }
+                    if task_id == &request.task.task_id
+            )
+        {
+            anyhow::bail!("task planner continuation does not match its durable route");
+        }
+        let mut child_session = build_child_session(parent_session, &request.child_session_ref)?;
+        sigil_kernel::preview_user_input_decision(
+            &child_session,
+            &request.command,
+            crate::current_unix_time_ms(),
+        )?;
+        let receipt = sigil_kernel::accept_user_input_decision(
+            &mut child_session,
+            request.command.clone(),
+            crate::current_unix_time_ms(),
+        )?;
+        if !matches!(
+            request.command.decision,
+            sigil_kernel::UserInputDecisionV1::Submitted { .. }
+        ) {
+            anyhow::bail!("task planner continuation requires a submitted answer");
+        }
+        let physical_attempt_id = sigil_kernel::new_provider_physical_attempt_id();
+        let continuation = sigil_kernel::prepare_user_input_continuation(
+            &mut child_session,
+            &request.command.identity,
+            &request.command.request_hash,
+            "task-planner-supervisor",
+            &physical_attempt_id,
+            crate::current_unix_time_ms(),
+        )?;
+        if continuation.continuation.physical_attempt_id != physical_attempt_id {
+            anyhow::bail!("task planner continuation is owned by another physical attempt");
+        }
+        let child_thread =
+            self.supervisor
+                .resume_task_planner_thread(parent_session, handler, &request.route)?;
+        let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
+        let mut registered_route = request.route.clone();
+        registered_route.request = continuation.request.clone();
+        registered_route.status = AgentRouteStatus::Registered;
+        registered_route.updated_at_unix_ms = crate::current_unix_time_ms();
+        if let Err(error) = self.supervisor.update_chat_child_user_input_route(
+            parent_session,
+            handler,
+            &request.route,
+            registered_route.request.clone(),
+            registered_route.status,
+        ) {
+            let _ = sigil_kernel::reconcile_user_input_continuation_after_failed_run(
+                &mut child_session,
+                &request.command.identity,
+                &request.command.request_hash,
+                crate::current_unix_time_ms(),
+            );
+            self.supervisor
+                .restore_chat_child_blocked_after_resume_failure(
+                    parent_session,
+                    handler,
+                    &child_thread.thread_id,
+                    &request.route.route_id,
+                    "failed to commit resumed planner route ownership",
+                )?;
+            return Err(error.context("failed to register resumed planner route ownership"));
+        }
+        let input = request
+            .child_input
+            .with_initial_provider_physical_attempt_id(physical_attempt_id);
+        let planner_run = {
+            let mut participant_handler = TaskParticipantEventHandler { inner: handler };
+            let tools = planner_tools_with_discovery(
+                planner.tool_registry(),
+                self.planner_discovery_max_probes,
+            );
+            if self.planner_discovery_max_probes == 0 {
+                planner
+                    .run_with_approval_input_and_tool_registry(
+                        &mut child_session,
+                        input,
+                        request.options.clone(),
+                        tools,
+                        &mut participant_handler,
+                        approval_handler,
+                    )
+                    .await
+            } else {
+                let mut discovery_delegate = TaskDiscoveryDelegate::new(
+                    self.supervisor.clone(),
+                    parent_session,
+                    request.task.clone(),
+                    request.attempt_id.clone(),
+                    child_thread.thread_id.clone(),
+                    Arc::clone(&self.subagent_read),
+                    request.discovery_options.clone(),
+                    self.planner_discovery_max_probes,
+                );
+                planner
+                    .run_with_approval_input_tool_registry_and_agent_delegate(
+                        &mut child_session,
+                        input,
+                        request.options.clone(),
+                        tools,
+                        &mut participant_handler,
+                        approval_handler,
+                        &mut discovery_delegate,
+                    )
+                    .await
+            }
+        };
+        let output = match planner_run {
+            Ok(output) => output,
+            Err(error) => {
+                let reconciled = sigil_kernel::reconcile_user_input_continuation_after_failed_run(
+                    &mut child_session,
+                    &request.command.identity,
+                    &request.command.request_hash,
+                    crate::current_unix_time_ms(),
+                );
+                let route_recovery = reconciled.and_then(|request| {
+                    let status = if request.status == sigil_kernel::UserInputStatusV1::Resolved {
+                        AgentRouteStatus::Stale
+                    } else {
+                        AgentRouteStatus::Registered
+                    };
+                    self.supervisor.update_chat_child_user_input_route(
+                        parent_session,
+                        handler,
+                        &registered_route,
+                        request,
+                        status,
+                    )
+                });
+                let thread_recovery = self
+                    .supervisor
+                    .restore_chat_child_blocked_after_resume_failure(
+                        parent_session,
+                        handler,
+                        &child_thread.thread_id,
+                        &request.route.route_id,
+                        &format!("{error:#}"),
+                    );
+                if let Err(recovery_error) = route_recovery.and(thread_recovery) {
+                    return Err(error.context(format!(
+                        "planner continuation recovery also failed: {recovery_error:#}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        child_session.append_user_input_lifecycle(vec![
+            sigil_kernel::UserInputLifecycleEntryV1::Resolved(sigil_kernel::UserInputResolvedV1 {
+                schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+                identity: request.command.identity.clone(),
+                request_hash: request.command.request_hash.clone(),
+                resolution: sigil_kernel::UserInputResolutionV1::Consumed,
+                resolved_at_unix_ms: crate::current_unix_time_ms(),
+            }),
+        ])?;
+        let resolved_request = child_session
+            .user_input_projection()?
+            .request(&receipt.request.identity)
+            .map(sigil_kernel::UserInputRequestStateV1::public_view)
+            .context("resolved planner input disappeared from its child session")?;
+        self.supervisor.update_chat_child_user_input_route(
+            parent_session,
+            handler,
+            &request.route,
+            resolved_request,
+            AgentRouteStatus::Resolved,
+        )?;
+        if let sigil_kernel::AgentRunDisposition::AwaitingUserInput(request_ref) =
+            &output.disposition
+        {
+            let pending = child_session
+                .user_input_projection()?
+                .request(&request_ref.identity)
+                .filter(|state| state.requested.request_hash == request_ref.request_hash)
+                .map(sigil_kernel::UserInputRequestStateV1::public_view)
+                .context("resumed planner lost its next durable user-input request")?;
+            self.supervisor.record_task_planner_waiting_for_input(
+                parent_session,
+                handler,
+                &child_thread,
+                &request.task.task_id,
+                &request.child_session_ref,
+                pending.clone(),
+            )?;
+            return Ok(TaskPlannerSessionRunOutcome::AwaitingUserInput(Box::new(
+                TaskPlannerSessionAwaitingUserInput {
+                    attempt_id: request.attempt_id,
+                    request: pending,
+                    child_session_ref: request.child_session_ref,
+                },
+            )));
+        }
+        let accepted_plan = child_session
+            .task_state_projection()
+            .tasks
+            .get(&request.task.task_id)
+            .and_then(|task| task.latest_plan_version)
+            .and_then(|version| {
+                child_session
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        sigil_kernel::SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                            if plan.task_id == request.task.task_id
+                                && plan.plan_version == version
+                                && plan.status == sigil_kernel::TaskPlanStatus::Accepted =>
+                        {
+                            Some(plan.clone())
+                        }
+                        _ => None,
+                    })
+            })
+            .context("resumed planner did not produce an accepted plan")?;
+        let materialized = super::AgentResultMaterialization::inline(
+            format!("accepted task plan v{}", accepted_plan.plan_version),
+            None,
+        );
+        self.supervisor.record_task_child_result(
+            parent_session,
+            handler,
+            &child_thread,
+            request.child_session_ref.clone(),
+            TaskChildSessionStatus::Completed,
+            &materialized,
+            &output.outcome,
+            Some(usage_summary_from_stats(child_session.stats())),
+        )?;
+        Ok(TaskPlannerSessionRunOutcome::Accepted(Box::new(
+            TaskPlannerSessionRunOutput {
+                attempt_id: request.attempt_id,
+                accepted_plan,
+                guidance_applied: None,
+                child_session_ref: request.child_session_ref,
+            },
+        )))
     }
 
     async fn run_child_session<H, A>(
@@ -3669,7 +3967,7 @@ fn agent_approval_route_binding(
     })
 }
 
-pub(super) fn build_child_session(
+pub(crate) fn build_child_session(
     parent_session: &Session,
     child_session_ref: &SessionRef,
 ) -> Result<Session> {

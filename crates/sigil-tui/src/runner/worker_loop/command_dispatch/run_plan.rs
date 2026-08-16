@@ -4,6 +4,7 @@ use super::super::agent_runtime::{
     run_prepared_plan_review,
 };
 use super::*;
+use sigil_kernel::EventHandler;
 
 fn record_tui_revision_spawn_failure(
     session: &mut sigil_kernel::Session,
@@ -1076,7 +1077,7 @@ where
                                 session.entries(),
                             )
                             .ok()?
-                            .pending()
+                            .unresolved()
                             .find(|route| {
                                 route.request.identity.request_id.as_str() == request_id
                                     && route.request.identity.generation == generation
@@ -1117,22 +1118,203 @@ where
                             continue;
                         }
                     };
-                let background_child_route =
-                    state.session.current.as_ref().is_some_and(|session| {
-                        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
-                            session.entries(),
+                let child_route = state.session.current.as_ref().and_then(|session| {
+                    sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+                        session.entries(),
+                    )
+                    .ok()
+                    .and_then(|projection| {
+                        projection
+                            .route_for_request(&exact.identity, &exact.request_hash)
+                            .cloned()
+                    })
+                    .filter(|route| {
+                        matches!(
+                            route.status,
+                            sigil_kernel::AgentRouteStatus::Requested
+                                | sigil_kernel::AgentRouteStatus::Registered
                         )
-                        .ok()
-                        .and_then(|projection| {
-                            projection
-                                .route_for_request(&exact.identity, &exact.request_hash)
-                                .cloned()
-                        })
-                        .is_some_and(|route| {
-                            route.status == sigil_kernel::AgentRouteStatus::Requested
-                        })
+                    })
+                });
+                if let Some(route) = child_route.as_ref().filter(|route| {
+                    matches!(
+                        route.request.source,
+                        sigil_kernel::UserInputSourceV1::Planner { .. }
+                    )
+                }) {
+                    let command = sigil_kernel::UserInputDecisionCommandV1 {
+                        identity: exact.identity,
+                        request_hash: exact.request_hash,
+                        command_id,
+                        decision,
+                    };
+                    let mut handler = ChannelEventHandler::new(message_tx.clone());
+                    if !matches!(
+                        command.decision,
+                        sigil_kernel::UserInputDecisionV1::Submitted { .. }
+                    ) {
+                        let result = state.session.current.as_mut().map_or_else(
+                            || Err(anyhow::anyhow!("session state is unavailable for task planner input")),
+                            |session| {
+                                sigil_runtime::agent_supervisor::task_role_runtime::settle_task_planner_user_input_without_continuation(
+                                    session,
+                                    route,
+                                    command,
+                                )
+                            },
+                        );
+                        match result {
+                            Ok((receipt, controls)) => {
+                                for control in controls {
+                                    if let Err(error) = handler.handle(RunEvent::Control(control)) {
+                                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                            "task planner input event delivery failed: {error:#}"
+                                        )));
+                                    }
+                                }
+                                let entries = state
+                                    .session
+                                    .current
+                                    .as_ref()
+                                    .map(|session| session.entries().to_vec())
+                                    .unwrap_or_default();
+                                let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+                                    request: receipt.request,
+                                    continuation_started: false,
+                                    entries,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                    "task planner input decision failed: {error:#}"
+                                )));
+                            }
+                        }
+                        continue;
+                    }
+                    let Some(mut run_session) = state.session.current.take() else {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "session state is unavailable for task planner input".to_owned(),
+                        ));
+                        continue;
+                    };
+                    let task = run_session
+                        .task_state_projection()
+                        .tasks
+                        .get(&route.budget_scope_id)
+                        .cloned();
+                    let Some(task) = task else {
+                        state.session.current = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "task planner input references an unavailable task".to_owned(),
+                        ));
+                        continue;
+                    };
+                    let task_id = task.task_id.clone();
+                    let task_id_value = task_id.as_str().to_owned();
+                    let effective_config =
+                        effective_orchestration_root_config(root_config, &run_session);
+                    let (approval_tx, approval_rx) = mpsc::channel();
+                    let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                        Arc::new(std::sync::Mutex::new(Vec::new()));
+                    elicitation_handler
+                        .set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                    let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                    let run_id = state.allocate_run_id();
+                    let (
+                        cancellation_owner,
+                        cancellation_recorder,
+                        cancellation_handle,
+                        cancellation_task_guard,
+                    ) = match prepare_task_run_cancellation(&mut run_session, &task_id) {
+                        Ok(cancellation) => cancellation,
+                        Err(error) => {
+                            state.session.current = Some(run_session);
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            continue;
+                        }
+                    };
+                    if let Err(error) = state
+                        .acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                    {
+                        state.session.current = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                    let prepared = runtime.block_on(
+                        sigil_runtime::agent_supervisor::task_role_runtime::prepare_task_planner_user_input_continuation(
+                            &effective_config,
+                            options,
+                            agent.tool_registry(),
+                            state.agent.supervisor.clone(),
+                            role_provider_builder.as_ref(),
+                            &mut run_session,
+                            route,
+                            &command,
+                        ),
+                    );
+                    let prepared = match prepared {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            state.run.route_execution_owner = None;
+                            state.session.current = Some(run_session);
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                "task planner continuation preparation failed: {error:#}"
+                            )));
+                            continue;
+                        }
+                    };
+                    let entries = run_session.entries().to_vec();
+                    let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+                        request: prepared.receipt.request.clone(),
+                        continuation_started: true,
+                        entries,
                     });
-                if background_child_route {
+                    let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                        task_id: task_id_value.clone(),
+                        objective: task.objective.clone(),
+                    });
+                    let url_capability_registrar = run_session.user_url_capability_registrar();
+                    let image_attachment_resolver = run_session.image_attachment_resolver();
+                    let cancellation_target = RunCancellationTarget::Task {
+                        task_id: task_id_value.clone(),
+                    };
+                    let handle = spawn_task_planner_input(
+                        runtime,
+                        TaskPlannerInputSpawn {
+                            run_id,
+                            session: run_session,
+                            task_id,
+                            task_id_value,
+                            parent_session_ref: task.parent_session_ref,
+                            objective: task.objective,
+                            route: prepared.route,
+                            command,
+                            task_runtime: prepared.runtime,
+                            max_plan_steps: effective_config.task.max_plan_steps,
+                            task_result_tx: state.run.result_tx.clone(),
+                            approval_rx,
+                            handler,
+                            elicitation_audit_buffer: run_elicitation_audit_buffer,
+                            cancellation_handle,
+                            cancellation_task_guard,
+                            tool_artifact_read_budget,
+                        },
+                    );
+                    state.run.active = Some(ActiveRun {
+                        run_id,
+                        handle,
+                        approval_tx,
+                        elicitation_audit_buffer,
+                        cancellation_owner,
+                        cancellation_recorder,
+                        cancellation_target,
+                        url_capability_registrar,
+                        image_attachment_resolver,
+                    });
+                    continue;
+                }
+                if child_route.is_some() {
                     let effective_config = state
                         .session
                         .current

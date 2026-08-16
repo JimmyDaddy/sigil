@@ -31,12 +31,27 @@ pub trait TaskChildSessionRunner: Send + Sync {
         _request: TaskPlannerSessionRunRequest,
         _handler: &mut H,
         _approval_handler: &mut A,
-    ) -> Result<TaskPlannerSessionRunOutput>
+    ) -> Result<TaskPlannerSessionRunOutcome>
     where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
         bail!("task child session runner does not support isolated planner sessions")
+    }
+
+    /// Resumes an exact suspended planner transcript after its durable user answer was accepted.
+    async fn resume_planner_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        _request: TaskPlannerSessionResumeRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskPlannerSessionRunOutcome>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        bail!("task child session runner does not support planner input continuation")
     }
 
     /// Runs one task child session and returns its bounded terminal output.

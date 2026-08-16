@@ -36,7 +36,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
         request: TaskPlannerSessionRunRequest,
         handler: &mut H,
         approval_handler: &mut A,
-    ) -> Result<TaskPlannerSessionRunOutput>
+    ) -> Result<TaskPlannerSessionRunOutcome>
     where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
@@ -77,12 +77,14 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
                 }
                 _ => None,
             });
-        Ok(TaskPlannerSessionRunOutput {
-            attempt_id: request.attempt_id,
-            accepted_plan,
-            guidance_applied,
-            child_session_ref: request.child_session_ref,
-        })
+        Ok(TaskPlannerSessionRunOutcome::Accepted(Box::new(
+            TaskPlannerSessionRunOutput {
+                attempt_id: request.attempt_id,
+                accepted_plan,
+                guidance_applied,
+                child_session_ref: request.child_session_ref,
+            },
+        )))
     }
 
     async fn run_child_session<H, A>(

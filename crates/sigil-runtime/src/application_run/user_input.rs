@@ -139,7 +139,7 @@ pub fn application_user_input_request_view_by_key(
         return Ok(request);
     }
     sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&entries)?
-        .pending()
+        .unresolved()
         .find(|route| {
             route.request.identity.request_id == request_id
                 && route.request.identity.generation == generation
@@ -163,7 +163,7 @@ pub fn application_session_has_unresolved_user_input(
         return Ok(true);
     }
     if sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&entries)?
-        .pending()
+        .unresolved()
         .next()
         .is_some()
     {
@@ -189,7 +189,64 @@ pub fn application_recoverable_user_input_decision(
     expected_session_scope_id: &str,
 ) -> Result<Option<sigil_kernel::UserInputDecisionCommandV1>> {
     let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
-    sigil_kernel::recoverable_user_input_decision_from_entries(&entries)
+    if let Some(command) = sigil_kernel::recoverable_user_input_decision_from_entries(&entries)? {
+        return Ok(Some(command));
+    }
+    recoverable_agent_user_input_decision_from_child_sessions(session_path, &entries)
+}
+
+/// Reconstructs one exact accepted command owned by a routed child session.
+///
+/// Parent routes mirror only public lifecycle state. Private answer values remain in the child
+/// transcript and are loaded only for controller-owned exact-command recovery.
+pub fn recoverable_agent_user_input_decision_from_child_sessions(
+    parent_session_path: &Path,
+    parent_entries: &[sigil_kernel::SessionLogEntry],
+) -> Result<Option<sigil_kernel::UserInputDecisionCommandV1>> {
+    let parent_dir = parent_session_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let projection =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(parent_entries)?;
+    let mut recovered = Vec::new();
+    for route in projection.unresolved() {
+        if !matches!(
+            route.request.source,
+            sigil_kernel::UserInputSourceV1::Agent
+                | sigil_kernel::UserInputSourceV1::Planner { .. }
+        ) {
+            continue;
+        }
+        let child_path = route.child_session_ref.resolve(parent_dir);
+        let child_entries = sigil_kernel::JsonlSessionStore::read_entries(&child_path)
+            .with_context(|| {
+                format!(
+                    "failed to read routed child session {}",
+                    child_path.display()
+                )
+            })?;
+        let Some(command) =
+            sigil_kernel::recoverable_user_input_decision_from_entries(&child_entries)?
+        else {
+            continue;
+        };
+        if command.identity != route.request.identity
+            || command.request_hash != route.request.request_hash
+            || route
+                .request
+                .answer_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.command_id != command.command_id)
+        {
+            bail!("routed child recovery command does not match its parent binding");
+        }
+        recovered.push(command);
+    }
+    match recovered.len() {
+        0 => Ok(None),
+        1 => Ok(recovered.pop()),
+        _ => bail!("session contains multiple routed child answers awaiting continuation"),
+    }
 }
 
 /// Accepts one exact user-input decision and prepares its continuation when required.
@@ -261,6 +318,125 @@ pub async fn prepare_application_user_input_decision(
             receipt,
             continuation: None,
             revision_request,
+        });
+    }
+    let planner_route =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&initial_entries)
+            .map_err(ApplicationRunPrepareError::execution)?
+            .route_for_request(&request.identity, &request.request_hash)
+            .filter(|route| {
+                matches!(
+                    route.request.source,
+                    sigil_kernel::UserInputSourceV1::Planner { .. }
+                )
+            })
+            .cloned();
+    if let Some(route) = planner_route {
+        let command = sigil_kernel::UserInputDecisionCommandV1 {
+            identity: request.identity.clone(),
+            request_hash: request.request_hash.clone(),
+            command_id: request.command_id.clone(),
+            decision: request.decision.clone(),
+        };
+        let public_prompt = "Continue task planning after answering a requested question";
+        let mut prepared = prepare_application_run(
+            ApplicationRunRequest {
+                config_path: request.config_path,
+                launch_cwd: request.launch_cwd,
+                prompt: public_prompt.to_owned(),
+                run_id: request.run_id,
+                session_path: Some(request.session_path),
+                session_attachment: request.session_attachment,
+                interaction: request.interaction,
+                permission_mode: request.permission_mode,
+                model_connection_id: None,
+                model_name: None,
+                model_selection_binding: None,
+                route_recovery_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                constraints: None,
+            },
+            services,
+        )
+        .await?;
+        if prepared.execution.session.session_scope_id() != request.expected_session_scope_id {
+            return Err(ApplicationRunPrepareError::InvalidInvocation {
+                message: "durable session identity changed before planner answer".to_owned(),
+            });
+        }
+        crate::agent_supervisor::task_role_runtime::validate_task_planner_user_input_route(
+            &prepared.execution.session,
+            &route,
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        let child = crate::agent_supervisor::build_child_session(
+            &prepared.execution.session,
+            &route.child_session_ref,
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        sigil_kernel::preview_user_input_decision(&child, &command, current_unix_time_ms())
+            .map_err(ApplicationRunPrepareError::execution)?;
+        if !matches!(
+            command.decision,
+            sigil_kernel::UserInputDecisionV1::Submitted { .. }
+        ) {
+            let (receipt, _) = crate::agent_supervisor::task_role_runtime::settle_task_planner_user_input_without_continuation(
+                &mut prepared.execution.session,
+                &route,
+                command,
+            )
+            .map_err(ApplicationRunPrepareError::execution)?;
+            return Ok(PreparedApplicationUserInputDecision {
+                receipt,
+                continuation: None,
+                revision_request: None,
+            });
+        }
+        let task_execution = prepared
+            .execution
+            .task_execution
+            .take()
+            .context("task planner continuation runtime is unavailable")
+            .map_err(ApplicationRunPrepareError::execution)?;
+        let ApplicationTaskExecutionRuntime {
+            root_config,
+            options,
+            base_registry,
+            agent_supervisor,
+            role_provider_builder,
+        } = task_execution;
+        let max_plan_steps = root_config.task.max_plan_steps;
+        let prepared_planner = crate::agent_supervisor::task_role_runtime::prepare_task_planner_user_input_continuation(
+            &root_config,
+            &options,
+            &base_registry,
+            agent_supervisor,
+            role_provider_builder.as_ref(),
+            &mut prepared.execution.session,
+            &route,
+            &command,
+        )
+        .await
+        .map_err(ApplicationRunPrepareError::provider_unavailable)?;
+        let crate::agent_supervisor::task_role_runtime::PreparedTaskPlannerUserInputContinuation {
+            runtime,
+            receipt,
+            route,
+        } = prepared_planner;
+        prepared.execution.kind = ApplicationRunExecutionKind::TaskPlannerUserInput {
+            runtime: Box::new(runtime),
+            route: Box::new(route),
+            command: Box::new(command),
+            max_plan_steps,
+        };
+        prepared.execution.plan_review_runtime = None;
+        return Ok(PreparedApplicationUserInputDecision {
+            receipt,
+            continuation: Some(prepared),
+            revision_request: None,
         });
     }
     if request.identity.session_scope_id.as_str() != request.expected_session_scope_id {

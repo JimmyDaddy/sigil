@@ -2475,6 +2475,9 @@ where
                             | AgentRunPurpose::TaskPlanner(_)
                     )
                 ) && !plan_review_submit_only
+                    && !suppressed_tool_names
+                        .iter()
+                        .any(|name| name == crate::REQUEST_USER_INPUT_TOOL_NAME)
                     || user_input_root_logical_run_id.is_some()
                 {
                     tool_specs.push(crate::request_user_input_tool_spec());
@@ -3168,7 +3171,11 @@ where
                         )?;
                         continue;
                     }
-                    if call.name == crate::REQUEST_USER_INPUT_TOOL_NAME {
+                    if call.name == crate::REQUEST_USER_INPUT_TOOL_NAME
+                        && !suppressed_tool_names
+                            .iter()
+                            .any(|name| name == crate::REQUEST_USER_INPUT_TOOL_NAME)
+                    {
                         let model_name = session.model_name().to_owned();
                         match handle_request_user_input_call(
                             session,
