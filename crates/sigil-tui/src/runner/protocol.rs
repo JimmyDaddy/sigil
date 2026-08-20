@@ -708,6 +708,12 @@ pub enum WorkerMessage {
         start_mode: PlanTaskStartMode,
         entries: Vec<SessionLogEntry>,
     },
+    /// RFC-0067: the adopted Task is held by a durable typed blocker with available actions.
+    TaskAdmissionBlocked {
+        task_id: String,
+        blocker: sigil_kernel::TaskBlockerV1,
+        entries: Vec<SessionLogEntry>,
+    },
     PlanTaskCreationFailed {
         plan_id: String,
         error: String,

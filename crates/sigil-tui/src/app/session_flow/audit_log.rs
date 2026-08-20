@@ -436,6 +436,39 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 truncate_session_view_text(entry.stale_reason.as_deref().unwrap_or("-"), 48)
             )
         }
+        ControlEntry::ExecutablePlanCandidatePreparedV1(candidate) => format!(
+            "[ctl] plan candidate {} task={} steps={} hash={}",
+            candidate.plan_id.as_str(),
+            candidate.task_id.as_str(),
+            candidate.task_plan.steps.len(),
+            truncate_session_view_text(&candidate.candidate_hash, 16)
+        ),
+        ControlEntry::PlanReadyCommittedV1(marker) => format!(
+            "[ctl] plan ready {} candidate={} attempt={}",
+            marker.plan_id.as_str(),
+            truncate_session_view_text(&marker.candidate_hash, 16),
+            marker.attempt_id
+        ),
+        ControlEntry::PlanCompileFailedV1(failure) => format!(
+            "[ctl] plan compile failed {} code={} step={}",
+            failure.plan_id.as_str(),
+            failure.reason_code,
+            failure.affected_step.as_deref().unwrap_or("-")
+        ),
+        ControlEntry::PlanExecutionAdoptedV1(adoption) => format!(
+            "[ctl] plan adopted {} task={} candidate={} command={} mode={:?}",
+            adoption.plan_id.as_str(),
+            adoption.task_id.as_str(),
+            truncate_session_view_text(&adoption.candidate_hash, 16),
+            adoption.command_id,
+            adoption.start_mode
+        ),
+        ControlEntry::TaskAdmissionAttemptedV1(attempt) => format!(
+            "[ctl] task admission {} ordinal={} outcome={:?}",
+            attempt.task_id.as_str(),
+            attempt.ordinal,
+            attempt.outcome
+        ),
         ControlEntry::TaskRun(run) => format!(
             "[ctl] task {} status={}",
             run.task_id.as_str(),

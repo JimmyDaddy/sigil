@@ -7,8 +7,8 @@ use sigil_kernel::{
     CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationInputKind,
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
     ConversationInputTarget, JsonlSessionStore, ModelMessage, MultiAgentMode,
-    PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk, ReasoningEffort,
-    Session, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TaskAdmissionReason,
+    PlanArtifactProjection, PlanTaskStartMode, ProviderChunk, ReasoningEffort, Session,
+    SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TaskAdmissionReason,
     TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPauseRequest,
     TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
     TaskStepMode, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory,
@@ -22,8 +22,9 @@ use super::{
     common::{
         PlannedProvider, StreamPlan, planned_role_provider_builder,
         planned_role_provider_builder_with_stream_start_signal, routed_test_root_config,
-        spawn_test_worker, spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks,
-        test_root_config, wait_for_session_entry,
+        routed_unauthenticated_test_root_config, spawn_test_worker,
+        spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
+        wait_for_session_entry,
     },
 };
 
@@ -1827,7 +1828,7 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-plan-handoff-e2e.jsonl");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
     let draft_args = r#"{
   "schema_version": 2,
   "summary": "Inspect approved README plan",
@@ -1947,21 +1948,25 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
     assert_eq!(created_task.plan_hash, draft.plan_hash);
     assert_eq!(created_task.task_plan_version, 1);
     assert_eq!(created_task.step_mapping.len(), 2);
+    // RFC-0067: the single adoption authority carries the accepted plan; old multi-record
+    // promotion artifacts no longer exist.
     assert!(entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision))
-            if decision.decision == PlanDecision::Accepted
+        SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(_))
     )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
-            if plan.task_id == created_task.task_id
-                && plan.status == TaskPlanStatus::Accepted
-                && plan.steps.len() == 2
-    )));
+    let projection = sigil_kernel::TaskStateProjection::from_entries(&entries);
+    let adopted_plan = projection
+        .tasks
+        .get(&created_task.task_id)
+        .and_then(|task| task.plans.get(&1))
+        .expect("approved plan should be promoted to an executable task plan");
+    assert_eq!(adopted_plan.status, TaskPlanStatus::Accepted);
+    assert_eq!(adopted_plan.steps.len(), 2);
     assert!(!entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(_))
+            | SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
+            | SessionLogEntry::Control(ControlEntry::TaskPlan(_))
     )));
 
     let started = worker
@@ -2003,16 +2008,11 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
     assert_eq!(task_id, created_task.task_id.as_str());
     assert_eq!(status, TaskRunStatus::Completed);
 
-    let task_plan = entries
-        .iter()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
-                if plan.task_id == created_task.task_id =>
-            {
-                Some(plan)
-            }
-            _ => None,
-        })
+    let task_projection = sigil_kernel::TaskStateProjection::from_entries(&entries);
+    let task_plan = task_projection
+        .tasks
+        .get(&created_task.task_id)
+        .and_then(|task| task.plans.get(&1))
         .expect("approved plan should be promoted to an executable task plan");
     assert_eq!(task_plan.status, TaskPlanStatus::Accepted);
     assert_eq!(task_plan.steps.len(), 2);
@@ -2040,11 +2040,14 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
         SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(attempt))
             if attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner
     )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(created))
-            if created.task_id == created_task.task_id
-    )));
+    let plan_artifacts = sigil_kernel::PlanArtifactProjection::from_entries(&entries);
+    assert!(
+        plan_artifacts
+            .adoptions
+            .values()
+            .flatten()
+            .any(|adoption| adoption.task_id == created_task.task_id)
+    );
     assert!(!entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(_))

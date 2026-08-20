@@ -38,11 +38,10 @@ use super::{
         terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
         worker_event::WorkerMcpRuntimeEventSender,
         worker_loop::{
-            CreateTaskFromPlanRequest, RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers,
-            WorkerLoopSessionAttachment, WorkerLoopTerminalRuntime,
-            agent_result_continuation_run_result, append_mcp_elicitation_audits,
-            artifact_gc_task_metrics, cancel_terminal_task, close_agent_thread,
-            create_task_from_plan, durable_terminal_tool_result_metadata, next_task_id,
+            RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers, WorkerLoopSessionAttachment,
+            WorkerLoopTerminalRuntime, adopt_plan_run, agent_result_continuation_run_result,
+            append_mcp_elicitation_audits, artifact_gc_task_metrics, cancel_terminal_task,
+            close_agent_thread, durable_terminal_tool_result_metadata, next_task_id,
             partition_agent_result_continuations,
             pending_agent_continuations_from_active_projection,
             pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
@@ -82,7 +81,38 @@ fn commit_explicit_plan_review_draft(
         workspace_snapshot_id,
     )?
     .expect("structured plan review draft");
-    PlanReviewCoordinator::commit_draft_from_child(session, &draft, &request, 3)?;
+    PlanReviewCoordinator::commit_draft_from_child(
+        session,
+        &draft,
+        &request,
+        &sigil_kernel::PlanCompileInputV1 {
+            source_attempt_id: "attempt-1".to_owned(),
+            source_turn_id: "message-1".to_owned(),
+            task_config_contract_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                "test",
+            ),
+            planner_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "v2",
+            ),
+            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "v2",
+            ),
+            intent_schema_hash: Some(sigil_kernel::stable_event_uuid(
+                "sigil-intent-schema-v1",
+                "v1",
+            )),
+            max_plan_steps: 64,
+            workspace_id: Some(sigil_kernel::stable_event_uuid(
+                "sigil-test-workspace-v1",
+                "intent-workspace",
+            )),
+            session_scope_id: Some(session.session_scope_id().to_owned()),
+        },
+        3,
+    )?;
     Ok(draft)
 }
 
@@ -160,42 +190,55 @@ fn task_from_plan_reconciles_decision_only_crash_prefix_with_the_same_task_id() 
     );
     let mut current_session = Some(session);
 
-    let created = create_task_from_plan(
+    let mut session = current_session.take().expect("session");
+    let adopted = adopt_plan_run(
         &root_config,
         &workspace_root,
         &session_log_path,
-        &mut current_session,
-        CreateTaskFromPlanRequest {
-            plan_id: draft.plan_id.as_str().to_owned(),
-            expected_plan_hash: draft.plan_hash,
-            start_mode: PlanTaskStartMode::CreateAndRun,
-            permission_grant: None,
-        },
+        &mut session,
+        draft.plan_id.as_str().to_owned(),
+        draft.plan_hash,
+        PlanTaskStartMode::CreateAndRun,
+        None,
+        sigil_kernel::PlanRunCommandSource::TuiKeyboard,
+        None,
     )
     .map_err(anyhow::Error::msg)?;
 
-    assert_eq!(created.task_id, stable_task_id);
+    assert_eq!(adopted.receipt.task_id, stable_task_id);
+    // RFC-0067: exactly one adoption authority and no multi-record promotion artifacts.
+    let entries = session.entries();
     assert_eq!(
-        created
-            .entries
+        entries
             .iter()
-            .filter(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskRun(_))))
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(_))
+            ))
             .count(),
         1
     );
     assert_eq!(
-        created
-            .entries
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskRun(_))))
+            .count(),
+        0,
+        "adoption must not append multi-record promotion artifacts"
+    );
+    assert_eq!(
+        entries
             .iter()
             .filter(|entry| matches!(
                 entry,
                 SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
             ))
             .count(),
-        1
+        1,
+        "only the seeded crash-prefix decision remains; adoption adds none"
     );
-    assert_eq!(created.entry.task_plan_version, 1);
-    assert_eq!(created.entry.task_id, stable_task_id);
+    assert_eq!(adopted.entry.task_plan_version, 1);
+    assert_eq!(adopted.entry.task_id, stable_task_id);
     Ok(())
 }
 
@@ -269,25 +312,25 @@ fn task_from_plan_acceptance_atomically_admits_and_binds_model_proposed_intents(
     )?;
     let mut current_session = Some(session);
 
-    let created = create_task_from_plan(
+    let mut session = current_session.take().expect("session");
+    let adopted = adopt_plan_run(
         &root_config,
         &workspace_root,
         &session_log_path,
-        &mut current_session,
-        CreateTaskFromPlanRequest {
-            plan_id: draft.plan_id.as_str().to_owned(),
-            expected_plan_hash: draft.plan_hash,
-            start_mode: PlanTaskStartMode::CreatePaused,
-            permission_grant: None,
-        },
+        &mut session,
+        draft.plan_id.as_str().to_owned(),
+        draft.plan_hash,
+        PlanTaskStartMode::CreatePaused,
+        None,
+        sigil_kernel::PlanRunCommandSource::TuiKeyboard,
+        None,
     )
     .map_err(anyhow::Error::msg)?;
 
-    let session = current_session.expect("task creation should retain the durable session");
     let task = session
         .task_state_projection()
         .tasks
-        .get(&created.task_id)
+        .get(&adopted.receipt.task_id)
         .cloned()
         .expect("accepted task should exist");
     let accepted_plan = task
@@ -331,16 +374,15 @@ fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
-    let draft = plan_draft_created_entry(
+    let draft = commit_explicit_plan_review_draft(
+        &mut session,
+        "Inspect the workspace",
+        "anchor-plan-review",
         r#"```sigil-plan-v2
 {"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
-        PlanSourceRef::default(),
-        1,
         base_snapshot,
-    )?
-    .expect("structured plan draft");
-    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    )?;
     let stable_task_id = task_id_from_plan_draft(&draft)?;
     let objective = plan_task_input_from_draft(&draft);
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
@@ -377,51 +419,63 @@ fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates
     );
     let mut current_session = Some(session);
 
-    let created = create_task_from_plan(
+    let mut session = current_session.take().expect("session");
+    let adopted = adopt_plan_run(
         &root_config,
         &workspace_root,
         &session_log_path,
-        &mut current_session,
-        CreateTaskFromPlanRequest {
-            plan_id: draft.plan_id.as_str().to_owned(),
-            expected_plan_hash: draft.plan_hash,
-            start_mode: PlanTaskStartMode::CreateAndRun,
-            permission_grant: None,
-        },
+        &mut session,
+        draft.plan_id.as_str().to_owned(),
+        draft.plan_hash,
+        PlanTaskStartMode::CreateAndRun,
+        None,
+        sigil_kernel::PlanRunCommandSource::TuiKeyboard,
+        None,
     )
     .map_err(anyhow::Error::msg)?;
 
-    assert_eq!(created.task_id, stable_task_id);
+    // RFC-0067: the adoption authority is the only record; all views derive from it.
+    let entries = session.entries();
+    assert_eq!(adopted.receipt.task_id, stable_task_id);
     assert_eq!(
-        created
-            .entries
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(_))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        entries
             .iter()
             .filter(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskRun(_))))
             .count(),
-        1
+        1,
+        "only the seeded crash-prefix TaskRun remains"
     );
     assert_eq!(
-        created
-            .entries
+        entries
             .iter()
             .filter(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
             .count(),
-        1
+        1,
+        "only the seeded crash-prefix TaskPlan remains"
     );
     assert_eq!(
-        created
-            .entries
+        entries
             .iter()
             .filter(|entry| matches!(
                 entry,
                 SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(_))
             ))
             .count(),
-        1
+        1,
+        "only the seeded crash-prefix anchor remains"
     );
     assert_eq!(
-        created
-            .entries
+        entries
             .iter()
             .filter(|entry| matches!(
                 entry,
@@ -429,12 +483,11 @@ fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates
                     if decision.decision == PlanDecision::Accepted
             ))
             .count(),
-        1
+        0,
+        "adoption adds no separate accepted-decision record"
     );
     assert!(
-        current_session
-            .as_ref()
-            .expect("session remains available")
+        session
             .plan_artifact_projection()
             .latest_pending_plan()
             .is_none()
@@ -464,21 +517,28 @@ fn task_from_plan_without_base_snapshot_fails_closed() -> Result<()> {
     session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
     let mut current_session = Some(session);
 
-    let error = create_task_from_plan(
+    let mut session = current_session.take().expect("session");
+    let error = match adopt_plan_run(
         &root_config,
         &workspace_root,
         &session_log_path,
-        &mut current_session,
-        CreateTaskFromPlanRequest {
-            plan_id: draft.plan_id.as_str().to_owned(),
-            expected_plan_hash: draft.plan_hash,
-            start_mode: PlanTaskStartMode::CreateAndRun,
-            permission_grant: None,
-        },
-    )
-    .expect_err("a legacy plan without a canonical review must not create task authority");
+        &mut session,
+        draft.plan_id.as_str().to_owned(),
+        draft.plan_hash,
+        PlanTaskStartMode::CreateAndRun,
+        None,
+        sigil_kernel::PlanRunCommandSource::TuiKeyboard,
+        None,
+    ) {
+        Ok(_) => panic!("a legacy plan without a candidate must not create task authority"),
+        Err(error) => error,
+    };
 
-    assert!(error.contains("no canonical review projection"));
+    assert!(
+        error.contains("not ready to run"),
+        "legacy plans must be rejected as not ready: {error}"
+    );
+    let current_session = Some(session);
     assert!(
         current_session
             .as_ref()
@@ -491,7 +551,7 @@ fn task_from_plan_without_base_snapshot_fails_closed() -> Result<()> {
 }
 
 #[test]
-fn task_from_plan_refuses_stale_retry_after_promoted_plan_crash_prefix() -> Result<()> {
+fn task_from_plan_reconciles_legacy_prefix_and_blocks_on_drift() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().join("workspace");
     fs::create_dir_all(&workspace_root)?;
@@ -529,51 +589,45 @@ fn task_from_plan_refuses_stale_retry_after_promoted_plan_crash_prefix() -> Resu
     fs::write(workspace_root.join("README.md"), "snapshot b\n")?;
     let mut current_session = Some(session);
 
-    let error = match create_task_from_plan(
+    let mut session = current_session.take().expect("session");
+    // RFC-0067: the adoption authority reconciles the legacy prefix in place with the same task
+    // identity; workspace drift then becomes a typed admission blocker instead of a refusal.
+    let adopted = match adopt_plan_run(
         &root_config,
         &workspace_root,
         &session_log_path,
-        &mut current_session,
-        CreateTaskFromPlanRequest {
-            plan_id: draft.plan_id.as_str().to_owned(),
-            expected_plan_hash: draft.plan_hash,
-            start_mode: PlanTaskStartMode::CreateAndRun,
-            permission_grant: None,
-        },
+        &mut session,
+        draft.plan_id.as_str().to_owned(),
+        draft.plan_hash,
+        PlanTaskStartMode::CreateAndRun,
+        None,
+        sigil_kernel::PlanRunCommandSource::TuiKeyboard,
+        None,
     ) {
-        Ok(_) => panic!("workspace drift must not reuse an earlier promoted plan"),
-        Err(error) => error,
+        Ok(adopted) => adopted,
+        Err(error) => panic!("legacy prefix must reconcile through adoption: {error}"),
     };
-
-    assert!(error.contains("workspace drift"));
-    let projection = current_session
-        .as_ref()
-        .expect("session remains available")
-        .plan_artifact_projection();
-    assert!(!projection.task_created_for_plan(&draft.plan_id));
-    assert!(projection.latest_pending_plan().is_some());
-    let task_projection = current_session
-        .as_ref()
-        .expect("session remains available")
-        .task_state_projection();
+    assert_eq!(adopted.receipt.task_id, stable_task_id);
+    assert!(matches!(
+        adopted.admission,
+        sigil_kernel::TaskAdmissionOutcomeV1::Blocked(sigil_kernel::TaskBlockerV1 {
+            reason_code: sigil_kernel::TaskBlockerReasonCodeV1::WorkspaceChanged,
+            ..
+        })
+    ));
+    let projection = session.plan_artifact_projection();
+    assert!(projection.task_created_for_plan(&draft.plan_id));
+    assert!(projection.latest_pending_plan().is_none());
+    let task_projection = session.task_state_projection();
     let task = task_projection
         .tasks
         .get(&stable_task_id)
-        .expect("stale prefix task remains auditable");
-    assert_eq!(task.status, TaskRunStatus::Cancelled);
+        .expect("reconciled task remains auditable");
+    assert_eq!(task.status, TaskRunStatus::Started);
     assert_eq!(
-        task.plans
-            .get(&1)
-            .expect("promoted plan remains audited")
-            .status,
-        TaskPlanStatus::Superseded
+        task_projection.execution_phase(&stable_task_id),
+        Some(sigil_kernel::TaskExecutionPhaseV1::Blocked)
     );
-    let continue_error = resolve_continue_task(
-        current_session.as_ref().expect("session remains available"),
-        Some(stable_task_id.as_str().to_owned()),
-    )
-    .expect_err("stale cancelled prefix must not be continuable");
-    assert!(continue_error.contains("cancelled"));
     Ok(())
 }
 

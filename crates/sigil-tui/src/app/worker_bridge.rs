@@ -591,6 +591,29 @@ impl AppState {
                     format!("{} -> {}", entry.plan_id.as_str(), entry.task_id.as_str()),
                 );
             }
+            WorkerMessage::TaskAdmissionBlocked {
+                task_id,
+                blocker,
+                entries,
+            } => {
+                self.runtime.is_busy = false;
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.last_notice =
+                    Some(format!("task {} is blocked: {}", task_id, blocker.summary));
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    format!(
+                        "Task {} is blocked ({}). The task is kept and can be retried once the environment is resolved.",
+                        task_id,
+                        blocker.reason_code.as_str()
+                    ),
+                );
+                self.push_event(
+                    "task:blocked",
+                    format!("{task_id}:{}", blocker.reason_code.as_str()),
+                );
+            }
             WorkerMessage::PlanTaskCreationFailed {
                 plan_id,
                 error,

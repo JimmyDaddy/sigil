@@ -18,7 +18,7 @@ use tempfile::tempdir;
 use super::{
     super::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerMessage},
     common::{
-        PlannedProvider, StreamPlan, spawn_test_worker,
+        PlannedProvider, StreamPlan, routed_unauthenticated_test_root_config, spawn_test_worker,
         spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
     },
 };
@@ -250,7 +250,7 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
             reason: Some("Intent Stack worker-loop dogfood trust".to_owned()),
         }),
     ))?;
-    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
     root_config.task.max_parallel_changeset_steps = 3;
     root_config.task.max_subagents = 8;
 
@@ -386,16 +386,12 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
     else {
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
-    let accepted_plan = entries
-        .iter()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
-                if plan.task_id == created_task.task_id =>
-            {
-                Some(plan)
-            }
-            _ => None,
-        })
+    // RFC-0067: the accepted plan is derived from the single adoption authority.
+    let task_projection = sigil_kernel::TaskStateProjection::from_entries(&entries);
+    let accepted_plan = task_projection
+        .tasks
+        .get(&created_task.task_id)
+        .and_then(|task| task.plans.get(&1))
         .context("accepted task plan should be durable")?;
     assert_eq!(accepted_plan.steps.len(), 3);
     assert!(

@@ -259,6 +259,7 @@ where
                     continue;
                 }
                 let plan_review_root_config = Arc::clone(&plan_review_root_config);
+                let session_log_path = state.session.log_path.clone();
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -278,6 +279,7 @@ where
                                 .ok()
                                 .flatten(),
                                 agent.as_ref(),
+                                &plan_review_root_config,
                                 options.clone(),
                                 plan_registry,
                                 &mut handler,
@@ -492,36 +494,63 @@ where
                                     }
                                 }
                                 AgentRunDisposition::RunPendingPlan(action) => {
-                                    let created = sigil_runtime::PlanReviewCoordinator::create_task_from_plan(
-                                        &mut run_session,
+                                    let adopted = adopt_plan_run(
                                         &task_root_config,
                                         &options.workspace_root,
-                                        parent_session_ref.clone(),
-                                        &sigil_runtime::CreateTaskFromPlanRequest {
-                                            plan_id: action.plan_id.as_str().to_owned(),
-                                            expected_plan_hash: action.plan_hash,
-                                            start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
-                                            permission_grant: None,
-                                        },
+                                        &session_log_path,
+                                        &mut run_session,
+                                        action.plan_id.as_str().to_owned(),
+                                        action.plan_hash,
+                                        sigil_kernel::PlanTaskStartMode::CreateAndRun,
+                                        None,
+                                        sigil_kernel::PlanRunCommandSource::ModelTypedRoute,
+                                        Some(task_base_registry.contracts()),
                                     )
                                     .map_err(|error| format!("failed to execute the selected pending plan: {error:#}"));
-                                    match created {
-                                        Ok(created) => {
+                                    match adopted {
+                                        Ok(adopted) => {
                                             let _ = run_message_tx.send(
                                                 WorkerMessage::TaskCreatedFromPlan {
-                                                    entry: created.entry.clone(),
-                                                    start_mode: created.start_mode,
-                                                    entries: created.entries.clone(),
+                                                    entry: adopted.entry.clone(),
+                                                    start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+                                                    entries: adopted.entries.clone(),
                                                 },
                                             );
-                                            let task_id = created.task_id.as_str().to_owned();
+                                            let task_id = adopted.receipt.task_id.as_str().to_owned();
                                             let task = run_session
                                                 .task_state_projection()
                                                 .tasks
-                                                .get(&created.task_id)
+                                                .get(&adopted.receipt.task_id)
                                                 .cloned();
-                                            match task {
-                                                Some(task) => {
+                                            match (task, adopted.admission) {
+                                                (Some(_task), sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker)) => {
+                                                    let _ = run_message_tx.send(
+                                                        WorkerMessage::TaskAdmissionBlocked {
+                                                            task_id: task_id.clone(),
+                                                            blocker,
+                                                            entries: adopted.entries.clone(),
+                                                        },
+                                                    );
+                                                    RunTaskPayload::Chat {
+                                                        result: Ok(sigil_kernel::AgentRunResult {
+                                                            final_text: format!(
+                                                                "Task {} is blocked until the environment is resolved.",
+                                                                task_id
+                                                            ),
+                                                            tool_calls: output.result.tool_calls,
+                                                            final_message_id: None,
+                                                        }),
+                                                        plan_mode,
+                                                        plan_review: false,
+                                                        queue_id: None,
+                                                        provider_logical_run_id: Some(
+                                                            provider_logical_run_id.clone(),
+                                                        ),
+                                                        agent_result_continuation_thread_ids:
+                                                            Vec::new(),
+                                                    }
+                                                }
+                                                (Some(task), _) => {
                                                     let _ = run_message_tx.send(
                                                         WorkerMessage::TaskRunStarted {
                                                             task_id: task_id.clone(),
@@ -531,7 +560,7 @@ where
                                                     let result = run_admitted_task_to_root_terminal(
                                                         &mut run_session,
                                                         AdmittedTaskRunOrchestration {
-                                                            task_id: created.task_id,
+                                                            task_id: adopted.receipt.task_id,
                                                             parent_session_ref:
                                                                 task.parent_session_ref,
                                                             objective: task.objective,
@@ -555,9 +584,9 @@ where
                                                         result,
                                                     }
                                                 }
-                                                None => RunTaskPayload::Chat {
+                                                (None, _) => RunTaskPayload::Chat {
                                                     result: Err(format!(
-                                                        "pending plan promotion created task {task_id} without durable task state"
+                                                        "plan adoption created task {task_id} without durable task state"
                                                     )),
                                                     plan_mode,
                                                     plan_review: false,
@@ -638,6 +667,7 @@ where
                                         &mut run_session,
                                         action,
                                         agent.as_ref(),
+                                        &plan_review_root_config,
                                         options.clone(),
                                         plan_registry,
                                         sigil_runtime::plan_handoff_workspace_snapshot_id(
@@ -1615,6 +1645,7 @@ where
                         .set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                     let task_result_tx = state.run.result_tx.clone();
+                    let plan_review_root_config = Arc::clone(&plan_review_root_config);
                     let handle = runtime.spawn(async move {
                         let _run_task_guard = run_task_guard;
                         let mut run_session = run_session;
@@ -1630,6 +1661,7 @@ where
                             &mut run_session,
                             &run_request,
                             run_agent.as_ref(),
+                            &plan_review_root_config,
                             run_options,
                             plan_registry,
                             &mut handler,

@@ -18,8 +18,9 @@ use super::{
         worker_loop::skill_child_agent_role,
     },
     common::{
-        PlannedProvider, StreamPlan, WriteTool, spawn_test_worker, test_root_config,
-        wait_for_session_entry,
+        PlannedProvider, StreamPlan, WriteTool, planned_role_provider_builder,
+        routed_unauthenticated_test_root_config, spawn_test_worker,
+        spawn_test_worker_with_role_provider_builder, test_root_config, wait_for_session_entry,
     },
 };
 
@@ -430,26 +431,49 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     assert!(entry.stale_reason.is_none());
     assert_eq!(entry.step_mapping.len(), 1);
     let created_task_id = entry.task_id.clone();
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision))
-            if decision.decision == PlanDecision::Accepted
-    )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-            SessionLogEntry::Control(ControlEntry::TaskRun(run))
-            if run.status == TaskRunStatus::Paused
-                && run.objective.contains("Execute the following user-approved structured plan")
-    )));
-    assert!(
-        entries
-            .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
+    // RFC-0067: the single adoption event is the only authority; every Task/plan view derives
+    // from it, so the old multi-record promotion artifacts must not exist.
+    let adoption = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(adoption)) => {
+                Some(adoption.as_ref())
+            }
+            _ => None,
+        })
+        .expect("run must append the single adoption authority");
+    assert_eq!(adoption.task_id, created_task_id);
+    assert_eq!(adoption.start_mode, PlanTaskStartMode::CreatePaused);
+    assert_eq!(
+        adoption.initial_phase,
+        sigil_kernel::TaskExecutionPhaseV1::Preparing
     );
-    assert!(entries.iter().any(|entry| matches!(
+    let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
+    let task = tasks
+        .tasks
+        .get(&adoption.task_id)
+        .expect("adopted task must project");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert!(
+        task.objective
+            .contains("Execute the following user-approved structured plan")
+    );
+    assert_eq!(task.latest_plan_version, Some(1));
+    let artifacts = PlanArtifactProjection::from_entries(&entries);
+    assert_eq!(
+        artifacts
+            .latest_decision(&draft.plan_id)
+            .expect("adoption must derive the accepted decision")
+            .decision,
+        PlanDecision::Accepted
+    );
+    assert!(artifacts.task_created_for_plan(&draft.plan_id));
+    assert!(!entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(created))
-            if created.task_id == created_task_id
+        SessionLogEntry::Control(ControlEntry::TaskRun(_))
+            | SessionLogEntry::Control(ControlEntry::TaskPlan(_))
+            | SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(_))
+            | SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
     )));
     assert!(!entries.iter().any(|entry| matches!(
         entry,
@@ -527,7 +551,9 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-plan-task-run-now.jsonl");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    // The honest admission probes require a resolvable route without depending on the
+    // process-global API key; the planner participant runs on the planned role provider.
+    let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
     let provider = PlannedProvider::new(vec![
         StreamPlan::Chunks(structured_plan_tool_chunks(
             "Fix README typo",
@@ -536,8 +562,16 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
         )),
         StreamPlan::Pending,
     ]);
-    let agent = Agent::new(provider, ToolRegistry::new());
-    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+    let mut registry = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools(&mut registry);
+    let agent = Agent::new(provider, registry);
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path.clone(),
+        agent,
+        workspace_root,
+        planned_role_provider_builder(vec![StreamPlan::Pending]),
+    )?;
 
     worker.send(WorkerCommand::SubmitPlanPrompt {
         prompt: "plan docs typo fix".to_owned(),
@@ -574,27 +608,36 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
     assert_eq!(start_mode, PlanTaskStartMode::CreateAndRun);
     assert_eq!(entry.task_plan_version, 1);
     assert_eq!(entry.step_mapping.len(), 1);
-    assert!(
-        entries
-            .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
-    );
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(_))
+    )));
+    let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
+    assert!(tasks.tasks.contains_key(&entry.task_id));
 
-    let started =
-        worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
-    assert!(matches!(
-        started,
-        WorkerMessage::TaskRunStarted { ref objective, .. }
-            if objective.contains("Execute the following user-approved structured plan")
-                && objective.contains("Update the approved README typo")
-    ));
+    let started = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::TaskRunStarted { .. })
+            || matches!(message, WorkerMessage::TaskAdmissionBlocked { .. })
+    })?;
+    let WorkerMessage::TaskRunStarted { objective, .. } = started else {
+        let WorkerMessage::TaskAdmissionBlocked { blocker, .. } = started else {
+            unreachable!();
+        };
+        panic!(
+            "admission blocked the task instead of running it: {}: {}",
+            blocker.reason_code.as_str(),
+            blocker.summary
+        );
+    };
+    assert!(objective.contains("Execute the following user-approved structured plan"));
+    assert!(objective.contains("Update the approved README typo"));
 
     worker.shutdown()?;
     Ok(())
 }
 
 #[test]
-fn create_task_from_plan_records_stale_reason_after_workspace_change() -> Result<()> {
+fn create_task_from_plan_after_workspace_change_adopts_then_blocks() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     fs::write(workspace_root.join("README.md"), "before\n")?;
@@ -632,11 +675,12 @@ fn create_task_from_plan_records_stale_reason_after_workspace_change() -> Result
         .clone();
     assert!(draft.workspace_snapshot_id.is_some());
 
+    // RFC-0067 14.2: workspace drift never prevents Task identity; it becomes a typed blocker.
     fs::write(workspace_root.join("README.md"), "after\n")?;
     worker.send(WorkerCommand::CreateTaskFromPlan {
         plan_id: draft.plan_id.as_str().to_owned(),
         expected_plan_hash: draft.plan_hash.clone(),
-        start_mode: PlanTaskStartMode::CreatePaused,
+        start_mode: PlanTaskStartMode::CreateAndRun,
         permission_grant: None,
     })?;
     let created = worker
@@ -644,17 +688,25 @@ fn create_task_from_plan_records_stale_reason_after_workspace_change() -> Result
     let WorkerMessage::TaskCreatedFromPlan { entry, entries, .. } = created else {
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
-
-    let stale_reason = entry
-        .stale_reason
-        .as_deref()
-        .expect("changed workspace should mark plan stale");
-    assert!(stale_reason.contains("workspace changed since plan"));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(created))
-            if created.stale_reason.as_deref() == Some(stale_reason)
-    )));
+    assert!(
+        entry.stale_reason.is_none(),
+        "adoption must not depend on current workspace state"
+    );
+    let blocked = worker
+        .recv_until(|message| matches!(message, WorkerMessage::TaskAdmissionBlocked { .. }))?;
+    let WorkerMessage::TaskAdmissionBlocked { blocker, .. } = blocked else {
+        unreachable!("recv_until only returns TaskAdmissionBlocked");
+    };
+    assert_eq!(
+        blocker.reason_code,
+        sigil_kernel::TaskBlockerReasonCodeV1::WorkspaceChanged
+    );
+    assert!(blocker.retryable);
+    let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        tasks.execution_phase(&entry.task_id),
+        Some(sigil_kernel::TaskExecutionPhaseV1::Blocked)
+    );
 
     worker.shutdown()?;
     Ok(())
@@ -705,19 +757,32 @@ fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
 
-    let grant = entries
+    let adoption = entries
         .iter()
         .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => Some(grant),
+            SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(adoption)) => {
+                Some(adoption.as_ref())
+            }
             _ => None,
         })
-        .expect("scoped edits should append a permission grant");
-    assert_eq!(grant.plan_id, draft.plan_id);
-    assert_eq!(grant.plan_hash, draft.plan_hash);
-    assert_eq!(grant.task_id, entry.task_id);
-    assert_eq!(grant.permission, PlanApprovalPermission::WorkspaceEdits);
-    assert_eq!(grant.scope.workspace_paths, vec!["README.md".to_owned()]);
-    assert!(grant.workspace_snapshot_id.is_some());
+        .expect("run must append the single adoption authority");
+    assert_eq!(adoption.plan_id, draft.plan_id);
+    assert_eq!(adoption.plan_hash, draft.plan_hash);
+    assert_eq!(adoption.task_id, entry.task_id);
+    assert_eq!(
+        adoption.permission_grant,
+        Some(PlanApprovalPermission::WorkspaceEdits)
+    );
+    let scope = adoption
+        .adopted_candidate
+        .permission_scope_candidate
+        .as_ref()
+        .expect("candidate must prove its permission scope");
+    assert_eq!(scope.workspace_paths, vec!["README.md".to_owned()]);
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(_))
+    )));
 
     worker.shutdown()?;
     Ok(())

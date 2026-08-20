@@ -1293,11 +1293,128 @@ pub(in crate::runner) fn append_plan_draft(
     Ok(Some(entry))
 }
 
-pub(in crate::runner) type CreateTaskFromPlanRequest = sigil_runtime::CreateTaskFromPlanRequest;
-
 pub(in crate::runner) type RejectPlanRequest = sigil_runtime::RejectPlanRequest;
 
-pub(in crate::runner) type CreatedTaskFromPlan = sigil_runtime::CreatedTaskFromPlan;
+/// RFC-0067 result of one typed Run command plus its first admission attempt.
+pub(in crate::runner) struct AdoptedPlanRun {
+    pub(in crate::runner) receipt: sigil_kernel::PlanRunReceiptV1,
+    pub(in crate::runner) admission: sigil_kernel::TaskAdmissionOutcomeV1,
+    pub(in crate::runner) entry: sigil_kernel::TaskCreatedFromPlanEntry,
+    pub(in crate::runner) entries: Vec<sigil_kernel::SessionLogEntry>,
+}
+
+/// RFC-0067 single execution spine entry for every TUI Run surface (RFC-0067 6.5, 9).
+///
+/// Constructs the typed command, performs the single atomic adoption, then runs the first
+/// admission attempt. The service never touches provider, workspace, registry or child processes
+/// during adoption; environment problems become a durable typed blocker.
+fn start_mode_str(mode: sigil_kernel::PlanTaskStartMode) -> &'static str {
+    match mode {
+        sigil_kernel::PlanTaskStartMode::CreatePaused => "paused",
+        sigil_kernel::PlanTaskStartMode::CreateAndRun => "run",
+    }
+}
+
+fn permission_choice_str(permission: Option<sigil_kernel::PlanApprovalPermission>) -> &'static str {
+    match permission {
+        Some(sigil_kernel::PlanApprovalPermission::WorkspaceEdits) => "scoped_edits",
+        Some(sigil_kernel::PlanApprovalPermission::Ask) | None => "current_policy",
+    }
+}
+
+pub(in crate::runner) fn adopt_plan_run(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    session_log_path: &Path,
+    session: &mut Session,
+    plan_id: String,
+    expected_plan_hash: String,
+    start_mode: sigil_kernel::PlanTaskStartMode,
+    permission_grant: Option<sigil_kernel::PlanApprovalPermission>,
+    source: sigil_kernel::PlanRunCommandSource,
+    tool_contracts: Option<Vec<sigil_kernel::ToolRuntimeContract>>,
+) -> std::result::Result<AdoptedPlanRun, String> {
+    let parent_session_ref = session_ref_for_log_path(session_log_path)?;
+    let plan_id = PlanId::new(plan_id).map_err(|error| format!("invalid plan id: {error}"))?;
+    let candidate_hash = session
+        .plan_artifact_projection()
+        .latest_candidate(&plan_id)
+        .map(|candidate| candidate.candidate_hash.clone())
+        .unwrap_or_default();
+    let command = sigil_kernel::PlanRunCommandV1 {
+        command_id: sigil_kernel::stable_event_uuid(
+            "sigil-plan-run-command-v1",
+            &format!(
+                "{}:{}:{}:{}:{}:{}",
+                session.session_scope_id(),
+                plan_id.as_str(),
+                expected_plan_hash,
+                candidate_hash,
+                start_mode_str(start_mode),
+                permission_choice_str(permission_grant),
+            ),
+        ),
+        session_id: session.session_scope_id().to_owned(),
+        plan_id: plan_id.clone(),
+        expected_plan_hash,
+        expected_candidate_hash: candidate_hash,
+        expected_durable_frontier: session.durable_frontier_sequence(),
+        start_mode,
+        permission: match permission_grant {
+            Some(sigil_kernel::PlanApprovalPermission::WorkspaceEdits) => {
+                sigil_kernel::PlanRunPermissionChoiceV1::GrantScopedEditsOnce
+            }
+            Some(sigil_kernel::PlanApprovalPermission::Ask) | None => {
+                sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy
+            }
+        },
+        source,
+    };
+    let receipt = sigil_runtime::PlanExecutionService::adopt(
+        session,
+        parent_session_ref,
+        &command,
+        current_unix_time_ms(),
+    )
+    .map_err(|rejection| sigil_runtime::plan_run_rejection_message(&rejection))?;
+    let candidate = session
+        .plan_artifact_projection()
+        .latest_candidate(&plan_id)
+        .cloned()
+        .ok_or_else(|| "the adopted candidate disappeared from the session".to_owned())?;
+    let probes = sigil_runtime::build_task_admission_probes(
+        root_config,
+        workspace_root,
+        tool_contracts,
+        session,
+        &receipt.task_id,
+        &candidate,
+    );
+    let admission = sigil_runtime::admit_adopted_task(
+        session,
+        root_config,
+        workspace_root,
+        &receipt.task_id,
+        &candidate,
+        &probes,
+        current_unix_time_ms(),
+    )
+    .map_err(|error| format!("task admission failed: {error:#}"))?;
+    let entry = session
+        .plan_artifact_projection()
+        .tasks_created
+        .get(&plan_id)
+        .and_then(|entries| entries.last())
+        .cloned()
+        .ok_or_else(|| "the adopted task link is unavailable".to_owned())?;
+    let entries = session.entries().to_vec();
+    Ok(AdoptedPlanRun {
+        receipt,
+        admission,
+        entry,
+        entries,
+    })
+}
 
 pub(in crate::runner) fn plan_handoff_workspace_snapshot_id(
     root_config: &RootConfig,
@@ -1305,39 +1422,6 @@ pub(in crate::runner) fn plan_handoff_workspace_snapshot_id(
 ) -> std::result::Result<Option<String>, String> {
     sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, workspace_root)
         .map_err(|error| format!("{error:#}"))
-}
-
-pub(in crate::runner) fn create_task_from_plan(
-    root_config: &RootConfig,
-    workspace_root: &Path,
-    current_session_log_path: &Path,
-    current_session: &mut Option<Session>,
-    request: CreateTaskFromPlanRequest,
-) -> std::result::Result<CreatedTaskFromPlan, String> {
-    let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.runtime_provider,
-        &root_config.agent.model,
-        current_session_log_path,
-        current_session.as_ref(),
-    )
-    .map_err(|error| format!("failed to load session before creating task from plan: {error:#}"))?;
-    let parent_session_ref = session_ref_for_log_path(current_session_log_path)?;
-    let created = match sigil_runtime::PlanReviewCoordinator::create_task_from_plan(
-        &mut session,
-        root_config,
-        workspace_root,
-        parent_session_ref,
-        &request,
-    ) {
-        Ok(created) => created,
-        Err(error) => {
-            // Failure paths still append durable prefix reconciliation records; keep them.
-            *current_session = Some(session);
-            return Err(format!("{error:#}"));
-        }
-    };
-    *current_session = Some(session);
-    Ok(created)
 }
 
 pub(in crate::runner) fn reject_plan(

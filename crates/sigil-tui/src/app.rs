@@ -487,6 +487,12 @@ impl PendingPlanApproval {
                     created_at_ms: 0,
                 },
                 legacy_markdown: Some(plan_text.to_owned()),
+                compile: sigil_kernel::PlanCompileDetailV1 {
+                    state: sigil_kernel::PlanReadyStateV1::LegacyPlanNeedsRecompile,
+                    candidate_hash: None,
+                    compiler_version: None,
+                    failure: None,
+                },
             },
             workbench_open: false,
             workbench_scroll: 0,

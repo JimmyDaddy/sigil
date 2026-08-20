@@ -609,6 +609,7 @@ pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     run_session: &mut Session,
     action: sigil_kernel::StartPlanReviewAction,
     agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
+    root_config: &RootConfig,
     options: AgentRunOptions,
     tool_registry: sigil_kernel::ToolRegistry,
     workspace_snapshot_id: Option<String>,
@@ -631,6 +632,7 @@ where
         run_session,
         &request,
         agent,
+        root_config,
         options,
         tool_registry,
         handler,
@@ -647,6 +649,7 @@ pub(in crate::runner) async fn run_explicit_plan_review<H, A>(
     root_logical_run_id: &str,
     workspace_snapshot_id: Option<String>,
     agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
+    root_config: &RootConfig,
     options: AgentRunOptions,
     tool_registry: sigil_kernel::ToolRegistry,
     handler: &mut H,
@@ -669,6 +672,7 @@ where
         run_session,
         &request,
         agent,
+        root_config,
         options,
         tool_registry,
         handler,
@@ -684,6 +688,7 @@ pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
     run_session: &mut Session,
     request: &sigil_runtime::PlanReviewRunRequest,
     agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
+    root_config: &RootConfig,
     options: AgentRunOptions,
     tool_registry: sigil_kernel::ToolRegistry,
     handler: &mut H,
@@ -700,6 +705,7 @@ where
         current_unix_time_ms(),
     )
     .map_err(|error| format!("failed to start plan review attempt: {error:#}"))?;
+    let plan_review_workspace_root = options.workspace_root.clone();
     let outcome = match sigil_runtime::PlanReviewCoordinator::run_plan_review(
         run_session,
         request,
@@ -749,10 +755,18 @@ where
             ))
         }
         sigil_runtime::PlanReviewRunOutcome::DraftReady { draft } => {
+            let compile_input = sigil_runtime::PlanReviewCoordinator::plan_compile_input(
+                run_session,
+                root_config,
+                &plan_review_workspace_root,
+                request,
+            )
+            .map_err(|error| format!("failed to prepare plan compile input: {error:#}"))?;
             sigil_runtime::PlanReviewCoordinator::commit_draft_from_child(
                 run_session,
                 &draft,
                 request,
+                &compile_input,
                 current_unix_time_ms(),
             )
             .map_err(|error| format!("failed to commit plan review draft: {error:#}"))?;
@@ -1012,6 +1026,7 @@ where
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
     let pending_input_provider = DurableQueuePendingInputProvider::new(context_resolver.clone());
+    let session_log_path = session_log_path.to_path_buf();
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -1176,34 +1191,57 @@ where
                         }
                     }
                     AgentRunDisposition::RunPendingPlan(action) => {
-                        let created = sigil_runtime::PlanReviewCoordinator::create_task_from_plan(
-                            &mut run_session,
+                        let adopted = adopt_plan_run(
                             &task_root_config,
                             &options.workspace_root,
-                            parent_session_ref.clone(),
-                            &sigil_runtime::CreateTaskFromPlanRequest {
-                                plan_id: action.plan_id.as_str().to_owned(),
-                                expected_plan_hash: action.plan_hash,
-                                start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
-                                permission_grant: None,
-                            },
+                            &session_log_path,
+                            &mut run_session,
+                            action.plan_id.as_str().to_owned(),
+                            action.plan_hash,
+                            sigil_kernel::PlanTaskStartMode::CreateAndRun,
+                            None,
+                            sigil_kernel::PlanRunCommandSource::ModelTypedRoute,
+                            Some(task_base_registry.contracts()),
                         )
                         .map_err(|error| format!("failed to execute the selected pending plan: {error:#}"));
-                        match created {
-                            Ok(created) => {
+                        match adopted {
+                            Ok(adopted) => {
                                 let _ = run_message_tx.send(WorkerMessage::TaskCreatedFromPlan {
-                                    entry: created.entry.clone(),
-                                    start_mode: created.start_mode,
-                                    entries: created.entries.clone(),
+                                    entry: adopted.entry.clone(),
+                                    start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+                                    entries: adopted.entries.clone(),
                                 });
-                                let task_id = created.task_id.as_str().to_owned();
+                                let task_id = adopted.receipt.task_id.as_str().to_owned();
                                 let task = run_session
                                     .task_state_projection()
                                     .tasks
-                                    .get(&created.task_id)
+                                    .get(&adopted.receipt.task_id)
                                     .cloned();
-                                match task {
-                                    Some(task) => {
+                                match (task, adopted.admission) {
+                                    (Some(_task), sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker)) => {
+                                        let _ = run_message_tx.send(
+                                            WorkerMessage::TaskAdmissionBlocked {
+                                                task_id: task_id.clone(),
+                                                blocker,
+                                                entries: adopted.entries.clone(),
+                                            },
+                                        );
+                                        RunTaskPayload::Chat {
+                                            result: Ok(sigil_kernel::AgentRunResult {
+                                                final_text: format!(
+                                                    "Task {task_id} is blocked until the environment is resolved."
+                                                ),
+                                                tool_calls: 0,
+                                                final_message_id: None,
+                                            }),
+                                            plan_mode: false,
+                                            plan_review: false,
+                                            queue_id: Some(queue_id.clone()),
+                                            provider_logical_run_id: None,
+                                            agent_result_continuation_thread_ids: Vec::new(),
+                                        }
+                                    }
+                                    (Some(task), _) => {
                                         let _ = run_message_tx.send(WorkerMessage::TaskRunStarted {
                                             task_id: task_id.clone(),
                                             objective: task.objective.clone(),
@@ -1211,7 +1249,7 @@ where
                                         let result = run_admitted_task_to_root_terminal(
                                             &mut run_session,
                                             AdmittedTaskRunOrchestration {
-                                                task_id: created.task_id,
+                                                task_id: adopted.receipt.task_id,
                                                 parent_session_ref: task.parent_session_ref,
                                                 objective: task.objective,
                                                 root_config: task_root_config,
@@ -1233,9 +1271,9 @@ where
                                             result,
                                         }
                                     }
-                                    None => RunTaskPayload::Chat {
+                                    (None, _) => RunTaskPayload::Chat {
                                         result: Err(format!(
-                                            "pending plan promotion created task {task_id} without durable task state"
+                                            "plan adoption created task {task_id} without durable task state"
                                         )),
                                         plan_mode: false,
                                         plan_review: false,
@@ -1306,6 +1344,7 @@ where
                             &mut run_session,
                             action,
                             agent.as_ref(),
+                            &plan_review_root_config,
                             options.clone(),
                             plan_registry,
                             sigil_runtime::plan_handoff_workspace_snapshot_id(

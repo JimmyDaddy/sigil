@@ -93,6 +93,32 @@ pub(super) fn routed_test_root_config(workspace_root: &Path, model: &str) -> Roo
     config
 }
 
+/// Routed config with an unauthenticated custom connection.
+///
+/// Admission-driven run fixtures use this instead of the environment-credential config so the
+/// honest credential probe never depends on a process-global environment variable that parallel
+/// tests may temporarily remove.
+pub(super) fn routed_unauthenticated_test_root_config(
+    workspace_root: &Path,
+    model: &str,
+) -> RootConfig {
+    let mut config = test_root_config(workspace_root, "planned", model);
+    let connection_id = ConnectionId::new("test-default").expect("test connection id");
+    config.config_version = sigil_kernel::CONFIG_VERSION_V2;
+    config.agent.connection = Some(connection_id);
+    config.connections.insert(
+        "test-default".to_owned(),
+        serde_json::json!({
+            "label": "Test default",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:1",
+            "credential": { "source": "none" }
+        }),
+    );
+    config
+}
+
 pub(super) fn routed_session_identity(
     root_config: &RootConfig,
     model: &str,

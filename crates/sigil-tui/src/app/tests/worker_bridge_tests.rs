@@ -63,6 +63,10 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     {{
       "step_id": "step-1",
       "title": "{title}",
+      "role": "executor",
+      "depends_on": [],
+      "mode": "write",
+      "isolation": "sequential_workspace_write",
       "target_paths": ["{path}"]
     }}
   ],
@@ -489,6 +493,26 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
         &mut review_session,
         &draft,
         &review_request,
+        &sigil_kernel::PlanCompileInputV1 {
+            source_attempt_id: "attempt-1".to_owned(),
+            source_turn_id: "message-1".to_owned(),
+            task_config_contract_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                "test",
+            ),
+            planner_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "v2",
+            ),
+            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "v2",
+            ),
+            intent_schema_hash: None,
+            max_plan_steps: 64,
+            workspace_id: None,
+            session_scope_id: Some("test-session".to_owned()),
+        },
         3,
     )?;
 

@@ -37,6 +37,15 @@ pub(super) fn render_plan_workbench(
 
 fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, theme: &Theme) {
     let stale = if pending.stale { " · stale" } else { "" };
+    // RFC-0067 13.1: compile facts drive the visible plan state; a compile-failed plan needs
+    // changes and cannot be run.
+    let compile_status = match pending.detail.compile.state {
+        sigil_kernel::PlanReadyStateV1::Ready => None,
+        sigil_kernel::PlanReadyStateV1::CompileFailed => Some(" · needs changes"),
+        sigil_kernel::PlanReadyStateV1::CandidatePrepared => Some(" · compiling (incomplete)"),
+        sigil_kernel::PlanReadyStateV1::LegacyPlanNeedsRecompile => Some(" · needs recompile"),
+        sigil_kernel::PlanReadyStateV1::NotReady => None,
+    };
     let mut title_spans = vec![
         Span::styled(
             "Plan Review",
@@ -49,6 +58,12 @@ fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, t
             styles::muted(&theme.palette),
         ),
     ];
+    if let Some(status) = compile_status {
+        title_spans.push(Span::styled(
+            status,
+            Style::default().fg(theme.palette.accent_danger),
+        ));
+    }
     if let Some(revision) = pending.revision.as_ref() {
         let status = match revision.status {
             sigil_kernel::PublicPlanRevisionStatusV1::AwaitingGuidance => "awaiting guidance",
@@ -110,6 +125,28 @@ fn render_body(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, the
 fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'static>> {
     let detail = &pending.detail;
     let mut lines = Vec::new();
+    // RFC-0067 13.1: a compile-failed plan shows the exact step/field/reason instead of a
+    // runnable state.
+    if let Some(failure) = detail.compile.failure.as_ref() {
+        lines.push(Line::from(Span::styled(
+            "Plan needs changes",
+            Style::default()
+                .fg(theme.palette.status_error)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(step) = failure.affected_step.as_deref() {
+            lines.push(Line::from(Span::styled(
+                format!("step: {step}"),
+                styles::muted(&theme.palette),
+            )));
+        }
+        push_multiline(&mut lines, "", &failure.reason);
+        lines.push(Line::from(Span::styled(
+            "Revise the plan to fix the compile failure, or reject it.",
+            styles::muted(&theme.palette),
+        )));
+        lines.push(Line::raw(String::new()));
+    }
     if let Some(error) = pending.last_run_failure.as_deref() {
         lines.push(Line::from(Span::styled(
             "Task could not start",

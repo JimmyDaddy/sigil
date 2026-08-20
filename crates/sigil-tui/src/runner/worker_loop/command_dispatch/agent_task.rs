@@ -698,26 +698,28 @@ where
                     ));
                     continue;
                 }
-                let created = match create_task_from_plan(
+                let Some(mut run_session) = state.session.current.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+                let adopted = match adopt_plan_run(
                     root_config,
                     workspace_root,
                     &state.session.log_path,
-                    &mut state.session.current,
-                    CreateTaskFromPlanRequest {
-                        plan_id,
-                        expected_plan_hash,
-                        start_mode,
-                        permission_grant,
-                    },
+                    &mut run_session,
+                    plan_id,
+                    expected_plan_hash,
+                    start_mode,
+                    permission_grant,
+                    sigil_kernel::PlanRunCommandSource::TuiKeyboard,
+                    Some(agent.tool_registry().contracts()),
                 ) {
-                    Ok(created) => created,
+                    Ok(adopted) => adopted,
                     Err(error) => {
-                        let entries = state
-                            .session
-                            .current
-                            .as_ref()
-                            .map(|session| session.entries().to_vec())
-                            .unwrap_or_default();
+                        let entries = run_session.entries().to_vec();
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::PlanTaskCreationFailed {
                             plan_id: requested_plan_id,
                             error,
@@ -726,12 +728,21 @@ where
                         continue;
                     }
                 };
+                state.session.current = Some(run_session);
                 let _ = message_tx.send(WorkerMessage::TaskCreatedFromPlan {
-                    entry: created.entry.clone(),
-                    start_mode: created.start_mode,
-                    entries: created.entries.clone(),
+                    entry: adopted.entry.clone(),
+                    start_mode,
+                    entries: adopted.entries.clone(),
                 });
-                if created.start_mode == PlanTaskStartMode::CreatePaused {
+                if start_mode == PlanTaskStartMode::CreatePaused {
+                    continue;
+                }
+                if let sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker) = &adopted.admission {
+                    let _ = message_tx.send(WorkerMessage::TaskAdmissionBlocked {
+                        task_id: adopted.receipt.task_id.as_str().to_owned(),
+                        blocker: blocker.clone(),
+                        entries: adopted.entries.clone(),
+                    });
                     continue;
                 }
 
@@ -741,6 +752,14 @@ where
                     ));
                     continue;
                 };
+                let task_id = adopted.receipt.task_id;
+                let task_id_value = task_id.as_str().to_owned();
+                let objective = run_session
+                    .task_state_projection()
+                    .tasks
+                    .get(&task_id)
+                    .map(|task| task.objective.clone())
+                    .unwrap_or_else(|| adopted.receipt.task_title.clone());
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
@@ -752,8 +771,8 @@ where
                     }
                 };
                 let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-                    task_id: created.task_id_value.clone(),
-                    objective: sigil_kernel::safe_persistence_text(&created.objective),
+                    task_id: task_id_value.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&objective),
                 });
                 let handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
@@ -767,7 +786,7 @@ where
                     cancellation_recorder,
                     cancellation_handle,
                     cancellation_task_guard,
-                ) = match prepare_task_run_cancellation(&mut run_session, &created.task_id) {
+                ) = match prepare_task_run_cancellation(&mut run_session, &task_id) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
                         state.session.current = Some(run_session);
@@ -778,7 +797,7 @@ where
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
                 let cancellation_target = RunCancellationTarget::Task {
-                    task_id: created.task_id_value.clone(),
+                    task_id: task_id_value.clone(),
                 };
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
@@ -794,10 +813,10 @@ where
                     TaskRunSpawn {
                         run_id,
                         session: run_session,
-                        task_id: created.task_id,
-                        task_id_value: created.task_id_value,
+                        task_id,
+                        task_id_value,
                         parent_session_ref,
-                        objective: created.objective,
+                        objective,
                         root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),

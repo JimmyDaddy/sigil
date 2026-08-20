@@ -187,18 +187,17 @@ pub(in crate::runner) use session_transition::{
 };
 pub(in crate::runner) use state::{WorkerLoopState, register_worker_active_projection_observer};
 pub(in crate::runner) use task_runtime::{
-    AdmittedTaskRunOrchestration, CreateTaskFromPlanRequest, RejectPlanRequest,
-    RoutedTaskContinuationOrchestration, SkillChildRunSpawn, TaskContinueSpawn,
-    TaskPlannerInputSpawn, TaskRunSpawn, VerificationCheckPromotionKind,
-    VerificationCheckPromotionOutcome, append_plan_draft, clean_mutation_artifacts,
-    continue_routed_task_to_root_terminal, create_task_from_plan, delete_mutation_artifact,
-    ensure_session_workspace_trust, format_mutation_artifact_cleanup_report,
-    format_mutation_artifact_delete_report, load_worker_skill, next_task_id,
-    plan_mode_transient_context, promote_workspace_verification_check, reject_plan,
-    resolve_continue_task, revise_plan, run_admitted_task_to_root_terminal,
-    session_ref_for_log_path, session_workspace_is_trusted, skill_child_session_objective,
-    skill_invocation_prompt, spawn_skill_child_run, spawn_task_continue, spawn_task_planner_input,
-    spawn_task_run,
+    AdmittedTaskRunOrchestration, RejectPlanRequest, RoutedTaskContinuationOrchestration,
+    SkillChildRunSpawn, TaskContinueSpawn, TaskPlannerInputSpawn, TaskRunSpawn,
+    VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, adopt_plan_run,
+    append_plan_draft, clean_mutation_artifacts, continue_routed_task_to_root_terminal,
+    delete_mutation_artifact, ensure_session_workspace_trust,
+    format_mutation_artifact_cleanup_report, format_mutation_artifact_delete_report,
+    load_worker_skill, next_task_id, plan_mode_transient_context,
+    promote_workspace_verification_check, reject_plan, resolve_continue_task, revise_plan,
+    run_admitted_task_to_root_terminal, session_ref_for_log_path, session_workspace_is_trusted,
+    skill_child_session_objective, skill_invocation_prompt, spawn_skill_child_run,
+    spawn_task_continue, spawn_task_planner_input, spawn_task_run,
 };
 #[cfg(test)]
 pub(in crate::runner) use terminal_control::durable_terminal_tool_result_metadata;
