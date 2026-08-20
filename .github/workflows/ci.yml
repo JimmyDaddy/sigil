@@ -23,6 +23,8 @@ on:
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
+      - "scripts/check-no-prompt-phrase-routing.py"
+      - "scripts/test-check-no-prompt-phrase-routing.py"
       - "scripts/check-orchestration-deterministic.sh"
       - "scripts/run-evals.sh"
       - "scripts/test-run-evals.py"
@@ -83,6 +85,8 @@ on:
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
+      - "scripts/check-no-prompt-phrase-routing.py"
+      - "scripts/test-check-no-prompt-phrase-routing.py"
       - "scripts/check-orchestration-deterministic.sh"
       - "scripts/run-evals.sh"
       - "scripts/test-run-evals.py"
@@ -167,6 +171,11 @@ jobs:
         run: |
           python3 scripts/test-check-test-layout.py
           python3 scripts/check-test-layout.py
+
+      - name: Enforce model-owned prompt semantics
+        run: |
+          python3 scripts/test-check-no-prompt-phrase-routing.py
+          python3 scripts/check-no-prompt-phrase-routing.py
 
       - name: Verify long-session evidence contract
         run: python3 scripts/test-long-session-evidence.py

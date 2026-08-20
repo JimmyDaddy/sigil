@@ -8,7 +8,7 @@ Usage: scripts/check-touched.sh [--tier quick|standard|full] [--scope dirty|stag
 Runs a risk-scaled local gate for the current change set.
 
 Tiers:
-  quick     docs whitespace check, rustfmt, workspace cargo check, touched crate tests
+  quick     policy/static checks, docs whitespace check, rustfmt, workspace cargo check, touched crate tests
   standard  quick + touched crate clippy
   full      rustfmt, workspace cargo check, workspace cargo test, workspace clippy
 
@@ -202,6 +202,8 @@ if [[ "${high_risk_changed}" == "1" && "${tier}" == "quick" ]]; then
 fi
 
 run_cmd git diff --check --
+run_cmd python3 scripts/test-check-no-prompt-phrase-routing.py
+run_cmd python3 scripts/check-no-prompt-phrase-routing.py
 
 if [[ "${desktop_changed}" == "1" ]]; then
   run_cmd pnpm --dir apps/desktop check

@@ -56,6 +56,7 @@ CLI 与 HTTP 只承担自动化、调试和 adapter 职责。
 ### 编码要求
 
 - 遵守 [`dev/governance/code-standards.md`](dev/governance/code-standards.md)
+- 禁止在 production code 中通过中英文关键词、固定短语、正则或 prompt alias 推断用户意图并选择功能；语义判断必须由模型通过受限 typed tool/schema 表达，host 只校验结构化决定、durable authority、安全与资源前置条件
 - 变更公共接口前，先确认是否会把 provider 私有语义泄漏进 `kernel`
 - 写工具相关代码时，优先考虑 preview、审批、可恢复性和结构化错误
 - 改 TUI 时，不要只改 UI；同时检查状态模型、事件流和键位提示是否同步

@@ -68,7 +68,16 @@
 - 后台任务不能“放飞不管”；需要有明确 owner、`JoinHandle`、取消信号或收尾路径
 - run/task/agent 取消必须使用唯一 root owner 与可复制 child handle；所有 forward effect 在最后责任边界取得 RAII permit，取消后不得再取得新 permit。cleanup/rollback/reap 使用独立 cleanup permit；只有 owned task 与 permit 全部归零才能记录 `Cancelled`，deadline 超时只能记录 `Interrupted`/cleanup-incomplete
 
-### 2.6 公开接口与 Rustdoc
+### 2.6 用户自然语言与语义决策边界
+
+- production code 禁止通过中英文关键词、固定短语、locale alias、正则或模糊字符串匹配，从用户 prompt / guidance / message 中推断意图并选择工具、方法、模式、Plan / Task 路由、继续/取消/审批或其他功能行为
+- 需要理解用户语义时，必须由模型通过受限 typed tool / JSON schema 输出选择；host 只能校验 enum、durable state、host-owned id/hash/generation、权限、安全边界、资源前置条件和幂等/CAS，不得从原始自然语言重建、修正或覆盖模型的 typed 决定
+- 若普通工具执行前必须先做语义分流，使用独立 routing microturn 或等价的 typed model decision；无效输出只能按有界 retry、typed neutral fallback 或显式失败处理，不能降级为关键词表
+- typed 决定建立后，后续 adapter 不得再次读取 prompt 文案来改变同一决定。测试必须证明：改变 prompt 的语言、礼貌词或同义表达不会绕过 host authority；相同文案也不能覆盖模型返回的 typed choice
+- 允许的字符串解析仅限明确语法和非语义安全职责，例如 `/command`、`@agent`、配置/协议 enum、工具参数中的显式 literal search、路径/标识符检索、secret/credential/PII 防护、markup/provider error 解析和纯展示格式化。这些解析结果不得被复用为用户意图路由
+- `python3 scripts/check-no-prompt-phrase-routing.py` 是最低静态门禁；它不替代 code review。新增自然语言输入链路时必须人工沿数据流确认没有通过重命名局部变量或封装 helper 绕过本规范
+
+### 2.7 公开接口与 Rustdoc
 
 - 新增跨 crate 的公共类型、trait、函数时，至少写清楚它的职责和边界
 - 会返回错误、可能 panic、或有调用前提的公共接口，应补 `Errors`、`Panics`、`Safety` 等对应说明
@@ -80,6 +89,8 @@
 
 - 负责：agent loop、session、approval、event、provider/tool 契约
 - 不负责：DeepSeek 私有协议细节、具体 HTTP 端点拼装、UI 展示逻辑
+- conversation / Plan / Task 的语义分流遵守 2.6 的项目级模型语义决策边界；kernel 只承载 typed choice 与 host authority 校验
+- typed 路由决定必须先绑定 host-owned identity 再执行；Plan id、Task id、plan hash 和 continuation target 不得由模型参数自行选择，也不得从自然语言重建
 - 公共类型修改时，必须先判断是否仍适合未来多 provider 复用
 - provider-hosted 能力只能通过中立 `HostedToolKind` / model capability 表达；hosted-enabled turn 的 text/reasoning/summary/evidence 必须先进入 hard-capped transient buffer，并在 runtime finalizer 完成 URL/source/citation 安全投影后才允许进入 session、`RunEvent` 或前端 handler
 - provider-hosted raw URL、title、query 与 remote source id 必须使用无 serde 实现且 redacted `Debug` 的 secret carrier；request bytes 开始发送后禁止透明 retry，provider 成功但未实际使用 hosted tool 必须记录 `NotUsed`
@@ -110,14 +121,15 @@
 - model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt
 - 所有 model-visible 工具输出必须有默认上限和截断 metadata；大输出不能直接灌满 timeline 或 provider context
 - `read_file` / `ls` / `glob` / `grep` 必须支持 limit 类参数并写回 returned/total/truncated metadata
-- 所有路径操作必须限制在 workspace root 内
+- 所有普通文件路径操作必须限制在 workspace root 内；唯一内置例外是经过 runtime binding 与 canonical containment 双重验证的 session-scoped `$SIGIL_SCRATCH_DIR` capability
 - workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须标记为 `External` subject
-- workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`
+- 任意 workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`；runtime-owned scratch 必须建模为独立 `RuntimeScratch` subject/trust zone，不能伪装成 `Workspace`，也不能误送入 arbitrary external-directory gate
 - Sigil 自身和模型可见 shell 工具需要临时 scratch 文件时，优先使用运行时注入的 `$SIGIL_SCRATCH_DIR`；它位于用户态 cache root，对模型显示为 `cache/tmp`。不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
 - `$SIGIL_SCRATCH_DIR` 必须按 session scope id 推导 session-scoped 命名空间（`<scratch root>/sessions/<session scope id>`），不得把 workspace-wide scratch root 直接注入给 child；bash、terminal_start、TUI 维护与 Desktop/application runtime 共用同一推导规则
-- scratch 命名空间在写入前必须 owner-only（Windows 复用 `secure_private_path_permissions` 的受保护 owner-only DACL），并执行 per-session 配额与 workspace 硬上限计量；配额/TTL 失败必须结构化、可诊断（工具返回 `scratch_quota_exceeded`），禁止静默转用系统 `/tmp`
+- scratch 命名空间在写入前必须 owner-only（Windows 复用 `secure_private_path_permissions` 的受保护 owner-only DACL），并执行 per-session 配额与 workspace 硬上限计量；计量必须拒绝 symlink、以总条目/字节预算限制工作量，不能把普通目录深度作为 namespace 有效性条件；配额/计量失败必须结构化、可诊断，禁止静默转用系统 `/tmp`
 - scratch TTL GC 只能删除无 active tool/terminal lease 的命名空间，删除与 lease 获取必须在同一注册表锁内完成；session 删除必须同时回收该 session 的 scratch 命名空间
-- 工具失败必须结构化返回，不能 panic
+- 工具失败必须结构化返回，不能 panic；pipe 读取失败、artifact/capture 存储失败与磁盘耗尽不得压缩成同一个通用 reader error，资源耗尽必须带稳定 code 和可执行恢复提示
+- 长时间 workspace check 在启动前必须做有界磁盘余量预检；capture 存储失败时继续 drain 已启动的 child process，并把 artifact 标记为 unavailable，不能把存储失败伪装成命令执行失败
 - provider-visible tool result 必须使用 V2 bounded model view；durable history 写 descriptor、facts 和 initial model view，不写裸文本或完整工具正文
 - initial model view 必须同时受 tool-specific per-result cap 与 root-run aggregate cap；aggregate cap 只按实际写入 `initial_model_view.preview` 的 UTF-8 bytes 扣减，不得按工具最大额度预扣；预算耗尽后保留 facts、opaque artifact ref 和 typed retrieval hint，不得回退为扩大 inline preview
 

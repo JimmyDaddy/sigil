@@ -4,5 +4,7 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
 
+python3 scripts/test-check-no-prompt-phrase-routing.py
+python3 scripts/check-no-prompt-phrase-routing.py
 ./scripts/check-staged-coverage.py
 python3 scripts/check-test-layout.py

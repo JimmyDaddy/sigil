@@ -102,7 +102,7 @@
 
 分层规则：
 
-- `quick`：适合普通代码改动、局部 TUI 状态/渲染、文档加少量测试；执行 `git diff --check`、`cargo fmt --all --check`、`cargo check` 和 touched crate 的 `cargo test -p <crate>`。
+- `quick`：适合普通代码改动、局部 TUI 状态/渲染、文档加少量测试；执行 `git diff --check`、prompt semantic gate 自测与扫描、`cargo fmt --all --check`、`cargo check` 和 touched crate 的 `cargo test -p <crate>`。
 - `standard`：适合 session/event/mutation/verification/permission/tool/TUI runner 等高风险路径；在 `quick` 基础上追加 touched crate 的 `cargo clippy -p <crate> --all-targets -- -D warnings`。
 - `full`：适合发布前、跨多个核心 crate 的语义大改或需要合并长期分支时；执行 workspace `cargo test` 和 `cargo clippy --all-targets -- -D warnings`。
 
@@ -124,7 +124,7 @@ cargo clippy --all-targets -- -D warnings
 git config core.hooksPath .githooks
 ```
 
-hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的声明、导入和类型形状当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
+hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/check-no-prompt-phrase-routing.py`，阻止 production code 用固定自然语言短语替代模型 typed semantic decision；随后调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的声明、导入和类型形状当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
 
 为缩短本地提交耗时，staged gate 不再为每次提交运行 `cargo llvm-cov`。它只证明“业务代码改动有同 crate 测试证据”，不要把它当成完整 workspace 覆盖率替代品。完整 workspace 覆盖率通过显式 `./scripts/coverage.sh` 和 CI 报告观察趋势；发布级阈值应由 release/hardening 任务显式启用。RFC/session/mutation/verification 等核心语义变更优先补可复现的语义测试和 conformance case；不要为了满足本地 staged gate 而补无效断言或 pass-only 测试。
 
