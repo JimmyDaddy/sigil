@@ -151,7 +151,7 @@ task-config digest 与 binary build 全部精确匹配 qualified release manifes
 | `[web].allowed_ports` | `[80, 443]` | 允许的目标端口。 |
 | `[web].allowed_domains` / `.blocked_domains` / `.allowed_private_hosts` / `.allowed_private_cidrs` | `[]` | 可选的目标列表；私有网络目标必须显式匹配。 |
 | `[memory].enabled` | `true` | 加载工作区指令文件。 |
-| `[memory].writable` | `true` | 开启需审批的持久用户偏好与当前项目事实工具、本地跨会话召回、检查和物理 Forget；设为 `false` 可退出。 |
+| `[memory].writable` | `true` | 开启持久用户偏好与当前项目事实工具、本地跨会话召回、检查和物理 Forget。普通模式默认询问，`danger-full-access` 不弹审批；显式拒绝仍然有效。设为 `false` 可退出。 |
 | `[skills].enabled` / `.user_skills` / `.user_agents` | `true` | 开启发现到的可复用资源。 |
 | `[skills].compatibility_auto_discover` | `true` | 导入标准 `.agents/skills`、Codex `.codex/agents`、OpenCode `.opencode/{skills,commands,agents}` 和 Claude Code `.claude/{skills,commands,agents}` 工作区资源。设为 `false` 可关闭默认兼容集合。 |
 | `[skills].compatibility_sources` | `[]` | 在默认集合之外添加兼容来源，例如为 `.reasonix/agents` 加入 `"reasonix"`；也可配合 `compatibility_auto_discover = false` 精确选择来源。 |

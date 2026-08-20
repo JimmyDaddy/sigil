@@ -23,7 +23,7 @@ python3 scripts/alpha-dogfood-campaign.py \
 
 Runner 有意不接收任何 script launcher，包括 npm JavaScript launcher，因为冻结 wrapper 并不能冻结它委托的 binary。准入只接受 Mach-O、ELF 或 PE executable。公开 npm 安装与 launcher 执行由 Public Distribution Smoke 覆盖；只有还需要本地离线 campaign 时，才显式选择已安装 platform package 内的 native binary。
 
-默认 campaign 通过真实 headless 或 PTY 产品入口运行 Context V1、Web V1、feedback、terminal attention 和 image-input acceptance。每个 case 使用独立 HOME、XDG、state、cache 和 temp root。Runner 不继承 provider credential 或 Sigil config override，ambient proxy route 指向关闭的 loopback endpoint，并且每个 harness 都只配置和检查 case-owned loopback service。Feedback case 会记录 loopback request 数量，并拒绝 provider generation request。
+默认 campaign 通过真实 headless 或 PTY 产品入口运行 Context V2、Web V1、feedback、terminal attention 和 image-input acceptance。每个 case 使用独立 HOME、XDG、state、cache 和 temp root。Runner 不继承 provider credential 或 Sigil config override，ambient proxy route 指向关闭的 loopback endpoint，并且每个 harness 都只配置和检查 case-owned loopback service。Feedback case 会记录 loopback request 数量，并拒绝 provider generation request。
 
 这不是 OS-level socket sandbox。“离线”结论只覆盖这些已审查 case definition、它们的 loopback endpoint assertion，以及 ambient credential/config 不可见的边界。
 
@@ -54,11 +54,11 @@ python3 scripts/tui-stateful-pty-acceptance.py \
 
 campaign 会把两个输入冻结到 case-owned storage，并围绕同一组 durable session 运行三个真实 TUI process：
 
-1. loopback provider 创建四个 finalized turn，其中包含一次受控 `write_file` mutation，以及曾经可能触发重复 reply 的 facts-before-final continuation；
+1. loopback provider 创建四个 finalized turn，其中包含一个以 CJK UTF-8 边界结尾的 `read_file` 结果、一次受控 `write_file` mutation，以及曾经可能触发重复 reply 的 facts-before-final continuation；
 2. 关闭 loopback server 后，以默认 transport config 和关闭的 ambient proxy 恢复 source session，在本地完成 compaction admission/apply，通过 Ctrl-R reverse-diff modal 恢复受控文件，再由 modal 的 `F` fork，且不得改变已恢复文件；
 3. 新进程先从 source session 启动，再通过可见的 `/resume` selector 切换到唯一 non-current fork。
 
-通过条件包括：最终 reply 在两次重建后的 VT screen 上都恰好出现一次，在 source/fork stream 中也都只有一条结构化 final-answer entry；同时必须恰好存在一个 `compaction_applied_v2`、一个 `checkpoint_restored`、一个 `conversation_forked`，fork 和 resume 前后文件 hash 不变。local compaction admission 有意不使用 custom provider route。
+通过条件包括：CJK 工具结果经 capture 后能在真实 PTY 中正常渲染且不会触发 worker panic；最终 reply 在两次重建后的 VT screen 上都恰好出现一次，在 source/fork stream 中也都只有一条结构化 final-answer entry；同时必须恰好存在一个 `compaction_applied_v2`、一个 `checkpoint_restored`、一个 `conversation_forked`，fork 和 resume 前后文件 hash 不变。local compaction admission 有意不使用 custom provider route。
 
 安全的 `manifest.json` 只包含公开 binary/tokenizer identity、计数、布尔结果、耗时，以及相对 evidence path/checksum。字节完全一致的 source/fork JSONL 与原始 PTY log 只保留在被忽略的本地输出中，可用于独立复算，且不会上传。仓库内输出若未被 Git ignore 会在执行前被拒绝；显式选择的仓库外路径会标记为 local-only。CI 只运行 parser、admission、process cleanup、durable structure 和 manifest privacy contract test；真实 release-binary campaign 因依赖已安装 tokenizer artifact，继续作为显式本地发布检查。
 

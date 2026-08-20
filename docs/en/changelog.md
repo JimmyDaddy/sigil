@@ -66,7 +66,16 @@ settlement closures.
 - The plan review surface is now a first-class lifecycle: `/plan` and automatic review share the
   same typed plan draft, the same pending plan card (Run / Save / Revise / Reject), and the same
   HTTP/Desktop/TUI decision commands. Reconnect and reload restore a pending plan.
-- Workspace instruction memory and approval-gated durable memory are now enabled by default. Set
+- Durable Task execution now carries versioned per-step paths, capabilities, deliverables,
+  acceptance criteria, and check references through planning, compaction, interruption, and
+  resume. Exact scoped-tool capability admission happens before child or provider dispatch, and a
+  durable progress guard forces bounded finalization when a participant repeats the same analysis
+  without progress.
+- A fixed read-only `vcs_inspect` tool provides bounded status/diff facts without arbitrary Git
+  arguments, while semantic cache layout V2 excludes per-turn authorization identities from the
+  provider-visible tool-schema fingerprint.
+- Workspace instruction memory and durable memory are now enabled by default. Durable mutations ask
+  in ordinary permission modes and run without an approval prompt in `danger-full-access`; set
   `[memory].enabled = false` or `[memory].writable = false` to opt out of either capability.
 - Plain `sigil` launches now start a fresh session instead of reopening the most recent conversation.
   Explicit resume keeps the portable transcript across safe endpoint corrections, asks before using

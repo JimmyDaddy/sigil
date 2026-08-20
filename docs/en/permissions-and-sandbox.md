@@ -22,6 +22,13 @@ mode = "manual"
 
 `manual` is the recommended starting point. A specific deny always remains stricter than a broad mode.
 
+For a writable Task child, Sigil keeps a host-owned audited workspace frontier. A workspace change
+made by an authorized tool advances that frontier only after the tool's mutation evidence has been
+settled, so the child does not revoke its own grant after a legitimate edit. An unattributed change,
+a concurrent frontier conflict, or a changed tool/cancellation binding still fails closed. The
+grant's initial workspace snapshot remains immutable audit evidence. `danger-full-access` removes
+ordinary approval prompts; it does not disable mutation auditing, cancellation, or conflict checks.
+
 ## Review Before An Action Runs
 
 Check the summary, path or destination, command, and diff before choosing a decision. A plan or earlier approval is not permission for a different action. Headless `sigil run` cannot open an approval modal; an unresolved `ask` action fails.
@@ -62,7 +69,7 @@ default_mode = "ask"
 rules = []
 ```
 
-Enabling this section does not make every external path safe or accessible; each path still follows its rule and protected-path checks. Use `$SIGIL_SCRATCH_DIR` for command scratch files when possible. The scratch directory is scoped to the current session, private to this user, capped by a size quota, and reclaimed after a TTL; do not rely on it for long-term storage.
+Enabling this section does not make every external path safe or accessible; each path still follows its rule and protected-path checks. Use `$SIGIL_SCRATCH_DIR` for command scratch files when possible. The scratch directory is scoped to the current session, private to this user, capped by a size quota, and reclaimed after a TTL. A runtime-verified scratch path is not arbitrary external-directory access and does not require `permission.external_directory`; an attempted escape from the scratch root is still treated as external. Do not rely on scratch for long-term storage.
 
 ## Network And Web Tools
 

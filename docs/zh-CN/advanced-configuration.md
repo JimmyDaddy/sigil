@@ -68,7 +68,7 @@ writable = true
 
 `enabled` 允许 Sigil 加载 `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` 等工作区指令文件。请保持内容简短、及时更新，并确保这些说明适用于仓库中的每个会话。
 
-`writable` 默认启用；如需退出，可显式设为 `false`。Sigil 会提供需要审批的 `remember_user_preference`、`remember_project_fact`，以及 `inspect_memory`、`forget_memory` 工具。是否需要长期记忆由模型根据用户语义自行判断，不通过关键词机械匹配 prompt。写入成功会返回包含 `scope`、`memory_id` 和 `version` 的 durable receipt；拿到该回执前，Sigil 不得声称信息已跨会话记住。用户偏好在本机工作区之间共享，项目事实按当前 canonical workspace 隔离；疑似凭据或 secret 的内容会被拒绝。
+`writable` 默认启用；如需退出，可显式设为 `false`。Sigil 会提供 `remember_user_preference`、`remember_project_fact`，以及 `inspect_memory`、`forget_memory` 工具。普通权限模式下，持久记忆变更仍会请求审批；`danger-full-access` 会把这类 `Ask` 视为已经授权，但显式 `Deny` 和疑似凭据或 secret 的内容拒绝仍然有效。是否需要长期记忆由模型根据用户语义自行判断，不通过关键词机械匹配 prompt。写入成功会返回包含 `scope`、`memory_id` 和 `version` 的 durable receipt；拿到该回执前，Sigil 不得声称信息已跨会话记住。用户偏好在本机工作区之间共享，项目事实按当前 canonical workspace 隔离。
 
 Forget 会停止后续召回，并物理删除 Sigil 控制的记忆 sidecar；它不能撤回已经发送给 provider 的上下文，也不会删除独立的 session 和审计证据。
 

@@ -1,5 +1,8 @@
 # Sigil Rust Agent 核心技术方案（Implementation Snapshot v1）
 
+> Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
+> no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
+
 ## 1. 背景
 
 `sigil` 是一个基于 Rust 的 AI coding agent：内核复用、前端可插拔，
@@ -300,9 +303,9 @@ sigil/
 - `sigil-updater`：Desktop、TUI 与 CLI 共享的更新策略边界，拥有 release discovery、SemVer channel isolation、immutable/digest admission、安装源分类、24 小时 global cache 与 standalone binary replacement；它不拥有产品 UI、release publication 或 package-manager execution。GitHub digest 只作为完整性证据，standalone apply 还要求编译期分发 marker、精确 tag/target/asset 和下载后二进制元数据复核；npm、Homebrew、Cargo、source 与 unknown 只返回原安装器命令。
 - `sigil-desktop`：桌面 Rust 后端的 library-only boundary。它生成并私有持有 per-launch bearer，以独立process tree启动one `sigil serve` per workspace，bounded解析startup metadata，再用no-proxy/no-redirect的鉴权`/server-info`验证同一DTO；关闭时先drop owner pipe等待graceful drain，超时才整树终止。typed client只反序列化server response，包含server-private path的DTO没有IPC serialization surface。它不依赖kernel、runtime、TUI或HTTP server crate，renderer也不能取得token/child/generic HTTP。
 - `apps/desktop`：RFC-0044 的 Tauri 2 + React/TypeScript/Vite companion。Tauri backend通过`sigil-desktop`维持one process per workspace，native recent store私有持有canonical path；renderer只接收workspace id/display/server state、bounded catalog rows与process-local session summary。history pagination/search/filter/new/open/rename/confirmed-delete全部经authenticated typed HTTP client；rename追加bounded lifecycle decision，可用会话的delete复用exact preview/apply并与活动run/verification互斥，无法打开的invalid/oversized/scan-limited来源则只能在重新校验catalog fingerprint并取得maintenance + writer lease后隔离或删除；JSONL 与同名 resource tree 一起进入 quarantine/tombstone，稳定 writer-lock inode 保留，跨进程占用返回 typed busy。session catalog只读取当前 application id、user version 与 projection row schema；同 application id 的旧 rebuildable cache 在 exclusive recovery lease 下整体隔离后从当前 JSONL truth 重建，不做旧 row migration；wrong owner、未知较新 schema 与 corruption 仍 fail closed。会话库 mutation 同时刷新 library page 与 App-owned sidebar catalog。server-private path与durable scope在IPC前丢弃。capability仅允许冻结的desktop业务command，不开放generic shell/process/filesystem/HTTP。wire schema由`sigil-http` OpenAPI导出并在CI检查snapshot和generated TypeScript drift；SSE `ProtocolEvent`/`PublicRunEvent` 也属于该合约，native client以provider-neutral typed DTO消费task/plan/batch/step/integration事件，未知事件只降级且raw payload不进入renderer，renderer不直接持有loopback client或bearer。RFC-0046 进一步把桌面表现层收口到 Material-derived semantic roles 和 Sigil-owned accessible primitives；application-scope `system | light | dark` 由 bounded native store 持久化，不进入 workspace/session/OpenAPI/SQLite/runtime truth，theme/navigation/review 切换不得 remount active conversation。
-- `sigil-code-intel`：隔离 LSP client 生命周期、多语言 Tree-sitter request-local fallback、RepoMapLite source map、符号/诊断缓存、warm LSP context snapshot、代码查询 tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。首批 request-local adapter 覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go，使用编译期固定 grammar、ignore-aware bounded walker/read、deterministic caps 和 same-language unique-reference heuristic；它不建立 persistent repo graph，也不把 heuristic edge 宣传为 resolved call graph。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态结果以 bounded Context V1/tool result 进入 provider-visible request，不修改 stable base system prompt。`LanguageServerConfig.trust_required = true` 时，runtime 必须把当前 session 对精确 workspace 的 durable trust projection 传到 code-intel，并在 command resolution 与 process spawn 前 fail-closed；旧调用入口和 fresh headless session 默认 `Unknown`，`trust_required = false` 只显式关闭 LSP 进程启动 gate，不改变写工具权限。外部规划型写入采用 kernel-owned `ToolPreparationDraft -> PreparedToolCall` 一次性 envelope：code-intel 只负责单次 LSP plan、source/version/hash、完整 edit set 与 proposed bytes 的进程内 materialization，kernel 用 exact target subjects 求 permission，并把 args、policy、approval、preview 与 execution 绑定同一 digest；execute 只能按值消费 artifact，不能再次查询 LSP。多文件写入复用 RFC-0002 coordinator，进程内失败采用可审计的补偿回滚，crash 仍按逐文件 reconciliation 处理而不宣称原子事务。
+- `sigil-code-intel`：隔离 LSP client 生命周期、多语言 Tree-sitter request-local fallback、RepoMapLite source map、符号/诊断缓存、warm LSP context snapshot、代码查询 tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。首批 request-local adapter 覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go，使用编译期固定 grammar、ignore-aware bounded walker/read、deterministic caps 和 same-language unique-reference heuristic；它不建立 persistent repo graph，也不把 heuristic edge 宣传为 resolved call graph。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态结果以 bounded Context V2/tool result 进入 provider-visible request，不修改 stable base system prompt。`LanguageServerConfig.trust_required = true` 时，runtime 必须把当前 session 对精确 workspace 的 durable trust projection 传到 code-intel，并在 command resolution 与 process spawn 前 fail-closed；旧调用入口和 fresh headless session 默认 `Unknown`，`trust_required = false` 只显式关闭 LSP 进程启动 gate，不改变写工具权限。外部规划型写入采用 kernel-owned `ToolPreparationDraft -> PreparedToolCall` 一次性 envelope：code-intel 只负责单次 LSP plan、source/version/hash、完整 edit set 与 proposed bytes 的进程内 materialization，kernel 用 exact target subjects 求 permission，并把 args、policy、approval、preview 与 execution 绑定同一 digest；execute 只能按值消费 artifact，不能再次查询 LSP。多文件写入复用 RFC-0002 coordinator，进程内失败采用可审计的补偿回滚，crash 仍按逐文件 reconciliation 处理而不宣称原子事务。
 - `sigil-mcp`：隔离 stdio 与 Streamable HTTP MCP client、OAuth 2.1 凭据生命周期和工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
-- `sigil-runtime`：收口跨入口共享的 provider factory、tool registry、run options、Context source provider contract / hard-cap enforcement 和 request resolver，避免 TUI / CLI 各自硬编码装配链。tool surface 保留与 registry 同一个 `CodeIntelligenceService` inner；每次请求先在 35ms 内只读 query-relevant warm LSP cache，有命中时使用 explicit path + LSP rows 并跳过 RepoMap，miss/disabled/timeout 才使用 request-local multilingual RepoMap。它把这些结果转换为带 score breakdown 的 bounded Context V1 items，并把 trusted plugin hook output / caller-supplied MCP resource text 通过同一个 source-provider contract 转成 `ExtensionProvided` / `McpResource` rows；缺失或不可信输入只产生 excluded provenance，不阻塞普通 request。normal、plan、headless、queue 和 compaction preparation 共享该 resolver；已经冻结的 provider request 不在 dispatch 时重算。kernel 只看到 provider-neutral `ContextItem` 和 packer，不知道 runtime 存在。
+- `sigil-runtime`：收口跨入口共享的 provider factory、tool registry、run options、Context source provider contract / hard-cap enforcement 和 request resolver，避免 TUI / CLI 各自硬编码装配链。tool surface 保留与 registry 同一个 `CodeIntelligenceService` inner；每次请求先在 35ms 内只读 query-relevant warm LSP cache，有命中时使用 explicit path + LSP rows 并跳过 RepoMap，miss/disabled/timeout 才使用 request-local multilingual RepoMap。它把这些结果转换为带 score breakdown 的 bounded Context V2 items，并把 trusted plugin hook output / caller-supplied MCP resource text 通过同一个 source-provider contract 转成 `ExtensionProvided` / `McpResource` rows；缺失或不可信输入只产生 excluded provenance，不阻塞普通 request。normal、plan、headless、queue 和 compaction preparation 共享该 resolver；已经冻结的 provider request 不在 dispatch 时重算。kernel 只看到 provider-neutral `ContextItem` 和 packer，不知道 runtime 存在。
 - `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。历史session reopen只接受catalog提供的relative ref与expected durable id，并由runtime重新验证lifecycle/JSONL truth；SQLite projection不能授权resume。artifact page route 必须 authenticated、typed、session/source-bound、hash-verified 且 endpoint cap 固定，response/error 均不包含物理路径。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`update`、`serve` 和隐藏 provider 调试命令保留为显式自动化/高级入口，不承担最终产品心智；`update check` 只发现更新，`update apply --yes` 只对已准入 standalone archive 执行替换，包管理器安装仅返回 owner command；`serve` 当前通过共享 runtime application service 启动 loopback-only、bearer-authenticated HTTP/SSE listener，支持 durable replay、live event、approval/cancel 与 graceful drain，不提供 remote bind 或 multi-user daemon 语义。`sigil-desktop`已按workspace监管单独的`serve`进程，通过单行版本化JSON/鉴权`server-info`完成bootstrap，并用stdin owner pipe与process-tree fallback拥有child lifecycle；诊断事实由 `sigil-runtime` 提供，避免 CLI、TUI与desktop各写一套判断。
 - `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke，并为可独立替换的官方归档写入 `github-release` 分发 marker；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs，npm launcher 再覆盖 install-source marker 以保留包管理器 ownership；`scripts/release-doctor.mjs` 绑定 tag、Cargo/Desktop/Tauri/Cargo.lock/changelog、remote main/tag 与 exact-SHA CI；`scripts/release-candidate.mjs` 冻结 tag commit、候选 asset inventory/size/SHA-256；macOS Desktop 使用 append-only 公证账本把 build+submit、单次 status、offline finalize 与 upload 分离，每个 attempt 绑定 tag/commit/Team/profile label/目标架构/不可变 submission SHA-256，Apple 原始响应原子落盘，缺失 ID 只能唯一 history reconciliation 或显式 orphan 后重提；`scripts/upload-desktop-macos-release.sh` 是签名双架构 Desktop 进入 draft 的唯一 maintainer 入口，并复验 finalized ledger，默认拒绝替换不同字节。`.github/workflows/release.yml` 只在 tag push 时构建一次多平台 TUI archive、生成 provenance、准备 npm tarball 和 draft Release；显式 publish 不再重编，而是按 candidate manifest 复用原 tarball，先验证双架构 macOS Desktop DMG、updater archive、checksum 与 signature，冻结 `latest.json`，再公开 immutable Release、通过 npm Trusted Publisher 按 platform-first/root-last 发布、部署 Pages updater endpoint，并由独立 job 使用仅限 `JimmyDaddy/homebrew-sigil` 的 SSH deploy key同步 tap。主 workflow 在 npm 发布后通过 `repository_dispatch` 启动有界等待的公开 npm/GitHub/Desktop/Pages/Homebrew smoke；`release.published` 另行覆盖非 `GITHUB_TOKEN` 触发的人工发布。crates.io package name 决策仍是 release-management 工作。
@@ -386,6 +389,11 @@ pub trait Provider: Send + Sync {
 - provider 抽象必须能承载 background task、response handle、reasoning artifact、续跑 cursor 这些能力位
 - 不能把 provider 的长任务、推理摘要、工具流事件都压扁成“只有文本 delta”的模型
 - provider 的 `stream()` 必须是真流式：HTTP/SSE body 读取、SSE frame 解码和 `ProviderChunk` 映射应边读边 yield；只允许在尚未 yield 任何 chunk 前做透明 retry
+- provider adapter 必须把“已输出后发现非结构化工具协议”映射为 provider-neutral typed protocol
+  violation。它不能在同一个 logical run 中透明重放；Task runtime 只能在 shared-read-only、零副作用、
+  失败 attempt 的 exact request material fingerprint 已作为恢复证据时创建新的 bounded durable participant
+  attempt。替代 attempt 独立绑定 retry-stable task input 与 provider/model route，dispatch 前发现 route
+  漂移时暂停等待恢复或显式 replan；恢复耗尽后暂停 Task 并保留 DAG，而不是级联取消依赖步骤
 
 ### 6.2 Tool 抽象
 
@@ -441,7 +449,7 @@ pub trait Tool: Send + Sync {
 - `egress_audit` 用于工具域内安全出境审计摘要，返回值会进入 durable control state；实现必须先脱敏并限制大小，不能包含原始 secret、文件内容或大 payload
 - `execute` 必须接收 provider 侧的 `call_id` 并原样写回 `ToolResult.call_id`，保证 tool call / result 配对可恢复
 - 文件类内置工具必须对 workspace root 做 canonicalize，并用路径组件判断 confinement；绝对路径、`..`、目标 symlink 或父目录 symlink 指向 workspace 外时必须生成 `External` subject，再由 `permission.external_directory` gate 决定 deny / ask / allow
-- 临时 shell scratch 文件使用运行时注入的 `$SIGIL_SCRATCH_DIR`，实际目录位于 Sigil 用户态 cache root，对模型显示为 `cache/tmp`。scratch 是 session-scoped：每个 session 通过其稳定 scope id 推导独立命名空间（`<cache root>/workspaces/<workspace>/tmp/sessions/<session scope id>`），同一 session 的连续 tool call 复用同一目录，resume 后路径不变；bash、terminal_start、TUI 与 Desktop/application runtime 共用同一推导规则。命名空间在写入前设置为 owner-only（Windows 使用受保护的 owner-only DACL），并受 per-session 容量配额与 workspace 硬上限约束；达到配额时工具返回结构化 `scratch_quota_exceeded` 错误，绝不静默转用系统 `/tmp`。过期命名空间由 TTL GC 回收，且 GC 永远不会删除仍被 active tool 或 terminal task lease 占用的命名空间。系统 temp 目录不作为内置例外：`/tmp`、macOS `/private/tmp`、Windows `%TEMP%` 等仍属于 workspace 外路径，必须走 `permission.external_directory`。
+- 临时 shell scratch 文件使用运行时注入的 `$SIGIL_SCRATCH_DIR`，实际目录位于 Sigil 用户态 cache root，对模型显示为 `cache/tmp`。scratch 是 session-scoped：每个 session 通过其稳定 scope id 推导独立命名空间（`<cache root>/workspaces/<workspace>/tmp/sessions/<session scope id>`），同一 session 的连续 tool call 复用同一目录，resume 后路径不变；bash、terminal_start、TUI 与 Desktop/application runtime 共用同一推导规则。只有 `ShellPathPolicyBinding` 解析且 canonical target 仍位于该 exact session root 内的路径才标记为 `ToolSubjectScope::RuntimeScratch` / `PathTrustZone::RuntimeScratch`；它不伪装成 workspace path，也不进入 arbitrary external-directory gate，逃逸目标仍为 `External`。命名空间在写入前设置为 owner-only（Windows 使用受保护的 owner-only DACL），并受 per-session 容量配额与 workspace 硬上限约束；计量使用 symlink-safe、总条目有界且不限制普通目录深度的迭代 walk。达到配额时工具返回结构化 `scratch_quota_exceeded`；计量限制或无效 namespace 返回带 reason code、相对路径和明确标记为非自动执行的用户确认重置建议，绝不静默转用系统 `/tmp`，也不把宿主 cache 路径写入模型结果。过期命名空间由 TTL GC 回收，且 GC 永远不会删除仍被 active tool 或 terminal task lease 占用的命名空间。系统 temp 目录不作为内置例外：`/tmp`、macOS `/private/tmp`、Windows `%TEMP%` 等仍属于 workspace 外路径，必须走 `permission.external_directory`。
 
 ### 6.3 Tool Registry
 
@@ -489,6 +497,12 @@ trust无法证明时，Desktop/TUI/HTTP都投影 bounded typed recovery，未经
 直接运行 TUI 默认创建 fresh session，历史只通过显式 `sigil resume [selector]` 或 `/resume` attach；
 每个 session 另有 OS-backed、crash-released的跨进程 write-capable attachment lease，目标 busy 时不释放
 source、不启动第二个 worker。该 attachment lease 与 durable writer/lifecycle lease职责独立。
+fresh session 启动时为 route、workspace trust 和 writer authority 建立的 bootstrap-only stream 只属于
+provisional control state，不算可恢复会话；resume 产品面应该只列出包含消息、Task、Plan 或其他非
+bootstrap durable activity 的 session。当前 TUI `/resume` 已执行该过滤，正常退出时会
+丢弃 bootstrap-only current stream；如果它是 workspace 唯一的 durable trust carrier，则只保留一个
+不进入 resume 列表的隐藏 trust anchor，避免下次启动重新询问信任。异常退出遗留的 bootstrap-only
+stream 同样不得污染 TUI 历史列表；Desktop catalog 采用同一判定仍属于后续统一项。
 
 V2 tool result 的 policy-safe bytes 写入 session JSONL sibling resource tree：
 `<session-stem>/artifacts/{staging,refs,blobs,trash}`。对外 ref 是随机、session-scoped
@@ -513,6 +527,14 @@ Ready projection 完全一致，seed 必须是 no-op，不能伪造 all-family w
 aggregate budget 只按实际写入 `initial_model_view.preview` 的 UTF-8 bytes 扣减，不按工具最大额度
 预扣。预算耗尽后 durable result 仍保留 bounded facts、opaque ref、token upper bound 和
 `line_page/search_literal` retrieval hint；后续正文只通过 typed retrieval 进入当前 request。
+
+shell/cargo workspace check 的资源失败采用独立语义：启动重型 check 前以有界扫描估算
+`target/` 压力并检查数据卷可用空间，余量不足返回 `ResourceExhausted` /
+`disk_space_exhausted`，durable Task 将其结算为可恢复暂停而非无反馈终止。已启动 child 的 pipe
+读取失败与 artifact capture 存储失败分离；后者继续 drain child、保留 exit status，并将 capture
+标记为 unavailable。session writer 在共享 session 目录维护不进入 resume catalog 的小型紧急
+reserve；遇到 ENOSPC 时释放后对同一 crash-safe append 重试一次，以优先落下最小 terminal /
+checkpoint 事实。
 
 上述 root-run cumulative counter 是 RFC-0059 V2 的 current baseline。RFC-0062 的 proposed V3 clean
 cutover 将其替换为四个独立 plane：harness-owned policy-safe artifact capture；per-result 8/16 KiB +
@@ -557,7 +579,8 @@ current-root child 集合，不再嵌入全 session command/file facts。Blocker
 
 ### 6.5 Cache-First 上下文分区
 
-为了保留 Reasonix 最核心的“缓存极致利用”特性，`sigil` 不应该只停留在“尽量少改 prompt”的口号层，而要直接把上下文建模成三个区域：
+为了保留 exact-prefix cache 的价值，`sigil` 不应该只停留在“尽量少改 prompt”的口号层，而要把
+provider-visible material 建模成稳定前缀与单调追加的 durable history，并把动态 Context 放在尾部：
 
 ```text
 ┌─────────────────────────────────────────┐
@@ -566,17 +589,23 @@ current-root child 集合，不再嵌入全 session command/file facts。Blocker
 ├─────────────────────────────────────────┤
 │ APPEND-ONLY LOG                         │
 │   user / assistant / tool results       │
+│   + RuntimeContextSnapshotV2 tail       │
 ├─────────────────────────────────────────┤
-│ VOLATILE SCRATCH                        │
-│   per-turn transient plan / repair      │
+│ PROCESS-LOCAL OVERLAY                    │
+│   staged/frozen material before barrier │
 └─────────────────────────────────────────┘
 ```
 
-这三段要分别承担不同责任：
+这三段分别承担不同责任：
 
 - `Immutable Prefix`：在 session boot 时计算一次，之后默认不改写，是 prefix-cache 命中的核心区域。
 - `Append-Only Log`：按发生顺序单调追加，不能重排、不能中途就地覆盖。
-- `Volatile Scratch`：只服务当前回合的临时状态，例如 repair、内部计划、局部推导，不直接上游发送，也不直接写回 prefix。
+- `RuntimeContextSnapshotV2`：以内部 `user` message 追加在当前 durable tail；相同内容不重复，变化、
+  clear、compaction 后重发都追加新 snapshot 并 supersede 旧 snapshot，不再把动态 retrieval/context
+  放到 leading System 位置破坏整段历史缓存。
+- `Process-local Overlay`：只服务 frozen request 的 staging；在 physical-attempt `Started` barrier 前，
+  要么幂等 materialize 为 durable snapshot 并与重投影完全一致，要么明确标记为不可跨重启重建，不能
+  静默混入可恢复历史。
 
 这里需要锁死 6 条不变量：
 
@@ -587,6 +616,13 @@ current-root child 集合，不再嵌入全 session command/file facts。Blocker
 5. 并行工具调用即使并发执行，落回历史时也必须按声明顺序写入。
 6. 除非发生受控 compaction，否则前一轮请求的字节前缀在下一轮必须继续可命中。
 
+当前普通工具批次通过 provider-neutral `ToolConcurrencyClass` 调度：所有工具默认 `Exclusive`；只有
+显式声明 `ParallelReadOnly`，同时静态 spec、动态 permission plan、mutation tracking 和 effect facts
+均证明只读的调用才进入最大 4 个 body 的 rolling pool。approval、preview、Started audit 仍串行完成，
+exclusive 调用构成 barrier；body 可以乱序结束，但 terminal audit、artifact settlement、产品事件与
+provider tool result 严格按模型 declaration order commit。取消只停止启动排队 body，已启动 body 必须
+drain，未启动调用获得 typed interrupted result，不能通过 drop future 伪造 quiescence。
+
 此外，缓存利用不能只靠“感觉”，必须做成硬观测项。`sigil` 需要在 telemetry 中持续产出：
 
 - 每轮 `cache_hit_tokens`
@@ -594,6 +630,12 @@ current-root child 集合，不再嵌入全 session command/file facts。Blocker
 - 每轮 `cache_hit_ratio`
 - 整个 session 的累计 `cache_hit_ratio`
 - 因缓存带来的估算节省成本
+
+每个生成型 `ProviderPhysicalAttempt` 还会持久化隐私安全的 `ProviderRequestEnvelopeV1`：canonical request、
+route/system/tool/conversation/dynamic 分段 hash，message identity hash，source durable frontier、context
+epoch、cache-layout proof 与 reconstruction disposition。进程级 fingerprint 使用 HMAC，不持久化 raw
+prompt、secret 或 provider wire bytes；`doctor` 会复核 envelope、frontier、attempt/tool closure 等运行时
+不变量，legacy 无 envelope 的 attempt 只报告降级证据，不能冒充当前可重建证明。
 
 ### 6.6 核心数据结构建议
 
@@ -1019,7 +1061,29 @@ Desktop、TUI、CLI 与 HTTP streaming 都消费同一套事件语义，而不�
 
 ## 9. Planner / Executor / Subagent 协作模型
 
-Planner / executor / subagent 协作已经作为跨表面的共享 task flow 落地。Durable task 在 TUI 中的显式入口是 `/task <任务>`；`/plan` 只表示一次性 Plan mode / read-only planning prompt，不创建 durable task state。TUI 中 `task.routing_policy = "auto"` 时，普通 chat 先进入独立 routing-only microturn；模型只能在 `request_task_planning` 与 `continue_without_task_planning` 之间给出一个 typed semantic decision，host 不扫描 prompt 关键词。正向 decision 进入同一 durable task flow；负向 decision 后才在下一 turn 恢复普通工具面。free text 或无效 decision 只重试一次，仍无效则 blocked，不能把 routing 文本当作用户回答。默认 `auto` 时普通输入走三路自动路由（Chat / PlanReview / Task），显式 `manual` 保持 chat-first。Production HTTP driver 与 Desktop-owned `sigil serve` child 已附加共享 foreground task executor，并完成 Task control/recovery parity：typed continuation 可携带 task-targeted guidance；integration review/accept 绑定 exact task/plan/preview digest、promotion authority 与 parent verification；Pause 复用 TUI 的 exact `TaskPauseRequest`、root cancellation scope 和 Task stop transition。请求前绑定 task/plan/scope，只有 root execution、child/effect permit 全部 quiescent 后才通过单一有序 writer batch 追加 active step/child terminal，并最后追加 Task `Paused` / `Cancelled`；cleanup、join 或最终 binding 不确定时只能追加 `Interrupted`。普通 run cancel 只有在 durable cancellation scope 真实绑定 Task 时才修改该 Task，不能误伤旧任务。autonomous planner 的 typed participant schema 只接受 read/write/review；可信 verification policy/check 由 host 绑定到 mutation step，并在 participant 结束后执行，不创建缺少 verification tool 的模型 `verify` participant。Task participant 在 mutation 后只有有界 read-only 收敛尾部；超过额度或即将耗尽轮次时，host 注入 route-fingerprinted finalization contract，并移除 client/hosted tools，只允许一次 bounded result 收口，且不影响普通 chat。HTTP schema v9 的 authenticated typed routes、幂等 command receipt 与 production supervisor 复用相同 authority；Desktop schema v9 handshake、native typed client、Tauri allowlist commands、Task card 与 integration inspector 消费相同 contract。canonical conversation display 还在固定 durable frontier 投影最多 128 个 step/lane 的 `task_control` 和显式 truncation，应用重启后即使没有 process-local live event 也能恢复 Continue/guidance/integration controls，同时不暴露 objective、prompt/transcript、private workspace/ref 或 mutation authority。release 默认值为 `auto`（review-first 基线），只有 qualified real-model evidence 与 rollout manifest 精确匹配才允许 `DirectTask`。恢复只补本地 handoff/TaskRun admission crash gap，不重放原 conversation provider request；只有能证明尚未发生 planner/participant dispatch 的 task 才自动接管，stale Running step/lease 会先记为 Interrupted/Paused，再由 `/task continue` 显式继续。`/plan continue` 不再作为 alias。普通 chat 明确要求 subagent / 子 agent delegation 时，可通过 agent-thread tools 直接创建 child agent，不需要进入 durable task。
+当前语义决策边界统一采用“模型输出受限 typed choice，host 校验 durable authority”：若存在
+exact `DraftReady` Plan，普通 Chat / Task 路由工具会被替换为 `run_pending_plan` 与
+`keep_pending_plan`；模型判断当前请求是否授权执行，host 只复核冻结的 plan
+id/hash/source turn/status，禁止匹配“继续”“执行方案”或其他语言别名。已有 durable Task 的
+继续行为同样由 `continue_existing_task.action = resume_task |
+apply_current_request_as_guidance` 表达并写入 receipt，host 只做 receipt/CAS 校验，不从 prompt
+重建该枚举。
+
+该边界适用于整个产品，不只限于 Plan / Task：production host 不得通过中英文短语、关键词、
+locale alias 或正则把任意用户自然语言映射成功能选择。显式 `/command` / `@agent` 语法、协议
+enum、literal search、路径/标识符检索和安全检测仍是确定性 parser 的职责，但不得反向充当
+用户意图分类器。需要“理解用户想做什么”的场景统一让模型调用受限 typed surface；host 只消费
+结构化选择并验证当前 durable authority、安全、资源与幂等前置条件。无效 model decision 使用
+有界 retry / typed fallback，不得偷偷降级到 phrase table。
+
+Planner / executor / subagent 协作已经作为跨表面的共享 task flow 落地。Durable task 在 TUI 中的显式入口是 `/task <任务>`；`/plan` 只表示一次性 Plan mode / read-only planning prompt，不创建 durable task state。TUI 中 `task.routing_policy = "auto"` 时，普通 chat 先进入独立 routing-only microturn；模型只能在 `request_task_planning` 与 `continue_without_task_planning` 之间给出一个 typed semantic decision，host 不扫描 prompt 关键词。正向 decision 进入同一 durable task flow；负向 decision 后才在下一 turn 恢复普通工具面。free text 或无效 decision 只重试一次，仍无效则记录 typed Chat fallback 并继续 ordinary turn，不能把 routing 文本当作用户回答。默认 `auto` 时普通输入走三路自动路由（Chat / PlanReview / Task），显式 `manual` 保持 chat-first。Production HTTP driver 与 Desktop-owned `sigil serve` child 已附加共享 foreground task executor，并完成 Task control/recovery parity：typed continuation 可携带 task-targeted guidance；integration review/accept 绑定 exact task/plan/preview digest、promotion authority 与 parent verification；Pause 复用 TUI 的 exact `TaskPauseRequest`、root cancellation scope 和 Task stop transition。请求前绑定 task/plan/scope，只有 root execution、child/effect permit 全部 quiescent 后才通过单一有序 writer batch 追加 active step/child terminal，并最后追加 Task `Paused` / `Interrupted`；只有显式取消整个 Task 或不可恢复的计划失效才追加 `Cancelled`。停止一次前台 Task run 必须保留 accepted plan、已完成步骤和语义标题，并把在途 step/child 收口为可继续的 `Interrupted`；普通 run cancel 只有在 durable cancellation scope 真实绑定 Task 时才修改该 Task，不能误伤旧任务。autonomous planner 的 typed participant schema 只接受 read/write/review；可信 verification policy/check 由 host 绑定到 mutation step，并在 participant 结束后执行，不创建缺少 verification tool 的模型 `verify` participant。Task participant 在 mutation 后只有有界 read-only 收敛尾部；超过额度或即将耗尽轮次时，host 注入 route-fingerprinted finalization contract，并移除 client/hosted tools，只允许一次 bounded result 收口，且不影响普通 chat。HTTP schema v9 的 authenticated typed routes、幂等 command receipt 与 production supervisor 复用相同 authority；Desktop schema v9 handshake、native typed client、Tauri allowlist commands、Task card 与 integration inspector 消费相同 contract。canonical conversation display 还在固定 durable frontier 投影最多 128 个 step/lane 的 `task_control` 和显式 truncation，应用重启后即使没有 process-local live event 也能恢复 Continue/guidance/integration controls，同时不暴露 objective、prompt/transcript、private workspace/ref 或 mutation authority。release 默认值为 `auto`（review-first 基线），只有 qualified real-model evidence 与 rollout manifest 精确匹配才允许 `DirectTask`。恢复只补本地 handoff/TaskRun admission crash gap，不重放原 conversation provider request；只有能证明尚未发生 planner/participant dispatch 的 task 才自动接管，stale Running step/lease 会先记为 Interrupted/Paused，再由 `/task continue` 显式继续。`/plan continue` 不再作为 alias。普通 chat 明确要求 subagent / 子 agent delegation 时，可通过 agent-thread tools 直接创建 child agent，不需要进入 durable task。
+
+路由微轮次属于内部控制面，而不是普通工具活动：typed Chat decision、正向 route tool、被拒绝的
+ordinary tool、retry/fallback 诊断都必须保留 durable audit 与 provider-visible result，但不能进入
+Desktop/TUI 产品事件，也不能在 resume 的历史投影中重新显示内部函数名。无效 decision 只重试
+一次，第二次失败后记录 typed Chat fallback 并继续 ordinary turn。只有正向 PlanReview / Task
+decision 分别进入用户可见的 `Plan Review` / `Task` 状态；同批经过 preview/approval 的 memory
+工具 lifecycle 仍保持可见。
 
 当 durable focus 中只有一个 exact current、resumable、accepted-plan Task 时，routing surface
 才额外曝光 `continue_existing_task`；task id、task status、plan version/status、source turn 与
@@ -1047,8 +1111,8 @@ current Task focus；旧 paused Task 仅保留为 resumable history，不能与�
 自动 routing 的 negative decision 还必须通过 route-fingerprinted direct-execution
 continuation contract 进入 ordinary turn：恢复 ordinary tools 后执行原始请求，不能只复述
 routing decision 或宣布将要行动。routing-only microturn 的 text/reasoning/assistant narrative
-不进入 live UI，也不持久化为 transcript；同批经过 preview/approval 的 memory 工具 lifecycle
-仍必须可见。该过渡由 typed decision 驱动，不扫描用户 prompt 关键词。
+不进入 live UI，也不持久化为 transcript。该过渡由 typed decision 驱动，不扫描用户 prompt
+关键词。
 
 RFC-0063 把 conversation 语义路由扩展为 Chat / PlanReview / Task 三路。每次 durable route
 decision 都绑定 route contract fingerprint（routing contract、exact tool surface、capability
@@ -1063,6 +1127,11 @@ DraftReady / CompletedWithoutDraft / Failed / Interrupted / Cancelled）：模�
 id/hash，Run 直接走 RFC-0018 的 `TaskCreatedFromPlan` 前缀，不重放 planner；Revise 启动新一轮
 attempt。RFC-0063 §13.9 后，Revise 先通过 RFC-0064 收集 durable guidance；base plan 与 revision
 substate 同时投影，candidate 成功前不覆盖 base plan，所有 terminal failure 都恢复 base actions。
+Plan step 的 `display_name` 只是不超过 32 字符的展示元数据：`submit_plan_draft` 在 durable commit
+前与 Task promotion 使用同一 canonicalizer，旧 session 在 promotion 时再次兼容规范化；完整执行语义
+始终保留在 `title/detail`，展示名不得阻断 Task。Run action 在 promotion 前后失败时追加 system-owned
+`TaskCreationFailed` decision，原 Plan 继续保持可操作；TUI 通过 typed worker message 同步失败后的
+session entries、恢复 Plan Workbench 并展示原因，不能把失败压缩成瞬态 footer Notice。
 公开 conversation 投影只暴露 bounded plan review summary（active plan、revision、status、counts、
 risk、allowed actions、source、stale），完整 plan document 通过绑定 plan id/hash 的 authenticated
 detail contract 读取；detail 包含 structured step/detail/dependency/path/check/risk/lineage，但不暴露
@@ -1154,6 +1223,13 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
 - Executor step 使用 transient request context 接收 objective / plan / step，不把每个 step prompt 写成 parent session 的普通 user message。
 - Continue guidance 使用同一 transient request context 注入当前 executor/subagent step，不作为新的普通 user history 写入。
 - Subagent read/write step 使用 child session；parent session 只记录 child-session link、状态和 summary hash。
+- 可写 child invocation grant 保留 mint 时的 workspace snapshot 作为不可变 admission/audit binding，
+  并共享一个 process-local audited mutation frontier。每个 mutating/unknown tool 在 effect 前校验
+  exact registry、frontier 与 root cancellation，effect 后先结算 RFC-0002 或 unknown-mutation
+  evidence，再以 compare-and-swap 推进 frontier；合法自身写入不会撤销 grant，外部未归因漂移、
+  并发 writer 冲突、只读 child 写入或 post-effect snapshot 不可用仍 fail closed。该 frontier 不可
+  从 durable grant record 重建为执行权限；`danger-full-access` 只消除普通 Ask，不关闭审计、取消或
+  冲突检测。
 - Plan mode prompt 使用普通 agent loop，但用户 prompt 和 plan-mode 指令都只作为本轮 transient context 注入，不追加为 parent `User` entry；工具面使用 planner scoped registry，同时保留 agent-thread tools 以支持显式只读 delegation。
 - Plan mode 的 fenced `sigil-plan-v2` 与 `TaskPlanEntry` 共用 role/dependency/mode/isolation 语义。只有当前 V2 draft 且 base/current workspace snapshot 均存在并完全相等时才直接成为 accepted TaskPlan；非当前 schema 直接拒绝，字段不完整或 stale draft 不能 promotion，正常 `/task` 请求仍可通过隔离 Planner 生成新的当前计划。Task 终态由隔离 Synthesis 生成，host 校验 result hash/plan version 后向 parent 追加唯一 FinalAnswer 和 `TaskFinalAnswerCommitted`；恢复可幂等修补部分提交前缀。participant result 自带 terminal status；若 step result 已落盘但 readiness/step terminal 未落盘，恢复会 Blocked/Pause 并释放 lease，禁止重跑潜在副作用。
 - Kernel 已提供独立于 durable task 的 `PlanApproved` control entry 和 `PlanApprovalProjection`，记录 plan version/hash、批准时间、`ask` 或 `workspace_edits` 权限、scope、过期策略和是否清理 planning context；`workspace_edits` 只覆盖带 required preview 的 workspace file write tool，不放宽 shell/execute、network、MCP 或 Agent spawn。TUI plan prompt 完成后会在 live band 展示 approval surface，并通过 worker `ApprovePlan` 追加 `PlanApproved` 后同步回 TUI；`ApprovePlan` 会从 plan 文本中保守提取 workspace path 写入 `PlanApprovalScope.workspace_paths`，plan 未包含路径时 scope 为空并保留既有全 workspace 行为；执行阶段已按 active `PlanApproved(workspace_edits)` 将 scope 内 workspace file write 的 `Ask` 降级为 `Allow`，显式 `Deny`、external directory、空 subject、scope 外路径和非文件写工具仍按原 permission policy 处理。模型语义偏离 approved plan 时要求重新批准仍是后续项。
@@ -1161,6 +1237,7 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
 - O4b1 已把 joined participant 的完成收集抽为 runtime-owned `AgentCompletionHub`：完整 batch 在 poll child future 前按稳定 attempt identity 拒绝重复 registration；每个 accepted participant 只产生一个 `AgentTerminalEnvelope`，failure 同样作为 terminal envelope 收口，不会提前丢弃 sibling。envelope 同时保留 completion arrival index 和原始 request sequence，因此 parent 可以按真实完成顺序接收、继续由单写者追加 durable control state，并在构造 provider transient context 前恢复稳定 request order。
 - O4b2 已加入 `spawn_agents`、stable `request_key`、whole-batch preflight 和 supervisor 原子 slot reservation。容量、profile、delegation、permission/tool-safety、provider/session materialization 或 join registration 任一失败时，不 poll participant provider future；成功 join 成员经 completion hub 并发收口，按 request key 稳定排序后注入 `agent_batch_results`，模型 polling turn 为 0。
 - O4b3a 已为隔离 Task planner 加入一次性的 planner-only `request_task_discovery`：默认最多 3 个 Explore probe、硬上限 4，`multi_agent_mode=none` 或配置为 0 时不暴露。Probe 固定绑定 trusted built-in Explore、`SubagentRead`、`SharedReadOnly` 与继承的 root cancellation/web budget；duplicate id/objective、非 workspace-relative path、结构重叠、unsafe tool registry 或容量不足会在任何 provider dispatch 前拒绝整批。成功批次原子预留 slot，经 completion hub 真实并发，parent 单写提交 terminal/result 后按 `probe_id` 稳定注入 `task_discovery_results` 并自动恢复 planner，模型 polling turn 为 0。Planner discovery 仍沿用自己的 completion hub；Task DAG shared-read-only participant 的 prepare/execute/commit launcher 已在 O5a 独立接入。
+- Task participant 只能直接读取 step/objective/dependency handoff 已明确给出的 workspace-relative path；其他路径必须先通过 list/glob/grep 发现，不能从惯例猜测相邻 module/test 文件。`read_file` 的 NotFound 是安全、可重试的结构化错误，返回 requested path、`discover_path` recovery 与 basename glob pattern；错误正文不得泄露 host workspace，participant 收到后必须执行 discovery，不能继续枚举猜测路径。
 - O4b3b durable/TUI projection slice 已把 provider-neutral `AgentBatchId` 和稳定 member key
   加入 append-only `AgentThreadStarted`。普通 `spawn_agents` 与 planner discovery 都在 Started
   entry 中持久化 batch identity；非 batch thread 的两个字段都为空，不完整 identity fail closed，
@@ -1339,14 +1416,16 @@ memory vertical slice，由 `[memory].writable` 控制：
 - 模型根据用户语义和工具描述自行判断是否需要写入，kernel/runtime 不以关键词匹配 prompt；
 - automatic routing microturn 在 writable memory 可用时冻结同一份 canonical route + remember tool
   surface；一个 response 必须恰好有一个 route decision，但可以额外携带语义明确的 remember call。
-  Remember 仍走普通 permission plan、preview、approval、execution audit 与 durable receipt 管线，并在
+  Remember 仍走普通 permission plan、preview、execution audit 与 durable receipt 管线；普通权限模式的
+  `Ask` 进入 approval，`danger-full-access` 按统一契约把 `Ask` 归一化为 `Allow`，但显式 `Deny`、疑似
+  secret/credential 拒绝和其他 hard safety 仍然有效。调用必须在
   plan/task handoff 发生前 settle；即使 provider 先声明 route call，host 也必须先执行并持久化所有合法
   remember call，再记录 route decision，同时仍按 provider 原始 declaration order 写回 tool result batch；
   dynamic、frozen、queued 与 route fingerprint 必须消费同一 surface；
-- 两类写入都需要 preview/approval，只有 sidecar 原子发布且 ref-only journal durable sync 完成后才返回
+- 两类写入都需要 preview；只有 sidecar 原子发布且 ref-only journal durable sync 完成后才返回
   包含 scope、memory id 和 version 的 durable receipt；没有成功回执就不能声称已经长期记住；
 - `[memory].writable = false` 时 system contract 明确要求模型只能承诺当前会话保留；
-- active memory 通过 Context V1 dynamic suffix 召回，不进入稳定 prefix；user preference 为
+- active memory 通过 Context V2 append-only tail snapshot 召回，不进入稳定 prefix；user preference 为
   user-private、project fact 为 repository sensitivity，疑似 secret/credential 在落盘前拒绝；
 - `inspect_memory` 提供 active entry 与 admission provenance，`forget_memory` 先 tombstone，再物理删除
   Sigil-controlled sidecar；V1 不把 pre-pack retrieval candidate 误记成 provider injection，也不声称能够
@@ -1411,7 +1490,7 @@ E21.17 已把 Streamable HTTP 协议核心接入用户根 flat tagged MCP config
 - `notifications/progress` 映射到 TUI live panel，不写重复 timeline，避免远端 server 用 progress 刷爆用户界面
 - `notifications/tools|resources|prompts/list_changed` 标记 server stale，并在 worker 空闲边界刷新该 server 的 provider-visible tool surface
 - `elicitation/create` 已由可插拔 client handler 承载：TUI runtime 声明 `elicitation` capability，stdio 与 Streamable HTTP 先收敛为同一 bounded flat-form contract，再转换成与普通 agent question 相同的 `UserInputFormViewModel`，复用同一 renderer、键位、校验以及 single/multi-select 交互；nested、缺少显式 type 或其他未知 shape 明确返回 `UnsupportedFormShape`，不能降级猜成 string。`Esc` 只关闭 live form、`Shift-Tab` 可重新打开；Submit/Decline 仍回到当前 MCP connection，owner 被清理则 Cancel，且永不生成 durable replay command。非交互默认 handler 返回明确 unsupported JSON-RPC error，不伪造用户输入，也不让请求挂死。TUI elicitation decision 会写入 append-only `ControlEntry::McpElicitation`，只记录 server、请求 message/schema hash、字段名和 action，不保存用户输入值。
-- MCP tool/resource/prompt 输出必须先本地脱敏，再按 32 KiB/2,000 lines 限额截断，并在 `ToolResultMeta` 中保留 truncation 与 MCP server/tool/trust/operation metadata；截断只使用结构化 metadata，不向文本插入可能命中 secret carrier 的 marker。已经通过 `resources/read` 取得的 bounded text 只有在调用侧显式交给 runtime MCP resource context adapter 后才会成为 `McpResource` Context V1 candidate；adapter 会再次执行 MIME filter、size cap、egress decision 和 packer 校验，不能绕过 permission / egress 直接改写 request。
+- MCP tool/resource/prompt 输出必须先本地脱敏，再按 32 KiB/2,000 lines 限额截断，并在 `ToolResultMeta` 中保留 truncation 与 MCP server/tool/trust/operation metadata；截断只使用结构化 metadata，不向文本插入可能命中 secret carrier 的 marker。已经通过 `resources/read` 取得的 bounded text 只有在调用侧显式交给 runtime MCP resource context adapter 后才会成为 `McpResource` Context V2 candidate；adapter 会再次执行 MIME filter、size cap、egress decision 和 packer 校验，不能绕过 permission / egress 直接改写 request。
 
 stdio transport 按声明的 MCP `2025-06-18` 使用 newline-delimited JSON，不再接受未声明的 LSP `Content-Length` framing。每个 inbound envelope 必须是单个 JSON object，batch array 直接拒绝；server request/notification 的 `id` 仅接受 string/integer、`params` 仅接受 object，success response 的 `result` 必须是 object。单个 inbound/outbound frame 硬限制为 4 MiB，单次 operation 最多处理 256 个 inbound message、累计 8 MiB；outbound frame 在完整 bounded encode 成功前不会写入 pipe。CRLF compatibility 只允许硬上限后的唯一候选 `\r`，任何其他 cap+1 byte 都立即返回 `frame_too_large`，不能继续占用 deadline。`initialize`、`initialized` 与首次 `tools/list` 共用一个 startup absolute deadline，tool/resource/prompt 则从等待串行 connection lock 前开始消费 `ToolContext.timeout_secs`，覆盖 write、flush、frame read 与 inbound handler；零值使用有限的 30 秒安全默认，不表示无限等待，非零值最高限制为 24 小时，极端 `u64` 输入不能造成 deadline overflow/panic。frame/message/cumulative/stderr limit 统一投影为带 limit 与 observed lower bound 的结构化 `resource_limit`。
 
@@ -1453,7 +1532,12 @@ pub struct McpServerPinnedIdentity {
 - `SelfHosted`：默认 `approval_default = Ask`、`egress_logging = true`、`allow_secrets = false`
 - `ThirdParty`：建议逐次审批、记录出境数据、默认不透传高敏凭据
 
-当前 `approval_default` 已参与逐调用 permission decision；`egress_logging` 已写入安全出境摘要；`allow_secrets = false` 已阻断 MCP tool/resource/prompt args、`roots/list` payload 和 elicitation response 中的已解析 secret。`pin_version = true` 采用两阶段校验：带 `inherit_env` 的 server 在 spawn 前绑定 command/args 文本、grant name、canonical execution base，以及隔离 baseline `PATH` 解析出的 executable canonical path/content digest；缺少 pinned identity 或静态 fingerprint 不匹配时直接失败且不向子进程注入 grant。静态部分匹配后才 initialize，并校验 protocol version、server name 和 server version。该 binding 不解释 interpreter args，也不证明 args 所引用脚本的内容；path-based spawn 继续遵循 RFC-0005 的可信本机/无恶意同用户并发前提，不宣称为 handle-bound host attestation。未启用 `inherit_env` 的既有 command fingerprint 保持兼容。lazy activation 会把获批的 exact process subject 带到 launcher，审批后 binding 漂移会在 spawn 前拒绝；每个 MCP client 会把 resolved grant value 合入自己的 redactor，且以 `ExtensionProcessLifecycleRecorded` 独立记录 clean/pre-spawn/post-spawn 结果而不污染 workspace dirty verdict。Secret redactor 使用缓存的 multi-pattern longest-match 与 immutable input mask，Bearer/assignment 不重扫 replacement；carrier count/总字节和输出增长都有硬预算，预算或安全 marker 无法满足时整体 fail-closed，truncated head/tail overlap 使用受 carrier 总预算约束的线性匹配。resources/prompts 协议入口复用同一 secret egress gate，且不会自动注入 system prompt；MCP resource context 进入 Context V1 时仍必须携带 egress decision，否则只写 `ExcludedEgressDenied` provenance，不渲染 snippet。
+当前 `approval_default` 已参与逐调用 permission decision；`egress_logging` 已写入安全出境摘要；`allow_secrets = false` 已阻断 MCP tool/resource/prompt args、`roots/list` payload 和 elicitation response 中的已解析 secret。`pin_version = true` 采用两阶段校验：带 `inherit_env` 的 server 在 spawn 前绑定 command/args 文本、grant name、canonical execution base，以及隔离 baseline `PATH` 解析出的 executable canonical path/content digest；缺少 pinned identity 或静态 fingerprint 不匹配时直接失败且不向子进程注入 grant。静态部分匹配后才 initialize，并校验 protocol version、server name 和 server version。该 binding 不解释 interpreter args，也不证明 args 所引用脚本的内容；path-based spawn 继续遵循 RFC-0005 的可信本机/无恶意同用户并发前提，不宣称为 handle-bound host attestation。未启用 `inherit_env` 的既有 command fingerprint 保持兼容。lazy activation 会把获批的 exact process subject 带到 launcher，审批后 binding 漂移会在 spawn 前拒绝；每个 MCP client 会把 resolved grant value 合入自己的 redactor，且以 `ExtensionProcessLifecycleRecorded` 独立记录 clean/pre-spawn/post-spawn 结果而不污染 workspace dirty verdict。Secret redactor 使用缓存的 multi-pattern longest-match 与 immutable input mask，Bearer/assignment 不重扫 replacement；carrier count/总字节和输出增长都有硬预算，预算或安全 marker 无法满足时整体 fail-closed，truncated head/tail overlap 使用受 carrier 总预算约束的线性匹配。resources/prompts 协议入口复用同一 secret egress gate，且不会自动注入 system prompt；MCP resource context 进入 Context V2 时仍必须携带 egress decision，否则只写 `ExcludedEgressDenied` provenance，不渲染 snippet。
+
+MCP local/remote refresh 与 deactivate 还必须遵守 exact generation quiescence：registry 先把目标 lifecycle
+owner 的 generation 标记 retiring 并移出新解析路径，已经取得 exact invocation lease 的调用继续到终态；
+全部 lease drain 后才对每个 owner 调用一次 `shutdown`。replacement 注册、rollback 与 shutdown failure
+不能让同名新调用回落到旧 generation，也不能在旧 body 仍运行时关闭 client/transport。
 
 MCP 配置在 runtime 注册前还会提升为不可序列化的
 `ResolvedMcpServerDeclaration`。它同时保留 declared/effective name、
@@ -1821,11 +1905,25 @@ screen 只负责保留用户原来的 shell 内容，应用运行期间的所有
 显示与 terminal 暴露的 scrollback；不能假定 alternate-screen 切换一定返回空 buffer，也不能为清屏
 调用任何会触发 CPR 的 cursor-position 读取。
 
+- terminal teardown 只能由启动 TUI 的 owner thread 执行。owner thread 自身 panic 时，panic hook
+  可立即恢复 primary screen 后交给原 hook；Tokio task、agent worker 或其他后台线程 panic 时，hook
+  只能把有界诊断转交主事件循环，不能离开 alternate screen、关闭 raw mode 或直接写 stderr。主循环
+  收到诊断后按普通 fatal error 路径停止并 join worker、清理当前帧、恢复 terminal，再在 primary screen
+  输出错误，避免后台 panic 后 TUI 继续拿 stale `Terminal` 往 primary screen 绘制
 - 主消息历史：在 alternate-screen 内使用应用拥有的 bounded render store 与虚拟滚动，不把消息行写入
   terminal 原生 scrollback。PageUp/Ctrl-Home/滚轮只改变应用内 scroll offset；End/下滚回到 live tail。
   历史视图以 entry 内 logical content offset 锚定可见顶行，stream delta、timeline append、height resize、
-  width reflow 与 info rail 显隐都不得把用户正在阅读的位置拖向 live tail
+  width reflow 与 info rail 显隐都不得把用户正在阅读的位置拖向 live tail。`Esc` 只清除历史/tool-card
+  焦点并返回 composer；运行取消必须使用显式 `Ctrl-C`，历史浏览动作不得生成 cancellation command
+- Task / Plan 执行条使用 durable `TaskRun.title` 与 accepted `TaskPlan` 步骤，不展示 task id、内部执行 prompt
+  或 `awaiting durable projection`。live runtime 只能补充 provider 并发诊断，且必须明确写作 model request
+  concurrency，不能用 `active 1/4` 冒充计划进度；真实进度固定来自 durable step status。手动/自动 compaction
+  和 resume 都从保留的 Task control 重建同一标题、步骤和进度。Completed/Cancelled 且无待处理 verification
+  action 的执行条自动结项收起，Interrupted/Paused 仍保留 Continue 入口。Failed/Interrupted 必须从 durable
+  Task/step reason 重建主卡片原因，并追加一次语义化 timeline 终态；terminal child/agent 没有 final result 时
+  显示“在最终回复前失败/中断”等真实状态，不显示 `result missing` 这类内部投影字段
 - Bash tool card 的标题与展开内容必须来自已经过 SafePersist/secret redaction 的 ToolCall 展示上下文：折叠态显示有界单行命令，`Ctrl-O` 展开时显示完整安全命令和输出；session restore 使用同一 durable ToolCall 投影，不能只在 live 内存中可见。运行中 progress 与最终 result 必须先按当前活动 invocation 的 `call_id` 关联，并以其精确 timeline occurrence 作为替换 identity；`execution_id` 只可作为该活动 occurrence 内的 transient correlation，不能全局扫描并合并历史，从而既不能留下同一次调用的重复卡片，也不能把跨 turn 复用的 `call_id` / `execution_id` 误合并
+- Tool card 的用户可见层级固定为 action/subject header、bounded summary、typed result surface 与 overflow action。首批 search/read-file/shell/terminal renderer 不展示 `result`、`code`、`matches`、`output` 这类协议字段作为通用分节标签：搜索结果按文件分组并使用行号 gutter，文件代码使用编辑器式行号与语法高亮，shell/terminal 使用 stdout/stderr rail；空结果和截断分别由安静的语义状态与统一 footer 表达。结构化 preview kind 只用于选择表面 renderer，未知类型降级为 plain text；选中态只强调 header 和结果 rail，不覆盖 syntax/match/diff 的语义样式
 - 主内容区：在同一全屏帧内显示历史窗口、当前流式尾部与可操作卡片，不要求用户在 chat 区和 composer 之间切焦点
 - 底部输入区：支持多行输入、发送、取消、清空
 - 右侧信息区 + composer 下状态行：展示写权限、subagent 状态、cache 命中、上下文压力、花费与余额；右栏启动可见性由 `[appearance].info_rail` 控制，运行中用 `F2` 显示/隐藏、`Shift-F2` 切换精简/详情，窄终端仍按布局能力自动收起
@@ -2266,6 +2364,18 @@ DeepSeek 官方错误码与通用 OpenAI-compatible 语义接近，但 `sigil` �
 - strict tool schema 超出 DeepSeek 支持子集
 
 这两类不是“模型随机失败”，而是可识别、可自动修复的请求构造问题。
+
+Messages/Chat 响应已经开始产出后发生的 response-body decode/read/timeout 属于 transport-uncertain
+terminal failure：provider 需要保留安全的错误分类供 durable reason 和产品面诊断，但不得透明重试。
+特别是 Messages hosted turn 已经产生文本、工具或外部副作用时，中途截断必须显式失败，不能把 EOF
+当作正常完成，也不能生成第二次请求。
+
+已输出文本中出现 provider-native 非结构化工具协议属于 `ProtocolRejectedAfterOutput`，不是普通 4xx、
+限流或 transport retry。conversation run 保持 fail-closed；durable Task 仅可在 host 证明步骤只读、
+零副作用，并把失败 attempt 的 request material fingerprint 作为恢复证据时，以新的 participant attempt
+做有限恢复。替代 attempt 绑定相同 task input hash 和已调度 provider/model route；输入或路由漂移必须在
+dispatch 前形成 typed recovery boundary。该恢复必须有独立 attempt 审计和预算；预算耗尽后步骤进入
+blocked、Task 进入 paused，不能把下游依赖标成 cancelled。
 
 ### 19.17 基于能力表的路由阈值
 

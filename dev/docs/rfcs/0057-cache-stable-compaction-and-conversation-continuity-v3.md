@@ -1007,6 +1007,12 @@ DeepSeek 的真实 cache smoke 以 ignored test 交付；默认 gate 不触网�
 用例固定为三次请求、64K conservative input reservation、每次最多 32 output token，并从受信 pricing
 snapshot 计算本地 admission；该值不是 provider 侧账单硬上限，因此不应在普通 CI 或开发 gate 中运行。
 
+RFC-0065 另增加生产 `Session -> Agent -> tool result -> next step -> second user turn -> resume` 路径：
+可用 `SIGIL_REAL_PROVIDER_MIN_CACHE_HIT_RATIO` 覆盖默认 `0.90` 的最低后续请求命中率，并运行
+`cargo test -p sigil-provider-deepseek real_agent_tool_turn_user_turn_and_resume_preserve_deepseek_cache_prefix -- --ignored --exact`。
+该用例复用相同 opt-in/secret/cost admission，并同时核对 provider usage、local cache-layout mutation 与
+durable `ProviderRequestEnvelopeV1`；它不是普通 CI gate，也不把未执行的 ignored test 记录成真实证据。
+
 ### 18.4 Quality evals
 
 eval corpus 必须包含：

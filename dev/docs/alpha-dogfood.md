@@ -23,7 +23,7 @@ Use `--expected-sha256` when a binary digest is available. Before creating any c
 
 Script launchers, including the npm JavaScript launcher, are intentionally not accepted because freezing a wrapper would not freeze the binary it delegates to. Admission requires a Mach-O, ELF, or PE executable. Public npm installation and launcher execution are covered by Public Distribution Smoke; use the native binary inside the installed platform package only when a local offline campaign is also required.
 
-The default campaign runs Context V1, Web V1, feedback, terminal attention, and image-input acceptance through real headless or PTY product entrypoints. Each case receives isolated HOME, XDG, state, cache and temporary roots. Provider credentials and Sigil config overrides are not inherited, ambient proxy routes point to a closed loopback endpoint, and every selected harness configures and inspects case-owned loopback services. The Feedback case records its loopback request count and rejects provider-generation requests.
+The default campaign runs Context V2, Web V1, feedback, terminal attention, and image-input acceptance through real headless or PTY product entrypoints. Each case receives isolated HOME, XDG, state, cache and temporary roots. Provider credentials and Sigil config overrides are not inherited, ambient proxy routes point to a closed loopback endpoint, and every selected harness configures and inspects case-owned loopback services. The Feedback case records its loopback request count and rejects provider-generation requests.
 
 This is not an OS-level socket sandbox. The offline claim is limited to these reviewed case definitions, their loopback endpoint assertions, and the absence of ambient credentials/configuration.
 
@@ -54,11 +54,11 @@ python3 scripts/tui-stateful-pty-acceptance.py \
 
 The campaign freezes both inputs into case-owned storage and runs three real TUI processes over one durable session family:
 
-1. a loopback provider creates four finalized turns, including one controlled `write_file` mutation and the facts-before-final continuation that previously risked a duplicate reply;
+1. a loopback provider creates four finalized turns, including a `read_file` result ending at a CJK UTF-8 boundary, one controlled `write_file` mutation, and the facts-before-final continuation that previously risked a duplicate reply;
 2. after the loopback server is closed, a default-transport configuration with closed ambient proxies resumes the source session, applies locally admitted compaction, restores the controlled file through the Ctrl-R reverse-diff modal, and uses modal `F` to fork without changing the restored file;
 3. a fresh process starts on the source session and uses the visible `/resume` selector to switch to the unique non-current fork.
 
-Passing evidence requires the final reply to appear exactly once on both reconstructed VT screens and exactly once as a structured final-answer entry in each source/fork stream. It also requires one `compaction_applied_v2`, one `checkpoint_restored`, one `conversation_forked`, and unchanged file hashes across fork and resume. Custom provider routes are intentionally not used for local compaction admission.
+Passing evidence requires the CJK tool result to survive capture and render through the real PTY without a worker panic, and the final reply to appear exactly once on both reconstructed VT screens and exactly once as a structured final-answer entry in each source/fork stream. It also requires one `compaction_applied_v2`, one `checkpoint_restored`, one `conversation_forked`, and unchanged file hashes across fork and resume. Custom provider routes are intentionally not used for local compaction admission.
 
 The safe `manifest.json` contains only public binary/tokenizer identity, counters, booleans, duration, and relative evidence paths/checksums. Byte-exact source/fork JSONL plus raw PTY logs remain in ignored local output for independent recounting and are never uploaded. Repository-local output is rejected unless Git ignores it; an explicitly selected path outside the repository is recorded as local-only. CI runs parser, admission, process-cleanup, durable-structure, and manifest-privacy contract tests; the real release-binary campaign remains an explicit local release check because it requires the installed tokenizer artifact.
 

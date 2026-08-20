@@ -1,5 +1,7 @@
 # RFC-0032 Multilingual RepoMap / Context V1
 
+> 2026-08-17：本 RFC 的多语言候选选择与 hard-cap 仍有效；provider-visible placement、wire schema 与 durable 证据已由 [RFC-0065](0065-cache-stable-runtime-contracts-v1.md) 的 Context V2 取代。Context V2 使用 append-only tail snapshot，不再把动态上下文作为 leading system material 重建。
+
 状态：implemented / R32.0-R32.6 complete
 
 创建日期：2026-07-16

@@ -1,6 +1,22 @@
 # RFC-0062 Harness-owned Tool-output Spooling and Result Conformance V1
 
-状态：proposed / design complete / implementation deferred
+状态：implemented / verified
+
+### 2026-08-17 cache-stable runtime follow-up
+
+RFC-0065 已补齐 Desktop 普通 run 的 provider-neutral cache usage、last layout mutation 与 provider-miss
+diagnostic，并继续复用本 RFC 的 typed Desktop/TUI tool-result projection；`pnpm --dir apps/desktop check` 与
+generated contract drift check 通过。source-built Tauri + real `sigil serve` 现已跑通 34 KiB `read_file`
+artifact 的 bounded preview、两页 typed retrieval、磁盘源 canary 核验、renderer reload 与 durable reread；
+`@artifact` 场景还会从隔离 state root 删除 exact blob，验证 reload 后保留可审计摘要但移除 retrieval
+controls。另一个 source-built 场景经真实审批运行 34 KiB stderr + exit 7 的 `bash`，验证 failed card、
+canonical stderr paging 与后续 provider final 都能完成；两个场景合计 13 steps 全部通过。Desktop renderer
+与 TUI 另有 typed `Expired` 回归，runtime durable-disable-before-delete 则由真实文件 GC test 覆盖。paid
+provider lane 已在显式 opt-in、最多 5 请求和 `$0.05` 单次 admission 下通过；最终 run 同时验证真实
+tool-result world state、逐 attempt request reconstruction、pre-compaction prefix preservation 和
+post-compaction epoch reset。attested manifest 位于 git-ignored 的
+`.repo-local-dev/deepseek-real-cache-conformance-pass-2/manifest.json`，SHA-256 为
+`c3fd29461da49f322df14d7c5edbb60d5700e70f36fe099c881863cad42faf58`；其余本地 acceptance 已闭合。
 
 - delegate/spawn 结果 batch 收口已闭合（2026-08-06）：`task_handoff` / `task_plan` /
   `plan_review` / `plan_draft` / `task_guidance` 系列的成功、忽略、拒绝与 invalid-input 结果全部从
@@ -36,19 +52,24 @@ R62.5 的 `$SIGIL_SCRATCH_DIR` 生命周期与隔离部分已在独立 worktree 
   unix 0700，Windows 受保护 owner-only DACL（新增 `windows_scratch_namespace_narrows_wide_parent_dacl`
   Windows CI 测试，模式与 staging DACL 测试一致）。
 - **quota**：per-session 512 MiB + workspace 硬上限 4 GiB（`ScratchQuota`，可经 `BuiltinToolPaths` 装配）。
-  计量在 spawn 前确定性执行（bounded walk，拒绝 symlink）；超限返回结构化 `ToolError`
+  计量在 spawn 前确定性执行（迭代式、总条目有界、不限制普通目录深度、拒绝 symlink）；超限返回结构化 `ToolError`
   （`ToolErrorKind::ScratchQuotaExceeded`，details 含 scope/usage/quota），不静默转用系统 `/tmp`；
-  删除文件释放空间后下一次调用确定性恢复。
+  entry budget 或无效 namespace 返回不含 host path 的 reason code、相对路径与明确标记为非自动执行的
+  用户确认重置建议；删除文件释放空间后下一次调用确定性恢复。一个合法深目录不得使当前或 sibling session 的
+  bash/terminal spawn 失效。
 - **TTL/GC**：`ScratchNamespaceLeaseRegistry` 进程内 lease（bash 每次执行持有；terminal task 从 start 到
   terminalize/cancel 持有）；`gc_scratch_namespaces` 只在无 lease 时删除过期命名空间，删除与 lease 获取
   在同一注册表锁内完成（无 TOCTOU）。TUI worker 启动与 application runtime surface 装配各执行一次
   TTL sweep；session 删除同时回收该 session 的 scratch 命名空间。crash 后由下次启动 sweep 回收。
 - **模型可见性不变**：scratch 继续对模型显示为 `cache/tmp`，harness-private artifact spool 仍不可见，
-  两者未合并；真实本机路径不进入 session event、HTTP/Desktop DTO 或 telemetry（既有 label/hash 行为保持）。
-- 测试：`scratch_namespace_tests.rs` 14 个单测（session 隔离、resume 复用、no-session 回退、symlink
+  两者未合并；exact runtime binding 内的路径使用 `RuntimeScratch` subject/trust zone，不进入任意外部目录
+  gate，逃逸路径仍为 `External`；真实本机路径不进入 session event、HTTP/Desktop DTO 或 telemetry。
+- 测试：`scratch_namespace_tests.rs` 15 个单测（session 隔离、resume 复用、no-session 回退、深目录与 sibling 隔离、symlink
   拒绝、quota 到达/释放、workspace 硬上限、GC lease 并发、task lease、delete lease、unix owner-only、
   Windows ACL、锁内删除）+ 工具级测试（bash/terminal env 注入与隔离、quota 结构化错误、description 与
-  env 一致、terminal lease 生命周期）+ runtime paths 推导测试；`cargo test --workspace` 5491 passed。
+  env 一致、深目录后的下一次 spawn、无效 namespace 结构化错误、terminal lease 生命周期）+ runtime
+  paths 推导测试；真实 TUI process fixture 使用 panic-safe workspace guard，失败断言不会把测试目录遗留在
+  session scratch。`cargo test --workspace` 5491 passed。
 - 生命周期收口：serve 进程的 scratch lease 已统一——启动时创建一个 process-scoped
   `ScratchNamespaceControl`，同时注入 `LocalSessionLifecycleService.with_scratch_cleanup`
   与 `HttpProductionRunDriverOptions.with_scratch_control`，经 `ApplicationRunServices` 穿过 run
@@ -111,7 +132,9 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   CRLF 行尾由行规程如实保留、stderr artifact 为空）；MCP stdio/HTTP 等价 fixture 已过
   （`stdio_and_streamable_http_transports_parse_identical_mcp_semantics`：同一 canonical 会话分别经
   python3 stdio server 与 scripted streamable HTTP fixture，断言工具描述（name/description/inputSchema）
-  与成功/错误调用语义逐字段一致）；**Desktop real-binary acceptance、paid provider smoke 未执行**。
+  与成功/错误调用语义逐字段一致）；Desktop real-binary 的 large-artifact paging/restore、外部 blob 缺失
+  fail-closed 与 34 KiB stderr + exit 7 error continuation 已通过；Desktop/TUI `Expired` typed surface 与
+  runtime durable GC 分支也有回归覆盖；key-gated paid provider lane 已按上述 attested manifest 通过。
 - RFC-0059 §10.3 read budget 偏差已修复：retrieval budget 由 per-root-run 累计改为 per-model-turn，
   root run 每个 model turn 起点重置 8 次/64 KiB 计数；delegate/orchestrator 子 agent 继承剩余计数、
   不能自行重置（`without_turn_reset`）；dedupe ledger 跨 turn 保留、按 epoch 生效。
@@ -136,6 +159,10 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   吸收进同一替换（与全文本 tokenizer 语义一致，canonical 闭合）。URL query 值跨 seam 拆分时，
   per-stream URL 投影已消除 marker，残片不携带任何可重建信息且 canonical 闭合，保持原样。
   新增测试覆盖全字节边界拆分、selector 读取、ledger/offset、cap 附近与 invalid UTF-8 下 hash 稳定。
+- 2026-08-18 修正 seam token 的 Unicode 边界：last/previous token 都从 `char_indices` 计算
+  `[start, end)`，不再把 `rfind(char predicate)` 返回的 UTF-8 byte offset 当作单字节字符位置；中文、
+  emoji 和多字节空白可安全到达 stream 尾部。真实 PTY campaign 增加以 CJK 字符结尾的
+  `read_file` result，验证 capture、durable artifact 与 TUI render 全链路不 panic。
 - GC 崩溃窗口已闭合（2026-08-06）：`ControlEntry::ToolArtifactTombstonePlan` 在物理删除前与
   disable 批次同一原子 append 落地（已 disabled 的 resume 用独立 batch），记录 artifact ref 与
   exact availability generation；GC 收尾阶段对所有“manifest 已消失且 ledger 仍为

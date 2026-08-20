@@ -56,8 +56,13 @@ RFC-0062 工具结果结算的收口。
 - Plan review 现在是完整一等 lifecycle：`/plan` 与自动 review 共享同一 typed plan draft、
   同一 pending plan card（Run / Save / Revise / Reject）与同一 HTTP/Desktop/TUI decision
   command；reconnect 与 reload 会恢复 pending plan。
-- 工作区指令记忆与需审批的持久记忆现在默认启用；可分别设置 `[memory].enabled = false` 或
-  `[memory].writable = false` 退出对应能力。
+- Durable Task 执行现在会把每步的目标路径、能力、交付物、验收条件和检查引用以版本化契约贯穿
+  planning、compaction、中断与 resume；child/provider 启动前按 exact scoped tools 做能力准入，
+  participant 在相同语义前沿重复分析时会由 durable no-progress guard 切入有界结项。
+- 新增固定只读 `vcs_inspect`，以有界操作提供 status/diff 事实而不接受任意 Git 参数；semantic cache
+  layout V2 同时从 provider-visible tool schema identity 中排除了逐轮授权身份。
+- 工作区指令记忆与持久记忆现在默认启用；普通权限模式下持久变更仍会询问，`danger-full-access`
+  不弹审批；可分别设置 `[memory].enabled = false` 或 `[memory].writable = false` 退出对应能力。
 - 直接运行 `sigil` 现在会创建 fresh session，不再自动打开最近会话。显式恢复会在安全 endpoint
   修正后保留可移植对话；目的地变化或无法证明时先要求确认，并阻止同一 session 被两个
   TUI/Desktop/headless owner 同时以可写方式打开。
