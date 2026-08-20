@@ -148,14 +148,39 @@ fn draft_ready_plan_replaces_ordinary_route_surface_with_typed_decisions() -> Re
     let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
         review.plan_id.clone(),
         r#"```sigil-plan-v2
-{"summary":"Implement the approved change","steps":[{"step_id":"implement","title":"Implement","role":"executor","depends_on":[],"mode":"write","isolation":"shared_write"}]}
+{"summary":"Implement the approved change","steps":[{"step_id":"implement","title":"Implement","role":"executor","depends_on":[],"mode":"write","isolation":"sequential_workspace_write"}]}
 ```"#,
         review.plan_source_ref(),
         2,
         None,
     )?
     .expect("structured plan draft");
-    crate::PlanReviewCoordinator::commit_draft_from_child(&mut session, &draft, &review, 3)?;
+    crate::PlanReviewCoordinator::commit_draft_from_child(
+        &mut session,
+        &draft,
+        &review,
+        &sigil_kernel::PlanCompileInputV1 {
+            source_attempt_id: "attempt-1".to_owned(),
+            source_turn_id: "message-1".to_owned(),
+            task_config_contract_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                "test",
+            ),
+            planner_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "v2",
+            ),
+            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "v2",
+            ),
+            intent_schema_hash: None,
+            max_plan_steps: 64,
+            workspace_id: None,
+            session_scope_id: Some("test-session".to_owned()),
+        },
+        3,
+    )?;
 
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {

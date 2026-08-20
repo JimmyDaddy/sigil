@@ -1079,6 +1079,7 @@ fn draft_ready_pending_plan(session: &Session) -> Option<PendingPlanHandoffBindi
         || reviews
             .attempt_for_plan(&draft.plan_id)
             .is_none_or(|attempt| attempt.status != PlanReviewAttemptStatus::DraftReady)
+        || !artifacts.plan_is_ready(&draft.plan_id)
     {
         return None;
     }

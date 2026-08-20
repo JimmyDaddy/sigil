@@ -262,7 +262,9 @@ fn seed_application_user_input_request(
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // Matches the SSL_CERT_FILE test env-lock pattern.
 async fn submitted_user_input_is_durable_before_one_supervised_continuation() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
@@ -5765,6 +5767,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
     );
     let runtime = super::ApplicationPlanReviewRuntime {
         options,
+        root_config: root_config.clone(),
         agent: Box::new(sigil_kernel::Agent::new(
             Box::new(PlanReviewDraftProvider),
             sigil_kernel::ToolRegistry::new(),
@@ -5818,6 +5821,344 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
     assert_eq!(
         attempt.status,
         sigil_kernel::PlanReviewAttemptStatus::DraftReady
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_application_test_config(&config_path)?;
+    let mut root_config = RootConfig::load(&config_path)?;
+    root_config.task.enabled = true;
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let session_path = temp.path().join(".sigil/sessions/session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        Session::load_from_store("application-task-test", "application-task-model", store)?;
+    let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?;
+    let request = crate::PlanReviewRunRequest {
+        plan_review_id: sigil_kernel::PlanReviewId::new("review-pending-plan-route")?,
+        attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-pending-plan-route")?,
+        plan_id: sigil_kernel::PlanId::new("plan_pending_route")?,
+        source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
+        source_turn: sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            "message-pending-plan-route",
+            "run-pending-plan-route",
+        )?,
+        route_decision_id: None,
+        child_session_ref: SessionRef::new_relative("child.jsonl")?,
+        finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        objective: "inspect the pending plan route".to_owned(),
+        workspace_snapshot_id: base_snapshot.clone(),
+    };
+    let session_scope_id = session.session_scope_id().to_owned();
+    crate::PlanReviewCoordinator::ensure_attempt_started(&mut session, &request, 1)?;
+    let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
+        request.plan_id.clone(),
+        r#"```sigil-plan-v2
+{"summary":"Inspect the pending plan route","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only","target_paths":["session.jsonl"]}]}
+```"#,
+        request.plan_source_ref(),
+        2,
+        base_snapshot,
+    )?
+    .expect("structured plan draft");
+    crate::PlanReviewCoordinator::commit_draft_from_child(
+        &mut session,
+        &draft,
+        &request,
+        &sigil_kernel::PlanCompileInputV1 {
+            source_attempt_id: request.attempt_id.as_str().to_owned(),
+            source_turn_id: request.source_turn.message_id.clone(),
+            task_config_contract_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                "test",
+            ),
+            planner_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "v2",
+            ),
+            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "v2",
+            ),
+            intent_schema_hash: None,
+            max_plan_steps: 64,
+            workspace_id: None,
+            session_scope_id: Some(session_scope_id.clone()),
+        },
+        2,
+    )?;
+    let plan_id = request.plan_id.clone();
+    let plan_hash = draft.plan_hash.clone();
+    let profile_registry =
+        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            temp.path(),
+            session.entries(),
+        )?;
+    let task_execution = super::ApplicationTaskExecutionRuntime {
+        root_config: root_config.clone(),
+        workspace_root: temp.path().to_path_buf(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        options: crate::build_run_options(
+            &root_config,
+            temp.path().to_path_buf(),
+            InteractionMode::Headless,
+            None,
+        ),
+        base_registry: {
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(NamedTool("read_file")));
+            registry
+        },
+        agent_supervisor: crate::AgentSupervisor::new(
+            profile_registry,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            application_task_provider_capabilities(),
+        ),
+        role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+    };
+    let cancellation_owner = RunCancellationOwner::new();
+    let cancellation_handle = cancellation_owner.handle();
+    let action = sigil_kernel::RunPendingPlanAction {
+        plan_id: plan_id.clone(),
+        plan_hash: plan_hash.clone(),
+        source_turn: sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            "message-pending-plan-route",
+            "run-pending-plan-route",
+        )?,
+    };
+    let root_output = AgentRunOutput {
+        disposition: AgentRunDisposition::RunPendingPlan(action),
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome {
+            terminal_reason: AgentRunTerminalReason::TaskHandoff,
+            tool_calls: 1,
+            ..AgentRunOutcome::default()
+        },
+    };
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+    let output = super::continue_application_task_handoff(
+        &mut session,
+        root_output,
+        Some(task_execution),
+        &mut handler,
+        &mut approval_handler,
+        &cancellation_handle,
+    )
+    .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    // The single adoption authority exists; the task ran through admission to a terminal.
+    let artifacts = session.plan_artifact_projection();
+    let adoption = artifacts
+        .adoptions
+        .get(&plan_id)
+        .and_then(|entries| entries.first())
+        .expect("model route must adopt the plan");
+    assert_eq!(adoption.plan_hash, plan_hash);
+    let tasks = session.task_state_projection();
+    assert!(
+        tasks
+            .admission_attempts
+            .get(&adoption.task_id)
+            .is_some_and(|attempts| !attempts.is_empty()),
+        "model route must run admission before the runner"
+    );
+    assert_eq!(
+        tasks.tasks.get(&adoption.task_id).map(|task| task.status),
+        Some(TaskRunStatus::Completed)
+    );
+    assert!(output.result.final_message_id.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_pending_plan_route_keeps_blocked_task_durable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    // Config without any connection: the honest admission probes block with provider_unavailable
+    // after adoption; the Task stays durable with a typed blocker.
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "missing-connection"
+model = "missing-model"
+
+[task]
+enabled = true
+max_plan_steps = 64
+"#,
+    )?;
+    let root_config = RootConfig::load(&config_path)?;
+    let session_path = temp.path().join(".sigil/sessions/session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        Session::load_from_store("application-task-test", "application-task-model", store)?;
+    let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?;
+    let request = crate::PlanReviewRunRequest {
+        plan_review_id: sigil_kernel::PlanReviewId::new("review-pending-plan-blocked")?,
+        attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-pending-plan-blocked")?,
+        plan_id: sigil_kernel::PlanId::new("plan_pending_blocked")?,
+        source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
+        source_turn: sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            "message-pending-plan-blocked",
+            "run-pending-plan-blocked",
+        )?,
+        route_decision_id: None,
+        child_session_ref: SessionRef::new_relative("child.jsonl")?,
+        finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        objective: "inspect the blocked pending plan route".to_owned(),
+        workspace_snapshot_id: base_snapshot.clone(),
+    };
+    let session_scope_id = session.session_scope_id().to_owned();
+    crate::PlanReviewCoordinator::ensure_attempt_started(&mut session, &request, 1)?;
+    let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
+        request.plan_id.clone(),
+        r#"```sigil-plan-v2
+{"summary":"Inspect the blocked route","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only","target_paths":["session.jsonl"]}]}
+```"#,
+        request.plan_source_ref(),
+        2,
+        base_snapshot,
+    )?
+    .expect("structured plan draft");
+    crate::PlanReviewCoordinator::commit_draft_from_child(
+        &mut session,
+        &draft,
+        &request,
+        &sigil_kernel::PlanCompileInputV1 {
+            source_attempt_id: request.attempt_id.as_str().to_owned(),
+            source_turn_id: request.source_turn.message_id.clone(),
+            task_config_contract_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                "test",
+            ),
+            planner_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "v2",
+            ),
+            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "v2",
+            ),
+            intent_schema_hash: None,
+            max_plan_steps: 64,
+            workspace_id: None,
+            session_scope_id: Some(session_scope_id.clone()),
+        },
+        2,
+    )?;
+    let plan_id = request.plan_id.clone();
+    let plan_hash = draft.plan_hash.clone();
+    let profile_registry =
+        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            temp.path(),
+            session.entries(),
+        )?;
+    let task_execution = super::ApplicationTaskExecutionRuntime {
+        root_config: root_config.clone(),
+        workspace_root: temp.path().to_path_buf(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        options: crate::build_run_options(
+            &root_config,
+            temp.path().to_path_buf(),
+            InteractionMode::Headless,
+            None,
+        ),
+        base_registry: {
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(NamedTool("read_file")));
+            registry
+        },
+        agent_supervisor: crate::AgentSupervisor::new(
+            profile_registry,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            application_task_provider_capabilities(),
+        ),
+        role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+    };
+    let cancellation_owner = RunCancellationOwner::new();
+    let cancellation_handle = cancellation_owner.handle();
+    let action = sigil_kernel::RunPendingPlanAction {
+        plan_id: plan_id.clone(),
+        plan_hash: plan_hash.clone(),
+        source_turn: sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            "message-pending-plan-blocked",
+            "run-pending-plan-blocked",
+        )?,
+    };
+    let root_output = AgentRunOutput {
+        disposition: AgentRunDisposition::RunPendingPlan(action),
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome {
+            terminal_reason: AgentRunTerminalReason::TaskHandoff,
+            tool_calls: 1,
+            ..AgentRunOutcome::default()
+        },
+    };
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+    let output = super::continue_application_task_handoff(
+        &mut session,
+        root_output,
+        Some(task_execution),
+        &mut handler,
+        &mut approval_handler,
+        &cancellation_handle,
+    )
+    .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert!(
+        output.result.final_text.contains("blocked"),
+        "blocked run must surface the blocker: {}",
+        output.result.final_text
+    );
+    let artifacts = session.plan_artifact_projection();
+    let adoption = artifacts
+        .adoptions
+        .get(&plan_id)
+        .and_then(|entries| entries.first())
+        .expect("model route must adopt the plan before blocking");
+    let tasks = session.task_state_projection();
+    assert_eq!(
+        tasks.execution_phase(&adoption.task_id),
+        Some(sigil_kernel::TaskExecutionPhaseV1::Blocked)
+    );
+    assert_eq!(
+        tasks
+            .active_blocker(&adoption.task_id)
+            .map(|blocker| blocker.reason_code),
+        Some(sigil_kernel::TaskBlockerReasonCodeV1::ProviderUnavailable)
     );
     Ok(())
 }

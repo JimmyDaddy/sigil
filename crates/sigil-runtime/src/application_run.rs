@@ -1843,6 +1843,7 @@ struct ApplicationTaskExecutionRuntime {
 /// Runtime facts used to execute a read-only plan review after an automatic route decision.
 struct ApplicationPlanReviewRuntime {
     options: AgentRunOptions,
+    root_config: RootConfig,
     agent: Box<Agent<Box<dyn sigil_kernel::Provider>>>,
     tool_registry: sigil_kernel::ToolRegistry,
     workspace_snapshot_id: Option<String>,
@@ -2341,22 +2342,51 @@ where
         if action.source_turn.session_scope_id != session.session_scope_id() {
             bail!("pending plan execution action belongs to another session");
         }
-        let created = crate::PlanReviewCoordinator::create_task_from_plan(
+        // RFC-0067 6.5: the shared model route drives the exact same single execution spine as
+        // every other surface: typed command -> atomic adoption -> admission -> runner.
+        let plan_id = sigil_kernel::PlanId::new(action.plan_id.as_str().to_owned())
+            .map_err(|error| anyhow!("invalid plan id for pending plan execution: {error}"))?;
+        let candidate_hash = session
+            .plan_artifact_projection()
+            .latest_candidate(&plan_id)
+            .map(|candidate| candidate.candidate_hash.clone())
+            .unwrap_or_default();
+        let command = sigil_kernel::PlanRunCommandV1 {
+            command_id: sigil_kernel::stable_event_uuid(
+                "sigil-plan-run-command-v1",
+                &format!(
+                    "{}:{}:{}:{}:run:current_policy",
+                    session.session_scope_id(),
+                    action.plan_id.as_str(),
+                    action.plan_hash,
+                    candidate_hash
+                ),
+            ),
+            session_id: session.session_scope_id().to_owned(),
+            plan_id,
+            expected_plan_hash: action.plan_hash.clone(),
+            expected_candidate_hash: candidate_hash,
+            expected_durable_frontier: session.durable_frontier_sequence(),
+            start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+            permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
+            source: sigil_kernel::PlanRunCommandSource::ModelTypedRoute,
+        };
+        let receipt = crate::PlanExecutionService::adopt(
             session,
-            &task_execution.root_config,
-            &task_execution.workspace_root,
             task_execution.parent_session_ref.clone(),
-            &crate::CreateTaskFromPlanRequest {
-                plan_id: action.plan_id.as_str().to_owned(),
-                expected_plan_hash: action.plan_hash,
-                start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
-                permission_grant: None,
-            },
-        )?;
+            &command,
+            crate::now_ms(),
+        )
+        .map_err(|rejection| {
+            anyhow!(
+                "pending plan execution was rejected: {}",
+                crate::plan_run_rejection_message(&rejection)
+            )
+        })?;
         return run_application_admitted_task(
             session,
             output,
-            created.task_id,
+            receipt.task_id,
             task_execution,
             handler,
             approval_handler,
@@ -2421,13 +2451,47 @@ where
     };
     let ApplicationTaskExecutionRuntime {
         root_config,
-        workspace_root: _,
+        workspace_root,
         parent_session_ref: _,
         options,
         base_registry,
         agent_supervisor,
         role_provider_builder,
     } = task_execution;
+    // RFC-0067 10.2: every run of an adopted Task goes through admission first; blockers keep
+    // the Task durable instead of failing mid-execution. Legacy (non-adopted) tasks skip this.
+    if let Some(adoption) = session
+        .plan_artifact_projection()
+        .adoption_for_task(&task_id)
+        .cloned()
+    {
+        let candidate = adoption.adopted_candidate;
+        let probes = crate::build_task_admission_probes(
+            &root_config,
+            &workspace_root,
+            Some(base_registry.contracts()),
+            session,
+            &task_id,
+            &candidate,
+        );
+        let outcome = crate::admit_adopted_task(
+            session,
+            &root_config,
+            &workspace_root,
+            &task_id,
+            &candidate,
+            &probes,
+            crate::now_ms(),
+        )?;
+        if let sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker) = &outcome {
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the blocked-task terminal-state race");
+            }
+            return application_task_blocked_output(session, handler, &task_id, blocker, output);
+        }
+    }
     let status = crate::agent_supervisor::task_execution::run_admitted_task_to_root_terminal(
         session,
         crate::agent_supervisor::task_execution::AdmittedTaskExecution {
@@ -2588,10 +2652,12 @@ where
 {
     let ApplicationPlanReviewRuntime {
         options,
+        root_config,
         agent,
         tool_registry,
         ..
     } = runtime;
+    let plan_review_workspace_root = options.workspace_root.clone();
     emit_current_plan_review_attempt(session, &request, handler)?;
     let outcome = match crate::PlanReviewCoordinator::run_plan_review(
         session,
@@ -2651,10 +2717,17 @@ where
             })
         }
         crate::PlanReviewRunOutcome::DraftReady { draft } => {
+            let compile_input = crate::PlanReviewCoordinator::plan_compile_input(
+                session,
+                &root_config,
+                &plan_review_workspace_root,
+                &request,
+            )?;
             crate::PlanReviewCoordinator::commit_draft_from_child(
                 session,
                 &draft,
                 &request,
+                &compile_input,
                 current_unix_time_ms(),
             )?;
             emit_current_plan_review_attempt(session, &request, handler)?;
@@ -2863,6 +2936,29 @@ fn application_task_final_answer(
         message_id: committed.message_id,
         text,
     })
+}
+
+fn application_task_blocked_output<H: EventHandler + Send>(
+    session: &mut Session,
+    handler: &mut H,
+    task_id: &TaskId,
+    blocker: &sigil_kernel::TaskBlockerV1,
+    mut output: AgentRunOutput,
+) -> Result<AgentRunOutput> {
+    // RFC-0067 13.2/13.3: a blocked Task keeps its durable identity; the run surface shows the
+    // blocker and its actions instead of a failed run.
+    let final_text = format!(
+        "Task {} is blocked ({}): {}. The task is kept and can be retried once the environment is resolved.",
+        task_id.as_str(),
+        blocker.reason_code.as_str(),
+        blocker.summary
+    );
+    let final_message_id = append_application_final_answer(session, handler, final_text.clone())?;
+    output.result.final_text = final_text;
+    output.result.final_message_id = Some(final_message_id);
+    output.disposition = AgentRunDisposition::FinalAnswer;
+    output.outcome.terminal_reason = AgentRunTerminalReason::FinalAnswer;
+    Ok(output)
 }
 
 fn application_task_terminal_output(
@@ -3470,6 +3566,7 @@ async fn prepare_application_run_internal(
         execution: ApplicationRunExecution {
             plan_review_runtime: Some(ApplicationPlanReviewRuntime {
                 options: options.clone(),
+                root_config: root_config.clone(),
                 workspace_snapshot_id: plan_review_workspace_snapshot_id,
                 agent: Box::new(Agent::new(
                     crate::build_provider_for_model_ref_async(&root_config, &model_ref)
@@ -5730,10 +5827,17 @@ where
                 )?;
             }
             crate::PlanReviewRunOutcome::DraftReady { draft } => {
+                let compile_input = crate::PlanReviewCoordinator::plan_compile_input(
+                    &session,
+                    root_config,
+                    workspace_root,
+                    request,
+                )?;
                 crate::PlanReviewCoordinator::commit_draft_from_child(
                     &mut session,
                     draft,
                     request,
+                    &compile_input,
                     current_unix_time_ms(),
                 )?;
             }

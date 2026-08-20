@@ -4466,10 +4466,35 @@ pub(crate) fn inherit_task_plan_permission_grant(
     task_id: &TaskId,
 ) -> Result<()> {
     let grant = parent_session.entries().iter().rev().find_map(|entry| {
-        let SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) = entry else {
-            return None;
-        };
-        (&grant.task_id == task_id).then(|| grant.clone())
+        match entry {
+            SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => {
+                (&grant.task_id == task_id).then(|| grant.clone())
+            }
+            // RFC-0067: the adoption authority carries the plan-scoped grant.
+            SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(adoption))
+                if &adoption.task_id == task_id && adoption.permission_grant.is_some() =>
+            {
+                let candidate = &adoption.adopted_candidate;
+                let scope = candidate.permission_scope_candidate.as_ref()?;
+                Some(sigil_kernel::PlanPermissionGrantedEntry {
+                    plan_id: adoption.plan_id.clone(),
+                    plan_hash: adoption.plan_hash.clone(),
+                    task_id: adoption.task_id.clone(),
+                    workspace_snapshot_id: candidate
+                        .compile_binding
+                        .base_workspace_snapshot_id
+                        .clone(),
+                    permission: adoption.permission_grant?,
+                    scope: sigil_kernel::PlanApprovalScope {
+                        summary: scope.summary.clone(),
+                        workspace_paths: scope.workspace_paths.clone(),
+                    },
+                    expires: sigil_kernel::PlanApprovalExpiry::Session,
+                    granted_at_ms: adoption.adopted_at_ms,
+                })
+            }
+            _ => None,
+        }
     });
     let Some(grant) = grant else {
         return Ok(());

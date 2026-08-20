@@ -234,11 +234,12 @@ pub use paths::{
 };
 pub use plan_review_coordinator::{
     ApplicationPlanAction, ApplicationPlanDecisionCommand, ApplicationPlanDecisionReceipt,
-    CreateTaskFromPlanRequest, CreatedTaskFromPlan, PlanDecisionCommand, PlanReviewCoordinator,
-    PlanReviewRunOutcome, PlanReviewRunRequest, RejectPlanRequest, RejectedPlan,
-    application_plan_decision, application_plan_review_research_input_decision,
-    application_plan_revision_guidance_decision, application_record_revision_failure,
-    plan_handoff_workspace_snapshot_id,
+    PlanDecisionCommand, PlanExecutionService, PlanReviewCoordinator, PlanReviewRunOutcome,
+    PlanReviewRunRequest, RejectPlanRequest, RejectedPlan, TASK_ADMISSION_MIN_DISK_SPACE_BYTES,
+    TaskAdmissionProbeContext, admit_adopted_task, application_plan_decision,
+    application_plan_review_research_input_decision, application_plan_revision_guidance_decision,
+    application_record_revision_failure, build_task_admission_probes, now_ms,
+    plan_handoff_workspace_snapshot_id, plan_run_rejection_message,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,

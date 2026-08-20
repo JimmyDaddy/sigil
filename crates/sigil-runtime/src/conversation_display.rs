@@ -2008,6 +2008,11 @@ struct PlanReviewDisplayProjection {
         sigil_kernel::PlanId,
         Vec<sigil_kernel::TaskCreatedFromPlanEntry>,
     >,
+    // RFC-0067: durable executable candidate + ready marker; Run is only offered when both exist.
+    candidates:
+        std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::ExecutablePlanCandidateV1>,
+    ready_markers:
+        std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::PlanReadyCommittedV1Entry>,
     revision_guidance:
         std::collections::BTreeMap<sigil_kernel::UserInputIdentityV1, sigil_kernel::PlanId>,
     pending_revision_guidance: std::collections::BTreeSet<sigil_kernel::PlanId>,
@@ -2063,6 +2068,45 @@ impl PlanReviewDisplayProjection {
                 .entry(created.plan_id.clone())
                 .or_default()
                 .push(created),
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::ExecutablePlanCandidatePreparedV1(candidate),
+            ) => {
+                self.candidates
+                    .insert(candidate.plan_id.clone(), (*candidate).clone());
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::PlanReadyCommittedV1(marker),
+            ) => {
+                self.ready_markers.insert(marker.plan_id.clone(), marker);
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::PlanExecutionAdoptedV1(adoption),
+            ) => {
+                // An adopted plan is no longer a pending runnable surface.
+                self.decisions
+                    .entry(adoption.plan_id.clone())
+                    .or_default()
+                    .push(sigil_kernel::PlanDecisionRecordedEntry {
+                        plan_id: adoption.plan_id.clone(),
+                        plan_hash: adoption.plan_hash.clone(),
+                        decision: sigil_kernel::PlanDecision::Accepted,
+                        decided_by: sigil_kernel::PlanDecisionActor::User,
+                        decided_at_ms: adoption.adopted_at_ms,
+                        reason: Some("adopted through the single execution spine".to_owned()),
+                    });
+                self.tasks_created
+                    .entry(adoption.plan_id.clone())
+                    .or_default()
+                    .push(sigil_kernel::TaskCreatedFromPlanEntry {
+                        plan_id: adoption.plan_id.clone(),
+                        plan_hash: adoption.plan_hash.clone(),
+                        task_id: adoption.task_id.clone(),
+                        task_plan_version: adoption.adopted_candidate.task_plan.plan_version,
+                        step_mapping: adoption.adopted_candidate.step_mapping.clone(),
+                        stale_reason: None,
+                        created_at_ms: adoption.adopted_at_ms,
+                    });
+            }
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::UserInputRequested(requested),
             ) => {
@@ -2178,28 +2222,49 @@ impl PlanReviewDisplayProjection {
         let guidance_pending = self
             .pending_revision_guidance
             .contains(&active_attempt.plan_id);
+        // RFC-0067 6.1/15.1: Run is only offered when the exact candidate and ready marker are
+        // durable. Legacy or crash-incomplete DraftReady plans stay actionable through
+        // Revise/Reject (explicit recompile) but never pretend to be runnable.
+        let executable = self.plan_is_executable(&active_attempt.plan_id);
         let allowed_actions = if active_attempt.status
             == sigil_kernel::PlanReviewAttemptStatus::DraftReady
             && draft.is_some()
             && !revision_running
             && !guidance_pending
         {
-            match legacy_recovery.map_or(latest_decision, |_| {
-                Some(sigil_kernel::PlanDecision::RevisionFailed)
-            }) {
-                Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
-                Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
-                    sigil_kernel::PublicPlanAction::Run,
+            if !executable {
+                vec![
                     sigil_kernel::PublicPlanAction::Revise,
                     sigil_kernel::PublicPlanAction::Reject,
-                ],
-                _ => vec![
-                    sigil_kernel::PublicPlanAction::Run,
-                    sigil_kernel::PublicPlanAction::Save,
-                    sigil_kernel::PublicPlanAction::Revise,
-                    sigil_kernel::PublicPlanAction::Reject,
-                ],
+                ]
+            } else {
+                match legacy_recovery.map_or(latest_decision, |_| {
+                    Some(sigil_kernel::PlanDecision::RevisionFailed)
+                }) {
+                    Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
+                    Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
+                        sigil_kernel::PublicPlanAction::Run,
+                        sigil_kernel::PublicPlanAction::Revise,
+                        sigil_kernel::PublicPlanAction::Reject,
+                    ],
+                    _ => vec![
+                        sigil_kernel::PublicPlanAction::Run,
+                        sigil_kernel::PublicPlanAction::Save,
+                        sigil_kernel::PublicPlanAction::Revise,
+                        sigil_kernel::PublicPlanAction::Reject,
+                    ],
+                }
             }
+        } else if active_attempt.status == sigil_kernel::PlanReviewAttemptStatus::CompileFailed
+            && draft.is_some()
+            && !revision_running
+            && !guidance_pending
+        {
+            // RFC-0067 13.1: a compile-failed plan needs changes; it cannot be run or saved.
+            vec![
+                sigil_kernel::PublicPlanAction::Revise,
+                sigil_kernel::PublicPlanAction::Reject,
+            ]
         } else {
             Vec::new()
         };
@@ -2239,7 +2304,8 @@ impl PlanReviewDisplayProjection {
                         sigil_kernel::PlanReviewAttemptStatus::Started
                         | sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
                         | sigil_kernel::PlanReviewAttemptStatus::Finalizing
-                        | sigil_kernel::PlanReviewAttemptStatus::DraftReady => {
+                        | sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                        | sigil_kernel::PlanReviewAttemptStatus::CompileFailed => {
                             unreachable!("legacy recovery only accepts terminal attempts")
                         }
                     },
@@ -2265,6 +2331,9 @@ impl PlanReviewDisplayProjection {
                         }
                         sigil_kernel::PlanReviewAttemptStatus::DraftReady => {
                             sigil_kernel::PublicPlanRevisionStatusV1::Succeeded
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::CompileFailed => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Failed
                         }
                         sigil_kernel::PlanReviewAttemptStatus::Cancelled => {
                             sigil_kernel::PublicPlanRevisionStatusV1::Cancelled
@@ -2321,6 +2390,14 @@ impl PlanReviewDisplayProjection {
                         }),
                     })
             },
+        })
+    }
+
+    fn plan_is_executable(&self, plan_id: &sigil_kernel::PlanId) -> bool {
+        self.ready_markers.get(plan_id).is_some_and(|marker| {
+            self.candidates
+                .get(plan_id)
+                .is_some_and(|candidate| candidate.candidate_hash == marker.candidate_hash)
         })
     }
 

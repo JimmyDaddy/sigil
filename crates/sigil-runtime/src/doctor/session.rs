@@ -435,6 +435,95 @@ pub(super) fn check_plan_review_compatibility(report: &mut DoctorReport, session
     }
 }
 
+/// RFC-0067: audits the single execution spine facts of every readable session.
+///
+/// A `DraftReady` plan must have an executable candidate and a ready marker; a candidate without
+/// a marker is an incomplete crash prefix; adopted Tasks must have at least one admission
+/// attempt before they leave `Preparing`.
+pub(super) fn check_plan_execution_spine(report: &mut DoctorReport, session_dir: &Path) {
+    let Ok(mut paths) = session_log_paths(session_dir) else {
+        return;
+    };
+    paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
+    let mut checked = 0usize;
+    let mut ready_plans = 0usize;
+    let mut draft_ready_without_marker = 0usize;
+    let mut candidate_without_marker = 0usize;
+    let mut adopted_tasks = 0usize;
+    let mut adopted_without_admission = 0usize;
+    for path in paths {
+        if session_stream_too_large_for_doctor(&path) {
+            continue;
+        }
+        let Ok(records) = JsonlSessionStore::read_event_records(&path) else {
+            continue;
+        };
+        let entries = records
+            .iter()
+            .filter_map(|record| {
+                sigil_kernel::conversation_transcript_entry_from_record(record)
+                    .ok()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let artifacts = sigil_kernel::PlanArtifactProjection::from_entries(&entries);
+        let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
+        checked += 1;
+        for plan_id in artifacts.plans.keys() {
+            match artifacts.plan_ready_state(plan_id) {
+                sigil_kernel::PlanReadyStateV1::Ready => ready_plans += 1,
+                sigil_kernel::PlanReadyStateV1::CandidatePrepared => {
+                    candidate_without_marker += 1;
+                }
+                _ => {}
+            }
+            let has_draft_ready_attempt = entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    sigil_kernel::SessionLogEntry::Control(
+                        sigil_kernel::ControlEntry::PlanReviewAttempt(attempt)
+                    ) if attempt.plan_id == *plan_id
+                        && attempt.status
+                            == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                )
+            });
+            if has_draft_ready_attempt
+                && !matches!(
+                    artifacts.plan_ready_state(plan_id),
+                    sigil_kernel::PlanReadyStateV1::Ready
+                )
+            {
+                draft_ready_without_marker += 1;
+            }
+        }
+        for adoption in artifacts.adoptions.values().flatten() {
+            adopted_tasks += 1;
+            let admitted = tasks
+                .admission_attempts
+                .get(&adoption.task_id)
+                .is_some_and(|attempts| !attempts.is_empty());
+            if !admitted {
+                adopted_without_admission += 1;
+            }
+        }
+    }
+    let message = format!(
+        "checked={checked}, ready_plans={ready_plans}, draft_ready_without_marker={draft_ready_without_marker}, candidate_without_marker={candidate_without_marker}, adopted_tasks={adopted_tasks}, adopted_without_admission={adopted_without_admission}"
+    );
+    if draft_ready_without_marker > 0 || candidate_without_marker > 0 {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "session:plan_execution_spine",
+            message,
+            Some(
+                "a DraftReady plan without its ready marker violates RFC-0067; preserve the session for audit and recompile the plan instead of guessing promotion facts",
+            ),
+        );
+    } else {
+        report.push(DoctorStatus::Ok, "session:plan_execution_spine", message);
+    }
+}
+
 pub(super) fn check_session_route_compatibility(
     report: &mut DoctorReport,
     session_dir: &Path,

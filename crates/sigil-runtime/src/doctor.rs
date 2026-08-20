@@ -42,8 +42,8 @@ use orchestration::check_orchestration_rollout;
 use providers::{check_execution_backend, check_provider};
 use session::{
     check_cache_runtime_invariants, check_orchestration_route_disablement,
-    check_plan_review_compatibility, check_session_route_compatibility, check_session_streams,
-    check_storage_paths, check_workspace,
+    check_plan_execution_spine, check_plan_review_compatibility, check_session_route_compatibility,
+    check_session_streams, check_storage_paths, check_workspace,
 };
 use terminal::check_terminal;
 pub use web::{
@@ -291,6 +291,7 @@ pub fn build_doctor_report_with_options(
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
     check_cache_runtime_invariants(&mut report, &sigil_paths.session_log_dir);
     check_plan_review_compatibility(&mut report, &sigil_paths.session_log_dir);
+    check_plan_execution_spine(&mut report, &sigil_paths.session_log_dir);
     check_session_route_compatibility(&mut report, &sigil_paths.session_log_dir, &root_config);
     check_orchestration_rollout(&mut report, &root_config);
     let runtime_provider = crate::provider_connections::resolve_default_model_route(&root_config)
