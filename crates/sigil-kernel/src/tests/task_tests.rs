@@ -8,23 +8,167 @@ use crate::{
     ConversationTurnRef, ModelMessage, Session, SessionLogEntry, SessionRef,
     TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_GUIDANCE_APPLY_TOOL_NAME,
     TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskApprovalRouteBinding, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskContinuationSelectedEntry, TaskFinalAnswerCommittedEntry,
-    TaskGraphProjection, TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId,
-    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
-    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
-    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanEntry,
-    TaskPlanStatus, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
+    TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskApprovalRouteBinding, TaskCapabilityV2,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
+    TaskContinuationSelectedEntry, TaskFinalAnswerCommittedEntry, TaskGraphProjection,
+    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode,
+    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
+    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
+    TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanContractSetCommittedV2,
+    TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
     TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus,
     TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry,
-    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
-    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall,
-    child_session_ref, normalize_task_agent_display_name,
-    project_conversation_prompt_for_persistence, stale_task_approval_routes_for_restore,
-    task_final_message_id, task_guidance_applied_entry, task_guidance_apply_tool_spec,
-    task_participant_attempt_id, task_participant_session_ref, task_plan_update_entry,
-    task_plan_update_result_content, task_plan_update_tool_spec, validate_task_plan_graph_steps,
+    TaskStateProjection, TaskStepCheckpointV2, TaskStepEntry, TaskStepId, TaskStepMode,
+    TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
+    normalize_task_agent_display_name, project_conversation_prompt_for_persistence,
+    stale_task_approval_routes_for_restore, task_final_message_id, task_guidance_applied_entry,
+    task_guidance_apply_tool_spec, task_participant_attempt_id, task_participant_session_ref,
+    task_plan_update_commit_v2, task_plan_update_entry, task_plan_update_result_content,
+    task_plan_update_tool_spec, task_semantic_title, validate_task_plan_graph_steps,
 };
+
+#[test]
+fn task_plan_v2_commit_replays_complete_execution_contract() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_contract_v2")?,
+        max_plan_steps: 8,
+        max_plan_versions: 3,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
+    };
+    let call = ToolCall {
+        id: "call_contract_v2".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: serde_json::json!({
+            "plan_version": 1,
+            "status": "accepted",
+            "steps": [{
+                "step_id": "inspect_vcs",
+                "title": "Inspect exact repository state",
+                "role": "executor",
+                "mode": "write",
+                "target_paths": ["crates/sigil-kernel"],
+                "required_capabilities": ["vcs_read"],
+                "deliverables": ["bounded patch"],
+                "acceptance_criteria": ["targeted tests pass"],
+                "check_spec_refs": ["check:kernel"],
+                "risk": "medium"
+            }]
+        })
+        .to_string(),
+    };
+    let commit = task_plan_update_commit_v2(&context, &call)?;
+    assert_eq!(commit.step_contracts.len(), 1);
+    assert_eq!(
+        commit.step_contracts[0].contract.required_capabilities,
+        vec![
+            TaskCapabilityV2::WorkspaceRead,
+            TaskCapabilityV2::WorkspaceWrite,
+            TaskCapabilityV2::VcsRead,
+        ]
+    );
+    let missing =
+        crate::validate_task_step_capability_admission(&commit.step_contracts[0].contract, &[])
+            .expect_err(
+                "a participant without the exact capabilities must fail before provider dispatch",
+            );
+    assert!(missing.to_string().contains("workspace_read"));
+    assert!(missing.to_string().contains("workspace_write"));
+    assert!(missing.to_string().contains("vcs_read"));
+    crate::validate_task_step_capability_admission(
+        &commit.step_contracts[0].contract,
+        &[crate::ToolRuntimeContract {
+            spec: task_plan_update_tool_spec(),
+            mutation_tracking: crate::ToolMutationTracking::None,
+            concurrency_class: crate::ToolConcurrencyClass::Exclusive,
+            capabilities: BTreeSet::from([
+                crate::ToolCapability::WorkspaceRead,
+                crate::ToolCapability::WorkspaceWrite,
+                crate::ToolCapability::VcsRead,
+            ]),
+        }],
+    )?;
+    let marker = TaskPlanContractSetCommittedV2::new(&commit.plan, &commit.step_contracts)?;
+    let mut session = Session::new("test", "model");
+    let mut controls = vec![ControlEntry::TaskPlan(commit.plan.clone())];
+    controls.extend(
+        commit
+            .step_contracts
+            .iter()
+            .cloned()
+            .map(ControlEntry::TaskStepContractBoundV2),
+    );
+    controls.push(ControlEntry::TaskPlanContractSetCommittedV2(marker));
+    session.append_controls(controls)?;
+
+    let projection = session.task_state_projection();
+    let plan = projection
+        .tasks
+        .get(&context.task_id)
+        .and_then(|task| task.plans.get(&1))
+        .expect("V2 plan should replay");
+    assert!(plan.contract_set_committed_v2);
+    assert_eq!(plan.step_contracts.len(), 1);
+    assert_eq!(
+        plan.step_contracts[&step_id("inspect_vcs")?].deliverables,
+        vec!["bounded patch"]
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_task_plan_replays_without_fabricating_v2_contract() -> Result<()> {
+    let plan = TaskPlanEntry {
+        task_id: task_id("legacy_task")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![read_step("inspect", Vec::new())?],
+        reason: None,
+    };
+    let projection = TaskStateProjection::from_entries(&[SessionLogEntry::Control(
+        ControlEntry::TaskPlan(plan),
+    )]);
+    let plan = &projection.tasks[&task_id("legacy_task")?].plans[&1];
+    assert!(plan.step_contracts.is_empty());
+    assert!(!plan.contract_set_committed_v2);
+    Ok(())
+}
+
+#[test]
+fn task_step_checkpoint_detects_only_the_same_semantic_frontier() -> Result<()> {
+    let base = TaskStepCheckpointV2 {
+        schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+        task_id: task_id("checkpoint_task")?,
+        plan_version: 1,
+        step_id: step_id("inspect")?,
+        attempt_id: TaskParticipantAttemptId::new("attempt-checkpoint")?,
+        model_turn: 1,
+        semantic_call_hash: format!("sha256:{}", "a".repeat(64)),
+        result_frontier_hash: format!("sha256:{}", "b".repeat(64)),
+        no_progress_count: 0,
+    };
+    base.validate()?;
+    let mut repeated = base.clone();
+    repeated.model_turn = 2;
+    repeated.no_progress_count = 1;
+    assert!(repeated.repeated_frontier(Some(&base)));
+    let mut progressed = repeated.clone();
+    progressed.result_frontier_hash = format!("sha256:{}", "c".repeat(64));
+    progressed.no_progress_count = 0;
+    assert!(!progressed.repeated_frontier(Some(&repeated)));
+    Ok(())
+}
+
+#[test]
+fn task_semantic_title_prefers_the_approved_plan_summary() {
+    let objective = "Execute the following user-approved structured plan with the configured approval requirements.\n\nApproved structured plan:\n\nSummary: 修复权限默认值与测试\n\nSteps:\n1. Inspect";
+
+    assert_eq!(task_semantic_title(objective), "修复权限默认值与测试");
+    assert_eq!(
+        task_semantic_title("\n  Inspect the workspace\nnext"),
+        "Inspect the workspace"
+    );
+}
 
 fn task_id(value: &str) -> Result<TaskId> {
     TaskId::new(value)
@@ -805,6 +949,42 @@ fn task_plan_update_rejects_system_owned_verify_participant_steps() -> Result<()
 }
 
 #[test]
+fn task_plan_update_rejects_delegated_verification_capability() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 1,
+        max_plan_versions: 1,
+        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
+    };
+    let call = ToolCall {
+        id: "call-verification-capability".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: serde_json::json!({
+            "plan_version": 1,
+            "status": "accepted",
+            "steps": [{
+                "step_id": "inspect",
+                "title": "Inspect before trusted checks",
+                "role": "executor",
+                "mode": "read",
+                "required_capabilities": ["verification_run"],
+                "check_spec_refs": ["check:kernel"]
+            }]
+        })
+        .to_string(),
+    };
+
+    let error = task_plan_update_commit_v2(&context, &call)
+        .expect_err("verification execution must remain host-owned");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot delegate verification_run")
+    );
+    Ok(())
+}
+
+#[test]
 fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Result<()> {
     let read_step = TaskStepSpec {
         step_id: step_id("read")?,
@@ -1304,6 +1484,39 @@ fn task_projection_tracks_latest_task_by_replay_order() -> Result<()> {
             .latest_unfinished_task()
             .map(|task| task.task_id.as_str()),
         Some("task_a")
+    );
+    Ok(())
+}
+
+#[test]
+fn task_projection_keeps_the_first_semantic_title_across_lifecycle_updates() -> Result<()> {
+    let task_id = task_id("task_title")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: "generic internal execution wrapper".to_owned(),
+            title: Some("用户可读的计划标题".to_owned()),
+            status: TaskRunStatus::Started,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: "generic internal execution wrapper".to_owned(),
+            title: Some("generic internal execution wrapper".to_owned()),
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+    ];
+
+    let projection = TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        projection
+            .tasks
+            .get(&task_id)
+            .and_then(|task| task.title.as_deref()),
+        Some("用户可读的计划标题")
     );
     Ok(())
 }
@@ -2042,6 +2255,28 @@ fn task_projection_tracks_pending_retry_from_terminal_zero_effect_attempt() -> R
 }
 
 #[test]
+fn provider_protocol_retry_proof_requires_read_only_zero_effect_evidence() -> Result<()> {
+    let valid = TaskParticipantRetryProof::ProviderProtocolRejectedAfterOutput {
+        physical_attempt_id: "physical-attempt-protocol-1".to_owned(),
+        request_material_fingerprint: format!("hmac-sha256:{}", "a".repeat(64)),
+        read_only_step: true,
+        zero_effect: true,
+    };
+    valid.validate_shape()?;
+    assert_eq!(valid.recovery_label(), "provider protocol recovery");
+
+    let mut invalid = valid.clone();
+    let TaskParticipantRetryProof::ProviderProtocolRejectedAfterOutput { read_only_step, .. } =
+        &mut invalid
+    else {
+        unreachable!("test constructed the protocol recovery variant")
+    };
+    *read_only_step = false;
+    assert!(invalid.validate_shape().is_err());
+    Ok(())
+}
+
+#[test]
 fn participant_result_shape_rejects_unbounded_parent_reference_lists() -> Result<()> {
     let task_id = task_id("task_1")?;
     let attempt_id =
@@ -2281,6 +2516,7 @@ fn continuation_selection(
         task_status: TaskRunStatus::Paused,
         plan_status: Some(TaskPlanStatus::Accepted),
         route_contract_fingerprint: "sha256:continuation-route".to_owned(),
+        control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: prompt.prompt_hash,
         exact_prompt_required: prompt.exact_prompt_required,
         guidance: prompt.safe_prompt,

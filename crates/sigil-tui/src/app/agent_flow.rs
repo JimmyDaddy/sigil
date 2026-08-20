@@ -23,7 +23,8 @@ use sigil_kernel::{
 
 use super::{
     ActiveAgentChildTranscript, AgentSidebarItem, AgentView, AppAction, AppState,
-    ChildTranscriptFileSignature, formatting::format_tool_progress_block_redacted_with_call,
+    ChildTranscriptFileSignature,
+    formatting::{format_tool_progress_block_redacted_with_call, summarize_terminal_reason},
     state::ChildToolCardOccurrence,
 };
 
@@ -1013,7 +1014,9 @@ fn pending_child_tool_calls(entries: &[SessionLogEntry]) -> Vec<PendingChildTool
                     call.render_running_card = false;
                 }
             }
-            SessionLogEntry::User(_) | SessionLogEntry::Control(_) => {}
+            SessionLogEntry::User(_)
+            | SessionLogEntry::RuntimeContextSnapshotV2(_)
+            | SessionLogEntry::Control(_) => {}
         }
     }
     let mut pending = pending.into_values().collect::<Vec<_>>();
@@ -1407,7 +1410,20 @@ fn agent_thread_detail(
     if let Some(heartbeat) = agent_thread_heartbeat_label(thread) {
         parts.push(heartbeat.to_owned());
     }
-    parts.push(agent_thread_result_label(thread, status, continuation_unresolved).to_owned());
+    parts.push(agent_thread_result_label(
+        thread,
+        status,
+        continuation_unresolved,
+    ));
+    if !continuation_unresolved
+        && status.is_terminal()
+        && let Some(reason) = thread
+            .reason
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(summarize_terminal_reason(reason, 72));
+    }
     parts.join(" · ")
 }
 
@@ -1427,15 +1443,24 @@ fn agent_thread_result_label(
     thread: &AgentThreadProjection,
     status: AgentThreadStatus,
     continuation_unresolved: bool,
-) -> &'static str {
+) -> String {
     if continuation_unresolved || !status.is_terminal() {
-        return "result pending";
+        return "result pending".to_owned();
     }
     if thread.result.is_some() {
-        "result ready"
-    } else {
-        "result missing"
+        return "result ready".to_owned();
     }
+    match status {
+        AgentThreadStatus::Failed => "failed before final response",
+        AgentThreadStatus::Blocked => "blocked before final response",
+        AgentThreadStatus::Cancelled => "cancelled before final response",
+        AgentThreadStatus::Interrupted => "interrupted before final response",
+        AgentThreadStatus::Completed => "completed without final response",
+        AgentThreadStatus::Closed => "closed without final response",
+        AgentThreadStatus::Unavailable | AgentThreadStatus::Unknown => "final response unavailable",
+        AgentThreadStatus::Started | AgentThreadStatus::Running => "result pending",
+    }
+    .to_owned()
 }
 
 fn agent_thread_heartbeat_label(thread: &AgentThreadProjection) -> Option<&'static str> {

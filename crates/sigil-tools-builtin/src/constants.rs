@@ -30,6 +30,9 @@ pub(crate) const SCRATCH_QUOTA_PER_SESSION_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const SCRATCH_QUOTA_WORKSPACE_HARD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Namespaces whose last activity is older than this are eligible for TTL GC.
 pub(crate) const SCRATCH_NAMESPACE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
-/// Bounds for the deterministic scratch usage/activity walk.
+/// Entry bound for the deterministic scratch usage/activity walk.
+///
+/// Directory depth is intentionally not bounded: build systems and test fixtures routinely
+/// create deeply nested trees. The entry bound limits traversal work without making an otherwise
+/// valid namespace unusable.
 pub(crate) const SCRATCH_WALK_MAX_ENTRIES: usize = 100_000;
-pub(crate) const SCRATCH_WALK_MAX_DEPTH: u32 = 4;

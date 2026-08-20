@@ -44,6 +44,7 @@ fn read_only_network_approval_exposes_session_grant_scope() -> Result<()> {
             normalized: "https://example.com/docs".to_owned(),
             canonical_path: None,
             scope: sigil_kernel::ToolSubjectScope::External,
+            access: sigil_kernel::ToolAccess::Read,
         }],
         network_effect: Some(sigil_kernel::NetworkEffect::Read),
         local_policy_decision: sigil_kernel::ApprovalMode::Allow,
@@ -102,6 +103,7 @@ fn approval_uses_kernel_session_grant_availability_without_recomputing_facets() 
             normalized: "https://example.com/docs".to_owned(),
             canonical_path: None,
             scope: sigil_kernel::ToolSubjectScope::External,
+            access: sigil_kernel::ToolAccess::Read,
         }],
         network_effect: Some(sigil_kernel::NetworkEffect::Read),
         local_policy_decision: sigil_kernel::ApprovalMode::Allow,
@@ -490,6 +492,7 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
             sigil_kernel::PathTrustZone::WorkspaceIgnored,
             sigil_kernel::PathTrustZone::WorkspaceGitMetadata,
             sigil_kernel::PathTrustZone::WorkspaceConfigSecret,
+            sigil_kernel::PathTrustZone::RuntimeScratch,
             sigil_kernel::PathTrustZone::UserState,
             sigil_kernel::PathTrustZone::UserCache,
             sigil_kernel::PathTrustZone::External,
@@ -517,6 +520,7 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
     assert!(lines.contains("config or secret"));
     assert!(lines.contains("user state"));
     assert!(lines.contains("user cache"));
+    assert!(lines.contains("session scratch"));
     assert!(lines.contains("external path"));
     assert!(lines.contains("unknown"));
     assert!(lines.contains("confirmation=type the requested phrase before approval"));

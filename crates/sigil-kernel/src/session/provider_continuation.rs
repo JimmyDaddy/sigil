@@ -2066,6 +2066,7 @@ impl ProviderContinuationProjection {
             }
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
+            | SessionLogEntry::RuntimeContextSnapshotV2(_)
             | SessionLogEntry::Control(_) => {}
         }
         Ok(())

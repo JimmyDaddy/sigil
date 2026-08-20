@@ -361,12 +361,29 @@ pub struct ApplicationRunContextView {
     pub context_window_tokens: Option<u32>,
     /// Prompt tokens recorded by the latest durable usage snapshot.
     pub last_prompt_tokens: Option<u64>,
+    /// Provider-neutral cumulative cache telemetry plus the latest local-layout diagnostic.
+    pub cache_usage: Option<ApplicationCacheUsageView>,
     /// Source used to resolve the effective context window.
     pub context_window_source: crate::ContextWindowSource,
     /// Bounded command, skill, and agent metadata for application clients.
     pub extension_catalog: crate::ApplicationExtensionCatalogView,
     /// Exact-bound route recovery state; transcript and catalog reads remain available.
     pub route_recovery: Option<ApplicationSessionRouteRecoveryView>,
+}
+
+/// Provider-neutral cache telemetry shared by Desktop and other application adapters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationCacheUsageView {
+    /// Cumulative provider-reported cache-read (hit) tokens.
+    pub cache_read_tokens: u64,
+    /// Cumulative provider-reported uncached input tokens.
+    pub cache_miss_tokens: u64,
+    /// Cumulative provider-reported cache-write tokens, when the route reports writes.
+    pub cache_write_tokens: Option<u64>,
+    /// Latest locally observed request-layout mutation.
+    pub last_layout_mutation: Option<sigil_kernel::CacheLayoutMutationKind>,
+    /// Latest request missed provider cache despite no locally observed prefix mutation.
+    pub provider_miss_without_local_mutation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1814,6 +1831,8 @@ impl ApplicationPostRunMaintenance {
 
 struct ApplicationTaskExecutionRuntime {
     root_config: RootConfig,
+    workspace_root: PathBuf,
+    parent_session_ref: SessionRef,
     options: AgentRunOptions,
     base_registry: sigil_kernel::ToolRegistry,
     agent_supervisor: crate::AgentSupervisor,
@@ -2092,6 +2111,7 @@ impl ApplicationRunExecution {
                     subagent_write_options,
                 } = *runtime;
                 let status = orchestrator
+                    .with_cancellation(self.cancellation_handle.clone())
                     .resume_planner_after_user_input(
                         &mut self.session,
                         sigil_kernel::SequentialTaskRequest {
@@ -2300,6 +2320,50 @@ where
     H: EventHandler + Send,
     A: ApprovalHandler + Send,
 {
+    if let AgentRunDisposition::PendingPlanDecisionRequired(_action) = output.disposition.clone() {
+        let final_text = "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned();
+        let final_message_id =
+            append_application_final_answer(session, handler, final_text.clone())?;
+        return Ok(AgentRunOutput {
+            disposition: AgentRunDisposition::FinalAnswer,
+            result: AgentRunResult {
+                final_text,
+                tool_calls: output.result.tool_calls,
+                final_message_id: Some(final_message_id),
+            },
+            outcome: output.outcome,
+        });
+    }
+    if let AgentRunDisposition::RunPendingPlan(action) = output.disposition.clone() {
+        let Some(task_execution) = task_execution else {
+            bail!("pending plan execution requires an attached durable Task executor");
+        };
+        if action.source_turn.session_scope_id != session.session_scope_id() {
+            bail!("pending plan execution action belongs to another session");
+        }
+        let created = crate::PlanReviewCoordinator::create_task_from_plan(
+            session,
+            &task_execution.root_config,
+            &task_execution.workspace_root,
+            task_execution.parent_session_ref.clone(),
+            &crate::CreateTaskFromPlanRequest {
+                plan_id: action.plan_id.as_str().to_owned(),
+                expected_plan_hash: action.plan_hash,
+                start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+                permission_grant: None,
+            },
+        )?;
+        return run_application_admitted_task(
+            session,
+            output,
+            created.task_id,
+            task_execution,
+            handler,
+            approval_handler,
+            cancellation_handle,
+        )
+        .await;
+    }
     if let AgentRunDisposition::ContinueDurableTask(action) = output.disposition.clone() {
         return continue_application_existing_task(
             session,
@@ -2318,11 +2382,32 @@ where
     let Some(task_execution) = task_execution else {
         return Ok(output);
     };
-    let task = session
-        .task_state_projection()
-        .tasks
-        .get(&action.task_id)
-        .cloned();
+    run_application_admitted_task(
+        session,
+        output,
+        action.task_id,
+        task_execution,
+        handler,
+        approval_handler,
+        cancellation_handle,
+    )
+    .await
+}
+
+async fn run_application_admitted_task<H, A>(
+    session: &mut Session,
+    output: AgentRunOutput,
+    task_id: TaskId,
+    task_execution: ApplicationTaskExecutionRuntime,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: &RunCancellationHandle,
+) -> Result<AgentRunOutput>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let task = session.task_state_projection().tasks.get(&task_id).cloned();
     let Some(task) = task else {
         if !cancellation_handle.is_naturally_finalized()
             && !cancellation_handle.try_finalize_naturally()
@@ -2331,11 +2416,13 @@ where
         }
         bail!(
             "accepted task handoff {} is missing its durable task",
-            action.task_id.as_str()
+            task_id.as_str()
         );
     };
     let ApplicationTaskExecutionRuntime {
         root_config,
+        workspace_root: _,
+        parent_session_ref: _,
         options,
         base_registry,
         agent_supervisor,
@@ -2344,7 +2431,7 @@ where
     let status = crate::agent_supervisor::task_execution::run_admitted_task_to_root_terminal(
         session,
         crate::agent_supervisor::task_execution::AdmittedTaskExecution {
-            task_id: action.task_id.clone(),
+            task_id: task_id.clone(),
             parent_session_ref: task.parent_session_ref,
             objective: task.objective,
             root_config,
@@ -2359,7 +2446,7 @@ where
         approval_handler,
     )
     .await?;
-    application_task_terminal_output(session, &action.task_id, status, output)
+    application_task_terminal_output(session, &task_id, status, output)
 }
 
 async fn continue_application_existing_task<H, A>(
@@ -2378,6 +2465,11 @@ where
     let Some(task_execution) = task_execution else {
         return Ok(output);
     };
+    // A live application can continue a task without crossing the session-open transition.
+    // Reproject completed participant evidence here as well, so a stale blocked step is repaired
+    // before the continuation scheduler computes its ready queue.
+    sigil_kernel::reconcile_task_step_projections(session, &action.task_id)
+        .context("failed to reconcile durable task step projections before continuation")?;
     let task = match crate::validate_task_continuation_action(session, &action) {
         Ok(task) => task,
         Err(error) => {
@@ -2391,6 +2483,8 @@ where
     };
     let ApplicationTaskExecutionRuntime {
         root_config,
+        workspace_root: _,
+        parent_session_ref: _,
         options,
         base_registry,
         agent_supervisor,
@@ -2408,7 +2502,12 @@ where
                 session,
                 crate::agent_supervisor::task_execution::ContinuedTaskExecution {
                     requested_task_id: Some(action.task_id.clone()),
-                    guidance: Some(action.guidance.expose_secret().to_owned()),
+                    guidance: match action.control() {
+                        sigil_kernel::TaskContinuationControl::ResumeTask => None,
+                        sigil_kernel::TaskContinuationControl::ApplyTaskGuidance(guidance) => {
+                            Some(guidance)
+                        }
+                    },
                     guidance_promotion: None,
                     continuation_guidance_receipt: Some(action.guidance_receipt),
                     root_config,
@@ -3174,7 +3273,13 @@ async fn prepare_application_run_internal(
         .resolve(context_prompt)
         .await
         .unwrap_or_default();
-    input = input.with_runtime_context(runtime_context.clone());
+    let pending_input_provider: Arc<dyn sigil_kernel::PendingConversationInputProvider> =
+        Arc::new(crate::pending_input::DurableQueuePendingInputProvider::new(
+            surface.context_resolver.clone(),
+        ));
+    input = input
+        .with_runtime_context(runtime_context.clone())
+        .with_pending_input_provider(Arc::clone(&pending_input_provider));
     let terminal_control = ApplicationTerminalTaskControl::new(
         workspace_root.clone(),
         surface.terminal_control.clone(),
@@ -3207,6 +3312,8 @@ async fn prepare_application_run_internal(
         .map(
             |(profile_registry, role_provider_builder)| ApplicationTaskExecutionRuntime {
                 root_config: root_config.clone(),
+                workspace_root: workspace_root.clone(),
+                parent_session_ref: parent_session_ref.clone(),
                 options: options.clone(),
                 base_registry: registry.clone(),
                 agent_supervisor: crate::AgentSupervisor::new(
@@ -3286,9 +3393,7 @@ async fn prepare_application_run_internal(
                 .with_logical_run_id(run_id.clone())
                 .with_cancellation(cancellation_handle.clone())
                 .with_initial_frozen_provider_request(frozen_request.clone())
-                .with_pending_input_provider(Arc::new(
-                    crate::pending_input::DurableQueuePendingInputProvider,
-                ));
+                .with_pending_input_provider(Arc::clone(&pending_input_provider));
             if let Some(max_output_tokens) = target_max_tokens {
                 run_input = run_input.with_max_output_tokens(max_output_tokens);
             }
@@ -4090,15 +4195,30 @@ pub fn application_run_context_view(
         &effective_route.model_ref,
         &provider_name,
     );
-    let last_prompt_tokens = entries
-        .iter()
-        .filter_map(|entry| match entry {
+    let mut usage_stats = sigil_kernel::SessionStats::default();
+    let mut observed_ordinary_usage = false;
+    for entry in &entries {
+        match entry {
             SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage)) => {
-                Some(usage.prompt_tokens)
+                observed_ordinary_usage = true;
+                usage_stats.apply_usage(usage);
             }
-            _ => None,
-        })
-        .next_back();
+            SessionLogEntry::Control(ControlEntry::SemanticCompactionUsageSnapshot(usage)) => {
+                usage_stats.apply_semantic_compaction_usage(usage);
+            }
+            _ => {}
+        }
+    }
+    let last_prompt_tokens = observed_ordinary_usage.then_some(usage_stats.last_prompt_tokens);
+    let cache_usage = observed_ordinary_usage.then(|| ApplicationCacheUsageView {
+        cache_read_tokens: usage_stats.cache_hit_tokens,
+        cache_miss_tokens: usage_stats.cache_miss_tokens,
+        cache_write_tokens: usage_stats
+            .cache_write_observed
+            .then_some(usage_stats.cache_write_tokens),
+        last_layout_mutation: usage_stats.last_cache_layout_mutation,
+        provider_miss_without_local_mutation: usage_stats.last_provider_miss_without_local_mutation,
+    });
     let available_reasoning_efforts = if route_recovery.as_ref().is_some_and(|recovery| {
         recovery.code != ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired
     }) {
@@ -4139,6 +4259,7 @@ pub fn application_run_context_view(
         reasoning_effort_binding,
         context_window_tokens: resolved.tokens,
         last_prompt_tokens,
+        cache_usage,
         context_window_source: resolved.source,
         extension_catalog,
         route_recovery,
@@ -4398,6 +4519,9 @@ pub fn application_session_transcript_page(
             }
             continue;
         }
+        if matches!(entry, SessionLogEntry::RuntimeContextSnapshotV2(_)) {
+            continue;
+        }
         let (message, role, expected_role) = match entry {
             SessionLogEntry::User(message) => {
                 (message, ApplicationTranscriptRole::User, MessageRole::User)
@@ -4423,6 +4547,9 @@ pub fn application_session_transcript_page(
                 ApplicationTranscriptRole::Tool,
                 MessageRole::Tool,
             ),
+            SessionLogEntry::RuntimeContextSnapshotV2(_) => {
+                unreachable!("runtime context snapshots are filtered above")
+            }
             SessionLogEntry::Control(_) => unreachable!("control entries are handled above"),
         };
         if message.role != expected_role {
@@ -4749,11 +4876,12 @@ pub fn default_application_session_path(session_log_dir: &Path) -> PathBuf {
 pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunInput {
     let runtime_context =
         context_candidates_from_safe_sources(workspace_root, &prompt, None).unwrap_or_default();
+    let pending_input_provider = crate::pending_input::DurableQueuePendingInputProvider::new(
+        crate::RequestContextResolver::new(workspace_root.to_path_buf(), None),
+    );
     AgentRunInput::user(prompt)
         .with_runtime_context(runtime_context)
-        .with_pending_input_provider(Arc::new(
-            crate::pending_input::DurableQueuePendingInputProvider,
-        ))
+        .with_pending_input_provider(Arc::new(pending_input_provider))
 }
 
 #[cfg(test)]
@@ -5081,7 +5209,7 @@ fn prepare_application_run_blocking(
         .with_logical_run_id(request.run_id.clone())
         .with_cancellation(cancellation_handle.clone())
         .with_pending_input_provider(Arc::new(
-            crate::pending_input::DurableQueuePendingInputProvider,
+            crate::pending_input::DurableQueuePendingInputProvider::default(),
         ));
     if let Some(loaded_skill) = loaded_skill.as_ref() {
         input
@@ -5760,6 +5888,19 @@ fn application_terminal_projection(
             PublicRunEventKind::RunFailed {
                 error: "run requested a durable task continuation, but this application surface has not attached the task executor"
                     .to_owned(),
+            },
+        ),
+        AgentRunDisposition::RunPendingPlan(_) => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunFailed {
+                error: "run requested pending plan execution, but this application surface has not attached the task executor"
+                    .to_owned(),
+            },
+        ),
+        AgentRunDisposition::PendingPlanDecisionRequired(_) => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunFailed {
+                error: "the current plan is still awaiting an explicit decision".to_owned(),
             },
         ),
         AgentRunDisposition::StartPlanReview(_) => (

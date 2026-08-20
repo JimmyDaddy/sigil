@@ -22,6 +22,7 @@ use crate::{
         TerminalWaitTool,
     },
     tool_artifact_tool::ReadToolArtifactTool,
+    vcs_inspect::VcsInspectTool,
 };
 
 /// Handles returned by built-in tool registration: terminal task control and the shared
@@ -194,6 +195,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     registry.register(Arc::new(ListTool));
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
+    registry.register(Arc::new(VcsInspectTool));
     registry.register(Arc::new(BashTool {
         scratch_root: paths.scratch_root.clone(),
         scratch_label: paths.scratch_label.clone(),

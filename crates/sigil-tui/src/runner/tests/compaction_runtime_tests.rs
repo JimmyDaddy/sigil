@@ -327,7 +327,9 @@ fn append_context_window_rejection(
         request_material_fingerprint: fingerprint.clone(),
         provider_name: "openai_responses".to_owned(),
         model_name: "gpt-4.1-2025-04-14".to_owned(),
+        request_envelope: None,
         cache_layout_proof: Some(cache_layout_proof("openai_responses", "gpt-4.1-2025-04-14")),
+        semantic_cache_layout_proof_v2: None,
         started_at_unix_ms: 1,
     };
     let started_record = DurableAuditRecord::new(

@@ -13,13 +13,15 @@ use futures::{Stream, stream};
 use sigil_kernel::{
     AgentRole, AgentRunDisposition, AgentRunOutcome, AgentRunOutput, AgentRunPurpose,
     AgentRunResult, AgentRunTerminalReason, ApprovalHandler, AssistantMessageKind,
-    AutoApproveHandler, CompletionRequest, ControlEntry, ConversationRunLifecycleRecordV1,
-    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DisclosurePresentationError,
-    DisclosurePresentationReceipt, EgressDisclosurePresenter, EventHandler, IntegrationPlanId,
-    InteractionMode, JsonlSessionStore, ModelMessage, NoopEventHandler, PreEgressDisclosure,
-    Provider, ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind,
-    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
-    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
+    AutoApproveHandler, CompletionRequest, ContextBodyRef, ContextInclusionReason, ContextItem,
+    ContextSensitivity, ContextSource, ContextTrustLevel, ControlEntry,
+    ConversationRunLifecycleRecordV1, ConversationRunStartedEntryV1,
+    ConversationRunTerminalStatusV1, DisclosurePresentationError, DisclosurePresentationReceipt,
+    EgressDisclosurePresenter, EventHandler, IntegrationPlanId, InteractionMode, JsonlSessionStore,
+    MemoryConfig, ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider,
+    ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RuntimeContextCandidates,
     Session, SessionLogEntry, SessionRef, StartDurableTaskAction, StartPlanReviewAction,
     TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId,
     TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
@@ -67,6 +69,29 @@ fn application_conversation_lifecycle(
         .iter()
         .filter_map(|record| conversation_run_lifecycle_record_from_stream(record).transpose())
         .collect()
+}
+
+fn application_internal_context_fixture() -> RuntimeContextCandidates {
+    let body = "desktop-internal context snapshot body";
+    let mut candidates = RuntimeContextCandidates::new();
+    candidates.items.push(ContextItem {
+        id: "application-context-fixture".to_owned(),
+        source: ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some("application-context-snapshot".to_owned()),
+        token_cost: sigil_kernel::estimate_context_token_cost(body),
+        score: Some(100.0),
+        score_breakdown: Vec::new(),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: ContextBodyRef::inline(body),
+    });
+    candidates
+        .snippets
+        .insert("application-context-fixture".to_owned(), body.to_owned());
+    candidates
 }
 
 fn append_running_application_task(
@@ -1650,6 +1675,7 @@ fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
         crate::ContextWindowSource::Provider
     );
     assert_eq!(empty.last_prompt_tokens, None);
+    assert_eq!(empty.cache_usage, None);
     assert_eq!(
         empty.extension_catalog.commands.len(),
         crate::APPLICATION_COMMANDS.len()
@@ -1680,7 +1706,16 @@ fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
-            cache_usage: None,
+            cache_usage: Some(sigil_kernel::CacheUsageV1 {
+                schema_version: sigil_kernel::CacheUsageV1::SCHEMA_VERSION,
+                read: Some(sigil_kernel::CacheTokenCountV1::provider_reported(30_000)),
+                write: Some(sigil_kernel::CacheTokenCountV1::provider_reported(2_000)),
+                uncached: Some(sigil_kernel::CacheTokenCountV1::provider_reported(12_000)),
+                local_layout_mutation: Some(
+                    sigil_kernel::CacheLayoutMutationKind::ConversationTailAppended,
+                ),
+                provider_miss_without_local_mutation: false,
+            }),
             pricing_snapshot: None,
         }),
     ))?;
@@ -1691,6 +1726,18 @@ fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
         &binding.session_scope_id,
     )?;
     assert_eq!(used.last_prompt_tokens, Some(42_000));
+    assert_eq!(
+        used.cache_usage,
+        Some(super::ApplicationCacheUsageView {
+            cache_read_tokens: 30_000,
+            cache_miss_tokens: 12_000,
+            cache_write_tokens: Some(2_000),
+            last_layout_mutation: Some(
+                sigil_kernel::CacheLayoutMutationKind::ConversationTailAppended,
+            ),
+            provider_miss_without_local_mutation: false,
+        })
+    );
     assert!(
         application_run_context_view(
             &config_path,
@@ -2412,6 +2459,43 @@ fn transcript_page_is_scope_checked_chronological_bounded_and_argument_free() ->
 }
 
 #[test]
+fn application_transcript_hides_provider_visible_context_v2_snapshots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/context-transcript.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.append_user_message(ModelMessage::user("inspect the transcript contract"))?;
+    session.build_request_with_transient_messages_and_context(
+        temp.path(),
+        &MemoryConfig::with_enabled(false),
+        Vec::new(),
+        None,
+        None,
+        None,
+        &[],
+        application_internal_context_fixture(),
+    )?;
+    session.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("done".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
+
+    let page = application_session_transcript_page(
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        None,
+        10,
+    )?;
+    assert_eq!(page.total_messages, 2);
+    assert!(!format!("{page:?}").contains("desktop-internal context snapshot body"));
+    Ok(())
+}
+
+#[test]
 fn transcript_page_projects_durable_reasoning_notes_without_other_control_data() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
@@ -3049,13 +3133,19 @@ credential = { source = "none" }
         )?;
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
+        workspace_root: temp.path().to_path_buf(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         options: crate::build_run_options(
             &root_config,
             temp.path().to_path_buf(),
             InteractionMode::Headless,
             None,
         ),
-        base_registry: ToolRegistry::new(),
+        base_registry: {
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(NamedTool("read_file")));
+            registry
+        },
         agent_supervisor: crate::AgentSupervisor::new(
             profile_registry,
             crate::AgentBudgetPolicy::from_root_config(&root_config),
@@ -3191,6 +3281,8 @@ credential = { source = "none" }
         });
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
+        workspace_root: temp.path().to_path_buf(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         options: crate::build_run_options(
             &root_config,
             temp.path().to_path_buf(),
@@ -3476,6 +3568,7 @@ credential = { source = "none" }
         task_status: TaskRunStatus::Paused,
         plan_status: Some(TaskPlanStatus::Accepted),
         route_contract_fingerprint: route_contract_fingerprint.clone(),
+        control: sigil_kernel::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: guidance_projection.prompt_hash,
         exact_prompt_required: guidance_projection.exact_prompt_required,
         guidance: guidance_projection.safe_prompt,
@@ -3492,6 +3585,8 @@ credential = { source = "none" }
         )?;
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
+        workspace_root: temp.path().to_path_buf(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         options: crate::build_run_options(
             &root_config,
             temp.path().to_path_buf(),
@@ -3517,6 +3612,9 @@ credential = { source = "none" }
                 task_status: TaskRunStatus::Paused,
                 plan_status: Some(TaskPlanStatus::Accepted),
                 route_contract_fingerprint,
+                control: sigil_kernel::TaskContinuationControl::ApplyTaskGuidance(
+                    exact_guidance.to_owned(),
+                ),
                 guidance: sigil_kernel::SecretString::new(exact_guidance),
                 guidance_receipt,
             },
@@ -3901,6 +3999,8 @@ fn application_guidance_recovery_fixture(
                     source_turn,
                     route_contract_fingerprint: "sha256:application-guidance-selection-recovery"
                         .to_owned(),
+                    control:
+                        sigil_kernel::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
                     prompt_hash: projected.prompt_hash.clone(),
                     exact_prompt_required: projected.exact_prompt_required,
                     guidance: projected.safe_prompt.clone(),
@@ -4025,7 +4125,7 @@ async fn application_continuation_recovers_safe_materialized_guidance_after_relo
 }
 
 #[tokio::test]
-async fn application_continuation_rejects_exact_required_materialized_guidance_after_reload()
+async fn application_continuation_recovers_exact_required_materialized_guidance_after_reload()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let fixture = application_guidance_recovery_fixture(
@@ -4062,21 +4162,34 @@ async fn application_continuation_rejects_exact_required_materialized_guidance_a
     let mut handler = RecordingApplicationRunEvents::default();
     let mut approval_handler = AutoApproveHandler;
 
-    let error = execution
+    let output = execution
         .execute(&mut handler, &mut approval_handler)
-        .await
-        .expect_err("exact-required materialization must require guidance re-entry after reload");
-
-    assert!(
-        format!("{error:#}")
-            .contains("requires exact prompt material after recovery; re-enter the guidance")
-    );
-    assert!(
-        executor_requests
-            .lock()
-            .expect("executor request lock should not be poisoned")
-            .is_empty()
-    );
+        .await?;
+    assert_eq!(output.task_status, TaskRunStatus::Completed);
+    let prompts = executor_requests
+        .lock()
+        .expect("executor request lock should not be poisoned")
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2);
+    let first = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_1"))
+        .expect("first executor step request");
+    let second = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_2"))
+        .expect("second executor step request");
+    assert!(!first.contains(&fixture.safe_guidance));
+    assert!(second.contains(&fixture.safe_guidance));
     assert!(!std::fs::read_to_string(session_path)?.contains(&exact_guidance));
     assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
     Ok(())
@@ -4302,7 +4415,7 @@ async fn application_continuation_explicitly_retries_selection_owned_uncertain_p
 }
 
 #[tokio::test]
-async fn application_continuation_rejects_exact_selection_only_guidance_after_reload() -> Result<()>
+async fn application_continuation_recovers_exact_selection_only_guidance_after_reload() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
     let fixture = application_guidance_recovery_fixture(
@@ -4339,25 +4452,29 @@ async fn application_continuation_rejects_exact_selection_only_guidance_after_re
     let mut handler = RecordingApplicationRunEvents::default();
     let mut approval_handler = AutoApproveHandler;
 
-    let error = execution
+    let output = execution
         .execute(&mut handler, &mut approval_handler)
         .await
-        .expect_err("selection-only exact guidance must require re-entry after reload");
+        .expect("safe durable guidance projection should recover after reload");
 
-    assert!(
-        format!("{error:#}")
-            .contains("pending task guidance requires exact prompt material after recovery")
-    );
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(output.task_status, TaskRunStatus::Completed);
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
     assert!(
         executor_requests
             .lock()
             .expect("executor request lock should not be poisoned")
-            .is_empty()
+            .iter()
+            .all(|request| {
+                request
+                    .messages
+                    .iter()
+                    .filter_map(|message| message.content.as_deref())
+                    .all(|content| !content.contains(&exact_guidance))
+            })
     );
     let durable_log = std::fs::read_to_string(session_path)?;
     assert!(!durable_log.contains(&exact_guidance));
-    assert!(!durable_log.contains("task_guidance_applied"));
+    assert!(durable_log.contains("task_guidance_applied"));
     Ok(())
 }
 
@@ -4412,13 +4529,13 @@ fn application_exact_reentry_preserves_active_task_then_recovers_started_planner
                     let (execution, first_control) = prepared.into_parts();
                     let mut handler = RecordingApplicationRunEvents::default();
                     let mut approval_handler = AutoApproveHandler;
-                    let error = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await
-        .expect_err("missing exact recovery material must stop before a fresh provider attempt");
-                    assert!(format!("{error:#}").contains(
-                        "pending task guidance requires exact prompt material after recovery"
-                    ));
+                    let output = execution
+                        .execute(&mut handler, &mut approval_handler)
+                        .await
+                        .expect(
+                            "safe durable guidance projection should recover the started planner",
+                        );
+                    assert_eq!(output.task_status, TaskRunStatus::Completed);
 
                     let reopened = Session::load_from_store(
                         "deepseek",
@@ -4431,43 +4548,22 @@ fn application_exact_reentry_preserves_active_task_then_recovers_started_planner
                         .get(&task_id)
                         .cloned()
                         .expect("active Task remains projected after admission failure");
-                    assert_eq!(
-                        task.status,
-                        TaskRunStatus::Started,
-                        "missing exact material must not finalize the durable Task as failed"
-                    );
-                    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+                    assert_eq!(task.status, TaskRunStatus::Completed);
+                    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
                     assert!(
                         executor_requests
                             .lock()
                             .expect("executor request lock should not be poisoned")
-                            .is_empty()
+                            .iter()
+                            .all(|request| {
+                                request
+                                    .messages
+                                    .iter()
+                                    .filter_map(|message| message.content.as_deref())
+                                    .all(|content| !content.contains(&exact_guidance))
+                            })
                     );
                     drop(first_control);
-                    drop(reopened);
-
-                    let prepared = prepare_application_task_continuation(
-                        ApplicationTaskContinuationRequest {
-                            config_path,
-                            launch_cwd: temp.path().to_path_buf(),
-                            session_path: session_path.clone(),
-                            session_attachment: None,
-                            expected_session_scope_id: session_scope_id,
-                            run_id: "run-application-guidance-started-exact-reentry".to_owned(),
-                            task_id: task_id.clone(),
-                            guidance: Some(exact_guidance.clone()),
-                            interaction: ApplicationRunInteraction::NonInteractive,
-                            permission_mode: None,
-                        },
-                        &services,
-                    )
-                    .await?;
-                    let (execution, _control) = prepared.into_parts();
-                    let output = execution
-                        .execute(&mut handler, &mut approval_handler)
-                        .await?;
-                    assert_eq!(output.task_status, TaskRunStatus::Completed);
-                    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
 
                     let reopened = Session::load_from_store(
                         "deepseek",
@@ -4720,6 +4816,7 @@ async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Re
         plan_status: Some(TaskPlanStatus::Accepted),
         source_turn: source_turn.clone(),
         route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
+        control: sigil_kernel::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: prompt.prompt_hash,
         exact_prompt_required: prompt.exact_prompt_required,
         guidance: prompt.safe_prompt,
@@ -4736,6 +4833,8 @@ async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Re
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
+        workspace_root: temp.path().to_path_buf(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         options: crate::build_run_options(
             &root_config,
             temp.path().to_path_buf(),
@@ -4764,6 +4863,9 @@ async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Re
                 task_status: TaskRunStatus::Paused,
                 plan_status: Some(TaskPlanStatus::Accepted),
                 route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
+                control: sigil_kernel::TaskContinuationControl::ApplyTaskGuidance(
+                    fixture.exact_guidance.clone(),
+                ),
                 guidance: sigil_kernel::SecretString::new(fixture.exact_guidance),
                 guidance_receipt: selection,
             },

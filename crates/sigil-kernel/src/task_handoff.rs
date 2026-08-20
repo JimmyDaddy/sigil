@@ -13,6 +13,8 @@ use crate::{
 pub const REQUEST_TASK_PLANNING_TOOL_NAME: &str = "request_task_planning";
 pub const CONTINUE_EXISTING_TASK_TOOL_NAME: &str = "continue_existing_task";
 pub const CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME: &str = "continue_without_task_planning";
+pub const RUN_PENDING_PLAN_TOOL_NAME: &str = "run_pending_plan";
+pub const KEEP_PENDING_PLAN_TOOL_NAME: &str = "keep_pending_plan";
 pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
 
 /// Stable identity for one conversation-to-task handoff.
@@ -192,10 +194,26 @@ pub struct TaskContinuationSelectedEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_status: Option<TaskPlanStatus>,
     pub route_contract_fingerprint: String,
+    /// Typed semantic choice returned by the routing model. Older records remain explicitly
+    /// unspecified; a later typed routing call may upgrade that process-local action without
+    /// guessing from localized prompt text.
+    #[serde(default)]
+    pub control: TaskContinuationControlKind,
     pub prompt_hash: String,
     pub exact_prompt_required: bool,
     pub guidance: String,
     pub selected_at_ms: u64,
+}
+
+/// Durable, secret-free semantic kind for one existing-Task continuation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskContinuationControlKind {
+    ResumeTask,
+    ApplyCurrentRequestAsGuidance,
+    /// Compatibility state for receipts written before the typed action field existed.
+    #[default]
+    LegacyUnspecified,
 }
 
 impl TaskContinuationSelectedEntry {
@@ -284,9 +302,13 @@ pub fn continue_existing_task_tool_spec() -> ToolSpec {
                 "reason": {
                     "type": "string",
                     "enum": ["continue_current_task"]
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["resume_task", "apply_current_request_as_guidance"]
                 }
             },
-            "required": ["reason"],
+            "required": ["reason", "action"],
             "additionalProperties": false
         }),
         category: ToolCategory::Custom,
@@ -358,6 +380,60 @@ pub fn continue_without_task_planning_tool_spec() -> ToolSpec {
     }
 }
 
+/// Model-visible decision to execute the exact pending Plan selected by the host.
+///
+/// Plan identity and content hash are deliberately absent from model arguments. The model decides
+/// only whether the user's current turn semantically authorizes execution; the host binds and
+/// revalidates the durable Plan.
+#[must_use]
+pub fn run_pending_plan_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: RUN_PENDING_PLAN_TOOL_NAME.to_owned(),
+        description: "Execute the exact draft-ready Plan currently selected by the host only when the user's current request semantically authorizes running that Plan. Do not infer authorization from a keyword alone. The host owns the plan identity, content hash, approval state, permissions, and Task identity."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "enum": ["execute_current_pending_plan"]
+                }
+            },
+            "required": ["reason"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
+/// Model-visible negative decision for a turn that does not authorize pending Plan execution.
+#[must_use]
+pub fn keep_pending_plan_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: KEEP_PENDING_PLAN_TOOL_NAME.to_owned(),
+        description: "Keep the exact host-selected pending Plan unchanged when the user's current request does not clearly authorize executing it. This prevents an unrelated, ambiguous, revision, save, or rejection request from being treated as execution."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "enum": ["execution_not_authorized"]
+                }
+            },
+            "required": ["reason"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
 /// Parses the bounded model-owned portion of a task handoff request.
 ///
 /// # Errors
@@ -407,6 +483,11 @@ pub fn validate_continue_without_task_planning_call(call: &ToolCall) -> Result<(
 /// Returns an error when the call uses another tool, includes unknown fields, or carries an
 /// unsupported reason. Task identity is deliberately absent from model arguments.
 pub fn validate_continue_existing_task_call(call: &ToolCall) -> Result<()> {
+    continue_existing_task_control_kind(call).map(|_| ())
+}
+
+/// Parses the typed semantic continuation choice without inspecting the user's prompt text.
+pub fn continue_existing_task_control_kind(call: &ToolCall) -> Result<TaskContinuationControlKind> {
     if call.name != CONTINUE_EXISTING_TASK_TOOL_NAME {
         bail!("unexpected internal task continuation tool {}", call.name);
     }
@@ -414,6 +495,43 @@ pub fn validate_continue_existing_task_call(call: &ToolCall) -> Result<()> {
         .map_err(|error| anyhow!("invalid task continuation routing arguments: {error}"))?;
     if args.reason != ExistingTaskContinuationReason::ContinueCurrentTask {
         bail!("task continuation routing reason is unsupported");
+    }
+    Ok(args.action)
+}
+
+/// Validates the model-owned execution decision for the host-selected pending Plan.
+pub fn validate_run_pending_plan_call(call: &ToolCall) -> Result<()> {
+    validate_pending_plan_decision_call(
+        call,
+        RUN_PENDING_PLAN_TOOL_NAME,
+        PendingPlanDecisionReason::ExecuteCurrentPendingPlan,
+    )
+}
+
+/// Validates the model-owned negative decision for the host-selected pending Plan.
+pub fn validate_keep_pending_plan_call(call: &ToolCall) -> Result<()> {
+    validate_pending_plan_decision_call(
+        call,
+        KEEP_PENDING_PLAN_TOOL_NAME,
+        PendingPlanDecisionReason::ExecutionNotAuthorized,
+    )
+}
+
+fn validate_pending_plan_decision_call(
+    call: &ToolCall,
+    expected_name: &str,
+    expected_reason: PendingPlanDecisionReason,
+) -> Result<()> {
+    if call.name != expected_name {
+        bail!(
+            "unexpected internal pending plan decision tool {}",
+            call.name
+        );
+    }
+    let args: RawPendingPlanDecisionArgs = serde_json::from_str(&call.args_json)
+        .map_err(|error| anyhow!("invalid pending plan decision arguments: {error}"))?;
+    if args.reason != expected_reason {
+        bail!("pending plan decision reason is unsupported");
     }
     Ok(())
 }
@@ -434,6 +552,13 @@ struct RawContinueWithoutTaskPlanningArgs {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 struct RawContinueExistingTaskArgs {
     reason: ExistingTaskContinuationReason,
+    action: TaskContinuationControlKind,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct RawPendingPlanDecisionArgs {
+    reason: PendingPlanDecisionReason,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -446,6 +571,13 @@ enum DirectConversationReason {
 #[serde(rename_all = "snake_case")]
 enum ExistingTaskContinuationReason {
     ContinueCurrentTask,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PendingPlanDecisionReason {
+    ExecuteCurrentPendingPlan,
+    ExecutionNotAuthorized,
 }
 
 /// Latest durable state for one handoff identity.

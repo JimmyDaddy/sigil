@@ -996,14 +996,17 @@ credential = { source = "none" }
     let serialized = serde_json::to_string(receipt).expect("receipt should serialize");
     assert!(!serialized.contains(&plugin_root.to_string_lossy().into_owned()));
 
-    let registered = report
+    let retirements = report
         .lifecycle_owners
         .iter()
-        .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+        .map(|owner| registry.retire_by_lifecycle_owner(owner))
         .collect::<Vec<_>>();
-    crate::mcp_registry::shutdown_registered_tools(&registered)
-        .await
-        .expect("fixture server should stop");
+    for retirement in &retirements {
+        retirement
+            .dispose_and_quiesce()
+            .await
+            .expect("fixture server should stop");
+    }
 }
 
 #[tokio::test]

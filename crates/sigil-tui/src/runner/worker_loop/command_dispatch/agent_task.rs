@@ -685,6 +685,7 @@ where
                 start_mode,
                 permission_grant,
             } => {
+                let requested_plan_id = plan_id.clone();
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before creating a task from a plan".to_owned(),
@@ -711,7 +712,17 @@ where
                 ) {
                     Ok(created) => created,
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                        let entries = state
+                            .session
+                            .current
+                            .as_ref()
+                            .map(|session| session.entries().to_vec())
+                            .unwrap_or_default();
+                        let _ = message_tx.send(WorkerMessage::PlanTaskCreationFailed {
+                            plan_id: requested_plan_id,
+                            error,
+                            entries,
+                        });
                         continue;
                     }
                 };

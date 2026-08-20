@@ -13,6 +13,30 @@ pub const SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub struct SessionProjectionEntry {
     /// The exact provider-neutral chat message retained by this projection.
     pub message: ModelMessage,
+    /// Typed source used by context selection, compaction, UI filtering, and request receipts.
+    pub origin: SessionProjectionOrigin,
+    /// Durable source event when this entry came from the append-only stream.
+    pub source_event_id: Option<EventId>,
+}
+
+/// Provider-neutral origin of one projected message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProjectionOrigin {
+    DurableUser,
+    ConversationPromotion,
+    Assistant,
+    ToolResult,
+    RuntimeContextSnapshotV2,
+    ContinuationCheckpoint,
+    Repair,
+    ProcessLocalCandidate,
+}
+
+impl SessionProjectionOrigin {
+    #[must_use]
+    pub fn is_user_authored(self) -> bool {
+        matches!(self, Self::DurableUser | Self::ConversationPromotion)
+    }
 }
 
 /// Whether an active TaskMemory payload still matches the current workspace snapshot.
@@ -64,8 +88,7 @@ pub struct SessionContextProjection {
 
 impl SessionContextProjection {
     pub(crate) fn from_entries(entries: &[SessionLogEntry]) -> Self {
-        let raw_messages = raw_model_messages(entries);
-        let retained_messages = repair_orphan_tool_results(&raw_messages);
+        let retained_entries = repair_projection_entries(raw_projection_entries(entries));
         Self {
             projection_schema_version: SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION,
             active_compaction_id: None,
@@ -73,7 +96,7 @@ impl SessionContextProjection {
             task_memory: None,
             task_memory_snapshot_relation: None,
             checkpoint: None,
-            retained_entries: into_projection_entries(retained_messages),
+            retained_entries,
             trust_projection: trust_projection(entries),
         }
     }
@@ -138,12 +161,12 @@ impl SessionContextProjection {
                     &outputs,
                     aged_outputs.replacements(),
                 )?;
-                projection.retained_entries = into_projection_entries(repair_orphan_tool_results(
-                    &raw_messages
+                projection.retained_entries = repair_projection_entries(
+                    raw_messages
                         .into_iter()
-                        .map(|message| message.message)
-                        .collect::<Vec<_>>(),
-                ));
+                        .map(SessionProjectionEntry::from)
+                        .collect(),
+                );
             }
         }
         Ok(projection)
@@ -169,7 +192,36 @@ impl SessionContextProjection {
         task_memory: &TaskMemoryV1,
         candidate_messages: Vec<ModelMessage>,
     ) -> Result<Self> {
-        checkpoint.render_for_provider(task_memory)?;
+        let checkpoint_message = checkpoint.render_for_provider(task_memory)?;
+        let known = self
+            .retained_entries
+            .iter()
+            .map(|entry| (entry.message.id.as_str(), entry))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let entries = candidate_messages
+            .into_iter()
+            .map(|message| {
+                if message.id == checkpoint_message.id {
+                    SessionProjectionEntry {
+                        message,
+                        origin: SessionProjectionOrigin::ContinuationCheckpoint,
+                        source_event_id: None,
+                    }
+                } else if let Some(previous) = known.get(message.id.as_str()) {
+                    SessionProjectionEntry {
+                        message,
+                        origin: previous.origin,
+                        source_event_id: previous.source_event_id.clone(),
+                    }
+                } else {
+                    SessionProjectionEntry {
+                        message,
+                        origin: SessionProjectionOrigin::ProcessLocalCandidate,
+                        source_event_id: None,
+                    }
+                }
+            })
+            .collect();
         Ok(Self {
             projection_schema_version: SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION,
             active_compaction_id: None,
@@ -177,9 +229,7 @@ impl SessionContextProjection {
             task_memory: Some(task_memory.clone()),
             task_memory_snapshot_relation: Some(TaskMemorySnapshotRelation::CurrentUnknown),
             checkpoint: Some(checkpoint.clone()),
-            retained_entries: into_projection_entries(repair_orphan_tool_results(
-                &candidate_messages,
-            )),
+            retained_entries: repair_projection_entries(entries),
             trust_projection: self.trust_projection.clone(),
         })
     }
@@ -231,9 +281,13 @@ impl SessionContextProjection {
                     .as_ref()
                     .expect("checkpoint was set with the active portable checkpoint")
                     .render_for_provider(task_memory)?;
-                let mut retained_messages = Vec::with_capacity(raw_messages.len() + 1);
-                retained_messages.push(checkpoint_message);
-                retained_messages.extend(
+                let mut retained_entries = Vec::with_capacity(raw_messages.len() + 1);
+                retained_entries.push(SessionProjectionEntry {
+                    message: checkpoint_message,
+                    origin: SessionProjectionOrigin::ContinuationCheckpoint,
+                    source_event_id: None,
+                });
+                retained_entries.extend(
                     raw_messages
                         .into_iter()
                         .filter(|message| {
@@ -241,33 +295,32 @@ impl SessionContextProjection {
                                 .expect("portable activation rebuilt retained raw event ids")
                                 .contains(&message.event_id)
                         })
-                        .map(|message| message.message),
+                        .map(SessionProjectionEntry::from),
                 );
-                self.retained_entries =
-                    into_projection_entries(repair_orphan_tool_results(&retained_messages));
+                self.retained_entries = repair_projection_entries(retained_entries);
             } else {
-                self.retained_entries = into_projection_entries(repair_orphan_tool_results(
-                    &raw_messages
+                self.retained_entries = repair_projection_entries(
+                    raw_messages
                         .into_iter()
-                        .map(|message| message.message)
-                        .collect::<Vec<_>>(),
-                ));
+                        .map(SessionProjectionEntry::from)
+                        .collect(),
+                );
             }
         } else {
             // A V2 lifecycle record without an activated TaskMemory/checkpoint must not hide raw
             // history. Provider-native candidates gain their own resolver in K25.12.
-            self.retained_entries = into_projection_entries(repair_orphan_tool_results(
-                &raw_messages
+            self.retained_entries = repair_projection_entries(
+                raw_messages
                     .into_iter()
-                    .map(|message| message.message)
-                    .collect::<Vec<_>>(),
-            ));
+                    .map(SessionProjectionEntry::from)
+                    .collect(),
+            );
         }
         Ok(())
     }
 }
 
-pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessage> {
+fn raw_projection_entries(entries: &[SessionLogEntry]) -> Vec<SessionProjectionEntry> {
     let delivered =
         super::conversation_promotion_projection::delivered_conversation_queue_ids_from_entries(
             entries,
@@ -289,17 +342,35 @@ pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessag
             SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
                 if delivered.contains(&promotion.queue_id) =>
             {
-                Some(promotion.durable_user_message.clone())
+                Some(SessionProjectionEntry {
+                    message: promotion.durable_user_message.clone(),
+                    origin: SessionProjectionOrigin::ConversationPromotion,
+                    source_event_id: None,
+                })
             }
             SessionLogEntry::User(message) if promoted_message_ids.contains(&message.id) => None,
-            SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
-                Some(message.clone())
-            }
-            SessionLogEntry::ToolResultV3(result) => Some(
-                result
+            SessionLogEntry::User(message) => Some(SessionProjectionEntry {
+                message: message.clone(),
+                origin: SessionProjectionOrigin::DurableUser,
+                source_event_id: None,
+            }),
+            SessionLogEntry::Assistant(message) => Some(SessionProjectionEntry {
+                message: message.clone(),
+                origin: SessionProjectionOrigin::Assistant,
+                source_event_id: None,
+            }),
+            SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => Some(SessionProjectionEntry {
+                message: snapshot.message.clone(),
+                origin: SessionProjectionOrigin::RuntimeContextSnapshotV2,
+                source_event_id: None,
+            }),
+            SessionLogEntry::ToolResultV3(result) => Some(SessionProjectionEntry {
+                message: result
                     .model_message()
-                    .expect("validated in-memory tool result V2 must materialize"),
-            ),
+                    .expect("validated in-memory tool result V3 must materialize"),
+                origin: SessionProjectionOrigin::ToolResult,
+                source_event_id: None,
+            }),
             SessionLogEntry::Control(_) => None,
         })
         .collect()
@@ -309,6 +380,17 @@ pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessag
 struct DurableProjectionMessage {
     event_id: EventId,
     message: ModelMessage,
+    origin: SessionProjectionOrigin,
+}
+
+impl From<DurableProjectionMessage> for SessionProjectionEntry {
+    fn from(message: DurableProjectionMessage) -> Self {
+        Self {
+            source_event_id: Some(message.event_id),
+            message: message.message,
+            origin: message.origin,
+        }
+    }
 }
 
 fn raw_model_messages_from_durable_records(
@@ -353,21 +435,38 @@ fn raw_model_messages_from_durable_records(
         let Some(entry) = session_entry_from_stored_event(event)? else {
             continue;
         };
-        let message = match entry {
+        let (message, origin) = match entry {
             SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
                 if visible_promotions.contains(&event.event_id) =>
             {
-                promotion.durable_user_message
+                (
+                    promotion.durable_user_message,
+                    SessionProjectionOrigin::ConversationPromotion,
+                )
             }
             SessionLogEntry::User(message) if promoted_message_ids.contains(&message.id) => {
                 continue;
             }
-            SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => replacements
-                .get(event.event_id.as_str())
-                .cloned()
-                .unwrap_or(message),
+            SessionLogEntry::User(message) => (
+                replacements
+                    .get(event.event_id.as_str())
+                    .cloned()
+                    .unwrap_or(message),
+                SessionProjectionOrigin::DurableUser,
+            ),
+            SessionLogEntry::Assistant(message) => (
+                replacements
+                    .get(event.event_id.as_str())
+                    .cloned()
+                    .unwrap_or(message),
+                SessionProjectionOrigin::Assistant,
+            ),
+            SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => (
+                snapshot.message,
+                SessionProjectionOrigin::RuntimeContextSnapshotV2,
+            ),
             SessionLogEntry::ToolResultV3(result) => {
-                if let Some(aged) = aged_outputs.get(event.event_id.as_str()) {
+                let message = if let Some(aged) = aged_outputs.get(event.event_id.as_str()) {
                     if aged.source_message_id != result.message_id
                         || aged.call_id != result.call_id
                         || aged.tool_name != result.tool_name
@@ -381,13 +480,15 @@ fn raw_model_messages_from_durable_records(
                         .get(event.event_id.as_str())
                         .cloned()
                         .unwrap_or(result.model_message()?)
-                }
+                };
+                (message, SessionProjectionOrigin::ToolResult)
             }
             SessionLogEntry::Control(_) => continue,
         };
         messages.push(DurableProjectionMessage {
             event_id: event.event_id.clone(),
             message,
+            origin,
         });
     }
     Ok(messages)
@@ -447,6 +548,7 @@ fn portable_retained_raw_event_ids_for_plan(
             entry,
             SessionLogEntry::User(_)
                 | SessionLogEntry::Assistant(_)
+                | SessionLogEntry::RuntimeContextSnapshotV2(_)
                 | SessionLogEntry::ToolResultV3(_)
         ) || (matches!(
             entry,
@@ -521,10 +623,24 @@ fn portable_retained_raw_event_ids(
     Ok(retained)
 }
 
-fn into_projection_entries(messages: Vec<ModelMessage>) -> Vec<SessionProjectionEntry> {
-    messages
+fn repair_projection_entries(entries: Vec<SessionProjectionEntry>) -> Vec<SessionProjectionEntry> {
+    let messages = entries
+        .iter()
+        .map(|entry| entry.message.clone())
+        .collect::<Vec<_>>();
+    let mut by_id = entries
         .into_iter()
-        .map(|message| SessionProjectionEntry { message })
+        .map(|entry| (entry.message.id.clone(), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    repair_orphan_tool_results(&messages)
+        .into_iter()
+        .map(|message| {
+            by_id.remove(&message.id).unwrap_or(SessionProjectionEntry {
+                message,
+                origin: SessionProjectionOrigin::Repair,
+                source_event_id: None,
+            })
+        })
         .collect()
 }
 

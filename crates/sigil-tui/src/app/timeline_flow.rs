@@ -1056,7 +1056,24 @@ impl AppState {
                 if child.summary_hash.is_some() {
                     "result ready"
                 } else {
-                    "result missing"
+                    match child.status {
+                        sigil_kernel::TaskChildSessionStatus::Failed => {
+                            "failed before final response"
+                        }
+                        sigil_kernel::TaskChildSessionStatus::Cancelled => {
+                            "cancelled before final response"
+                        }
+                        sigil_kernel::TaskChildSessionStatus::Interrupted => {
+                            "interrupted before final response"
+                        }
+                        sigil_kernel::TaskChildSessionStatus::Completed => {
+                            "completed without final response"
+                        }
+                        sigil_kernel::TaskChildSessionStatus::Unavailable => {
+                            "final response unavailable"
+                        }
+                        sigil_kernel::TaskChildSessionStatus::Started => "result pending",
+                    }
                 }
             } else {
                 "result pending"

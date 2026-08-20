@@ -4,8 +4,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{CompletionRequest, MessageRole};
 
-/// Schema version for the provider-neutral, hash-only request cache layout proof.
+/// Schema version for the legacy provider-neutral, hash-only request cache layout proof.
 pub const CACHE_LAYOUT_PROOF_SCHEMA_VERSION: u16 = 1;
+
+/// Schema version for semantic provider-wire cache layout proofs.
+pub const CACHE_LAYOUT_PROOF_V2_SCHEMA_VERSION: u16 = 2;
 
 /// Returns a recursively key-sorted JSON value suitable for cache-stable provider wire material.
 ///
@@ -215,10 +218,192 @@ impl CacheLayoutProofV1 {
     }
 }
 
+/// Hash-only proof of provider-visible request semantics frozen before provider I/O.
+///
+/// Unlike [`CacheLayoutProofV1`], hosted-tool authorization IDs and request fingerprints do not
+/// participate in the tool-schema identity because providers never receive them as declaration
+/// fields. The legacy proof remains readable so existing sessions can replay without migration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CacheLayoutProofV2 {
+    pub schema_version: u16,
+    pub layout_hash: String,
+    pub route_hash: String,
+    pub system_hash: String,
+    pub tool_schema_hash: String,
+    pub conversation_hash: String,
+    pub dynamic_state_hash: String,
+    pub system_message_count: u64,
+    pub tool_count: u64,
+    pub conversation_message_count: u64,
+    pub mutation_from_previous: CacheLayoutMutationProofV1,
+}
+
+impl CacheLayoutProofV2 {
+    /// Materializes one deterministic semantic proof and compares it with a prior V2 proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when request subsets cannot be represented as canonical JSON, hosted
+    /// declarations are invalid or counts exceed the durable `u64` representation.
+    pub fn from_request(request: &CompletionRequest, previous: Option<&Self>) -> Result<Self> {
+        let leading_system_count = request
+            .messages
+            .iter()
+            .take_while(|message| message.role == MessageRole::System)
+            .count();
+        let (system_messages, conversation_messages) =
+            request.messages.split_at(leading_system_count);
+        let hosted_tools = request
+            .hosted_tools
+            .iter()
+            .map(crate::hosted::HostedToolRequest::semantic_declaration)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let local_tools = request
+            .tools
+            .iter()
+            .map(LocalToolDeclarationV2::from)
+            .collect::<Vec<_>>();
+
+        let route_hash = hash_canonical(
+            "sigil-cache-layout-route-v2",
+            &(request.provider_name.as_str(), request.model_name.as_str()),
+        )?;
+        let system_hash = hash_canonical("sigil-cache-layout-system-v2", &system_messages)?;
+        let tool_schema_hash = hash_canonical(
+            "sigil-cache-layout-tools-v2",
+            &ToolSchemaMaterialV2 {
+                local_tools: &local_tools,
+                hosted_tools: &hosted_tools,
+            },
+        )?;
+        let conversation_hash =
+            hash_canonical("sigil-cache-layout-conversation-v2", &conversation_messages)?;
+        let dynamic_state_hash = hash_canonical(
+            "sigil-cache-layout-dynamic-v2",
+            &DynamicRequestMaterialV1::from(request),
+        )?;
+
+        let system_message_count = durable_count(system_messages.len(), "system messages")?;
+        let tool_count = durable_count(
+            request
+                .tools
+                .len()
+                .saturating_add(request.hosted_tools.len()),
+            "tools",
+        )?;
+        let conversation_message_count =
+            durable_count(conversation_messages.len(), "conversation messages")?;
+        let mutation_from_previous = mutation_from_previous_v2(
+            previous,
+            &route_hash,
+            &system_hash,
+            &tool_schema_hash,
+            &conversation_hash,
+            &dynamic_state_hash,
+            conversation_messages,
+        )?;
+        let layout_hash = hash_canonical(
+            "sigil-cache-layout-proof-v2",
+            &LayoutIdentityV1 {
+                route_hash: &route_hash,
+                system_hash: &system_hash,
+                tool_schema_hash: &tool_schema_hash,
+                conversation_hash: &conversation_hash,
+                dynamic_state_hash: &dynamic_state_hash,
+                system_message_count,
+                tool_count,
+                conversation_message_count,
+            },
+        )?;
+
+        Ok(Self {
+            schema_version: CACHE_LAYOUT_PROOF_V2_SCHEMA_VERSION,
+            layout_hash,
+            route_hash,
+            system_hash,
+            tool_schema_hash,
+            conversation_hash,
+            dynamic_state_hash,
+            system_message_count,
+            tool_count,
+            conversation_message_count,
+            mutation_from_previous,
+        })
+    }
+
+    /// Validates the bounded V2 hash-only durable representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported schema versions, malformed hashes or inconsistent
+    /// mutation evidence.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != CACHE_LAYOUT_PROOF_V2_SCHEMA_VERSION {
+            bail!(
+                "unsupported cache layout proof V2 schema version {}",
+                self.schema_version
+            );
+        }
+        for (label, hash) in [
+            ("layout", &self.layout_hash),
+            ("route", &self.route_hash),
+            ("system", &self.system_hash),
+            ("tool schema", &self.tool_schema_hash),
+            ("conversation", &self.conversation_hash),
+            ("dynamic state", &self.dynamic_state_hash),
+        ] {
+            if !is_sha256(hash) {
+                bail!("cache layout {label} hash is malformed");
+            }
+        }
+        if self.mutation_from_previous.kind == CacheLayoutMutationKind::FirstObservation
+            && (self
+                .mutation_from_previous
+                .reusable_conversation_message_count
+                != 0
+                || self.mutation_from_previous.local_stable_prefix_preserved)
+        {
+            bail!("cache layout first observation cannot claim reusable prefix evidence");
+        }
+        if self
+            .mutation_from_previous
+            .reusable_conversation_message_count
+            > self.conversation_message_count
+        {
+            bail!("cache layout reusable conversation count exceeds the current request");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 struct ToolSchemaMaterialV1<'a> {
     local_tools: &'a [crate::ToolSpec],
     hosted_tools: &'a [crate::HostedToolRequest],
+}
+
+#[derive(Serialize)]
+struct LocalToolDeclarationV2<'a> {
+    name: &'a str,
+    description: &'a str,
+    input_schema: &'a serde_json::Value,
+}
+
+impl<'a> From<&'a crate::ToolSpec> for LocalToolDeclarationV2<'a> {
+    fn from(tool: &'a crate::ToolSpec) -> Self {
+        Self {
+            name: &tool.name,
+            description: &tool.description,
+            input_schema: &tool.input_schema,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ToolSchemaMaterialV2<'a> {
+    local_tools: &'a [LocalToolDeclarationV2<'a>],
+    hosted_tools: &'a [crate::hosted::HostedToolDeclarationV1],
 }
 
 #[derive(Serialize)]
@@ -286,6 +471,70 @@ fn mutation_from_previous(
         <= conversation_messages.len()
         && hash_canonical(
             "sigil-cache-layout-conversation-v1",
+            &conversation_messages[..previous_conversation_count],
+        )? == previous.conversation_hash
+    {
+        previous.conversation_message_count
+    } else {
+        0
+    };
+
+    let kind = if route_hash != previous.route_hash {
+        CacheLayoutMutationKind::RouteChanged
+    } else if system_hash != previous.system_hash {
+        CacheLayoutMutationKind::SystemChanged
+    } else if tool_schema_hash != previous.tool_schema_hash {
+        CacheLayoutMutationKind::ToolSchemaChanged
+    } else if conversation_hash != previous.conversation_hash {
+        if reusable_conversation_message_count == previous.conversation_message_count
+            && conversation_messages.len() > previous_conversation_count
+        {
+            CacheLayoutMutationKind::ConversationTailAppended
+        } else {
+            CacheLayoutMutationKind::ConversationHistoryRewritten
+        }
+    } else if dynamic_state_hash != previous.dynamic_state_hash {
+        CacheLayoutMutationKind::DynamicStateOnly
+    } else {
+        CacheLayoutMutationKind::Identical
+    };
+    let local_stable_prefix_preserved = matches!(
+        kind,
+        CacheLayoutMutationKind::Identical
+            | CacheLayoutMutationKind::ConversationTailAppended
+            | CacheLayoutMutationKind::DynamicStateOnly
+    );
+    Ok(CacheLayoutMutationProofV1 {
+        kind,
+        reusable_conversation_message_count,
+        local_stable_prefix_preserved,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mutation_from_previous_v2(
+    previous: Option<&CacheLayoutProofV2>,
+    route_hash: &str,
+    system_hash: &str,
+    tool_schema_hash: &str,
+    conversation_hash: &str,
+    dynamic_state_hash: &str,
+    conversation_messages: &[crate::ModelMessage],
+) -> Result<CacheLayoutMutationProofV1> {
+    let Some(previous) = previous else {
+        return Ok(CacheLayoutMutationProofV1 {
+            kind: CacheLayoutMutationKind::FirstObservation,
+            reusable_conversation_message_count: 0,
+            local_stable_prefix_preserved: false,
+        });
+    };
+    previous.validate()?;
+    let previous_conversation_count = usize::try_from(previous.conversation_message_count)
+        .context("prior cache layout conversation count exceeds usize")?;
+    let reusable_conversation_message_count = if previous_conversation_count
+        <= conversation_messages.len()
+        && hash_canonical(
+            "sigil-cache-layout-conversation-v2",
             &conversation_messages[..previous_conversation_count],
         )? == previous.conversation_hash
     {

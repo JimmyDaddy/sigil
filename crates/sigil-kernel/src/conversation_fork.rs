@@ -426,6 +426,10 @@ fn safe_prefix_for_complete_turn(
                     message_ids.insert(message.id.clone());
                     messages.push(SessionLogEntry::Assistant(message));
                 }
+                SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => {
+                    message_ids.insert(snapshot.message.id.clone());
+                    messages.push(SessionLogEntry::RuntimeContextSnapshotV2(snapshot));
+                }
                 SessionLogEntry::ToolResultV3(result) => {
                     message_ids.insert(result.message_id.clone());
                     messages.push(SessionLogEntry::ToolResultV3(result));

@@ -48,6 +48,9 @@ pub(super) fn restored_timeline_entries_from_session_entries(
                 }
             }
             SessionLogEntry::ToolResultV3(result) => {
+                if internal_conversation_route_tool(&result.tool_name) {
+                    continue;
+                }
                 let execution = restored_tools.executions.get(&entry_index);
                 let preview = restored_tools.previews.get(&entry_index);
                 let tool_call = restored_tools.calls.get(&entry_index);
@@ -73,10 +76,11 @@ pub(super) fn restored_timeline_entries_from_session_entries(
                 }
             }
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if should_render_restored_tool_execution(
-                    entry_index,
-                    &restored_tools.orphan_execution_indices,
-                ) =>
+                if !internal_conversation_route_tool(&execution.tool_name)
+                    && should_render_restored_tool_execution(
+                        entry_index,
+                        &restored_tools.orphan_execution_indices,
+                    ) =>
             {
                 let preview = restored_tools.previews.get(&entry_index);
                 let tool_call = restored_tools.calls.get(&entry_index);
@@ -104,10 +108,21 @@ pub(super) fn restored_timeline_entries_from_session_entries(
             SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(entry)) => {
                 push_restored_tool_card(&mut timeline, format_agent_thread_status_block(entry));
             }
+            SessionLogEntry::RuntimeContextSnapshotV2(_) => {}
             SessionLogEntry::Control(_) => {}
         }
     }
     timeline
+}
+
+fn internal_conversation_route_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+            | sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME
+            | sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME
+            | sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME
+    )
 }
 
 fn push_restored_tool_card(timeline: &mut Vec<crate::timeline::TimelineEntry>, text: String) {

@@ -12,7 +12,7 @@ use sigil_kernel::{
 
 use crate::ui::{StatusKind, status_symbol};
 
-use super::formatting::truncate_session_view_text;
+use super::formatting::{summarize_terminal_reason, truncate_session_view_text};
 
 const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
 const TASK_STRIP_STEP_LIMIT: usize = 4;
@@ -83,9 +83,19 @@ pub(crate) fn task_provider_route_live_lines(
                     format_provider_route_duration(route.cooldown_remaining_ms)
                 )
             } else if route.in_flight >= route.concurrency_window {
-                format!("saturated {}/{}", route.in_flight, route.concurrency_window)
+                format!(
+                    "{} model request{} running · concurrency limit {} reached",
+                    route.in_flight,
+                    if route.in_flight == 1 { "" } else { "s" },
+                    route.concurrency_window
+                )
             } else if route.in_flight > 0 {
-                format!("active {}/{}", route.in_flight, route.concurrency_window)
+                format!(
+                    "{} model request{} running · concurrency limit {}",
+                    route.in_flight,
+                    if route.in_flight == 1 { "" } else { "s" },
+                    route.concurrency_window
+                )
             } else {
                 "recovering".to_owned()
             };
@@ -484,6 +494,17 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
         detail.push_str(" · ");
         detail.push_str(&view.summary);
     }
+    if matches!(
+        task.status,
+        TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Interrupted
+    ) && let Some(reason) = task
+        .reason
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        detail.push_str(" · ");
+        detail.push_str(&summarize_terminal_reason(reason, 72));
+    }
 
     if rows.is_empty() {
         rows.push(TaskStripRow {
@@ -777,6 +798,10 @@ fn task_strip_step_rows(
             let step = &plan.steps[*index];
             let status = task_sidebar_step_status(task, plan_version, step);
             let readiness = task_step_readiness(task, step, verification_projection);
+            let reason = task
+                .steps
+                .get(&(plan_version, step.step_id.clone()))
+                .and_then(|projected| projected.reason.as_deref());
             let label = if task_step_verification_failed(readiness) {
                 format!("{}. check failed · {}", index + 1, step.title)
             } else if task_step_needs_user_verification(Some(step), status, readiness) {
@@ -789,7 +814,7 @@ fn task_strip_step_rows(
             TaskStripRow {
                 kind: task_step_status_kind(Some(step), status, readiness),
                 label,
-                detail: task_strip_step_detail(step, status, readiness),
+                detail: task_strip_step_detail(step, status, readiness, reason),
                 active: if task.active_steps.is_empty() {
                     focus_index == Some(*index)
                 } else {
@@ -1205,8 +1230,19 @@ fn task_strip_step_detail(
     step: &TaskStepSpec,
     status: TaskStepStatus,
     readiness: Option<&ReadinessEvaluatedEntry>,
+    reason: Option<&str>,
 ) -> String {
     let label = task_step_display_label(Some(step), status, readiness);
+    if matches!(
+        status,
+        TaskStepStatus::Failed
+            | TaskStepStatus::Blocked
+            | TaskStepStatus::Cancelled
+            | TaskStepStatus::Interrupted
+    ) && let Some(reason) = reason.filter(|value| !value.trim().is_empty())
+    {
+        return format!("{label} · {}", summarize_terminal_reason(reason, 72));
+    }
     if step.is_review_advisory() || step.requires_system_verifier() {
         return format!(
             "{label} · {} · {}",

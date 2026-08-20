@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    panic,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -8,7 +9,7 @@ use std::{
 #[cfg(not(test))]
 use std::{
     env, io,
-    panic::{self, AssertUnwindSafe},
+    panic::AssertUnwindSafe,
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -148,7 +149,7 @@ fn run_tui_with_initial_session(
     app.set_update_build_info(update_info);
 
     let mut cleanup = TerminalCleanupGuard::new();
-    let panic_hook = TuiPanicHookGuard::install();
+    let (panic_hook, mut background_panics) = TuiPanicHookGuard::install();
     enable_raw_mode()?;
     cleanup.raw_mode_enabled = true;
     let mut stdout = io::stdout();
@@ -191,6 +192,7 @@ fn run_tui_with_initial_session(
                         &mut worker,
                         &mut mouse_capture_active,
                         &mut focus_change_active,
+                        &mut background_panics,
                     ))
                 })
             }
@@ -208,10 +210,26 @@ fn run_tui_with_initial_session(
                     &mut worker,
                     &mut mouse_capture_active,
                     &mut focus_change_active,
+                    &mut background_panics,
                 ))
             }
         },
     ));
+    let background_panic_during_shutdown = if result.is_ok() {
+        shutdown_and_join_worker(&mut worker);
+        app.release_worker_session_attachment();
+        background_panics.try_recv().ok()
+    } else {
+        None
+    };
+    let result = match (result, background_panic_during_shutdown) {
+        (Ok(Ok(())), Some(report)) => Ok(Err(anyhow::anyhow!(report))),
+        (result, _) => result,
+    };
+    let clean_exit = matches!(&result, Ok(Ok(())));
+    if clean_exit {
+        let _ = app.discard_current_bootstrap_only_session();
+    }
     cleanup.mouse_capture_active = mouse_capture_active;
     cleanup.focus_change_active = focus_change_active;
     // The panic hook has already restored the primary screen before catch_unwind observes the
@@ -316,26 +334,42 @@ impl Drop for TerminalCleanupGuard {
     }
 }
 
-#[cfg(not(test))]
 type TuiPanicHook = dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static;
 
-#[cfg(not(test))]
 struct TuiPanicHookGuard {
     previous: Option<Arc<TuiPanicHook>>,
 }
 
-#[cfg(not(test))]
 impl TuiPanicHookGuard {
-    fn install() -> Self {
+    #[cfg(not(test))]
+    fn install() -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        Self::install_with_restore(restore_terminal_escape_state)
+    }
+
+    fn install_with_restore(
+        restore_terminal: impl Fn() + Send + Sync + 'static,
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
         let previous = Arc::<TuiPanicHook>::from(panic::take_hook());
         let hook_previous = Arc::clone(&previous);
+        let owner_thread = std::thread::current().id();
+        let (background_panic_tx, background_panic_rx) = tokio::sync::mpsc::unbounded_channel();
         panic::set_hook(Box::new(move |info| {
-            restore_terminal_escape_state();
-            hook_previous(info);
+            if std::thread::current().id() == owner_thread {
+                restore_terminal();
+                hook_previous(info);
+            } else {
+                // A Tokio or worker-thread panic must not tear down the terminal owned by the
+                // launcher thread. Route it back into the application loop, which will stop the
+                // worker and restore the terminal exactly once before surfacing the error.
+                let _ = background_panic_tx.send(format_background_panic(info));
+            }
         }));
-        Self {
-            previous: Some(previous),
-        }
+        (
+            Self {
+                previous: Some(previous),
+            },
+            background_panic_rx,
+        )
     }
 
     fn restore(mut self) {
@@ -345,7 +379,28 @@ impl TuiPanicHookGuard {
     }
 }
 
-#[cfg(not(test))]
+fn format_background_panic(info: &panic::PanicHookInfo<'_>) -> String {
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("unnamed");
+    let payload = info
+        .payload()
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    let payload = payload.chars().take(512).collect::<String>();
+    if let Some(location) = info.location() {
+        format!(
+            "background thread `{thread_name}` panicked at {}:{}:{}: {payload}",
+            location.file(),
+            location.line(),
+            location.column()
+        )
+    } else {
+        format!("background thread `{thread_name}` panicked: {payload}")
+    }
+}
+
 impl Drop for TuiPanicHookGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -444,6 +499,7 @@ async fn run_app(
     worker: &mut Option<WorkerRuntime>,
     mouse_capture_active: &mut bool,
     focus_change_active: &mut bool,
+    background_panics: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
     // From this point onward the event stream is the sole reader of terminal input. Full-screen
     // rendering never queries the cursor and never writes transcript rows into native scrollback.
@@ -527,6 +583,7 @@ async fn run_app(
             Terminal(std::io::Result<CrosstermEvent>),
             Worker(Box<WorkerMessage>),
             WorkerClosed,
+            BackgroundPanic(String),
             Deadline,
         }
         let wake = {
@@ -544,6 +601,9 @@ async fn run_app(
                         WakeEvent::WorkerClosed,
                         |message| WakeEvent::Worker(Box::new(message)),
                     ),
+                    report = background_panics.recv() => WakeEvent::BackgroundPanic(
+                        report.unwrap_or_else(|| "background panic channel closed".to_owned()),
+                    ),
                     () = tokio::time::sleep(deadline) => WakeEvent::Deadline,
                 },
                 None => tokio::select! {
@@ -556,6 +616,9 @@ async fn run_app(
                     message = worker_message => message.map_or(
                         WakeEvent::WorkerClosed,
                         |message| WakeEvent::Worker(Box::new(message)),
+                    ),
+                    report = background_panics.recv() => WakeEvent::BackgroundPanic(
+                        report.unwrap_or_else(|| "background panic channel closed".to_owned()),
                     ),
                 },
             }
@@ -595,6 +658,7 @@ async fn run_app(
                 ))?;
                 needs_render = true;
             }
+            WakeEvent::BackgroundPanic(report) => anyhow::bail!(report),
             WakeEvent::Deadline => {}
         }
     }
@@ -1557,7 +1621,10 @@ fn next_wake_deadline(app: &AppState) -> Option<Duration> {
 }
 
 fn render_tui_exit_resume_hint(app: &AppState, explicit_config: Option<&Path>) -> String {
-    if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {
+    if app.is_setup_mode()
+        || app.is_workspace_trust_gate_mode()
+        || !app.current_session_has_resumable_activity()
+    {
         return String::new();
     }
     let mut command = String::from("sigil");

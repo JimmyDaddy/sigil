@@ -53,6 +53,12 @@ pub(super) fn append_task_run<H>(
 where
     H: EventHandler + Send,
 {
+    let title = session
+        .task_state_projection()
+        .tasks
+        .get(&request.task_id)
+        .and_then(|task| task.title.clone())
+        .unwrap_or_else(|| crate::task_semantic_title(&request.objective));
     append_task_control(
         session,
         handler,
@@ -60,7 +66,7 @@ where
             task_id: request.task_id.clone(),
             parent_session_ref: request.parent_session_ref.clone(),
             objective: crate::safe_persistence_text(&request.objective),
-            title: Some(crate::task_semantic_title(&request.objective)),
+            title: Some(title),
             status,
             reason: reason.as_deref().map(crate::safe_persistence_text),
         }),
@@ -115,7 +121,6 @@ pub(super) fn route_id_for_call(
     ))
 }
 
-#[cfg(test)]
 pub(super) fn hash_text(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());

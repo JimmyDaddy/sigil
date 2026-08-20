@@ -20,15 +20,15 @@ pub(super) fn tool_scope_summary(scope: &sigil_kernel::ToolRegistryScope) -> Str
 }
 
 pub(super) fn tool_contracts_are_safe_readonly_for_auto_spawn(
-    contracts: &[(ToolSpec, sigil_kernel::ToolMutationTracking)],
+    contracts: &[sigil_kernel::ToolRuntimeContract],
 ) -> bool {
     !contracts.is_empty()
-        && contracts.iter().all(|(spec, mutation_tracking)| {
-            spec.access == ToolAccess::Read
-                && spec.network_effect.is_none()
-                && *mutation_tracking == sigil_kernel::ToolMutationTracking::None
+        && contracts.iter().all(|contract| {
+            contract.spec.access == ToolAccess::Read
+                && contract.spec.network_effect.is_none()
+                && contract.mutation_tracking == sigil_kernel::ToolMutationTracking::None
                 && matches!(
-                    spec.category,
+                    contract.spec.category,
                     ToolCategory::File | ToolCategory::Search | ToolCategory::Custom
                 )
         })
@@ -50,6 +50,7 @@ pub(super) fn admit_model_agent_spawn(
         ),
         DelegationAuthority::UserExplicit
         | DelegationAuthority::AcceptedTaskPlan { .. }
+        | DelegationAuthority::TaskOrchestrator { .. }
         | DelegationAuthority::ModelProactive => {}
     }
     match mode {
@@ -59,7 +60,9 @@ pub(super) fn admit_model_agent_spawn(
         MultiAgentMode::ExplicitRequestOnly => {
             if matches!(
                 authority,
-                DelegationAuthority::UserExplicit | DelegationAuthority::AcceptedTaskPlan { .. }
+                DelegationAuthority::UserExplicit
+                    | DelegationAuthority::AcceptedTaskPlan { .. }
+                    | DelegationAuthority::TaskOrchestrator { .. }
             ) {
                 return Ok(());
             }
@@ -85,7 +88,7 @@ pub(super) fn admit_model_agent_spawn(
     Ok(())
 }
 
-pub(super) fn delegation_admission_entry(
+pub(crate) fn delegation_admission_entry(
     grant: &AgentInvocationGrant,
     thread_id: AgentThreadId,
     profile_id: AgentProfileId,
@@ -112,7 +115,7 @@ pub(super) fn resolved_tool_contract_fingerprint(registry: &ToolRegistry) -> Res
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn mint_agent_invocation_grant(
+pub(crate) fn mint_agent_invocation_grant(
     context: AgentDelegationRunContext,
     root_logical_run_id: &str,
     root_cancellation: &sigil_kernel::RunCancellationHandle,
@@ -161,7 +164,7 @@ pub(super) fn mint_agent_invocation_grant(
     )
 }
 
-pub(super) fn revalidate_agent_invocation_grant(
+pub(crate) fn revalidate_agent_invocation_grant(
     grant: &AgentInvocationGrant,
     context: &AgentDelegationRunContext,
     root_logical_run_id: &str,

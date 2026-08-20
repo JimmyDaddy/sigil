@@ -100,7 +100,6 @@ where
     let mut collector = HeadTailCollector::new(limits.retained_bytes_per_stream);
     let mut read_buffer = [0u8; OUTPUT_READ_BUFFER_BYTES];
     let mut limit_reported = false;
-    let mut reader_failed = false;
     loop {
         match reader.read(&mut read_buffer).await {
             Ok(0) => break,
@@ -130,16 +129,16 @@ where
                             if let Err(error) =
                                 handle.sink.write_stream(tool_stream, &read_buffer[..read])
                             {
+                                // Capture storage is a secondary durability sink, not the pipe
+                                // reader. Mark the artifact unavailable and keep draining the
+                                // child so ENOSPC or an artifact fault cannot be misreported as a
+                                // broken stdout/stderr pipe or kill an otherwise healthy command.
                                 handle.sink.mark_process_write_failed();
-                                reader_failed = true;
-                                let _ = alert_tx.try_send(OutputAlert::ReaderFailed {
-                                    stream,
-                                    reason: bounded_reader_error(&std::io::Error::other(error)),
-                                });
+                                let _ = error;
                             }
                         }
-                        Err(_) => {
-                            reader_failed = true;
+                        Err(poisoned) => {
+                            poisoned.into_inner().sink.mark_process_write_failed();
                         }
                     }
                 }
@@ -153,7 +152,6 @@ where
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
-                reader_failed = true;
                 let _ = alert_tx.try_send(OutputAlert::ReaderFailed {
                     stream,
                     reason: bounded_reader_error(&error),
@@ -162,7 +160,6 @@ where
             }
         }
     }
-    let _ = reader_failed;
     collector.finish(limits.hard_bytes_per_stream)
 }
 

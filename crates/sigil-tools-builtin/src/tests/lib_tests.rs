@@ -18,8 +18,8 @@ use sigil_kernel::{
     ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionStreamCapture,
     ExecutionTerminationCause, ExecutionTimeoutSource, FilesystemContainment, JsonlSessionStore,
     MutationEventRecorder, NetworkContainment, PathTrustZone, PermissionConfig,
-    PermissionEvaluationContext, PermissionMode, PermissionPolicyChain, PermissionRisk,
-    ProcessContainment, RunCancellationOwner, TERMINAL_TASK_SCHEMA_VERSION,
+    PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionPolicyChain,
+    PermissionRisk, ProcessContainment, RunCancellationOwner, TERMINAL_TASK_SCHEMA_VERSION,
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalReadinessStatus,
     TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess,
     ToolAnalysisReasonCode, ToolAnalysisStatus, ToolArtifactBindingV1, ToolArtifactEncoding,
@@ -119,15 +119,39 @@ async fn bash_execution_rechecks_finite_only_contract() -> Result<()> {
     let tool = posix_bash_tool(workspace.path())?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let error = tool
+    let result = tool
         .execute(
             ctx,
             "call-background".to_owned(),
             json!({ "command": "nohup sleep 3600 >/dev/null 2>&1 &" }),
         )
-        .await
-        .expect_err("direct execution must not bypass bash finite-only validation");
-    assert!(error.to_string().contains("terminal_start"));
+        .await?;
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("direct execution must return a structured persistent-command error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::InvalidInput);
+    assert_eq!(error.details["category"], "persistent_command");
+    assert_eq!(error.details["next_tool"], "terminal_start");
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_shell_syntax_error_is_invalid_input_not_generic_exit_failure() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = posix_bash_tool(workspace.path())?;
+    let result = tool
+        .execute(
+            ToolContext::new(workspace.path().to_path_buf(), 5),
+            "call-syntax".to_owned(),
+            json!({ "command": "if then" }),
+        )
+        .await?;
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("shell syntax error should be structured");
+    };
+    assert_eq!(error.kind, ToolErrorKind::InvalidInput);
+    assert_eq!(error.details["category"], "shell_syntax");
+    assert!(!error.retryable);
     Ok(())
 }
 
@@ -267,6 +291,37 @@ async fn read_tool_artifact_returns_body_only_as_transient_context() -> Result<(
             if receipt.outcome == sigil_kernel::ToolArtifactReadOutcome::Unchanged
                 && receipt.deduplicated_from_call_id.as_deref() == Some("read-call")
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_tool_artifact_overlarge_line_page_is_retryable_invalid_input() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let context = ToolContext::new(temp.path(), 5);
+    let result = ReadToolArtifactTool
+        .execute(
+            context,
+            "read-overlarge".to_owned(),
+            json!({
+                "artifact_ref": { "artifact_id": "ta1_00000000000000000000000000000000" },
+                "selector": {
+                    "kind": "line_page",
+                    "start_line": 0,
+                    "line_count": 201
+                }
+            }),
+        )
+        .await?;
+    assert!(result.is_error());
+    match &result.status {
+        ToolResultStatus::Error(error) => {
+            assert_eq!(error.kind, ToolErrorKind::InvalidInput);
+            assert!(error.retryable);
+            assert_eq!(error.details["allowed_line_count"]["max"], 200);
+        }
+        status => panic!("expected InvalidInput, got {status:?}"),
+    }
+    assert!(result.content.contains("reduce line_count"));
     Ok(())
 }
 
@@ -2741,9 +2796,12 @@ fn bash_permission_plan_matches_deterministic_risk_corpus() -> Result<()> {
 
 #[test]
 fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()> {
-    let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
-    let context = ToolContext::new(workspace.path(), 30);
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let mut tool = posix_bash_tool(&workspace)?;
+    tool.scratch_root = temp.path().join("cache").join("tmp");
+    let context = ToolContext::new(&workspace, 30);
     let workspace_plan =
         tool.permission_plan(&context, &json!({ "command": "cat \"$PWD/Cargo.toml\"" }))?;
     assert!(workspace_plan.analysis.is_complete());
@@ -2759,13 +2817,35 @@ fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()>
         scratch_plan.subjects.iter().any(|subject| {
             subject.kind == ToolSubjectKind::Path
                 && subject.original == "$SIGIL_SCRATCH_DIR/result.txt"
-                && subject.scope == ToolSubjectScope::Workspace
-                && subject
-                    .normalized
-                    .ends_with("scratch-cache/tmp/sessions/no-session/result.txt")
+                && subject.scope == ToolSubjectScope::RuntimeScratch
+                && subject.normalized == "cache/tmp/result.txt"
+                && subject.access == ToolAccess::Write
         }),
         "{:?}",
         scratch_plan.subjects
+    );
+    let permission = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&permission).decide_with_operation_and_default(
+        &tool.spec(),
+        "bash",
+        scratch_plan.access,
+        scratch_plan.operation,
+        scratch_plan.subjects.clone(),
+        scratch_plan.tool_default_mode,
+    )?;
+    assert!(!decision.external_directory_required);
+    assert_eq!(
+        decision.mode,
+        sigil_kernel::ApprovalMode::Allow,
+        "{decision:#?}"
+    );
+    assert!(
+        decision
+            .subject_zones
+            .contains(&PathTrustZone::RuntimeScratch)
     );
     assert!(
         scratch_plan
@@ -2790,11 +2870,71 @@ fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()>
     assert!(tmpdir_plan.subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path
             && subject.original == "$TMPDIR/build"
-            && subject.scope == ToolSubjectScope::Workspace
-            && subject
-                .normalized
-                .ends_with("scratch-cache/tmp/sessions/no-session/build")
+            && subject.scope == ToolSubjectScope::RuntimeScratch
+            && subject.normalized == "cache/tmp/build"
     }));
+    Ok(())
+}
+
+#[test]
+fn read_only_git_lock_probe_is_not_protected_mutation() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = posix_bash_tool(workspace.path())?;
+    let context = ToolContext::new(workspace.path().to_path_buf(), 30);
+    let command = "for item in index.lock; do if [ -e .git/$item ]; then echo \"$item\"; else echo absent; fi; done";
+    let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+    assert!(plan.analysis.is_complete(), "{plan:?}");
+    assert!(plan.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.scope == ToolSubjectScope::Workspace
+            && subject.normalized.ends_with(".git/index.lock")
+            && subject.access == ToolAccess::Read
+    }));
+    let decision = PermissionPolicy::new(&PermissionConfig {
+        mode: PermissionMode::Manual,
+        ..PermissionConfig::default()
+    })
+    .decide_with_operation_and_default(
+        &tool.spec(),
+        "bash",
+        plan.access,
+        plan.operation,
+        plan.subjects,
+        plan.tool_default_mode,
+    )?;
+    assert_ne!(decision.risk, PermissionRisk::Protected, "{decision:#?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn controlled_scratch_heredoc_does_not_parse_body_as_root_path() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let tool = posix_bash_tool(&workspace)?;
+    let command = "cat > \"$SIGIL_SCRATCH_DIR/probe.awk\" <<'AWK'\nBEGIN { print \"/Users/not-a-real-subject\"; }\nAWK";
+    let context = ToolContext::new(workspace.clone(), 30).with_session_scope_id("heredoc-test");
+    let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+    assert!(plan.analysis.is_complete(), "{plan:?}");
+    assert!(plan.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.scope == ToolSubjectScope::RuntimeScratch
+            && subject.original.contains("SIGIL_SCRATCH_DIR")
+            && subject.access == ToolAccess::Write
+    }));
+    assert!(!plan.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && (subject.normalized.contains("not-a-real-subject")
+                || subject.original.contains("not-a-real-subject"))
+    }));
+    let result = tool
+        .execute(
+            context,
+            "call-heredoc".to_owned(),
+            json!({ "command": command }),
+        )
+        .await?;
+    assert!(!result.is_error(), "{result:?}");
     Ok(())
 }
 
@@ -4266,7 +4406,7 @@ fn terminal_start_binds_sigil_scratch_but_not_inherited_tmpdir() -> Result<()> {
     assert!(scratch.subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path
             && subject.original == "$SIGIL_SCRATCH_DIR/result.txt"
-            && subject.scope == ToolSubjectScope::Workspace
+            && subject.scope == ToolSubjectScope::RuntimeScratch
     }));
 
     let inherited_tmpdir = registry.permission_plan(
@@ -4919,6 +5059,83 @@ async fn bash_scratch_quota_exceeded_is_structured_tool_error() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_scratch_measurement_failure_is_structured_without_host_path() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session = "unsafe-tool-0000-0000-0000-000000000104";
+    let ctx = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools_with_test_paths(&mut registry, &workspace, scratch_root.clone());
+
+    let namespace = crate::scratch_namespace::session_scratch_dir(&scratch_root, Some(session));
+    fs::create_dir_all(&namespace)?;
+    symlink(temp.path().join("outside"), namespace.join("escape"))?;
+
+    let result = registry
+        .execute(ctx, tool_call("bash", json!({ "command": "printf ok" })))
+        .await?;
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("unsafe scratch namespace must fail with a structured tool error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Io);
+    assert!(
+        error
+            .message
+            .contains("scratch namespace contains a symlink")
+    );
+    assert!(!error.message.contains(&temp.path().display().to_string()));
+    assert_eq!(error.details["reason_code"], "scratch_namespace_symlink");
+    assert_eq!(error.details["measurement"]["relative_path"], "escape");
+    assert_eq!(
+        error.details["recovery"]["user_action"],
+        "reset_scratch_storage"
+    );
+    assert_eq!(error.details["recovery"]["automatic"], false);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn deeply_nested_scratch_tree_does_not_block_the_next_bash_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session = "deep-tool-0000-0000-0000-000000000105";
+    let ctx = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools_with_test_paths(&mut registry, &workspace, scratch_root.clone());
+
+    let first = registry
+        .execute(
+            ctx.clone(),
+            tool_call("bash", json!({ "command": "printf first" })),
+        )
+        .await?;
+    assert!(matches!(first.status, ToolResultStatus::Ok));
+
+    let mut nested = crate::scratch_namespace::session_scratch_dir(&scratch_root, Some(session));
+    for depth in 0..16 {
+        nested = nested.join(format!("fixture-{depth}"));
+    }
+    fs::create_dir_all(&nested)?;
+    fs::write(nested.join("payload"), b"fixture")?;
+
+    let second = registry
+        .execute(
+            ctx,
+            tool_call("bash", json!({ "command": "printf second" })),
+        )
+        .await?;
+    assert!(matches!(second.status, ToolResultStatus::Ok));
+    assert_eq!(second.content, "second");
+    Ok(())
+}
+
 #[test]
 fn registration_shares_external_scratch_control_across_surfaces() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -5472,7 +5689,13 @@ async fn read_file_reports_missing_path_without_disclosing_host_workspace() -> R
     };
     assert_eq!(error.kind, ToolErrorKind::NotFound);
     assert!(error.message.contains("missing/review.md"));
-    assert!(error.message.contains("list or glob"));
+    assert!(error.message.contains("glob pattern"));
+    assert!(error.message.contains("do not guess another path"));
+    assert!(error.retryable);
+    assert_eq!(error.details["requested_path"], "missing/review.md");
+    assert_eq!(error.details["recovery"], "discover_path");
+    assert_eq!(error.details["suggested_tool"], "glob");
+    assert_eq!(error.details["suggested_pattern"], "**/review.md");
     assert!(
         !error.message.contains(&temp.path().display().to_string()),
         "model-visible missing-file error must not disclose the absolute host workspace"
@@ -6734,8 +6957,8 @@ fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
     let background_decision =
         PermissionPolicyChain::new_with_context(&danger_config, &policy_context)
             .decide_plan(&spec, &background_plan)?;
-    assert_eq!(background_decision.risk, PermissionRisk::Protected);
-    assert_eq!(background_decision.mode, sigil_kernel::ApprovalMode::Deny);
+    assert_eq!(background_decision.risk, PermissionRisk::High);
+    assert_ne!(background_decision.mode, sigil_kernel::ApprovalMode::Deny);
 
     let protected_write = r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo overwrite > ".git/$f"; else echo absent; fi; done"#;
     let protected_plan = registry.permission_plan(

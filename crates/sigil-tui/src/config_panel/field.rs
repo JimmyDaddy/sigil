@@ -274,7 +274,7 @@ impl ConfigField {
                 "Loads workspace memory documents once at startup for stable session context."
             }
             Self::MemoryWritable => {
-                "Registers approval-gated durable memory tools and retrieves active user preferences and current-project facts across sessions. Disabled by default."
+                "Registers durable memory tools and retrieves active user preferences and current-project facts across sessions. Writes ask by default; danger-full-access runs them without an approval prompt."
             }
             Self::CompactionEnabled => {
                 "Allows manual compaction and safe-boundary automatic epoch rotation."

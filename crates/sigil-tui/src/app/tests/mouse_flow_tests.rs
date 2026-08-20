@@ -1698,7 +1698,7 @@ fn mouse_click_info_rail_agent_row_switches_visible_agent() -> Result<()> {
     assert_eq!(
         app.last_notice(),
         Some(
-            "agent focus: 仓库审查 · completed · subagent_read · background task · deepseek-v4-pro · tools scoped · workspace inherited · result missing"
+            "agent focus: 仓库审查 · completed · subagent_read · background task · deepseek-v4-pro · tools scoped · workspace inherited · completed without final response"
         )
     );
 
@@ -1834,9 +1834,15 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
 }
 
 #[test]
-fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
+fn mouse_scroll_composer_reaches_timeline_history() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(80, 20);
+    app.handle(RunEvent::TextDelta(
+        (0..48)
+            .map(|index| format!("composer-scroll-history-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ))?;
     let layout = LayoutSnapshot {
         verification_card: None,
         composer_queue_hit_areas: None,
@@ -1863,10 +1869,10 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
     };
     let (column, row) = point_in(layout.composer);
 
-    let outcome =
-        app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::ScrollUp, column, row), &layout)?;
 
-    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert!(app.timeline_scroll_back > 0);
     Ok(())
 }
 

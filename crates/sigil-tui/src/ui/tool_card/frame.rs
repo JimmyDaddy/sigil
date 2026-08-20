@@ -15,8 +15,14 @@ pub(super) fn tool_card_header_line(
     ));
     spans.push(Span::raw("  "));
     let status_indicator = StatusIndicator::animated(display.status.kind);
+    let status_text = if display.status.kind == StatusKind::Success && display.status.label == "OK"
+    {
+        format!(" {} ", status_indicator.symbol())
+    } else {
+        format!(" {} {} ", status_indicator.symbol(), display.status.label)
+    };
     spans.push(Span::styled(
-        format!(" {} {} ", status_indicator.symbol(), display.status.label),
+        status_text,
         tool_status_style(display.status.kind, palette),
     ));
     if let Some(detail) = &display.status.detail {
@@ -44,12 +50,14 @@ pub(super) fn tool_card_header_line(
 
 pub(super) fn tool_card_frame_lines(
     lines: Vec<Line<'static>>,
+    result_frame: Option<(usize, ToolResultPresentation)>,
     selected: bool,
     max_content_width: usize,
     marker_style: Style,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     ToolCardFrame {
+        result_frame,
         selected,
         max_content_width,
         marker_style,
@@ -59,6 +67,7 @@ pub(super) fn tool_card_frame_lines(
 }
 
 pub(super) struct ToolCardFrame<'a> {
+    result_frame: Option<(usize, ToolResultPresentation)>,
     selected: bool,
     max_content_width: usize,
     marker_style: Style,
@@ -78,10 +87,23 @@ impl ToolCardFrame<'_> {
             .map(|(index, line)| {
                 let line = if index == 0 {
                     line
+                } else if let Some((result_start_index, presentation)) = self.result_frame
+                    && index >= result_start_index
+                {
+                    tool_card_result_frame_line(
+                        line,
+                        card_width,
+                        presentation,
+                        self.selected,
+                        self.palette,
+                    )
                 } else {
                     tool_card_body_frame_line(line, index == 1, self.marker_style, self.palette)
                 };
-                if self.selected {
+                let result_line = self
+                    .result_frame
+                    .is_some_and(|(result_start_index, _)| index >= result_start_index);
+                if self.selected && !result_line {
                     tool_card_selected_line(line, card_width, self.palette)
                 } else {
                     line
@@ -89,6 +111,64 @@ impl ToolCardFrame<'_> {
             })
             .collect()
     }
+}
+
+fn tool_card_result_frame_line(
+    line: Line<'static>,
+    card_width: usize,
+    presentation: ToolResultPresentation,
+    selected: bool,
+    palette: &ThemePalette,
+) -> Line<'static> {
+    let rail_color = match presentation {
+        ToolResultPresentation::SearchMatches => palette.accent_info,
+        ToolResultPresentation::CodeExcerpt => palette.accent_secondary,
+        ToolResultPresentation::TerminalOutput => palette.accent_warning,
+        ToolResultPresentation::FileTree => palette.accent_success,
+        ToolResultPresentation::UnifiedDiff => palette.accent_warning,
+        ToolResultPresentation::StructuredData => palette.accent_info,
+        ToolResultPresentation::Document => palette.accent_secondary,
+        ToolResultPresentation::PlainText => palette.text_muted,
+    };
+    let rail_background = if selected {
+        palette.surface_selection
+    } else {
+        palette.surface_panel_alt
+    };
+    let mut spans = vec![Span::styled(
+        "│ ",
+        Style::default()
+            .fg(rail_color)
+            .bg(rail_background)
+            .add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(strip_timeline_content_indent(line.spans));
+    tool_card_surface_line(spans, card_width, palette.surface_panel_alt)
+}
+
+fn tool_card_surface_line(
+    spans: Vec<Span<'static>>,
+    card_width: usize,
+    background: Color,
+) -> Line<'static> {
+    let mut spans = spans
+        .into_iter()
+        .map(|span| {
+            let mut style = span.style;
+            if style.bg.is_none() {
+                style.bg = Some(background);
+            }
+            Span::styled(span.content, style)
+        })
+        .collect::<Vec<_>>();
+    let width = spans_display_width(&spans);
+    if card_width > width {
+        spans.push(Span::styled(
+            " ".repeat(card_width - width),
+            Style::default().bg(background),
+        ));
+    }
+    Line::from(spans)
 }
 
 pub(super) fn tool_card_body_frame_line(
@@ -178,7 +258,13 @@ pub(super) fn tool_title_width(display: &ToolCardDisplay, max_content_width: usi
     if max_content_width == 0 {
         return 160;
     }
+    let status_width = if display.status.kind == StatusKind::Success && display.status.label == "OK"
+    {
+        3
+    } else {
+        display.status.label.chars().count() + 4
+    };
     max_content_width
-        .saturating_sub(display.status.label.chars().count() + 12)
+        .saturating_sub(status_width + 8)
         .clamp(32, 160)
 }

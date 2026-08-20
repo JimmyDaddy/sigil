@@ -481,11 +481,11 @@ async fn rollback_registered_mcp_generations(
 ) -> Result<()> {
     let mut failures = Vec::new();
     for owner in owners.iter().rev() {
-        let tools = registry.drain_by_lifecycle_owner(owner);
-        let Some(tool) = tools.first() else {
+        let retirement = registry.retire_by_lifecycle_owner(owner);
+        if retirement.is_empty() {
             continue;
-        };
-        if let Err(error) = tool.shutdown().await {
+        }
+        if let Err(error) = retirement.dispose_and_quiesce().await {
             failures.push(format!(
                 "failed to shut down MCP generation {} for scope {}: {error:#}",
                 owner.generation(),

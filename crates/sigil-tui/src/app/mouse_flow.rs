@@ -622,8 +622,13 @@ impl AppState {
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::ApprovalModal => Ok(crate::mouse::AppMouseOutcome::Noop),
-            crate::mouse::HitTarget::Composer
-            | crate::mouse::HitTarget::ComposerQueueItem { .. }
+            crate::mouse::HitTarget::Composer => {
+                // The composer has no independent wheel viewport. Let users inspect the
+                // transcript without first moving the pointer away from their draft.
+                self.handle_mouse_scroll(upward);
+                Ok(crate::mouse::AppMouseOutcome::Redraw)
+            }
+            crate::mouse::HitTarget::ComposerQueueItem { .. }
             | crate::mouse::HitTarget::ComposerQueueAction { .. } => {
                 Ok(crate::mouse::AppMouseOutcome::Noop)
             }

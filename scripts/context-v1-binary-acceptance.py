@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Context V1 through the production Sigil binary and a loopback provider.
+"""Verify Context V2 through the production Sigil binary and a loopback provider.
 
 The acceptance workspace contains Rust, Python, JavaScript/JSX, TypeScript and Go
 sources plus adversarial ignored, generated, secret-like, symlink and oversized
@@ -28,7 +28,7 @@ from typing import Any
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 EXPECTED_POLICY = "warm_lsp_then_request_local_tree_sitter"
-CONTEXT_ID_RE = re.compile(r"context:v1:[0-9a-f]{64}")
+CONTEXT_ID_RE = re.compile(r"context:v2:[0-9a-f]{64}")
 FORBIDDEN_SENTINELS = (
     "IGNORED_CONTEXT_SENTINEL",
     "GENERATED_CONTEXT_SENTINEL",
@@ -104,9 +104,9 @@ class FixtureState:
         with self.lock:
             self.errors.append(f"{type(error).__name__}: {error}")
 
-    def request_at(self, index: int) -> RecordedRequest:
+    def requests_from(self, index: int) -> list[RecordedRequest]:
         with self.lock:
-            return self.requests[index]
+            return list(self.requests[index:])
 
 
 class FixtureServer(ThreadingHTTPServer):
@@ -135,7 +135,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if not self.path.endswith("/chat/completions"):
                 self._send_json(404, {"error": "unexpected fixture route"})
                 return
-            answer = f"Context V1 fixture response {request_index}."
+            answer = f"Context V2 fixture response {request_index}."
             body = (
                 "data: "
                 + json.dumps(
@@ -176,7 +176,9 @@ class CaseEvidence:
     label: str
     expected_path: str
     expected_symbol: str
+    provider_request_count: int
     provider_request_sha256: str
+    prefix_record_count: int
     prefix_record_sha256: str
     context_id: str
     fallback_canary: bool
@@ -184,7 +186,7 @@ class CaseEvidence:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run mixed-language Context V1 acceptance through the real Sigil binary."
+        description="Run mixed-language Context V2 acceptance through the real Sigil binary."
     )
     parser.add_argument(
         "--binary",
@@ -276,6 +278,8 @@ def write_config(path: Path, state_root: Path, cache_root: Path, port: int) -> N
     path.write_text(
         "\n".join(
             (
+                "config_version = 2",
+                "",
                 "[workspace]",
                 'root = "."',
                 "",
@@ -284,20 +288,19 @@ def write_config(path: Path, state_root: Path, cache_root: Path, port: int) -> N
                 f'cache_root = "{toml_string(cache_root)}"',
                 "",
                 "[agent]",
-                'provider = "deepseek"',
-                'model = "deepseek-v4-flash"',
+                'connection = "context-v2-fixture"',
+                'model = "context-v2-fixture-model"',
                 "tool_timeout_secs = 5",
                 "",
                 "[model_request]",
                 "request_timeout_secs = 10",
                 "",
-                "[providers.deepseek]",
+                "[connections.context-v2-fixture]",
+                'label = "Context V2 loopback fixture"',
+                'provider = "custom"',
+                'protocol = "chat_completions"',
                 f'base_url = "http://127.0.0.1:{port}"',
-                f'beta_base_url = "http://127.0.0.1:{port}"',
-                f'anthropic_base_url = "http://127.0.0.1:{port}"',
-                'fim_model = "deepseek-v4-pro"',
-                'api_key = "context-v1-fixture-key"',
-                'strict_tools_mode = "auto"',
+                'credential = { source = "none" }',
                 "",
             )
         ),
@@ -318,11 +321,11 @@ def context_message(payload: dict[str, Any]) -> str:
         if not isinstance(message, dict):
             continue
         content = message.get("content")
-        if isinstance(content, str) and content.startswith("Sigil Context V1"):
+        if isinstance(content, str) and content.startswith("Sigil Context V2"):
             contexts.append(content)
     if len(contexts) != 1:
         raise AssertionError(
-            f"expected one Context V1 provider message, observed {len(contexts)}"
+            f"expected one Context V2 provider message, observed {len(contexts)}"
         )
     return contexts[0]
 
@@ -335,7 +338,7 @@ def newest_session(before: set[Path], state_root: Path) -> Path:
     return created[0]
 
 
-def prefix_record(session_path: Path) -> tuple[str, str]:
+def prefix_records(session_path: Path) -> list[str]:
     matches: list[tuple[str, dict[str, Any]]] = []
     for line in session_path.read_text(encoding="utf-8").splitlines():
         try:
@@ -344,18 +347,35 @@ def prefix_record(session_path: Path) -> tuple[str, str]:
             continue
         if contains_key(record, "prefix_snapshot_captured"):
             matches.append((line, record))
+    if not matches:
+        raise AssertionError("expected at least one durable prefix snapshot")
+    for _raw, record in matches:
+        rendered = json.dumps(record, sort_keys=True, ensure_ascii=False)
+        if "sigil_context_v2" not in rendered:
+            raise AssertionError("durable prefix snapshot did not contain Context V2 summary")
+        if "sigil_context_v0" in rendered:
+            raise AssertionError("new request unexpectedly persisted Context V0")
+    return [raw for raw, _record in matches]
+
+
+def context_snapshot_record(session_path: Path) -> tuple[str, str]:
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for line in session_path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event_type") == "runtime_context_snapshot_recorded_v2":
+            matches.append((line, record))
     if len(matches) != 1:
         raise AssertionError(
-            f"expected one durable prefix snapshot, observed {len(matches)}"
+            f"expected one durable Context V2 snapshot, observed {len(matches)}"
         )
     raw, record = matches[0]
     rendered = json.dumps(record, sort_keys=True, ensure_ascii=False)
-    if "sigil_context_v1" not in rendered or "Sigil Context V1" not in rendered:
-        raise AssertionError("durable prefix snapshot did not contain Context V1")
-    if "sigil_context_v0" in rendered:
-        raise AssertionError("new request unexpectedly persisted Context V0")
-    context_id = find_context_id(record)
-    return raw, context_id
+    if "sigil_context_v2" not in rendered or "Sigil Context V2" not in rendered:
+        raise AssertionError("durable Context V2 snapshot is missing its canonical payload")
+    return raw, find_context_id(record)
 
 
 def contains_key(value: object, expected: str) -> bool:
@@ -371,7 +391,7 @@ def contains_key(value: object, expected: str) -> bool:
 def find_context_id(value: object) -> str:
     if isinstance(value, dict):
         for key, child in value.items():
-            if key == "id" and isinstance(child, str) and child.startswith("context:v1:"):
+            if key == "id" and isinstance(child, str) and child.startswith("context:v2:"):
                 return child
             found = find_context_id(child)
             if found:
@@ -448,38 +468,53 @@ def run_case(
         raise AssertionError(
             f"{case.label} run failed ({completed.returncode}): {completed.stderr.strip()}"
         )
-    request = fixture.request_at(request_index)
-    if request.path.endswith("/chat/completions") is False:
-        raise AssertionError(f"unexpected provider path: {request.path}")
-    serialized_request = json.dumps(request.payload, sort_keys=True, ensure_ascii=False)
-    context = context_message(request.payload)
-    for expected in (
-        "sigil_context_v1",
-        EXPECTED_POLICY,
-        case.expected_path,
-        case.expected_symbol,
-        "repository_file",
-        "lsp-context:unavailable",
-    ):
-        if expected not in context:
-            raise AssertionError(f"{case.label} Context V1 omitted {expected!r}")
+    requests = fixture.requests_from(request_index)
+    if not requests:
+        raise AssertionError(f"{case.label} did not reach the provider fixture")
+    serialized_requests = []
+    for request in requests:
+        if request.path.endswith("/chat/completions") is False:
+            raise AssertionError(f"unexpected provider path: {request.path}")
+        serialized_request = json.dumps(
+            request.payload, sort_keys=True, ensure_ascii=False
+        )
+        serialized_requests.append(serialized_request)
+        context = context_message(request.payload)
+        for expected in (
+            "sigil_context_v2",
+            EXPECTED_POLICY,
+            case.expected_path,
+            case.expected_symbol,
+            "repository_file",
+            "lsp-context:unavailable",
+        ):
+            if expected not in context:
+                raise AssertionError(f"{case.label} Context V2 omitted {expected!r}")
 
     session_path = newest_session(before_sessions, state_root)
     session_text = session_path.read_text(encoding="utf-8")
-    prefix_raw, context_id = prefix_record(session_path)
-    if not context_id.startswith("context:v1:"):
-        raise AssertionError(f"{case.label} durable prefix omitted a Context V1 id")
+    prefix_raws = prefix_records(session_path)
+    if len(prefix_raws) != len(requests):
+        raise AssertionError(
+            f"expected one prefix snapshot per provider request, observed "
+            f"{len(prefix_raws)} snapshots for {len(requests)} requests"
+        )
+    _context_raw, context_id = context_snapshot_record(session_path)
+    if not context_id.startswith("context:v2:"):
+        raise AssertionError(f"{case.label} durable session omitted a Context V2 id")
     for expected in (case.expected_path, case.expected_symbol, context_id):
         if expected not in session_text:
             raise AssertionError(f"{case.label} durable session omitted {expected!r}")
-    assert_forbidden_absent(serialized_request, session_text)
+    assert_forbidden_absent(*serialized_requests, session_text)
 
     return CaseEvidence(
         label=case.label,
         expected_path=case.expected_path,
         expected_symbol=case.expected_symbol,
-        provider_request_sha256=sha256_text(serialized_request),
-        prefix_record_sha256=sha256_text(prefix_raw),
+        provider_request_count=len(requests),
+        provider_request_sha256=sha256_text("\n".join(serialized_requests)),
+        prefix_record_count=len(prefix_raws),
+        prefix_record_sha256=sha256_text("\n".join(prefix_raws)),
         context_id=context_id,
         fallback_canary=True,
     )
@@ -549,7 +584,7 @@ def main() -> int:
         server.server_close()
         thread.join(timeout=5)
         report = {
-            "schema": "sigil_context_v1_binary_acceptance_v1",
+            "schema": "sigil_context_v2_binary_acceptance_v1",
             "status": status,
             "binary": str(binary),
             "binary_sha256": binary_sha256(binary),
@@ -573,7 +608,7 @@ def main() -> int:
         else:
             shutil.rmtree(temp_root, ignore_errors=True)
 
-    print(f"Context V1 binary acceptance: {status}")
+    print(f"Context V2 binary acceptance: {status}")
     print(f"report: {report_path}")
     if error_message:
         print(error_message, file=sys.stderr)

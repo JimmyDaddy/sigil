@@ -39,6 +39,9 @@ ORIGINAL_CONTENT = "stateful checkpoint original\n"
 MUTATED_CONTENT = "stateful checkpoint mutated\n"
 EDIT_PATH = "stateful-checkpoint.txt"
 TOOL_CALL_ID = "stateful-write-call"
+CJK_PATH = "stateful-cjk-boundary.txt"
+CJK_CONTENT = "UTF-8 boundary regression 到"
+CJK_TOOL_CALL_ID = "stateful-cjk-read-call"
 PLAN_TOOL_CALL_ID = "stateful-plan-draft-call"
 PLAN_PROMPT = "review the stateful TUI rendering path without modifying files"
 PLAN_SUMMARY_CANARY = "STATEFUL-PLAN-PREVIEW-CANARY-5821"
@@ -78,6 +81,20 @@ def history_head_canary(request_index: int) -> str:
     return f"{HISTORY_HEAD_CANARY_PREFIX}{request_index}"
 
 
+def cache_usage_for_request(request_index: int) -> dict[str, int]:
+    """Return a deterministic cold-then-warm DeepSeek cache observation."""
+    hit_tokens = 0 if request_index == 1 else 50_000
+    miss_tokens = 500_000 if request_index == 1 else 450_000
+    prompt_tokens = hit_tokens + miss_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": 1,
+        "total_tokens": prompt_tokens + 1,
+        "prompt_cache_hit_tokens": hit_tokens,
+        "prompt_cache_miss_tokens": miss_tokens,
+    }
+
+
 def stateful_history_response_body(request_index: int) -> str:
     suffix = f"STATEFUL-HISTORY-{request_index}"
     if request_index == 2:
@@ -102,6 +119,9 @@ ESCAPE_KEY_SEQUENCE = b"\x1b[27u"
 # XTerm-compatible modified Home/End sequences decoded by Crossterm as Ctrl-Home/Ctrl-End.
 CTRL_HOME_KEY_SEQUENCE = b"\x1b[1;5H"
 CTRL_END_KEY_SEQUENCE = b"\x1b[1;5F"
+# SGR mouse coordinates are one-based. Row 10 is inside the live transcript for the fixed
+# 140x42 acceptance viewport, so this exercises application-owned wheel scrolling.
+LIVE_PANEL_SCROLL_UP_SEQUENCE = b"\x1b[<64;10;10M"
 SINGLE_LINE_SCROLL_REGION_PATTERN = re.compile(rb"\x1b\[(\d+);\1r\x1b\[\d+S\x1b\[r")
 DEFAULT_PTY_ROWS = 42
 DEFAULT_PTY_COLS = 140
@@ -408,6 +428,7 @@ def is_plan_mode_request(payload: object) -> bool:
 
 @dataclasses.dataclass
 class FixtureState:
+    cache_usage_enabled: bool = False
     provider_requests: list[dict[str, bool]] = dataclasses.field(default_factory=list)
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
     semantic_summary_requests: int = 0
@@ -423,10 +444,17 @@ class FixtureState:
         messages = request.get("messages")
         message_items = messages if isinstance(messages, list) else []
         has_tool = advertises_tool(payload, "write_file")
+        has_read_file = advertises_tool(payload, "read_file")
         has_result = any(
             isinstance(message, dict)
             and message.get("role") == "tool"
             and message.get("tool_call_id") == TOOL_CALL_ID
+            for message in message_items
+        )
+        has_cjk_result = any(
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and message.get("tool_call_id") == CJK_TOOL_CALL_ID
             for message in message_items
         )
         has_queued_follow_up = any(
@@ -440,7 +468,9 @@ class FixtureState:
             self.provider_requests.append(
                 {
                     "has_write_file": has_tool,
+                    "has_read_file": has_read_file,
                     "has_tool_result": has_result,
+                    "has_cjk_tool_result": has_cjk_result,
                     "has_queued_follow_up": has_queued_follow_up,
                 }
             )
@@ -634,8 +664,42 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 # Keep the campaign above the real RFC-0057 economics floor even after the
                 # provider/tool schema prefix and the billed semantic-summary usage are counted.
                 body = stateful_history_response_body(request_index)
-                self._send_sse({"delta": {"content": body}, "finish_reason": "stop"})
+                self._send_sse(
+                    {"delta": {"content": body}, "finish_reason": "stop"},
+                    usage=(
+                        cache_usage_for_request(request_index)
+                        if self.fixture.cache_usage_enabled
+                        else None
+                    ),
+                )
             elif request_index == 4:
+                self._send_sse(
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": CJK_TOOL_CALL_ID,
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json.dumps(
+                                            {"path": CJK_PATH},
+                                            separators=(",", ":"),
+                                        ),
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    },
+                    usage=(
+                        cache_usage_for_request(request_index)
+                        if self.fixture.cache_usage_enabled
+                        else None
+                    ),
+                )
+            elif request_index == 5:
                 self._send_sse(
                     {
                         "delta": {
@@ -655,10 +719,22 @@ class FixtureHandler(BaseHTTPRequestHandler):
                             ]
                         },
                         "finish_reason": "tool_calls",
-                    }
+                    },
+                    usage=(
+                        cache_usage_for_request(request_index)
+                        if self.fixture.cache_usage_enabled
+                        else None
+                    ),
                 )
-            elif request_index in (5, 6):
-                self._send_sse({"delta": {"content": FINAL_CANARY}, "finish_reason": "stop"})
+            elif request_index in (6, 7):
+                self._send_sse(
+                    {"delta": {"content": FINAL_CANARY}, "finish_reason": "stop"},
+                    usage=(
+                        cache_usage_for_request(request_index)
+                        if self.fixture.cache_usage_enabled
+                        else None
+                    ),
+                )
             else:
                 raise AcceptanceError(f"unexpected provider request {request_index}")
         except Exception as error:  # noqa: BLE001 - retain fixture diagnostics.
@@ -1759,9 +1835,10 @@ def validate_passed_contract(
     session_evidence: dict[str, dict[str, str]],
 ) -> None:
     expected = {
-        "provider_request_count": 5,
+        "provider_request_count": 6,
         "plan_request_count": 1,
         "queued_follow_up_observed": True,
+        "cjk_tool_result_observed": True,
         "live_final_reply_screen_count": 1,
         "resumed_final_reply_screen_count": 1,
         "source_final_answer_count": 1,
@@ -1883,6 +1960,7 @@ def main() -> int:
             directory.mkdir()
         edit_file = workspace / EDIT_PATH
         edit_file.write_text(ORIGINAL_CONTENT, encoding="utf-8")
+        (workspace / CJK_PATH).write_text(CJK_CONTENT, encoding="utf-8")
         tokenizer_identity = install_tokenizer(
             args.tokenizer_json,
             cache_root,
@@ -2032,6 +2110,8 @@ def main() -> int:
         )
         if edit_file.read_text(encoding="utf-8") != MUTATED_CONTENT:
             raise AcceptanceError("write_file fixture did not mutate the controlled file")
+        if CJK_CONTENT.encode("utf-8") not in bytes(first_runner.output):
+            raise AcceptanceError("CJK read_file result was not rendered through the real PTY")
         current_files = session_files(session_dir)
         if len(current_files) != 1:
             raise AcceptanceError("first process did not create exactly one source session")
@@ -2059,6 +2139,14 @@ def main() -> int:
         )
         if count_on_screen(live_screen, FINAL_CANARY) != 1:
             raise AcceptanceError("live completion screen rendered the final reply more than once")
+        for _ in range(12):
+            first_runner.send(LIVE_PANEL_SCROLL_UP_SEQUENCE)
+        first_runner.wait_until(
+            lambda text: FINAL_CANARY not in text and "verified-history" in text,
+            deadline.remaining(),
+            "mouse-owned history inspection immediately after direct resume",
+            final_screen=True,
+        )
         first_runner.send(CTRL_HOME_KEY_SEQUENCE)
         oldest_history_head = history_head_canary(1)
         history_inspection_screen = first_runner.wait_until(
@@ -2123,6 +2211,30 @@ def main() -> int:
         )
         first_runner.start()
         wait_for_main_tui(first_runner, deadline.remaining())
+
+        # Session restore must publish a scrollable history projection before any resize event.
+        # This catches launch paths that restore against a placeholder viewport and only become
+        # scrollable after the terminal emits SIGWINCH.
+        first_runner.send(CTRL_HOME_KEY_SEQUENCE)
+        oldest_history_head = history_head_canary(1)
+        restored_history_screen = first_runner.wait_until(
+            lambda text: count_on_screen(text, oldest_history_head) > 0
+            and FINAL_CANARY not in text,
+            deadline.remaining(),
+            "in-app history inspection immediately after direct resume",
+            final_screen=True,
+        )
+        if count_on_screen(restored_history_screen, oldest_history_head) != 1:
+            raise AcceptanceError(
+                "direct resume rendered the oldest completed turn more than once"
+            )
+        first_runner.send(CTRL_END_KEY_SEQUENCE)
+        first_runner.wait_until(
+            lambda text: FINAL_CANARY in text and oldest_history_head not in text,
+            deadline.remaining(),
+            "return to live tail immediately after direct resume history inspection",
+            final_screen=True,
+        )
 
         first_runner.type_text("/compact")
         first_runner.send("\r")
@@ -2265,9 +2377,9 @@ def main() -> int:
             plan_requests = fixture.plan_requests
             semantic_summary_requests = fixture.semantic_summary_requests
             semantic_title_requests = fixture.semantic_title_requests
-        if len(requests) != 5:
+        if len(requests) != 6:
             raise AcceptanceError(
-                f"expected 5 conversation provider requests, observed {len(requests)}"
+                f"expected 6 conversation provider requests, observed {len(requests)}"
             )
         if semantic_summary_requests != 1:
             raise AcceptanceError(
@@ -2283,13 +2395,16 @@ def main() -> int:
             raise AcceptanceError(f"expected one plan provider request, observed {plan_requests}")
         if not requests[1]["has_queued_follow_up"]:
             raise AcceptanceError("queued follow-up was not injected into the active provider run")
-        if not requests[3]["has_write_file"] or not requests[4]["has_tool_result"]:
+        if not requests[3]["has_read_file"] or not requests[4]["has_cjk_tool_result"]:
+            raise AcceptanceError("CJK read_file tool-call continuation contract was not observed")
+        if not requests[4]["has_write_file"] or not requests[5]["has_tool_result"]:
             raise AcceptanceError("write_file tool-call continuation contract was not observed")
 
         checks = {
             "provider_request_count": len(requests),
             "plan_request_count": plan_requests,
             "queued_follow_up_observed": requests[1]["has_queued_follow_up"],
+            "cjk_tool_result_observed": requests[4]["has_cjk_tool_result"],
             "live_final_reply_screen_count": 1,
             "resumed_final_reply_screen_count": 1,
             "source_final_answer_count": final_source_audit.final_canary_count,

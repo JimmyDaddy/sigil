@@ -122,7 +122,7 @@ struct AgentToolSurface {
     profile_registry: AgentProfileRegistry,
     budget: AgentBudgetPolicy,
     multi_agent_mode: MultiAgentMode,
-    base_tool_contracts: Vec<(ToolSpec, sigil_kernel::ToolMutationTracking)>,
+    base_tool_contracts: Vec<sigil_kernel::ToolRuntimeContract>,
     profile_index_description: String,
 }
 
@@ -436,7 +436,7 @@ impl AgentTool {
             .surface
             .base_tool_contracts
             .iter()
-            .filter(|(spec, _)| resolved.profile.tool_scope.allows(&spec.name))
+            .filter(|contract| resolved.profile.tool_scope.allows(&contract.spec.name))
             .cloned()
             .collect::<Vec<_>>();
         resolved.effective_enabled()

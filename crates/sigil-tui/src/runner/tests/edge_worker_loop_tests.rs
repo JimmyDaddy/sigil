@@ -49,7 +49,7 @@ use super::{
             queued_background_ready_transient_context, resolve_continue_task, run_worker_loop,
             session_ref_for_log_path, worker_reactor_metrics,
         },
-        worker_loop::{append_cancelled_task_state, append_paused_task_state},
+        worker_loop::{append_interrupted_task_state, append_paused_task_state},
     },
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
@@ -1036,7 +1036,12 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
         }))?;
     }
 
-    append_cancelled_task_state(&mut session).map_err(anyhow::Error::msg)?;
+    sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
+        &mut session,
+        None,
+        sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Cancelled,
+        "user explicitly cancelled the task",
+    )?;
 
     assert_eq!(
         session
@@ -1168,6 +1173,37 @@ fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
         TaskRunStatus::Running,
         "pause must not use latest-task fallback after validating an exact target"
     );
+    Ok(())
+}
+
+#[test]
+fn stopped_task_run_is_interrupted_and_remains_continuable() -> Result<()> {
+    let mut session = Session::new("deepseek", "model");
+    let task_id = TaskId::new("task_stopped")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "continue this plan later".to_owned(),
+        title: Some("Continue this plan later".to_owned()),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+
+    append_interrupted_task_state(
+        &mut session,
+        Some(task_id.as_str()),
+        "task run stopped from TUI; task remains available to continue",
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("interrupted task");
+    assert_eq!(task.status, TaskRunStatus::Interrupted);
+    assert_eq!(task.title.as_deref(), Some("Continue this plan later"));
+    let (continued_task_id, _, _, _) =
+        resolve_continue_task(&session, Some(task_id.as_str().to_owned()))
+            .map_err(anyhow::Error::msg)?;
+    assert_eq!(continued_task_id, task_id);
     Ok(())
 }
 

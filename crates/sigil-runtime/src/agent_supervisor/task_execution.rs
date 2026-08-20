@@ -332,6 +332,10 @@ pub fn append_task_stop_state(
     let task_id = task.task_id.clone();
     let parent_session_ref = task.parent_session_ref.clone();
     let objective = task.objective.clone();
+    let title = task
+        .title
+        .clone()
+        .unwrap_or_else(|| sigil_kernel::task_semantic_title(&objective));
     let active_steps = task
         .active_steps
         .iter()
@@ -370,7 +374,7 @@ pub fn append_task_stop_state(
         task_id: task_id.clone(),
         parent_session_ref,
         objective: safe_persistence_text(&objective),
-        title: Some(sigil_kernel::task_semantic_title(&objective)),
+        title: Some(title),
         status,
         reason: Some(safe_reason),
     }));
@@ -533,6 +537,14 @@ where
         cancellation_handle,
         tool_artifact_read_budget,
     } = request;
+    // The caller already resolved the routing model's typed ResumeTask vs ApplyTaskGuidance
+    // choice. Never reinterpret the localized prompt text here.
+    let guidance = guidance.filter(|value| !value.trim().is_empty());
+    let resume_receipt = continuation_guidance_receipt
+        .as_ref()
+        .is_some_and(|receipt| {
+            receipt.control == sigil_kernel::TaskContinuationControlKind::ResumeTask
+        });
     let task = resolve_task_continuation(session, requested_task_id.as_ref().map(TaskId::as_str))?;
     let mut explicit_focus_required = validate_continuation_guidance_authority(
         task.needs_planning,
@@ -548,7 +560,7 @@ where
         // already-validated Task before any provider executes.
         explicit_focus_required = true;
     }
-    let recoverable_materialization = if !task.needs_planning {
+    let recoverable_materialization = if !task.needs_planning && !resume_receipt {
         // Every continuation entry point resolves unfinished durable guidance before it creates a
         // new authority or performs provider I/O. This pure admission check prevents direct,
         // typed, queued, and slash continuations from forking an already-accepted review after a
@@ -557,11 +569,12 @@ where
     } else {
         None
     };
-    let recoverable_review = if !task.needs_planning && recoverable_materialization.is_none() {
-        recoverable_task_guidance_review(session, &task.task_id, guidance.as_deref())?
-    } else {
-        None
-    };
+    let recoverable_review =
+        if !task.needs_planning && recoverable_materialization.is_none() && !resume_receipt {
+            recoverable_task_guidance_review(session, &task.task_id, guidance.as_deref())?
+        } else {
+            None
+        };
     if let Some(recovered) = recoverable_materialization.as_ref() {
         let incoming_matches = match (
             guidance_promotion.as_ref(),
@@ -787,9 +800,39 @@ where
                     )
                     .await
             }
-            (None, Some(_), None) | (None, None, Some(_)) => Err(anyhow!(
-                "task guidance receipt is missing exact prompt material"
+            (None, Some(_), None) => Err(anyhow!(
+                "task guidance promotion is missing its guidance material"
             )),
+            (None, None, Some(receipt)) if receipt.guidance.trim().is_empty() => {
+                orchestrator
+                    .continue_run(
+                        session,
+                        task_request,
+                        executor_options,
+                        subagent_read_options,
+                        subagent_write_options,
+                        None,
+                        handler,
+                        approval_handler,
+                    )
+                    .await
+            }
+            (None, None, Some(_)) => {
+                // A recovered selection may carry only the safe durable projection. Resume from
+                // that projection instead of requiring the process-local exact source prompt.
+                orchestrator
+                    .continue_run(
+                        session,
+                        task_request,
+                        executor_options,
+                        subagent_read_options,
+                        subagent_write_options,
+                        None,
+                        handler,
+                        approval_handler,
+                    )
+                    .await
+            }
             (_, Some(_), Some(_)) => Err(anyhow!(
                 "task continuation supplied conflicting guidance authorities"
             )),
@@ -820,9 +863,10 @@ fn validate_continuation_guidance_authority(
     match (guidance, guidance_promotion, continuation_guidance_receipt) {
         (Some(_), Some(_), None) | (Some(_), None, Some(_)) => Ok(false),
         (_, None, None) => Ok(true),
-        (None, Some(_), None) | (None, None, Some(_)) => Err(anyhow!(
-            "task guidance receipt is missing exact prompt material"
+        (None, Some(_), None) => Err(anyhow!(
+            "task guidance promotion is missing its guidance material"
         )),
+        (None, None, Some(_)) => Ok(false),
         (_, Some(_), Some(_)) => Err(anyhow!(
             "task continuation supplied conflicting guidance authorities"
         )),

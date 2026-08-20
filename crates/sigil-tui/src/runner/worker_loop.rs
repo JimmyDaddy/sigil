@@ -215,9 +215,7 @@ pub(in crate::runner) use agent_runtime::{
 pub(in crate::runner) use sigil_runtime::agent_supervisor::task_role_runtime::{
     RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder, TaskRoleRuntime,
 };
-pub(in crate::runner) use task_runtime::{
-    append_cancelled_task_state, append_interrupted_task_state, append_paused_task_state,
-};
+pub(in crate::runner) use task_runtime::{append_interrupted_task_state, append_paused_task_state};
 #[cfg(test)]
 pub(in crate::runner) use task_runtime::{
     configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,

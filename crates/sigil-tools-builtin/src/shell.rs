@@ -27,14 +27,16 @@ use sigil_kernel::{
 use tree_sitter::{Node, Parser};
 
 use crate::{
-    constants::{DEFAULT_TEXT_LIMIT_BYTES, HARD_TEXT_LIMIT_BYTES, SIGIL_SCRATCH_DIR_ENV},
+    constants::{
+        DEFAULT_TEXT_LIMIT_BYTES, HARD_TEXT_LIMIT_BYTES, SIGIL_SCRATCH_DIR_ENV, WORKSPACE_TEMP_ROOT,
+    },
     path::{
         ResolvedToolPath, absolute_path_from, canonical_workspace_root, lexically_normalize_path,
         resolve_existing_prefix, resolve_tool_path_from_base,
     },
     scratch_namespace::{
-        ScratchNamespaceLeaseRegistry, ScratchQuota, ScratchQuotaExceededError,
-        ensure_session_scratch, session_scratch_dir, session_scratch_key,
+        ScratchNamespaceLeaseRegistry, ScratchQuota, ensure_session_scratch,
+        scratch_provision_error_result, session_scratch_dir, session_scratch_key,
     },
     shell_runtime::{ResolvedShell, ShellDialect},
     support::{
@@ -47,6 +49,10 @@ const SHELL_SEMANTIC_REGISTRY_VERSION: u32 = 2;
 const SHELL_ENVIRONMENT_POLICY_VERSION: u32 = 1;
 const FILE_PRESENCE_EXECUTION_BINDING_KEY: &str = "file_presence_execution_binding";
 const FILE_PRESENCE_EXECUTION_PROFILE_VERSION: u32 = 1;
+const WORKSPACE_CHECK_MIN_AVAILABLE_BYTES: u64 = 1024 * 1024 * 1024;
+const WORKSPACE_CHECK_TARGET_HEADROOM_DIVISOR: u64 = 16;
+const WORKSPACE_CHECK_MAX_TARGET_HEADROOM_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+const WORKSPACE_CHECK_TARGET_SCAN_CEILING_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct FilePresenceExecutionProfile {
@@ -216,7 +222,22 @@ impl Tool for BashTool {
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let command = required_string(&args, "command")?;
-        reject_non_finite_bash_command(command, &self.shell)?;
+        if let Err(error) = reject_non_finite_bash_command(command, &self.shell) {
+            return Ok(ToolResult::error(
+                call_id,
+                self.spec().name,
+                ToolErrorKind::InvalidInput,
+                error.to_string(),
+            )
+            .with_error_details(
+                false,
+                json!({
+                    "category": "persistent_command",
+                    "retryable": false,
+                    "next_tool": "terminal_start"
+                }),
+            ));
+        }
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(Value::as_u64)
@@ -288,6 +309,46 @@ impl Tool for BashTool {
             );
             (request, Some(analysis))
         };
+        let workspace_check = fallback_analysis
+            .as_ref()
+            .is_some_and(|analysis| analysis.command_family.is_workspace_check())
+            || ctx
+                .prepared_permission_plan()
+                .is_some_and(|plan| plan.operation == ToolOperation::ExecuteWorkspaceCheckCommand);
+        if workspace_check {
+            let workspace_root = ctx.workspace_root.clone();
+            let resource_probe = tokio::task::spawn_blocking(move || {
+                workspace_check_resource_probe(&workspace_root)
+            })
+            .await
+            .context("workspace resource preflight task panicked")?;
+            match resource_probe {
+                Ok(probe) => {
+                    if let Some(result) =
+                        workspace_check_resource_error(&call_id, &self.spec().name, command, &probe)
+                    {
+                        return Ok(result);
+                    }
+                }
+                Err(error) => {
+                    return Ok(ToolResult::error(
+                        call_id,
+                        self.spec().name,
+                        ToolErrorKind::Io,
+                        "workspace validation could not inspect local disk capacity",
+                    )
+                    .with_error_details(
+                        true,
+                        json!({
+                            "code": "disk_capacity_probe_failed",
+                            "resource": "disk_space",
+                            "reason": error.to_string(),
+                            "action": "verify that the workspace volume is available, then retry"
+                        }),
+                    ));
+                }
+            }
+        }
         // RFC-0062 14.1: provision the session-scoped scratch namespace (owner-only, quota
         // checked) before any child can write into it. Quota failures are recoverable tool
         // errors, never a silent fallback to the system temp directory.
@@ -306,29 +367,13 @@ impl Tool for BashTool {
         let session_key = session_scratch_key(session_scope_id.as_deref());
         match provision {
             Ok(_provision) => {}
-            Err(error) if error.downcast_ref::<ScratchQuotaExceededError>().is_some() => {
-                let quota_error = error
-                    .downcast::<ScratchQuotaExceededError>()
-                    .expect("downcast checked above");
-                return Ok(ToolResult::error(
+            Err(error) => {
+                return Ok(scratch_provision_error_result(
                     call_id,
                     self.spec().name,
-                    sigil_kernel::ToolErrorKind::ScratchQuotaExceeded,
-                    quota_error.to_string(),
-                )
-                .with_error_details(
-                    false,
-                    json!({
-                        "scope": quota_error.scope.as_str(),
-                        "usage_bytes": quota_error.usage_bytes,
-                        "quota_bytes": quota_error.quota_bytes,
-                        "scratch_label": self.scratch_label,
-                    }),
+                    &self.scratch_label,
+                    error,
                 ));
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to provision {}", self.scratch_label));
             }
         };
         let _scratch_lease = self.scratch_namespaces.acquire(&session_key);
@@ -343,6 +388,7 @@ impl Tool for BashTool {
                 "bash",
             )
         });
+        let mut capture_setup_failed = false;
         if let Some(plan) = capture_plan.as_ref()
             && let Some(sink) = ctx.create_policy_safe_tool_output_sink(
                 &call_id,
@@ -361,10 +407,15 @@ impl Tool for BashTool {
                     });
                 }
                 Err(_error) => {
-                    // Continue without spool; the result still settles through the bounded
-                    // inline adapter when no harness capture is available.
+                    // Capture storage is secondary to process execution. Keep the command
+                    // running, but retain a typed diagnostic so settlement never pretends that
+                    // the missing artifact was a pipe-reader failure or a complete capture.
+                    capture_setup_failed = true;
                 }
             }
+        }
+        if capture_plan.is_some() && request.capture.is_none() {
+            capture_setup_failed = true;
         }
         let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
         tokio::fs::create_dir_all(&session_scratch)
@@ -418,6 +469,10 @@ impl Tool for BashTool {
                     .context("prepared permission plan disappeared before receipt projection")?,
             )?
         };
+        if capture_setup_failed {
+            attach_capture_storage_failure(&mut result, observed_bytes, "capture_setup_failed");
+            result = result.with_unavailable_artifact_capture(observed_bytes);
+        }
         let capture_outcome = result.take_capture_outcome();
         if let Some(outcome) = capture_outcome {
             // RFC-0062 9.2/9.3: settle the harness-owned capture into the canonical dual-segment
@@ -428,6 +483,15 @@ impl Tool for BashTool {
                 outcome.source,
             ) {
                 Ok((descriptor, segments, completeness)) => {
+                    if completeness.storage
+                        == sigil_kernel::session::ToolStorageCompletenessV1::Unavailable
+                    {
+                        attach_capture_storage_failure(
+                            &mut result,
+                            observed_bytes,
+                            "capture_write_failed",
+                        );
+                    }
                     if let Some(plan) = capture_plan.as_ref() {
                         match sigil_kernel::ToolResultRecordedV3::from_process_capture(
                             &result,
@@ -441,6 +505,11 @@ impl Tool for BashTool {
                                 result.set_durable_v3_projection(recorded, display);
                             }
                             Err(_error) => {
+                                attach_capture_storage_failure(
+                                    &mut result,
+                                    observed_bytes,
+                                    "capture_settlement_failed",
+                                );
                                 result = result.with_unavailable_artifact_capture(observed_bytes);
                             }
                         }
@@ -449,12 +518,121 @@ impl Tool for BashTool {
                     }
                 }
                 Err(_error) => {
+                    attach_capture_storage_failure(
+                        &mut result,
+                        observed_bytes,
+                        "capture_settlement_failed",
+                    );
                     result = result.with_unavailable_artifact_capture(observed_bytes);
                 }
             }
         }
         Ok(result)
     }
+}
+
+fn attach_capture_storage_failure(result: &mut ToolResult, observed_bytes: u64, stage: &str) {
+    if !result.metadata.details.is_object() {
+        result.metadata.details = json!({});
+    }
+    result.metadata.details["capture"] = json!({
+        "code": "capture_storage_failed",
+        "stage": stage,
+        "observed_bytes": observed_bytes,
+        "command_completed": true,
+        "action": "free local disk space before requesting the full saved output"
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceCheckResourceProbe {
+    available_bytes: u64,
+    target_bytes_lower_bound: u64,
+    target_scan_truncated: bool,
+}
+
+impl WorkspaceCheckResourceProbe {
+    fn required_available_bytes(self) -> u64 {
+        WORKSPACE_CHECK_MIN_AVAILABLE_BYTES.saturating_add(
+            self.target_bytes_lower_bound
+                .checked_div(WORKSPACE_CHECK_TARGET_HEADROOM_DIVISOR)
+                .unwrap_or_default()
+                .min(WORKSPACE_CHECK_MAX_TARGET_HEADROOM_BYTES),
+        )
+    }
+
+    fn has_capacity(self) -> bool {
+        self.available_bytes >= self.required_available_bytes()
+    }
+}
+
+fn workspace_check_resource_probe(workspace_root: &Path) -> Result<WorkspaceCheckResourceProbe> {
+    let available_bytes = fs2::available_space(workspace_root).with_context(|| {
+        format!(
+            "failed to inspect free space for {}",
+            workspace_root.display()
+        )
+    })?;
+    let (target_bytes_lower_bound, target_scan_truncated) =
+        bounded_directory_size(&workspace_root.join("target"));
+    Ok(WorkspaceCheckResourceProbe {
+        available_bytes,
+        target_bytes_lower_bound,
+        target_scan_truncated,
+    })
+}
+
+fn bounded_directory_size(path: &Path) -> (u64, bool) {
+    if !path.is_dir() {
+        return (0, false);
+    }
+    let mut total = 0_u64;
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file() {
+            total = total.saturating_add(entry.metadata().map_or(0, |metadata| metadata.len()));
+            if total >= WORKSPACE_CHECK_TARGET_SCAN_CEILING_BYTES {
+                return (total, true);
+            }
+        }
+    }
+    (total, false)
+}
+
+fn workspace_check_resource_error(
+    call_id: &str,
+    tool_name: &str,
+    command: &str,
+    probe: &WorkspaceCheckResourceProbe,
+) -> Option<ToolResult> {
+    if probe.has_capacity() {
+        return None;
+    }
+    let required_available_bytes = probe.required_available_bytes();
+    Some(
+        ToolResult::error(
+            call_id,
+            tool_name,
+            ToolErrorKind::ResourceExhausted,
+            "workspace validation was paused because the workspace volume is low on disk space",
+        )
+        .with_error_details(
+            true,
+            json!({
+                "code": "disk_space_exhausted",
+                "resource": "disk_space",
+                "available_bytes": probe.available_bytes,
+                "required_available_bytes": required_available_bytes,
+                "target_bytes_lower_bound": probe.target_bytes_lower_bound,
+                "target_scan_truncated": probe.target_scan_truncated,
+                "command_sha256": sha256_hex(command.as_bytes()),
+                "action": "free disk space or remove disposable build artifacts, then resume the Task"
+            }),
+        ),
+    )
 }
 
 fn reject_non_finite_bash_command(command: &str, shell: &ResolvedShell) -> Result<()> {
@@ -1106,6 +1284,19 @@ fn inspect_bound_shell_paths(
             if relative.is_empty() { "." } else { relative },
         )?;
         resolved.original = requested;
+        if resolved_target.starts_with(root) {
+            let relative_label = resolved_target
+                .strip_prefix(root)
+                .expect("containment checked above")
+                .to_string_lossy()
+                .replace('\\', "/");
+            resolved.scope = ToolSubjectScope::RuntimeScratch;
+            resolved.normalized = if relative_label.is_empty() {
+                WORKSPACE_TEMP_ROOT.to_owned()
+            } else {
+                format!("{WORKSPACE_TEMP_ROOT}/{relative_label}")
+            };
+        }
         inspection
             .subjects
             .push(resolved_tool_path_subject(resolved));
@@ -1434,6 +1625,7 @@ fn analyze_shell_command_with_path_policy_and_environment(
             }
         }
     }
+    annotate_shell_subject_access(&mut subjects, command);
 
     let analysis_status = incomplete_analysis.unwrap_or_else(|| {
         if family.is_recognized() {
@@ -2405,10 +2597,13 @@ fn inspect_posix_shell_ast(
     let allow_file_presence_loop = bounded_loop.as_ref().is_some_and(|loop_spec| {
         posix_ast_matches_bounded_file_presence_loop(root, command.as_bytes(), loop_spec)
     });
+    let allow_controlled_heredoc =
+        shell_command_uses_controlled_scratch_heredoc(command, path_policy);
     let mut state = ShellAstWalkState {
         nodes: 0,
         saw_readonly_structure: false,
         allow_file_presence_loop,
+        allow_controlled_heredoc,
         path_policy,
     };
     let status = bounded_loop
@@ -2755,6 +2950,7 @@ struct ShellAstWalkState<'a> {
     nodes: usize,
     saw_readonly_structure: bool,
     allow_file_presence_loop: bool,
+    allow_controlled_heredoc: bool,
     path_policy: &'a ShellPathPolicyBinding,
 }
 
@@ -2820,7 +3016,10 @@ fn inspect_posix_shell_ast_node(
             )],
         });
     }
+    let allowed_controlled_heredoc =
+        state.allow_controlled_heredoc && matches!(kind, "heredoc_redirect" | "heredoc_body");
     if !allowed_loop_node
+        && !allowed_controlled_heredoc
         && matches!(
             kind,
             "if_statement"
@@ -3408,7 +3607,20 @@ fn bash_tool_result_from_execution_receipt_inner(
         } else {
             summary.to_owned()
         };
-        let mut result = ToolResult::error(call_id, tool_name, ToolErrorKind::ExitStatus, message);
+        let syntax_error = content.to_ascii_lowercase().contains("syntax error")
+            || content.to_ascii_lowercase().contains("parse error");
+        let kind = if syntax_error {
+            ToolErrorKind::InvalidInput
+        } else {
+            ToolErrorKind::ExitStatus
+        };
+        let mut result = ToolResult::error(call_id, tool_name, kind, message);
+        if syntax_error {
+            result = result.with_error_details(
+                false,
+                json!({ "category": "shell_syntax", "retryable": false }),
+            );
+        }
         result.content = content;
         result.metadata = metadata;
         if let Some(outcome) = capture_outcome {
@@ -3828,6 +4040,7 @@ fn command_family_for_simple_segment_with_depth(tokens: &[String], depth: usize)
         "find" if find_segment_is_safe_readonly(&words) => CommandFamily::Search,
         "find" if find_segment_has_delete_action(args) => CommandFamily::FindDelete,
         "find" if find_segment_has_write_action(args) => CommandFamily::FindWrite,
+        "cat" if shell_segment_has_overwrite_redirection(&words) => CommandFamily::StaticFileWrite,
         "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "du" | "file" | "readlink"
         | "realpath" | "basename" | "dirname" | "diff" | "cmp" | "pwd" => CommandFamily::ListRead,
         "echo" | "printf" if shell_segment_has_overwrite_redirection(&words) => {
@@ -5311,6 +5524,37 @@ fn push_resolved_or_unknown_shell_path_subject(
     }
 }
 
+/// A shell invocation can read one path and overwrite another path in the same command. Keep the
+/// enclosing `ToolAccess::Execute` for the command subject, but annotate concrete path subjects so
+/// policy can evaluate each resource independently.
+fn annotate_shell_subject_access(subjects: &mut [ToolSubject], command: &str) {
+    let tokens = tokenize_shell_subject_words(command);
+    let mut mark = |target: &str| {
+        if let Some(subject) = subjects.iter_mut().find(|subject| {
+            subject.kind == sigil_kernel::ToolSubjectKind::Path && subject.original == target
+        }) {
+            subject.access = ToolAccess::Write;
+        }
+    };
+    for (index, token) in tokens.iter().enumerate() {
+        if overwrite_redirection_target(token) {
+            let target = [
+                "1>>", "1>|", "1>", "2>>", "2>|", "2>", "&>>", "&>", ">>", ">|", ">",
+            ]
+            .iter()
+            .find_map(|prefix| token.strip_prefix(prefix))
+            .unwrap_or_default();
+            mark(target);
+        } else if is_overwrite_redirection_operator(token) {
+            if let Some(target) = tokens.get(index + 1) {
+                mark(target);
+            }
+        } else if token.starts_with("of=") && token.len() > 3 {
+            mark(&token[3..]);
+        }
+    }
+}
+
 fn shell_requested_path_is_safe_device(requested: &str) -> bool {
     matches!(requested, "/dev/null" | "/dev/stdout" | "/dev/stderr")
 }
@@ -5333,6 +5577,7 @@ pub(crate) fn resolved_tool_path_subject(resolved: ResolvedToolPath) -> ToolSubj
 }
 
 pub(crate) fn tokenize_shell_subject_words(command: &str) -> Vec<String> {
+    let command = strip_shell_heredoc_bodies(command);
     let mut words = Vec::new();
     let mut current = String::new();
     let mut chars = command.chars().peekable();
@@ -5473,6 +5718,58 @@ pub(crate) fn tokenize_shell_subject_words(command: &str) -> Vec<String> {
     words
 }
 
+/// Removes heredoc bodies before shell subject extraction. A heredoc body is data, not an
+/// executable path subject; retaining it made an absolute path written inside an AWK/Python
+/// program look like a root mutation. The redirection and destination remain analyzed normally.
+fn strip_shell_heredoc_bodies(command: &str) -> String {
+    let mut output = String::with_capacity(command.len());
+    let mut lines = command.split_inclusive('\n');
+    while let Some(line) = lines.next() {
+        output.push_str(line);
+        let Some(delimiter) = shell_heredoc_delimiter(line) else {
+            continue;
+        };
+        for body_line in lines.by_ref() {
+            if body_line.trim_end_matches(['\n', '\r']) == delimiter {
+                break;
+            }
+        }
+    }
+    output
+}
+
+fn shell_heredoc_delimiter(line: &str) -> Option<String> {
+    let marker = line.find("<<")?;
+    if line.as_bytes().get(marker + 2) == Some(&b'<') {
+        return None;
+    }
+    let mut rest = &line[marker + 2..];
+    if rest.starts_with('-') {
+        rest = &rest[1..];
+    }
+    let rest = rest.trim_start();
+    let token = rest.split_whitespace().next()?.trim_end_matches(';');
+    let token = token
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            token
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(token);
+    (!token.is_empty()).then(|| token.to_owned())
+}
+
+fn shell_command_uses_controlled_scratch_heredoc(
+    command: &str,
+    path_policy: &ShellPathPolicyBinding,
+) -> bool {
+    path_policy.scratch_root.is_some()
+        && command.contains("<<")
+        && (command.contains("$SIGIL_SCRATCH_DIR") || command.contains("${SIGIL_SCRATCH_DIR}"))
+}
+
 pub(crate) fn is_redirection_operator(word: &str) -> bool {
     matches!(
         word,
@@ -5493,6 +5790,10 @@ pub(crate) fn redirection_target(word: &str) -> Option<&str> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "tests/shell_tests.rs"]
+mod tests;
 
 pub(crate) fn is_path_argument(command: &str, word: &str) -> bool {
     if word.starts_with('-') || word.contains("://") {

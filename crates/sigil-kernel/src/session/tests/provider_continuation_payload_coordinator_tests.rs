@@ -282,7 +282,9 @@ fn append_observed_physical_start(store: &JsonlSessionStore) -> Result<()> {
         request_material_fingerprint: hmac('a'),
         provider_name: "test-provider".to_owned(),
         model_name: "test-model".to_owned(),
+        request_envelope: None,
         cache_layout_proof: Some(cache_layout_proof()),
+        semantic_cache_layout_proof_v2: None,
         started_at_unix_ms: 1,
     };
     store

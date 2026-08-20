@@ -558,7 +558,7 @@ fn detail_info_rail_projects_bounded_runtime_context_summary() -> Result<()> {
                 128,
                 4,
                 Some(PrefixRuntimeContextSummary {
-                    schema: "sigil_context_v1".to_owned(),
+                    schema: sigil_kernel::RUNTIME_CONTEXT_V2_SCHEMA.to_owned(),
                     max_tokens: 64,
                     used_tokens: 11,
                     included_count: 2,
@@ -1246,7 +1246,7 @@ fn footer_hints_show_agent_background_shortcut_while_waiting() -> anyhow::Result
     let view_model = UiViewModel::from_app(&app);
 
     assert!(view_model.footer.hints.contains("Ctrl-B background"));
-    assert!(view_model.footer.hints.contains("Esc interrupt"));
+    assert!(view_model.footer.hints.contains("Ctrl-C stop"));
     Ok(())
 }
 
@@ -1295,7 +1295,7 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
     let view_model = UiViewModel::from_app(&app);
 
     assert!(view_model.footer.hints.contains("Y allow once"));
-    assert!(!view_model.footer.hints.contains("Esc interrupt"));
+    assert!(!view_model.footer.hints.contains("Ctrl-C stop"));
     assert!(
         !view_model
             .info_rail
@@ -1353,7 +1353,7 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Enter add follow-up · Esc interrupt · Ctrl-L copy reply · Ctrl-T details"
+        "agent: main · Enter add follow-up · Ctrl-C stop · Ctrl-L copy reply · Ctrl-T details"
     );
     assert_eq!(view_model.composer.phase, RunPhase::Thinking);
     assert_eq!(view_model.composer.reasoning_effort_label, "max");

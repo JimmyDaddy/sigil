@@ -75,8 +75,14 @@ pub struct ProviderPhysicalAttemptStartedEntry {
     pub request_material_fingerprint: String,
     pub provider_name: String,
     pub model_name: String,
+    /// Present for all newly emitted attempts. `None` remains readable for pre-envelope V3 logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_envelope: Option<crate::ProviderRequestEnvelopeV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_layout_proof: Option<crate::CacheLayoutProofV1>,
+    /// V2 semantic proof excluding process-local hosted authorization identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_cache_layout_proof_v2: Option<crate::CacheLayoutProofV2>,
     pub started_at_unix_ms: u64,
 }
 
@@ -96,10 +102,27 @@ impl ProviderPhysicalAttemptStartedEntry {
         )?;
         validate_label("provider name", &self.provider_name)?;
         validate_label("provider model name", &self.model_name)?;
-        self.cache_layout_proof
+        let cache_layout = self
+            .cache_layout_proof
             .as_ref()
-            .context("provider physical-attempt cache layout proof is missing")?
-            .validate()?;
+            .context("provider physical-attempt cache layout proof is missing")?;
+        cache_layout.validate()?;
+        if let Some(semantic) = self.semantic_cache_layout_proof_v2.as_ref() {
+            semantic.validate()?;
+        }
+        if let Some(request_envelope) = &self.request_envelope {
+            request_envelope.validate()?;
+            if request_envelope.provider_name != self.provider_name
+                || request_envelope.model_name != self.model_name
+                || request_envelope.process_local_material_fingerprint
+                    != self.request_material_fingerprint
+            {
+                bail!("provider physical-attempt request envelope identity is inconsistent");
+            }
+            if request_envelope.cache_layout_hash != cache_layout.layout_hash {
+                bail!("provider physical-attempt request envelope cache layout is inconsistent");
+            }
+        }
         Ok(())
     }
 }
@@ -258,6 +281,14 @@ impl ProviderPhysicalAttemptProjection {
         self.attempts.get(attempt_id)
     }
 
+    /// Returns every physical attempt in durable start order for diagnostics and audit views.
+    #[must_use]
+    pub fn attempts(&self) -> Vec<&ProviderPhysicalAttemptState> {
+        let mut attempts = self.attempts.values().collect::<Vec<_>>();
+        attempts.sort_by_key(|attempt| attempt.started_stream_sequence);
+        attempts
+    }
+
     /// Returns every attempt with one durable logical-run correlation id.
     ///
     /// Results are ordered by durable start sequence. Callers that accept a bounded safe-connect
@@ -361,6 +392,22 @@ impl ProviderPhysicalAttemptProjection {
             .map(|(_, proof)| proof)
     }
 
+    pub(super) fn latest_semantic_cache_layout_proof_v2_for_internal_use(
+        &self,
+    ) -> Option<&crate::CacheLayoutProofV2> {
+        self.attempts
+            .values()
+            .filter_map(|attempt| {
+                attempt
+                    .entry
+                    .semantic_cache_layout_proof_v2
+                    .as_ref()
+                    .map(|proof| (attempt.started_stream_sequence, proof))
+            })
+            .max_by_key(|(sequence, _)| *sequence)
+            .map(|(_, proof)| proof)
+    }
+
     fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         let decision = projection_apply_decision(self.cursor.as_ref(), event)?;
@@ -394,6 +441,14 @@ impl ProviderPhysicalAttemptProjection {
         entry: ProviderPhysicalAttemptStartedEntry,
     ) -> Result<()> {
         entry.validate_shape()?;
+        if entry.request_envelope.as_ref().is_some_and(|envelope| {
+            envelope
+                .source_frontier
+                .as_ref()
+                .is_some_and(|frontier| frontier.session_id != event.session_id)
+        }) {
+            bail!("provider request envelope source frontier belongs to a different session");
+        }
         if event.correlation_id.as_deref() != Some(event.event_id.as_str()) {
             bail!("provider physical-attempt start correlation id must equal its event id");
         }
@@ -510,7 +565,7 @@ impl ProviderPhysicalAttemptProjection {
 /// retain existing behavior and deliberately do not manufacture non-resumable audit facts.
 pub(crate) enum ProviderPhysicalAttemptAudit {
     InMemory {
-        cache_layout_proof: crate::CacheLayoutProofV1,
+        semantic_cache_layout_proof_v2: crate::CacheLayoutProofV2,
     },
     Durable(DurableProviderPhysicalAttemptAudit),
 }
@@ -521,7 +576,7 @@ pub(crate) struct DurableProviderPhysicalAttemptAudit {
     start_event_id: EventId,
     last_causation_event_id: EventId,
     durable_output_event_ids: Vec<EventId>,
-    cache_layout_proof: crate::CacheLayoutProofV1,
+    semantic_cache_layout_proof_v2: crate::CacheLayoutProofV2,
     terminal_recorded: bool,
 }
 
@@ -699,26 +754,54 @@ impl ProviderPhysicalAttemptAudit {
         }
         let Some(store) = session.durable_store() else {
             return Ok(Self::InMemory {
-                cache_layout_proof: frozen_request.cache_layout_proof(None)?,
+                semantic_cache_layout_proof_v2: frozen_request
+                    .semantic_cache_layout_proof_v2(None)?,
             });
         };
         let request = frozen_request.request();
-        let prior_cache_layout = {
+        let (prior_cache_layout, prior_semantic_cache_layout_v2) = {
             let store = store.clone();
             tokio::task::spawn_blocking(move || {
                 let records = store.read_event_records_writer()?;
                 let projection = ProviderPhysicalAttemptProjection::from_records(&records)?;
-                Ok::<_, anyhow::Error>(
+                Ok::<_, anyhow::Error>((
                     projection
                         .latest_cache_layout_proof_for_internal_use()
                         .cloned(),
-                )
+                    projection
+                        .latest_semantic_cache_layout_proof_v2_for_internal_use()
+                        .cloned(),
+                ))
             })
             .await
             .context("provider cache layout projection task failed")??
         };
         let cache_layout_proof =
             Some(frozen_request.cache_layout_proof(prior_cache_layout.as_ref())?);
+        let semantic_cache_layout_proof_v2 = Some(
+            frozen_request
+                .semantic_cache_layout_proof_v2(prior_semantic_cache_layout_v2.as_ref())?,
+        );
+        let source_projection = session.active_projection_snapshot()?;
+        let source_frontier = source_projection
+            .as_ref()
+            .map(|snapshot| crate::ProviderRequestSourceFrontierV1::from(snapshot.frontier()));
+        let context_epoch_id = source_projection
+            .as_ref()
+            .map(|snapshot| snapshot.tool_output_pressure().active_epoch_id.clone())
+            .unwrap_or_else(|| "context-epoch:root".to_owned());
+        let durable_previous_response_handle =
+            session.latest_response_handle(&request.provider_name);
+        let durable_continuation_states = session.continuation_states(&request.provider_name);
+        let request_envelope = frozen_request.request_envelope_with_durable_runtime_state(
+            cache_layout_proof
+                .as_ref()
+                .expect("provider attempt cache layout is always materialized"),
+            source_frontier,
+            context_epoch_id,
+            durable_previous_response_handle.as_ref(),
+            &durable_continuation_states,
+        )?;
         let physical_attempt_id = requested_physical_attempt_id
             .map(str::to_owned)
             .unwrap_or_else(new_provider_physical_attempt_id);
@@ -731,7 +814,9 @@ impl ProviderPhysicalAttemptAudit {
             request_material_fingerprint: frozen_request.fingerprint().to_owned(),
             provider_name: request.provider_name.clone(),
             model_name: request.model_name.clone(),
+            request_envelope: Some(request_envelope),
             cache_layout_proof,
+            semantic_cache_layout_proof_v2,
             started_at_unix_ms: unix_time_ms(),
         };
         entry.validate_shape()?;
@@ -756,9 +841,9 @@ impl ProviderPhysicalAttemptAudit {
             start_event_id: start_event_id.clone(),
             last_causation_event_id: start_event_id,
             durable_output_event_ids: Vec::new(),
-            cache_layout_proof: entry
-                .cache_layout_proof
-                .expect("new physical attempts always carry a cache layout proof"),
+            semantic_cache_layout_proof_v2: entry
+                .semantic_cache_layout_proof_v2
+                .expect("new physical attempts always carry a semantic cache layout proof"),
             terminal_recorded: false,
         }))
     }
@@ -766,8 +851,15 @@ impl ProviderPhysicalAttemptAudit {
     #[must_use]
     pub(crate) fn cache_layout_mutation(&self) -> crate::CacheLayoutMutationKind {
         match self {
-            Self::InMemory { cache_layout_proof } => cache_layout_proof.mutation_from_previous.kind,
-            Self::Durable(audit) => audit.cache_layout_proof.mutation_from_previous.kind,
+            Self::InMemory {
+                semantic_cache_layout_proof_v2,
+            } => semantic_cache_layout_proof_v2.mutation_from_previous.kind,
+            Self::Durable(audit) => {
+                audit
+                    .semantic_cache_layout_proof_v2
+                    .mutation_from_previous
+                    .kind
+            }
         }
     }
 

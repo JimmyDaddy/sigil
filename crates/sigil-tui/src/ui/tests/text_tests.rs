@@ -28,6 +28,24 @@ fn truncate_display_width_respects_visual_budget_and_ellipsis_width() {
 }
 
 #[test]
+fn truncate_middle_display_width_preserves_path_identity_within_visual_budget() {
+    assert_eq!(
+        truncate_middle_display_width("crates/sigil-tui/src/ui/tool_card.rs", 20),
+        "crates/si..._card.rs"
+    );
+    assert_eq!(truncate_middle_display_width("abc", 10), "abc");
+    assert_eq!(truncate_middle_display_width("你好世界", 7), "你...界");
+    for width in 1..=18 {
+        assert!(
+            terminal_cell_width(&truncate_middle_display_width(
+                "dev/docs/非常长的路径/technical-solution.md",
+                width,
+            )) <= width
+        );
+    }
+}
+
+#[test]
 fn composer_cursor_width_uses_the_same_graphemes_as_rendering() {
     let family = "👨‍👩‍👧‍👦";
     assert_eq!(

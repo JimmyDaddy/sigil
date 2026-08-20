@@ -415,7 +415,9 @@ impl ConversationTaskControlProjection {
         match entry {
             SessionLogEntry::User(_) => self.clear_current(),
             SessionLogEntry::Control(control) => self.apply_control(control),
-            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResultV3(_) => {}
+            SessionLogEntry::Assistant(_)
+            | SessionLogEntry::ToolResultV3(_)
+            | SessionLogEntry::RuntimeContextSnapshotV2(_) => {}
         }
     }
 
@@ -1536,6 +1538,7 @@ fn project_session_entry(
             }
             Ok(vec![item])
         }
+        SessionLogEntry::RuntimeContextSnapshotV2(_) => Ok(Vec::new()),
         SessionLogEntry::Control(control) => project_control(
             record,
             expected_scope,

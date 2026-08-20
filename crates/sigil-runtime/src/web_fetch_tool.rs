@@ -321,6 +321,7 @@ fn webfetch_permission_plan(
             normalized: capability.safe_display_url().to_owned(),
             canonical_path: None,
             scope: ToolSubjectScope::External,
+            access: ToolAccess::Read,
         }],
         analysis: ToolAnalysisStatus::Complete,
         containment: Default::default(),

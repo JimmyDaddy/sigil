@@ -446,17 +446,25 @@ impl ContinuationSourceCatalog {
                 .expect("validated compaction plan references existing folded events");
             let entry = session_entry_from_stored_event(event)?
                 .context("folded checkpoint source is not a provider-visible message")?;
-            let message = match entry {
+            let (message, runtime_context_snapshot) = match entry {
                 SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
-                    promotion.durable_user_message
+                    (promotion.durable_user_message, false)
                 }
-                SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => message,
-                SessionLogEntry::ToolResultV3(result) => result.model_message()?,
+                SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
+                    (message, false)
+                }
+                SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => (snapshot.message, true),
+                SessionLogEntry::ToolResultV3(result) => (result.model_message()?, false),
                 SessionLogEntry::Control(_) => {
                     bail!("folded checkpoint source cannot be a control entry");
                 }
             };
-            let (trust_level, sensitivity) = if external_message_ids.contains(&message.id) {
+            let (trust_level, sensitivity) = if runtime_context_snapshot {
+                (
+                    ContextTrustLevel::ToolObservation,
+                    ContextSensitivity::Repository,
+                )
+            } else if external_message_ids.contains(&message.id) {
                 (
                     ContextTrustLevel::ExternalUntrusted,
                     ContextSensitivity::External,

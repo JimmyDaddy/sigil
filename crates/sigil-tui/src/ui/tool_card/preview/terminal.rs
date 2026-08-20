@@ -5,29 +5,12 @@ pub(in crate::ui::tool_card) fn render_terminal_task_preview_with_palette(
     accent: Color,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let subtitle = summary
-        .metadata
-        .terminal_command
-        .as_deref()
-        .map(|command| truncate_inline_text(command, 120))
-        .or_else(|| summary.metadata.terminal_log_path.clone())
-        .unwrap_or_else(|| "terminal task".to_owned());
-    let mut lines = vec![timeline_section_line_with_palette(
-        accent,
-        "terminal",
-        palette.accent_warning,
-        vec![Span::styled(
-            subtitle,
-            Style::default().fg(palette.text_muted),
-        )],
-        palette,
-    )];
+    let mut lines = Vec::new();
     if let Some(log_path) = &summary.metadata.terminal_log_path {
         lines.push(timeline_content_line(
             accent,
             vec![
-                section_badge_with_palette("log", palette.accent_secondary, palette),
-                Span::raw(" "),
+                Span::styled("↳ ", Style::default().fg(palette.accent_secondary)),
                 Span::styled(log_path.clone(), Style::default().fg(palette.text_muted)),
             ],
         ));
@@ -36,17 +19,12 @@ pub(in crate::ui::tool_card) fn render_terminal_task_preview_with_palette(
         lines.push(timeline_content_line(
             accent,
             vec![Span::styled(
-                "(no output preview)".to_owned(),
+                "— No output",
                 Style::default().fg(palette.text_muted),
             )],
         ));
     } else {
-        lines.extend(render_code_preview_lines_with_palette(
-            accent,
-            &summary.preview_lines,
-            palette.markdown_code_bg,
-            palette,
-        ));
+        lines.extend(render_terminal_output_lines(summary, accent, palette));
     }
     lines.extend(render_tool_hidden_tail(
         accent,

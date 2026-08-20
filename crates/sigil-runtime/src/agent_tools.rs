@@ -125,12 +125,14 @@ use handlers::{
     BackgroundApprovalHandler, BackgroundApprovalRequired, ChatAgentApprovalRouteHandler,
     ChatChildEventHandler, ChatChildThreadGuard,
 };
-pub(crate) use permissions::tool_registry_is_safe_readonly_for_auto_spawn;
 use permissions::{
     admit_model_agent_spawn, apply_child_permission_constraints,
-    apply_recovered_readonly_child_constraints, delegation_admission_entry,
-    mint_agent_invocation_grant, revalidate_agent_invocation_grant,
-    tool_contracts_are_safe_readonly_for_auto_spawn, tool_scope_summary,
+    apply_recovered_readonly_child_constraints, tool_contracts_are_safe_readonly_for_auto_spawn,
+    tool_scope_summary,
+};
+pub(crate) use permissions::{
+    delegation_admission_entry, mint_agent_invocation_grant, revalidate_agent_invocation_grant,
+    tool_registry_is_safe_readonly_for_auto_spawn,
 };
 use result_pages::{
     agent_result_already_delivered_tool_result, agent_result_page_tool_result,

@@ -34,7 +34,9 @@ fn started() -> ProviderPhysicalAttemptStartedEntry {
         request_material_fingerprint: "hmac-sha256:started".to_owned(),
         provider_name: "test-provider".to_owned(),
         model_name: "test-model".to_owned(),
+        request_envelope: None,
         cache_layout_proof: Some(cache_layout_proof()),
+        semantic_cache_layout_proof_v2: None,
         started_at_unix_ms: 1,
     }
 }
@@ -109,6 +111,56 @@ fn physical_attempt_projection_accepts_one_started_and_terminal() -> Result<()> 
         .expect("physical attempt should project");
     assert!(attempt.terminal.is_some());
     assert!(projection.unfinished_attempts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn physical_attempt_projection_rejects_cross_session_request_frontier() -> Result<()> {
+    let request = crate::CompletionRequest {
+        provider_name: "test-provider".to_owned(),
+        model_name: "test-model".to_owned(),
+        messages: vec![crate::ModelMessage::user("current request")],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: Some(128),
+        reasoning_effort: None,
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+        hosted_tools: Vec::new(),
+    };
+    let frozen = crate::FrozenProviderRequestMaterial::freeze("session-provider-attempt", request)?;
+    let layout = frozen.cache_layout_proof(None)?;
+    let mut entry = started();
+    entry.request_material_fingerprint = frozen.fingerprint().to_owned();
+    entry.cache_layout_proof = Some(layout.clone());
+    entry.request_envelope = Some(frozen.request_envelope(
+        &layout,
+        Some(crate::ProviderRequestSourceFrontierV1 {
+            session_id: "different-session".to_owned(),
+            durable_end_offset: 1,
+            stream_sequence: None,
+            event_id: None,
+            record_checksum: None,
+        }),
+        "context-epoch:root",
+    )?);
+    let start = direct_event(
+        DurableEventType::ProviderPhysicalAttemptStarted,
+        "event-start",
+        1,
+        serde_json::to_value(entry)?,
+        Some("event-start"),
+        None,
+    );
+
+    let error =
+        ProviderPhysicalAttemptProjection::from_records(&[SessionStreamRecord::Stored(start)])
+            .expect_err("cross-session source frontier must fail closed");
+    assert!(error.to_string().contains("different session"));
     Ok(())
 }
 
@@ -457,6 +509,24 @@ async fn non_generating_attempt_records_an_input_measurement_lifecycle() -> Resu
     assert_eq!(
         attempts[0].entry.purpose,
         ProviderPhysicalAttemptPurpose::InputTokenMeasurement
+    );
+    let envelope = attempts[0]
+        .entry
+        .request_envelope
+        .as_ref()
+        .expect("new provider attempts must bind a request envelope");
+    assert!(envelope.source_frontier.is_some());
+    envelope.verify_reconstructed_request(frozen.request())?;
+    let reconstruction =
+        envelope.verify_reconstructed_request_at_frontier(store.path(), frozen.request())?;
+    let source_frontier = envelope
+        .source_frontier
+        .as_ref()
+        .expect("new provider attempts must bind a durable source frontier");
+    assert_eq!(reconstruction.session_id, source_frontier.session_id);
+    assert_eq!(
+        reconstruction.source_record_count,
+        source_frontier.stream_sequence.unwrap_or(0)
     );
     assert!(matches!(
         attempts[0].terminal.as_ref(),

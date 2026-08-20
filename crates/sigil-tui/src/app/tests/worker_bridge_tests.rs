@@ -213,8 +213,8 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
     let strip = app
         .task_strip_view()
         .expect("live task should render before durable projection arrives");
-    assert_eq!(strip.title, "Task task_1");
-    assert_eq!(strip.detail, "running · awaiting durable projection");
+    assert_eq!(strip.title, "inspect routes");
+    assert_eq!(strip.detail, "starting · loading plan steps");
     assert_eq!(strip.rows[0].label, "inspect routes");
     assert!(
         app.task_sidebar_lines()
@@ -894,7 +894,7 @@ fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()
 }
 
 #[test]
-fn esc_interrupts_active_run() -> Result<()> {
+fn esc_does_not_interrupt_an_active_run() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "long task".to_owned();
     assert!(matches!(
@@ -903,14 +903,15 @@ fn esc_interrupts_active_run() -> Result<()> {
     ));
     assert!(app.runtime.is_busy);
 
-    let cancel_action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
-    assert!(matches!(cancel_action, Some(AppAction::CancelRun)));
-    assert_eq!(app.last_notice(), Some("cancellation requested"));
+    assert!(action.is_none());
+    assert!(app.runtime.is_busy);
+    assert_ne!(app.last_notice(), Some("cancellation requested"));
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.text.contains("cancel requested"))
+            .all(|entry| !entry.text.contains("cancel requested"))
     );
     Ok(())
 }
@@ -1253,7 +1254,10 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
         prompt: "inspect before editing".to_owned(),
     })?;
     assert_eq!(app.run_phase(), RunPhase::Thinking);
-    assert_eq!(app.last_notice(), Some("planning"));
+    assert_eq!(
+        app.last_notice(),
+        Some("Plan Review · preparing a draft for your approval")
+    );
     assert!(
         app.events
             .iter()
@@ -1383,7 +1387,10 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
     })?;
 
     assert_eq!(app.run_phase(), RunPhase::Thinking);
-    assert_eq!(app.last_notice(), Some("planning task task_1"));
+    assert_eq!(
+        app.last_notice(),
+        Some("Task · creating a durable execution plan")
+    );
     assert!(
         app.events
             .iter()
@@ -1435,6 +1442,66 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
         app.last_notice(),
         Some("task task_1 failed: step gate_check failed")
     );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry.text == "Task failed: ship task\nstep gate_check failed"
+    }));
+    let task_failure_notice_count = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.text.starts_with("Task failed: ship task"))
+        .count();
+    app.handle_worker_message(WorkerMessage::RunFailed(
+        "step gate_check failed".to_owned(),
+    ))?;
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.text.starts_with("Task failed: ship task"))
+            .count(),
+        task_failure_notice_count,
+        "the generic RunFailed message must not duplicate the task terminal notice"
+    );
+    let failed_strip = app
+        .task_strip_view()
+        .expect("failed task should remain visible after worker completion");
+    assert_eq!(failed_strip.title, "ship task");
+    assert!(failed_strip.detail.contains("step gate_check failed"));
+    Ok(())
+}
+
+#[test]
+fn settled_task_closes_while_interrupted_task_remains_visible_after_restore() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let task_entry = |status| {
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskRun(
+            sigil_kernel::TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")
+                    .expect("session ref"),
+                objective: "Finish the durable plan".to_owned(),
+                title: Some("Finish the durable plan".to_owned()),
+                status,
+                reason: None,
+            },
+        ))
+    };
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.sync_current_session_state(vec![task_entry(sigil_kernel::TaskRunStatus::Completed)]);
+    assert!(app.task_strip_view().is_none());
+    assert!(
+        app.task_sidebar_lines()
+            .iter()
+            .all(|line| !line.starts_with("task:"))
+    );
+
+    app.sync_current_session_state(vec![task_entry(sigil_kernel::TaskRunStatus::Interrupted)]);
+    let restored = app
+        .task_strip_view()
+        .expect("interrupted task should remain visible and resumable");
+    assert_eq!(restored.title, "Finish the durable plan");
+    assert!(restored.detail.starts_with("interrupted"));
     Ok(())
 }
 
@@ -5008,7 +5075,12 @@ fn idle_auto_compaction_rebuilds_the_visible_task_list_from_reloaded_controls() 
         source: crate::runner::V2CompactionApplySource::IdleAutomatic,
         compaction_id: "portable-idle-task-survival".to_owned(),
         folded_event_count: 8,
-        entries,
+        entries: entries.clone(),
+    })?;
+
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: "task_compact_survival".to_owned(),
+        objective: "Execute the following user-approved structured plan".to_owned(),
     })?;
 
     let strip = app
@@ -5034,6 +5106,21 @@ fn idle_auto_compaction_rebuilds_the_visible_task_list_from_reloaded_controls() 
             .iter()
             .any(|line| line.contains("Resume implementation"))
     );
+
+    let mut manual = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    manual.handle_worker_message(WorkerMessage::V2CompactionApplied {
+        request_id: 1,
+        source: crate::runner::V2CompactionApplySource::ManualConfirmation,
+        compaction_id: "portable-manual-task-survival".to_owned(),
+        folded_event_count: 8,
+        entries,
+    })?;
+    let manual_strip = manual
+        .task_strip_view()
+        .expect("manual compaction should retain the task strip");
+    assert_eq!(manual_strip.title, "Preserve the visible task list");
+    assert!(manual_strip.detail.contains("1/2 done"));
+    assert_eq!(manual_strip.rows.len(), 2);
     Ok(())
 }
 
@@ -5354,6 +5441,57 @@ fn session_restore_rehydrates_the_complete_plan_workbench() -> Result<()> {
     assert_eq!(pending.detail.summary, "Restore the durable plan");
     assert_eq!(pending.detail.steps.len(), 1);
     assert!(!pending.workbench_open);
+    Ok(())
+}
+
+#[test]
+fn task_creation_failure_restores_the_same_actionable_plan() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text(
+            "Commit the prepared changes",
+            "Commit support crates",
+            "crates",
+        ),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("plan draft");
+    let reason = "agent display name is too long";
+    let entries = vec![
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDraftCreated(
+            draft.clone(),
+        )),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDecisionRecorded(
+            sigil_kernel::PlanDecisionRecordedEntry {
+                plan_id: draft.plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                decision: sigil_kernel::PlanDecision::TaskCreationFailed,
+                decided_by: sigil_kernel::PlanDecisionActor::System,
+                decided_at_ms: 2,
+                reason: Some(reason.to_owned()),
+            },
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::PlanTaskCreationFailed {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        error: reason.to_owned(),
+        entries,
+    })?;
+
+    let pending = app
+        .pending_plan_approval()
+        .expect("failed promotion must keep the plan actionable");
+    assert_eq!(pending.plan_id.as_deref(), Some(draft.plan_id.as_str()));
+    assert_eq!(pending.last_run_failure.as_deref(), Some(reason));
+    assert!(pending.workbench_open);
+    assert!(!app.runtime.is_busy);
+    assert_eq!(
+        app.last_notice(),
+        Some("plan could not start: agent display name is too long")
+    );
     Ok(())
 }
 

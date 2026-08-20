@@ -41,8 +41,9 @@ use mcp::{CommandStatus, check_mcp_servers, check_plugin_hooks, command_status};
 use orchestration::check_orchestration_rollout;
 use providers::{check_execution_backend, check_provider};
 use session::{
-    check_orchestration_route_disablement, check_plan_review_compatibility,
-    check_session_route_compatibility, check_session_streams, check_storage_paths, check_workspace,
+    check_cache_runtime_invariants, check_orchestration_route_disablement,
+    check_plan_review_compatibility, check_session_route_compatibility, check_session_streams,
+    check_storage_paths, check_workspace,
 };
 use terminal::check_terminal;
 pub use web::{
@@ -288,6 +289,7 @@ pub fn build_doctor_report_with_options(
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     check_storage_paths(&mut report, &sigil_paths);
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
+    check_cache_runtime_invariants(&mut report, &sigil_paths.session_log_dir);
     check_plan_review_compatibility(&mut report, &sigil_paths.session_log_dir);
     check_session_route_compatibility(&mut report, &sigil_paths.session_log_dir, &root_config);
     check_orchestration_rollout(&mut report, &root_config);

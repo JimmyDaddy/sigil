@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use sigil_kernel::{
-    CacheTokenCountV1, CacheUsageV1, ProviderChunk, ToolCallCompletionIdPolicy,
-    ToolCallStreamAccumulator, UsageStats,
+    CacheTokenCountV1, CacheUsageV1, ProviderChunk, ProviderProtocolViolation,
+    ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
 };
 
 use crate::{
@@ -14,7 +14,13 @@ pub struct StreamMapper {
     tool_parts: ToolCallStreamAccumulator,
     saw_tool_call: bool,
     reasoning_buffer: String,
+    text_protocol_tail: String,
 }
+
+// DeepSeek occasionally emits its internal DSML tool-call syntax as ordinary assistant text
+// instead of using the structured `delta.tool_calls` stream. Treating that text as a successful
+// final answer would let a task appear complete although no requested tool ever ran.
+const NATIVE_TOOL_PROTOCOL_SENTINEL: &str = "<｜｜DSML｜｜tool_calls>";
 
 impl StreamMapper {
     pub fn new(_model: impl Into<String>) -> Self {
@@ -22,6 +28,7 @@ impl StreamMapper {
             tool_parts: ToolCallStreamAccumulator::new(),
             saw_tool_call: false,
             reasoning_buffer: String::new(),
+            text_protocol_tail: String::new(),
         }
     }
 }
@@ -59,6 +66,7 @@ impl StreamMapper {
         }
         for choice in envelope.choices {
             if let Some(content) = choice.delta.content {
+                self.reject_unstructured_native_tool_protocol(&content)?;
                 chunks.push(ProviderChunk::TextDelta(content));
             }
             if let Some(reasoning_content) = choice.delta.reasoning_content {
@@ -86,10 +94,12 @@ impl StreamMapper {
                 }
                 self.tool_parts.clear();
                 self.reasoning_buffer.clear();
+                self.text_protocol_tail.clear();
             }
             if matches!(choice.finish_reason.as_deref(), Some("stop")) {
                 self.tool_parts.clear();
                 self.reasoning_buffer.clear();
+                self.text_protocol_tail.clear();
             }
         }
         Ok(chunks)
@@ -102,6 +112,28 @@ impl StreamMapper {
             .unwrap_or_default();
         self.tool_parts
             .append_delta(chunks, delta.index, delta.id, name, arguments);
+    }
+
+    fn reject_unstructured_native_tool_protocol(&mut self, text: &str) -> Result<()> {
+        let mut observed = self.text_protocol_tail.clone();
+        observed.push_str(text);
+        if observed.contains(NATIVE_TOOL_PROTOCOL_SENTINEL) {
+            return Err(ProviderProtocolViolation::UnstructuredToolInvocation.into());
+        }
+
+        let retained_chars = NATIVE_TOOL_PROTOCOL_SENTINEL
+            .chars()
+            .count()
+            .saturating_sub(1);
+        self.text_protocol_tail = observed
+            .chars()
+            .rev()
+            .take(retained_chars)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        Ok(())
     }
 }
 

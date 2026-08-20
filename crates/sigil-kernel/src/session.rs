@@ -36,9 +36,9 @@ use crate::{
     context_engine::{
         ContextBodyRef, ContextInclusionReason, ContextItem, ContextItemId, ContextPackOptions,
         ContextSensitivity, ContextSource, ContextTrustLevel,
-        DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES, PackedContext, RUNTIME_CONTEXT_V1_HEADING,
-        RUNTIME_CONTEXT_V1_NOTE, RUNTIME_CONTEXT_V1_PLACEMENT, RUNTIME_CONTEXT_V1_SCHEMA,
-        RUNTIME_CONTEXT_V1_SELECTION_POLICY, RuntimeContextCandidates, SessionArchive,
+        DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES, PackedContext, RUNTIME_CONTEXT_V2_HEADING,
+        RUNTIME_CONTEXT_V2_NOTE, RUNTIME_CONTEXT_V2_PLACEMENT, RUNTIME_CONTEXT_V2_SCHEMA,
+        RUNTIME_CONTEXT_V2_SELECTION_POLICY, RuntimeContextCandidates, SessionArchive,
         SessionArchiveEntry, context_provenance_row_v1, estimate_context_token_cost,
         pack_context_items, validate_context_render_snippet,
     },
@@ -194,7 +194,7 @@ pub use compaction_v2::{
 };
 pub use context_projection::{
     ContextTrustProjection, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, SessionContextProjection,
-    SessionProjectionEntry, TaskMemorySnapshotRelation,
+    SessionProjectionEntry, SessionProjectionOrigin, TaskMemorySnapshotRelation,
 };
 pub use continuity_v2::{
     ActiveConstraintV1, AnchoredStatementV1, CONVERSATION_CONTINUITY_V2_SCHEMA_VERSION,

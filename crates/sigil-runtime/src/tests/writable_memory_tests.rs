@@ -355,7 +355,7 @@ fn registration_exposes_explicit_memory_lifecycle_tools() {
 }
 
 #[test]
-fn remember_tools_are_always_previewed_and_approval_gated() -> Result<()> {
+fn remember_tools_require_preview_and_default_to_ask() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut registry = ToolRegistry::new();
     register_writable_memory_tools(&mut registry, test_store(temp.path(), "workspace-a"));

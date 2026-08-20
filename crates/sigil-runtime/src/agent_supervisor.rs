@@ -30,6 +30,8 @@ use control::{agent_terminal_status_from_task_child, append_control};
 #[cfg(test)]
 use guard::tool_scope_is_write_capable;
 use hash::{hash_json, hash_text, short_digest};
+#[cfg(test)]
+pub(crate) use ids::agent_thread_id_for_task_child;
 pub use ids::chat_agent_thread_id_for_call;
 use projection::build_agent_thread_result;
 pub(crate) use projection::{AgentResultMaterialization, materialize_child_agent_final_answer};

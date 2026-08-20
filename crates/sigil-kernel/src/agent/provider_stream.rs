@@ -201,6 +201,16 @@ where
             Err(_) if rejection.is_some() => {
                 ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
             }
+            Err(error)
+                if error
+                    .downcast_ref::<crate::ProviderProtocolViolation>()
+                    .is_some() =>
+            {
+                // A typed adapter protocol violation proves that a provider response was parsed,
+                // even when the violating frame was rejected before it could become a durable
+                // TextDelta or tool-call event.
+                ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
+            }
             Err(_) if physical_attempt.has_durable_output_or_side_effect() => {
                 ProviderPhysicalAttemptOutcome::FailedAfterOutputOrSideEffect
             }

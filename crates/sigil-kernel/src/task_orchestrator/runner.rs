@@ -73,15 +73,16 @@ impl RecoverableTaskGuidance {
 
 /// Resolves the one unfinished guidance materialization for `task_id`.
 ///
-/// Sensitive materializations fail closed unless the caller re-enters exact prompt text matching
-/// the durable safe projection and hash. Incomplete, orphaned, duplicate, or concurrent
+/// Sensitive materializations use their bounded safe projection after process recovery; an
+/// explicitly supplied guidance string must still match the durable projection and hash.
+/// Incomplete, orphaned, duplicate, or concurrent
 /// materializations also fail closed so a generic `/task continue` cannot guess which durable
 /// authority to consume.
 ///
 /// # Errors
 ///
 /// Returns an error when the current accepted plan or its guidance materialization history is
-/// inconsistent, or when exact prompt material must be entered again after process loss.
+/// inconsistent.
 pub fn recoverable_task_guidance(
     session: &Session,
     task_id: &TaskId,
@@ -139,7 +140,7 @@ pub fn recoverable_task_guidance(
             .collect::<Vec<_>>();
         let [materialized] = materializations.as_slice() else {
             bail!(
-                "accepted task guidance has no unique durable materialization; re-enter the guidance"
+                "accepted task guidance has no unique durable materialization; repair the durable guidance record"
             );
         };
         materialized.validate_against(applied)?;
@@ -147,20 +148,15 @@ pub fn recoverable_task_guidance(
         let recovered_guidance = match exact_guidance {
             Some(exact_guidance) => {
                 let projected = crate::project_conversation_prompt_for_persistence(exact_guidance);
-                if projected.prompt_hash != materialized.prompt_hash
-                    || projected.safe_prompt != materialized.guidance
-                    || projected.exact_prompt_required != materialized.exact_prompt_required
-                {
-                    bail!(
-                        "explicit guidance conflicts with unfinished durable task guidance; re-enter the exact accepted guidance"
-                    );
+                let matches_exact_materialization = projected.prompt_hash
+                    == materialized.prompt_hash
+                    && projected.safe_prompt == materialized.guidance
+                    && projected.exact_prompt_required == materialized.exact_prompt_required;
+                let matches_safe_materialization = projected.safe_prompt == materialized.guidance;
+                if !matches_exact_materialization && !matches_safe_materialization {
+                    bail!("explicit guidance conflicts with unfinished durable task guidance");
                 }
                 exact_guidance.to_owned()
-            }
-            None if materialized.exact_prompt_required => {
-                bail!(
-                    "accepted task guidance requires exact prompt material after recovery; re-enter the guidance"
-                );
             }
             None => materialized.guidance.clone(),
         };
@@ -207,8 +203,7 @@ pub fn recoverable_task_guidance(
 /// Resolves one unconsumed guidance selection/promotion for the current accepted Task plan.
 ///
 /// This covers the crash boundary after routing/queue promotion is durable but before planner
-/// dispatch. Safe guidance can be reconstructed from the authority. Sensitive guidance requires
-/// matching process-local text to be supplied again.
+/// dispatch. Safe guidance can be reconstructed from the authority after process recovery.
 ///
 /// # Errors
 ///
@@ -503,19 +498,15 @@ fn recover_guidance_review_text(
     match exact_guidance {
         Some(exact_guidance) => {
             let projected = crate::project_conversation_prompt_for_persistence(exact_guidance);
-            if projected.prompt_hash != prompt_hash
-                || projected.safe_prompt != safe_guidance
-                || projected.exact_prompt_required != exact_prompt_required
-            {
-                bail!(
-                    "explicit guidance conflicts with pending durable task guidance; re-enter the exact selected guidance"
-                );
+            let matches_exact_materialization = projected.prompt_hash == prompt_hash
+                && projected.safe_prompt == safe_guidance
+                && projected.exact_prompt_required == exact_prompt_required;
+            let matches_safe_materialization = projected.safe_prompt == safe_guidance;
+            if !matches_exact_materialization && !matches_safe_materialization {
+                bail!("explicit guidance conflicts with pending durable task guidance");
             }
             Ok(exact_guidance.to_owned())
         }
-        None if exact_prompt_required => bail!(
-            "pending task guidance requires exact prompt material after recovery; re-enter the guidance"
-        ),
         None => Ok(safe_guidance.to_owned()),
     }
 }
@@ -715,11 +706,13 @@ where
                     .await;
                 match planner_output {
                     Ok(TaskPlannerSessionRunOutcome::Accepted(output)) => {
-                        validate_isolated_planner_output(&request, &attempt, &output)?;
-                        append_task_control(
+                        commit_task_planner_output(
                             session,
                             handler,
-                            ControlEntry::TaskPlan(output.accepted_plan.clone()),
+                            &request,
+                            &attempt.attempt_id,
+                            &attempt.child_session_ref,
+                            &output,
                         )?;
                         let result = participant_result_entry(
                             &attempt,
@@ -937,11 +930,13 @@ where
             .await?;
         match outcome {
             TaskPlannerSessionRunOutcome::Accepted(output) => {
-                validate_isolated_planner_output(&request, &attempt, &output)?;
-                append_task_control(
+                commit_task_planner_output(
                     session,
                     handler,
-                    ControlEntry::TaskPlan(output.accepted_plan.clone()),
+                    &request,
+                    &attempt.attempt_id,
+                    &attempt.child_session_ref,
+                    &output,
                 )?;
                 let result = participant_result_entry(
                     &attempt,
@@ -1136,11 +1131,12 @@ where
         let guidance = normalize_task_guidance(Some(guidance))
             .ok_or_else(|| anyhow!("bound task guidance is empty"))?;
         let prompt_projection = crate::project_conversation_prompt_for_persistence(&guidance);
-        if prompt_projection.prompt_hash != binding.prompt_hash
-            || prompt_projection.safe_prompt != binding.guidance
-            || prompt_projection.exact_prompt_required != binding.exact_prompt_required
-        {
-            bail!("bound task guidance no longer matches its exact prompt material");
+        let matches_exact_materialization = prompt_projection.prompt_hash == binding.prompt_hash
+            && prompt_projection.safe_prompt == binding.guidance
+            && prompt_projection.exact_prompt_required == binding.exact_prompt_required;
+        let matches_safe_materialization = prompt_projection.safe_prompt == binding.guidance;
+        if !matches_exact_materialization && !matches_safe_materialization {
+            bail!("bound task guidance no longer matches its durable projection");
         }
         if binding.task_id != request.task_id {
             bail!("bound task guidance targets a different task");
@@ -1213,7 +1209,7 @@ where
                 .collect::<Vec<_>>();
             let [materialized] = materializations.as_slice() else {
                 bail!(
-                    "bound task guidance has no unique durable materialization; re-enter the guidance"
+                    "bound task guidance has no unique durable materialization; repair the durable guidance record"
                 );
             };
             materialized.validate_against(&applied)?;
@@ -1425,9 +1421,9 @@ where
                     plan_version,
                     &accepted_plan,
                     &output.accepted_plan,
+                    &output.step_contracts,
                 )?;
-                let mut replan_controls =
-                    vec![ControlEntry::TaskPlan(output.accepted_plan.clone())];
+                let mut replan_controls = planner_plan_commit_controls(&output)?;
                 replan_controls.extend(carried_steps.into_iter().map(ControlEntry::TaskStep));
                 (
                     None,
@@ -1686,6 +1682,13 @@ where
                 let mut batch_requests = Vec::with_capacity(runnable.steps.len());
                 let mut child_effects = Vec::with_capacity(runnable.steps.len());
                 for step in runnable.steps {
+                    let (scoped_objective, step_contract) = task_step_prompt_context(
+                        session,
+                        &request.task_id,
+                        plan_version,
+                        &step.step_id,
+                        &request.objective,
+                    );
                     let dependency_results = task_step_dependency_result_context(
                         session,
                         &request.task_id,
@@ -1724,10 +1727,11 @@ where
                         &attempt,
                     )?;
                     let prompt = if step.role == AgentRole::Executor {
-                        executor_step_prompt(
-                            &request.objective,
+                        executor_step_prompt_with_contract(
+                            &scoped_objective,
                             plan_version,
                             &step,
+                            step_contract.as_ref(),
                             dependency_results.as_deref(),
                             guidance_for_step(
                                 guidance.as_deref(),
@@ -1736,10 +1740,11 @@ where
                             ),
                         )
                     } else {
-                        subagent_step_prompt(
-                            &request.objective,
+                        subagent_step_prompt_with_contract(
+                            &scoped_objective,
                             plan_version,
                             &step,
+                            step_contract.as_ref(),
                             dependency_results.as_deref(),
                             guidance_for_step(
                                 guidance.as_deref(),
@@ -2014,19 +2019,28 @@ where
                         else {
                             continue 'scheduler;
                         };
+                        let status = step_output.status;
                         step_outputs.push(step_output);
+                        let task_status = task_status_from_step_status(status);
                         append_task_run(
                             session,
                             handler,
                             &request,
-                            TaskRunStatus::Failed,
-                            Some(format!("step {} failed: {error:#}", step.step_id.as_str())),
+                            task_status,
+                            Some(if status == TaskStepStatus::Blocked {
+                                format!(
+                                    "step {} needs a recoverable retry: {error:#}",
+                                    step.step_id.as_str()
+                                )
+                            } else {
+                                format!("step {} failed: {error:#}", step.step_id.as_str())
+                            }),
                         )?;
                         return Ok(SequentialTaskRunOutput {
                             task_id: request.task_id,
                             plan_version: Some(plan_version),
                             steps: step_outputs,
-                            status: TaskRunStatus::Failed,
+                            status: task_status,
                             pending_user_input: None,
                         });
                     }
@@ -2116,12 +2130,28 @@ where
             write_lease_id,
             WriteLeaseReleaseStatus::Interrupted,
         )?;
+        let recoverable = error.downcast_ref::<TaskParticipantRetryError>().is_some()
+            || error
+                .downcast_ref::<super::TaskParticipantRetryRouteDriftError>()
+                .is_some()
+            || error
+                .downcast_ref::<crate::ProviderProtocolViolation>()
+                .is_some();
+        let step_status = if recoverable {
+            TaskStepStatus::Blocked
+        } else {
+            TaskStepStatus::Failed
+        };
         append_participant_terminal(
             session,
             handler,
             attempt,
-            TaskParticipantAttemptStatus::Failed,
-            Some(format!("step failed: {error:#}")),
+            participant_status_from_step_status(step_status),
+            Some(if recoverable {
+                format!("step requires recoverable retry: {error:#}")
+            } else {
+                format!("step failed: {error:#}")
+            }),
         )?;
         let readiness =
             task_step_failure_readiness_nonblocking(session, request, step, step_options).await?;
@@ -2131,23 +2161,25 @@ where
             &request.task_id,
             plan_version,
             step,
-            TaskStepStatus::Failed,
+            step_status,
             None,
             Some(format!("{error:#}")),
         )?;
-        append_cancelled_dependent_steps(
-            session,
-            handler,
-            &request.task_id,
-            plan_version,
-            plan_steps,
-            &step.step_id,
-            TaskStepStatus::Failed,
-        )?;
+        if !recoverable {
+            append_cancelled_dependent_steps(
+                session,
+                handler,
+                &request.task_id,
+                plan_version,
+                plan_steps,
+                &step.step_id,
+                TaskStepStatus::Failed,
+            )?;
+        }
         append_task_readiness(session, handler, readiness.clone())?;
         Ok(Some(SequentialTaskStepOutput {
             step_id: step.step_id.clone(),
-            status: TaskStepStatus::Failed,
+            status: step_status,
             verification_verdict: readiness.evaluation.verification_verdict,
             visible_state: readiness.evaluation.visible_state,
             outcome: AgentRunOutcome::default(),
@@ -2304,7 +2336,7 @@ where
             step,
             status,
             Some(bounded_task_participant_summary(&output.final_text)),
-            step_reason_from_output(status, &output),
+            step_reason_after_readiness(status, &output, &readiness),
         )?;
         if cancels_dependent_steps(status) {
             append_cancelled_dependent_steps(
@@ -2588,7 +2620,7 @@ where
             &step,
             status,
             Some(bounded_task_participant_summary(&output.final_text)),
-            step_reason_from_output(status, &output),
+            step_reason_after_readiness(status, &output, &readiness),
         )?;
         append_task_readiness(session, handler, readiness.clone())?;
         let task_status = if status == TaskStepStatus::Completed {
@@ -2644,6 +2676,13 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let (scoped_objective, step_contract) = task_step_prompt_context(
+            parent_session,
+            &request.task_id,
+            plan_version,
+            &step.step_id,
+            &request.objective,
+        );
         let dependency_results = task_step_dependency_result_context(
             parent_session,
             &request.task_id,
@@ -2651,18 +2690,20 @@ where
             step,
         )?;
         let prompt = if step.role == AgentRole::Executor {
-            executor_step_prompt(
-                &request.objective,
+            executor_step_prompt_with_contract(
+                &scoped_objective,
                 plan_version,
                 step,
+                step_contract.as_ref(),
                 dependency_results.as_deref(),
                 guidance,
             )
         } else {
-            subagent_step_prompt(
-                &request.objective,
+            subagent_step_prompt_with_contract(
+                &scoped_objective,
                 plan_version,
                 step,
+                step_contract.as_ref(),
                 dependency_results.as_deref(),
                 guidance,
             )
@@ -2969,8 +3010,9 @@ where
                 handler,
                 request,
                 TaskRunStatus::Completed,
-                Some(format!(
-                    "completed plan v{plan_version} after final synthesis"
+                Some(task_completion_reason(
+                    task,
+                    format!("completed plan v{plan_version} after final synthesis"),
                 )),
             )?;
             return Ok(TaskRunStatus::Completed);
@@ -3005,8 +3047,9 @@ where
                 handler,
                 request,
                 TaskRunStatus::Completed,
-                Some(format!(
-                    "completed plan v{plan_version} after recovered synthesis"
+                Some(task_completion_reason(
+                    task,
+                    format!("completed plan v{plan_version} after recovered synthesis"),
                 )),
             )?;
             return Ok(TaskRunStatus::Completed);
@@ -3166,12 +3209,30 @@ where
                 handler,
                 request,
                 TaskRunStatus::Completed,
-                Some(format!(
-                    "completed plan v{plan_version} after final synthesis"
+                Some(task_completion_reason(
+                    &session
+                        .task_state_projection()
+                        .tasks
+                        .get(&request.task_id)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("task disappeared after final synthesis"))?,
+                    format!("completed plan v{plan_version} after final synthesis"),
                 )),
             )?;
             return Ok(TaskRunStatus::Completed);
         }
+    }
+}
+
+fn task_completion_reason(task: &TaskRunProjection, base: String) -> String {
+    if task.steps.values().any(|step| {
+        step.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("completed with warnings"))
+    }) {
+        format!("{base} with warnings")
+    } else {
+        base
     }
 }
 
@@ -3377,6 +3438,231 @@ pub fn reconcile_task_final_answer_prefix(session: &mut Session, task_id: &TaskI
     Ok(true)
 }
 
+/// Reprojects blocked task steps when their durable participant evidence already proves a
+/// successful completion. This is append-only and uses the normal task-step writer; callers never
+/// edit the session JSONL representation directly.
+pub fn reconcile_task_step_projections(session: &mut Session, task_id: &TaskId) -> Result<usize> {
+    let projection = session.task_state_projection();
+    let Some(task) = projection.tasks.get(task_id).cloned() else {
+        return Ok(0);
+    };
+    let Some(plan_version) = task.latest_plan_version else {
+        return Ok(0);
+    };
+    let Some(plan) = task.plans.get(&plan_version) else {
+        return Ok(0);
+    };
+    let verification = session.verification_state_projection();
+    let mut repairs = Vec::new();
+    for step in &plan.steps {
+        let Some(projected) = task.steps.get(&(plan_version, step.step_id.clone())) else {
+            continue;
+        };
+        if projected.status != TaskStepStatus::Blocked {
+            continue;
+        }
+        let evidence = task
+            .participant_attempts
+            .values()
+            .filter(|attempt| {
+                attempt.purpose == TaskParticipantPurpose::Step
+                    && attempt.plan_version == Some(plan_version)
+                    && attempt.step_id.as_ref() == Some(&step.step_id)
+                    && matches!(
+                        attempt.status,
+                        TaskParticipantAttemptStatus::Completed
+                            | TaskParticipantAttemptStatus::Blocked
+                    )
+            })
+            .filter_map(|attempt| {
+                task.participant_results
+                    .get(&attempt.attempt_id)
+                    .filter(|result| {
+                        participant_result_proves_completed_step(
+                            &verification,
+                            task_id,
+                            step,
+                            attempt,
+                            result,
+                        )
+                    })
+                    .map(|result| (attempt.ordinal, result))
+            })
+            .max_by_key(|(ordinal, _)| *ordinal);
+        if let Some((_, result)) = evidence {
+            repairs.push((step.clone(), result.summary.clone()));
+        }
+    }
+    if repairs.is_empty() {
+        return Ok(0);
+    }
+    let mut handler = crate::NoopEventHandler;
+    for (step, summary) in &repairs {
+        append_reprojected_readiness_if_needed(session, task_id, step)?;
+        append_task_step(
+            session,
+            &mut handler,
+            task_id,
+            plan_version,
+            step,
+            TaskStepStatus::Completed,
+            Some(summary.clone()),
+            Some("reprojected from completed participant evidence".to_owned()),
+        )?;
+    }
+    Ok(repairs.len())
+}
+
+/// Accepts both clean participant completion and the legacy shape where the participant was
+/// marked blocked after it had already persisted a final answer.  The latter is safe to repair
+/// only when the durable readiness projection has no required action and has a non-failing
+/// verification verdict; a final answer by itself must not erase a current readiness blocker.
+fn participant_result_proves_completed_step(
+    verification: &crate::VerificationStateProjection,
+    task_id: &TaskId,
+    step: &TaskStepSpec,
+    attempt: &TaskParticipantAttemptEntry,
+    result: &TaskParticipantResultEntry,
+) -> bool {
+    if result.summary.trim().is_empty()
+        || result.final_answer_ref.is_none() && result.verification_refs.is_empty()
+    {
+        return false;
+    }
+    if result.terminal_status == Some(TaskParticipantAttemptStatus::Completed) {
+        return true;
+    }
+    if result.terminal_status != Some(TaskParticipantAttemptStatus::Blocked)
+        || attempt.status != TaskParticipantAttemptStatus::Blocked
+        || result.final_answer_ref.is_none()
+    {
+        return false;
+    }
+    let scope = EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step.step_id.as_str()));
+    let Some(readiness) = verification.latest_readiness(&scope) else {
+        return false;
+    };
+    readiness.evaluation.required_actions.is_empty()
+        && matches!(
+            readiness.evaluation.verification_verdict,
+            VerificationVerdict::NotApplicable
+                | VerificationVerdict::Passed
+                | VerificationVerdict::Skipped
+        )
+}
+
+fn append_reprojected_readiness_if_needed(
+    session: &mut Session,
+    task_id: &TaskId,
+    step: &TaskStepSpec,
+) -> Result<()> {
+    let scope = EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step.step_id.as_str()));
+    let Some(mut readiness) = session
+        .verification_state_projection()
+        .latest_readiness(&scope)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    if readiness.evaluation.run_status == RunStatus::Completed
+        && readiness.evaluation.visible_state
+            == VisibleCompletionState::derive(
+                RunStatus::Completed,
+                readiness.evaluation.verification_verdict,
+            )
+    {
+        return Ok(());
+    }
+    readiness.evaluation.run_status = RunStatus::Completed;
+    readiness.evaluation.visible_state = VisibleCompletionState::derive(
+        RunStatus::Completed,
+        readiness.evaluation.verification_verdict,
+    );
+    session.append_control(ControlEntry::ReadinessEvaluated(readiness))?;
+    Ok(())
+}
+
+/// Requeues one blocked step without changing the accepted plan or editing historical events.
+///
+/// This is the explicit control-plane equivalent of pressing ResumeTask. The regular continuation
+/// path can discover the same step from the ready graph, while adapters that expose a step-level
+/// repair action can call this helper first. Repeating it is idempotent once the step is pending.
+pub fn retry_blocked_step(
+    session: &mut Session,
+    task_id: &TaskId,
+    plan_version: u32,
+    step_id: &TaskStepId,
+) -> Result<bool> {
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| anyhow!("task is missing during blocked-step retry"))?;
+    let plan = task
+        .plans
+        .get(&plan_version)
+        .ok_or_else(|| anyhow!("task plan v{plan_version} is missing during blocked-step retry"))?;
+    let step = plan
+        .steps
+        .iter()
+        .find(|step| &step.step_id == step_id)
+        .ok_or_else(|| anyhow!("task plan v{plan_version} has no step {}", step_id.as_str()))?;
+    let status = task
+        .steps
+        .get(&(plan_version, step_id.clone()))
+        .map(|step| step.status)
+        .unwrap_or(TaskStepStatus::Pending);
+    if status == TaskStepStatus::Pending {
+        return Ok(false);
+    }
+    if !matches!(
+        status,
+        TaskStepStatus::Blocked
+            | TaskStepStatus::Failed
+            | TaskStepStatus::Interrupted
+            | TaskStepStatus::Cancelled
+    ) {
+        return Ok(false);
+    }
+    let mut handler = crate::NoopEventHandler;
+    append_task_step(
+        session,
+        &mut handler,
+        task_id,
+        plan_version,
+        step,
+        TaskStepStatus::Pending,
+        None,
+        Some("explicit retry_blocked_step recovery".to_owned()),
+    )?;
+    Ok(true)
+}
+
+/// Reconciles one completed step projection from durable participant evidence.
+pub fn reconcile_completed_step(
+    session: &mut Session,
+    task_id: &TaskId,
+    plan_version: u32,
+    step_id: &TaskStepId,
+) -> Result<bool> {
+    let before = session
+        .task_state_projection()
+        .tasks
+        .get(task_id)
+        .and_then(|task| task.steps.get(&(plan_version, step_id.clone())))
+        .map(|step| step.status);
+    let repaired = reconcile_task_step_projections(session, task_id)?;
+    let after = session
+        .task_state_projection()
+        .tasks
+        .get(task_id)
+        .and_then(|task| task.steps.get(&(plan_version, step_id.clone())))
+        .map(|step| step.status);
+    Ok(repaired > 0
+        && before != Some(TaskStepStatus::Completed)
+        && after == Some(TaskStepStatus::Completed))
+}
+
 async fn await_pending_step_retries(
     task: &TaskRunProjection,
     plan_version: u32,
@@ -3497,7 +3783,8 @@ where
     let mut terminal = attempt.clone();
     terminal.status = TaskParticipantAttemptStatus::Failed;
     terminal.reason = Some(crate::safe_persistence_text(&format!(
-        "provider pressure retry scheduled after {} ms",
+        "{} retry scheduled after {} ms",
+        schedule.proof.recovery_label(),
         schedule.retry_after_ms
     )));
     let pending = TaskStepEntry {
@@ -3509,7 +3796,8 @@ where
         title: Some(crate::safe_persistence_text(&step.title)),
         summary: None,
         reason: Some(format!(
-            "provider pressure retry {} scheduled after {} ms",
+            "{} retry {} scheduled after {} ms",
+            schedule.proof.recovery_label(),
             retry_count.saturating_add(1),
             schedule.retry_after_ms
         )),
@@ -3556,7 +3844,8 @@ where
     let mut terminal = attempt.clone();
     terminal.status = TaskParticipantAttemptStatus::Failed;
     terminal.reason = Some(crate::safe_persistence_text(&format!(
-        "provider pressure retry scheduled after {} ms",
+        "{} retry scheduled after {} ms",
+        schedule.proof.recovery_label(),
         schedule.retry_after_ms
     )));
     append_task_controls(
@@ -3902,7 +4191,25 @@ fn validate_isolated_planner_output(
     attempt: &TaskParticipantAttemptEntry,
     output: &TaskPlannerSessionRunOutput,
 ) -> Result<()> {
-    validate_participant_output_identity(attempt, &output.attempt_id, &output.child_session_ref)?;
+    validate_task_planner_output(
+        request,
+        &attempt.attempt_id,
+        &attempt.child_session_ref,
+        output,
+    )
+}
+
+fn validate_task_planner_output(
+    request: &SequentialTaskRequest,
+    expected_attempt_id: &TaskParticipantAttemptId,
+    expected_child_session_ref: &SessionRef,
+    output: &TaskPlannerSessionRunOutput,
+) -> Result<()> {
+    if &output.attempt_id != expected_attempt_id
+        || &output.child_session_ref != expected_child_session_ref
+    {
+        bail!("isolated planner returned output for a different participant attempt");
+    }
     let plan = &output.accepted_plan;
     if plan.task_id != request.task_id {
         bail!("isolated planner returned a plan for a different task");
@@ -3911,7 +4218,121 @@ fn validate_isolated_planner_output(
         bail!("isolated planner did not return a non-empty accepted plan");
     }
     TaskGraphProjection::from_plan_entry(plan)?;
+    if !output.step_contracts.is_empty() {
+        let mut contracted_steps = BTreeSet::new();
+        for binding in &output.step_contracts {
+            binding.validate()?;
+            if binding.task_id != plan.task_id || binding.plan_version != plan.plan_version {
+                bail!("isolated planner returned a step contract for another plan");
+            }
+            if !plan
+                .steps
+                .iter()
+                .any(|step| step.step_id == binding.step_id)
+            {
+                bail!("isolated planner returned a contract for an unknown step");
+            }
+            if !contracted_steps.insert(binding.step_id.clone()) {
+                bail!("isolated planner returned duplicate step contracts");
+            }
+        }
+        if contracted_steps.len() != plan.steps.len() {
+            bail!("isolated planner returned an incomplete V2 step contract set");
+        }
+    }
     Ok(())
+}
+
+/// Atomically commits a validated isolated planner result to its parent session.
+///
+/// The child transcript is durable before this function is called. Committing the complete plan
+/// and V2 contract marker before the runtime records the child as complete closes the recovery
+/// gap where a completed planner child could otherwise be stranded without an executable parent
+/// plan. Repeated calls accept only the exact previously committed control batch.
+pub fn commit_task_planner_output<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    expected_attempt_id: &TaskParticipantAttemptId,
+    expected_child_session_ref: &SessionRef,
+    output: &TaskPlannerSessionRunOutput,
+) -> Result<bool>
+where
+    H: EventHandler + Send,
+{
+    validate_task_planner_output(
+        request,
+        expected_attempt_id,
+        expected_child_session_ref,
+        output,
+    )?;
+    let controls = planner_plan_commit_controls(output)?;
+    if planner_output_is_already_committed(session, output) {
+        return Ok(false);
+    }
+    if session
+        .task_state_projection()
+        .tasks
+        .get(&request.task_id)
+        .is_some_and(|task| task.plans.contains_key(&output.accepted_plan.plan_version))
+    {
+        bail!(
+            "task plan v{} is partially committed or conflicts with the planner output",
+            output.accepted_plan.plan_version
+        );
+    }
+    append_task_controls(session, handler, controls)?;
+    Ok(true)
+}
+
+fn planner_output_is_already_committed(
+    session: &Session,
+    output: &TaskPlannerSessionRunOutput,
+) -> bool {
+    let projection = session.task_state_projection();
+    let Some(plan) = projection
+        .tasks
+        .get(&output.accepted_plan.task_id)
+        .and_then(|task| task.plans.get(&output.accepted_plan.plan_version))
+    else {
+        return false;
+    };
+    if plan.status != output.accepted_plan.status
+        || plan.steps != output.accepted_plan.steps
+        || plan.reason != output.accepted_plan.reason
+    {
+        return false;
+    }
+    if output.step_contracts.is_empty() {
+        return plan.step_contracts.is_empty() && !plan.contract_set_committed_v2;
+    }
+    plan.contract_set_committed_v2
+        && plan.step_contracts.len() == output.step_contracts.len()
+        && output
+            .step_contracts
+            .iter()
+            .all(|binding| plan.step_contracts.get(&binding.step_id) == Some(&binding.contract))
+}
+
+fn planner_plan_commit_controls(output: &TaskPlannerSessionRunOutput) -> Result<Vec<ControlEntry>> {
+    let mut controls = Vec::with_capacity(output.step_contracts.len().saturating_add(2));
+    controls.push(ControlEntry::TaskPlan(output.accepted_plan.clone()));
+    controls.extend(
+        output
+            .step_contracts
+            .iter()
+            .cloned()
+            .map(ControlEntry::TaskStepContractBoundV2),
+    );
+    if !output.step_contracts.is_empty() {
+        controls.push(ControlEntry::TaskPlanContractSetCommittedV2(
+            crate::TaskPlanContractSetCommittedV2::new(
+                &output.accepted_plan,
+                &output.step_contracts,
+            )?,
+        ));
+    }
+    Ok(controls)
 }
 
 fn validate_isolated_planner_suspension(
@@ -3940,6 +4361,27 @@ fn guidance_for_step<'a>(
             .map(|targets| targets.contains(step_id))
             .unwrap_or(true)
     })
+}
+
+fn task_step_prompt_context(
+    session: &Session,
+    task_id: &TaskId,
+    plan_version: u32,
+    step_id: &TaskStepId,
+    fallback_objective: &str,
+) -> (String, Option<TaskStepContractV2>) {
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(task_id);
+    let objective = task
+        .and_then(|task| task.title.as_deref())
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(fallback_objective)
+        .to_owned();
+    let contract = task
+        .and_then(|task| task.plans.get(&plan_version))
+        .and_then(|plan| plan.step_contracts.get(step_id))
+        .cloned();
+    (objective, contract)
 }
 
 fn validate_guidance_replan(
@@ -3974,6 +4416,7 @@ fn completed_steps_for_replan(
     current_plan_version: u32,
     current_plan: &TaskPlanEntry,
     next_plan: &TaskPlanEntry,
+    next_contracts: &[TaskStepContractBoundEntryV2],
 ) -> Result<Vec<TaskStepEntry>> {
     let mut carried = Vec::new();
     for step in &current_plan.steps {
@@ -3997,6 +4440,20 @@ fn completed_steps_for_replan(
         if !task_steps_semantically_equal(next_step, step) {
             bail!(
                 "task guidance replan changed completed step {}",
+                step.step_id.as_str()
+            );
+        }
+        let current_contract = task
+            .plans
+            .get(&current_plan_version)
+            .and_then(|plan| plan.step_contracts.get(&step.step_id));
+        let next_contract = next_contracts
+            .iter()
+            .find(|binding| binding.step_id == step.step_id)
+            .map(|binding| &binding.contract);
+        if current_contract != next_contract {
+            bail!(
+                "task guidance replan changed completed step contract {}",
                 step.step_id.as_str()
             );
         }

@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::app::{AppState, PaneFocus};
@@ -30,6 +30,9 @@ use super::{
     user_input_form::render_user_input_form,
 };
 
+const FOOTER_GIT_MIN_WIDTH: u16 = 12;
+const FOOTER_SECTION_GAP: u16 = 1;
+
 pub fn render(frame: &mut Frame, app: &AppState) {
     app.begin_egress_disclosure_frame();
     let theme = theme::resolve_for_app(app);
@@ -46,6 +49,10 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         return;
     }
 
+    // Ratatui retains the current buffer while resizing. Styling the base block alone does not
+    // replace its symbols, so an explicit reset prevents old wrapped timeline cells from leaking
+    // into the reflowed frame.
+    frame.render_widget(Clear, frame.area());
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.palette.surface_base)),
         frame.area(),
@@ -202,7 +209,13 @@ fn footer_context_width(footer: &FooterViewModel, available_width: u16) -> u16 {
         return 0;
     }
     let preferred = terminal_cell_width(&footer.context_label) as u16;
-    preferred.min(available_width / 2).min(42)
+    let reserved_workspace_width = if footer.workspace_git_label.is_empty() {
+        0
+    } else {
+        FOOTER_GIT_MIN_WIDTH + FOOTER_SECTION_GAP
+    };
+
+    preferred.min(available_width.saturating_sub(reserved_workspace_width))
 }
 
 pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {

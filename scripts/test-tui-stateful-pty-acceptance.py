@@ -26,9 +26,10 @@ SPEC.loader.exec_module(MODULE)
 
 def passed_checks() -> dict[str, object]:
     return {
-        "provider_request_count": 5,
+        "provider_request_count": 6,
         "plan_request_count": 1,
         "queued_follow_up_observed": True,
+        "cjk_tool_result_observed": True,
         "live_final_reply_screen_count": 1,
         "resumed_final_reply_screen_count": 1,
         "source_final_answer_count": 1,
@@ -51,6 +52,18 @@ def session_evidence() -> dict[str, dict[str, str]]:
 
 
 class VtScreenTests(unittest.TestCase):
+    def test_cache_fixture_is_cold_then_warm_and_aggregates_to_8_percent(self) -> None:
+        observations = [MODULE.cache_usage_for_request(index) for index in range(1, 6)]
+
+        self.assertEqual(observations[0]["prompt_cache_hit_tokens"], 0)
+        self.assertEqual(observations[0]["prompt_cache_miss_tokens"], 500_000)
+        self.assertTrue(
+            all(item["prompt_cache_hit_tokens"] == 50_000 for item in observations[1:])
+        )
+        hits = sum(item["prompt_cache_hit_tokens"] for item in observations)
+        misses = sum(item["prompt_cache_miss_tokens"] for item in observations)
+        self.assertEqual(hits * 100 // (hits + misses), 8)
+
     def test_final_screen_replaces_prior_full_screen_paints(self) -> None:
         canary = MODULE.FINAL_CANARY
         stream = (

@@ -16,12 +16,12 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ApprovalMode, ContextBodyRef, ContextInclusionReason, ContextItem, ContextScoreComponent,
     ContextScoreComponentKind, ContextSensitivity, ContextSource, ContextTrustLevel,
-    MEMORY_STATEMENT_MAX_BYTES, Tool, ToolAccess, ToolAnalysisStatus, ToolCategory, ToolContext,
-    ToolMutationTracking, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
-    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
-    atomic_publish_private_file, estimate_context_token_cost, remember_memory_tool_spec,
-    safe_persistence_text, secure_private_path_permissions,
+    MEMORY_STATEMENT_MAX_BYTES, Tool, ToolAccess, ToolAnalysisStatus, ToolCategory,
+    ToolConcurrencyClass, ToolContext, ToolMutationTracking, ToolOperation, ToolPermissionEffect,
+    ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreview, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject,
+    ToolSubjectKind, ToolSubjectScope, atomic_publish_private_file, estimate_context_token_cost,
+    remember_memory_tool_spec, safe_persistence_text, secure_private_path_permissions,
 };
 
 pub use sigil_kernel::{REMEMBER_PROJECT_FACT_TOOL_NAME, REMEMBER_USER_PREFERENCE_TOOL_NAME};
@@ -1070,6 +1070,10 @@ impl Tool for InspectMemoryTool {
         ToolMutationTracking::None
     }
 
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
+    }
+
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let scope = parse_scope(args.get("scope").and_then(Value::as_str))?;
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
@@ -1217,6 +1221,7 @@ fn memory_write_permission_plan(
         normalized: format!("durable-memory:{scope_label}"),
         canonical_path: None,
         scope: ToolSubjectScope::Unknown,
+        access: ToolAccess::Write,
     };
     let mut semantic_scope = ToolSemanticScope::new("durable_memory", 1);
     semantic_scope

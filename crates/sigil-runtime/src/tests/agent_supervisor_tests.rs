@@ -30,25 +30,28 @@ use sigil_kernel::{
     MemoryConfig, MessageRole, ModelMessage, ModelRef, MultiAgentMode, NetworkPolicy,
     PermissionConfig, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
     PlanPermissionGrantedEntry, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ProviderRequestRejection,
-    ReasoningStreamSupport, ResolvedModelRoute, RootConfig, RunCancellationOwner, RunEvent,
-    Session, SessionConfig, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
-    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus,
-    TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal, TaskIntegrationRunRequest,
-    TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose, TaskParticipantRetryError,
-    TaskParticipantRetryProof, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+    ProviderPhysicalAttemptOutcome, ProviderProtocolViolation, ProviderRateLimitError,
+    ProviderRequestRejection, ReasoningStreamSupport, ResolvedModelRoute, RootConfig,
+    RunCancellationOwner, RunEvent, SequentialTaskOrchestrator, Session, SessionConfig,
+    SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    TaskChildSessionStatus, TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal,
+    TaskIntegrationRunRequest, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskParticipantRetryRouteDriftError,
+    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
     TaskPlannerSessionResumeRequest, TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability,
-    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolAnalysisStatus, ToolCall, ToolCategory,
-    ToolContext, ToolError, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolOperation,
-    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats, VerificationScope,
-    WorkspaceConfig, WriteIsolationMode, build_integration_plan, build_workspace_snapshot,
-    child_session_ref, declared_tool_permission_plan, decode_changeset_only_child_output,
-    stable_event_hash, stable_workspace_id, task_participant_attempt_id,
-    task_participant_logical_run_id, task_participant_session_ref,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest, Tool, ToolAccess,
+    ToolAnalysisStatus, ToolCall, ToolCategory, ToolContext, ToolError, ToolErrorKind,
+    ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolPermissionEffect,
+    ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, UsageStats, VerificationScope, WorkspaceConfig, WriteIsolationMode,
+    build_integration_plan, build_workspace_snapshot, child_session_ref,
+    declared_tool_permission_plan, decode_changeset_only_child_output, stable_event_hash,
+    stable_workspace_id, task_participant_attempt_id, task_participant_logical_run_id,
+    task_participant_session_ref,
 };
 
 use super::{
@@ -122,6 +125,15 @@ fn participant_session_ref_for(step_id: &str) -> Result<SessionRef> {
     let task_id = TaskId::new("task_1")?;
     let attempt_id = participant_attempt_id_for(step_id)?;
     task_participant_session_ref(&task_id, &attempt_id)
+}
+
+fn task_child_input(
+    attempt_id: &TaskParticipantAttemptId,
+    messages: Vec<ModelMessage>,
+) -> AgentRunInput {
+    AgentRunInput::without_persisted_user_message(messages)
+        .with_logical_run_id(task_participant_logical_run_id(attempt_id))
+        .with_child_cancellation(RunCancellationOwner::new().handle())
 }
 
 #[test]
@@ -236,6 +248,10 @@ struct ConnectThenRateLimitedTaskChildProvider {
 }
 
 struct OutputThenRateLimitedTaskChildProvider;
+
+struct RecoveringProtocolTaskChildProvider {
+    starts: Arc<AtomicUsize>,
+}
 
 #[async_trait]
 impl Provider for TextProvider {
@@ -615,6 +631,32 @@ impl Provider for OutputThenRateLimitedTaskChildProvider {
                 ProviderRateLimitError::new(anyhow!("rate limited after output"), Some("1")).into(),
             ),
         ])))
+    }
+}
+
+#[async_trait]
+impl Provider for RecoveringProtocolTaskChildProvider {
+    fn name(&self) -> &str {
+        "recovering-protocol-task-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if self.starts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("partial inspection".to_owned())),
+                Err(ProviderProtocolViolation::UnstructuredToolInvocation.into()),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![Ok(ProviderChunk::TextDelta(
+            "inspection completed after durable recovery".to_owned(),
+        ))])))
     }
 }
 
@@ -1490,8 +1532,48 @@ fn child_start(step: TaskStepSpec, workspace_root: PathBuf) -> Result<AgentTaskC
     let task_id = TaskId::new("task_1")?;
     let child_task_id = TaskId::new(format!("child_v1_{}", step.step_id.as_str()))?;
     let child_session_ref = child_session_ref(&task_id, &step.step_id, &child_task_id)?;
+    let role = step.role;
+    let profile_id = super::ids::profile_id_for_role(role)?;
+    let thread_id = super::agent_thread_id_for_task_child(&task_id, 1, &step, &child_task_id)?;
+    let cancellation = RunCancellationOwner::new().handle();
+    let authority = DelegationAuthority::AcceptedTaskPlan {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step.step_id.clone(),
+    };
+    let grant = AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: AgentInvocationGrantSource::AcceptedTaskPlan {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step.step_id.clone(),
+            },
+            authority: authority.clone(),
+            root_logical_run_id: "task-test-run".to_owned(),
+            profile_id: profile_id.clone(),
+            role,
+            isolation: step.effective_isolation(),
+            permission_upper_bound: PermissionConfig {
+                mode: sigil_kernel::PermissionMode::ReadOnly,
+                ..PermissionConfig::default()
+            },
+            network_upper_bound: NetworkPolicy::Deny,
+            tool_contract_fingerprint: "sha256:test-task-contracts".to_owned(),
+            workspace_snapshot_id: sigil_kernel::agent_invocation_workspace_snapshot_id(
+                &workspace_root,
+            )?,
+            root_cancellation_scope_id: cancellation.scope_id().to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )?;
+    let child_input =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("inspect code")])
+            .with_child_cancellation(cancellation)
+            .with_logical_run_id("task-test-run")
+            .with_agent_invocation_grant(grant.clone());
     Ok(AgentTaskChildStart {
-        task_id,
+        task_id: task_id.clone(),
         parent_thread_id: AgentThreadId::new("main")?,
         parent_depth: 0,
         batch_id: None,
@@ -1501,17 +1583,33 @@ fn child_start(step: TaskStepSpec, workspace_root: PathBuf) -> Result<AgentTaskC
         step,
         child_task_id,
         child_session_ref,
-        child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-            "inspect code",
-        )]),
+        child_input,
         objective: "inspect code".to_owned(),
         workspace_root,
         provider_capabilities: provider_capabilities(),
-        role: AgentRole::SubagentRead,
+        role,
         invocation_mode: AgentInvocationMode::Foreground,
         invocation_source: AgentInvocationSource::Task,
+        invocation_grant: grant.clone(),
+        delegation_admission: AgentDelegationAdmissionEntry {
+            thread_id,
+            profile_id,
+            invocation_mode: AgentInvocationMode::Foreground,
+            invocation_source: AgentInvocationSource::Task,
+            authority: DelegationAuthorityRecord::from(&authority),
+            objective_hash: super::hash_text("inspect code"),
+            tool_contract_fingerprint: "sha256:test-task-contracts".to_owned(),
+            invocation_grant: Some(grant.durable_record()?),
+            admitted_at_ms: None,
+        },
         isolated_workspace_id: None,
     })
+}
+
+fn rebind_task_delegation_admission(start: &mut AgentTaskChildStart) -> Result<()> {
+    start.delegation_admission.profile_id = super::ids::profile_id_for_role(start.role)?;
+    start.delegation_admission.invocation_mode = start.invocation_mode;
+    Ok(())
 }
 
 fn chat_child_start(profile_id: &str, workspace_root: PathBuf) -> Result<AgentChatChildStart> {
@@ -1603,6 +1701,12 @@ fn rebind_chat_delegation_admission(start: &mut AgentChatChildStart) -> Result<(
             plan_version: *plan_version,
             step_id: step_id.clone(),
         },
+        DelegationAuthorityRecord::TaskOrchestrator { task_id, phase } => {
+            DelegationAuthority::TaskOrchestrator {
+                task_id: task_id.clone(),
+                phase: *phase,
+            }
+        }
         DelegationAuthorityRecord::ModelProactive => DelegationAuthority::ModelProactive,
         DelegationAuthorityRecord::SystemRecovery => DelegationAuthority::SystemRecovery,
     };
@@ -2176,8 +2280,10 @@ fn task_batch_reservation_is_atomic_and_claimed_by_child_start() -> Result<()> {
     let supervisor = supervisor_with_budget(budget)?;
     let mut first = child_start(step("task_batch_first")?, temp.path().to_path_buf())?;
     first.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+    rebind_task_delegation_admission(&mut first)?;
     let mut second = child_start(step("task_batch_second")?, temp.path().to_path_buf())?;
     second.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+    rebind_task_delegation_admission(&mut second)?;
     let starts = vec![first, second];
 
     let reservation = supervisor.reserve_task_child_batch(&starts)?;
@@ -2210,8 +2316,10 @@ fn dropped_task_batch_reservation_releases_every_slot() -> Result<()> {
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
     let mut first = child_start(step("task_batch_drop_first")?, temp.path().to_path_buf())?;
     first.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+    rebind_task_delegation_admission(&mut first)?;
     let mut second = child_start(step("task_batch_drop_second")?, temp.path().to_path_buf())?;
     second.invocation_mode = AgentInvocationMode::JoinBeforeFinal;
+    rebind_task_delegation_admission(&mut second)?;
 
     let reservation = supervisor.reserve_task_child_batch(&[first, second])?;
     assert_eq!(supervisor.active_profile_ids().len(), 2);
@@ -2500,6 +2608,7 @@ fn supervisor_enforces_max_subagents_for_background_read_child() -> Result<()> {
     let mut handler = RecordingEventHandler::default();
     let mut start = child_start(step("background")?, temp.path().to_path_buf())?;
     start.invocation_mode = AgentInvocationMode::Background;
+    rebind_task_delegation_admission(&mut start)?;
 
     let error = supervisor
         .begin_task_child_thread(&mut session, &mut handler, start)
@@ -2591,6 +2700,7 @@ fn supervisor_denies_background_worker_even_when_scope_is_readonly() -> Result<(
     let mut start = child_start(write_step("background_write")?, temp.path().to_path_buf())?;
     start.role = AgentRole::SubagentWrite;
     start.invocation_mode = AgentInvocationMode::Background;
+    rebind_task_delegation_admission(&mut start)?;
 
     let error = supervisor
         .begin_task_child_thread(&mut session, &mut handler, start)
@@ -2712,6 +2822,7 @@ fn supervisor_denies_background_write_agents() -> Result<()> {
     let mut start = child_start(write_step("edit")?, temp.path().to_path_buf())?;
     start.role = AgentRole::SubagentWrite;
     start.invocation_mode = AgentInvocationMode::Background;
+    rebind_task_delegation_admission(&mut start)?;
 
     let _error = supervisor
         .begin_task_child_thread(&mut session, &mut handler, start)
@@ -3102,11 +3213,13 @@ async fn planner_postprocess_failure_marks_thread_failed_and_releases_slot() -> 
                     parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
                     objective: "produce a durable task plan".to_owned(),
                 },
-                attempt_id,
+                attempt_id: attempt_id.clone(),
                 child_session_ref,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("plan the task"),
-                ]),
+                ])
+                .with_child_cancellation(RunCancellationOwner::new().handle())
+                .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
                 options: run_options(temp.path().to_path_buf()),
                 discovery_options: run_options(temp.path().to_path_buf()),
             },
@@ -3217,7 +3330,9 @@ async fn planner_user_input_suspends_and_resumes_the_exact_child_session() -> Re
                         task_id: task_id.clone(),
                         attempt_id: Some(attempt_id.clone()),
                     },
-                )),
+                ))
+                .with_child_cancellation(RunCancellationOwner::new().handle())
+                .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
                 options: run_options(temp.path().to_path_buf()),
                 discovery_options: run_options(temp.path().to_path_buf()),
             },
@@ -3273,6 +3388,7 @@ async fn planner_user_input_suspends_and_resumes_the_exact_child_session() -> Re
                         },
                     ))
                     .with_logical_run_id(logical_run_id.as_str())
+                    .with_child_cancellation(RunCancellationOwner::new().handle())
                     .with_user_input_continuation_context(
                         command.identity.root_logical_run_id.as_str(),
                         route.source_thread_id.clone(),
@@ -3292,6 +3408,18 @@ async fn planner_user_input_suspends_and_resumes_the_exact_child_session() -> Re
     assert_eq!(resumed.child_session_ref, child_session_ref);
     assert_eq!(resumed.accepted_plan.plan_version, 1);
     assert!(supervisor.active_profile_ids().is_empty());
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(sigil_kernel::ControlEntry::AgentDelegationAdmitted(_))
+            ))
+            .count(),
+        2,
+        "planner resume must mint and durably admit a fresh process-local invocation grant"
+    );
     let route =
         sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
             .route(&route.route_id)
@@ -3384,7 +3512,7 @@ async fn planner_output_returns_model_owned_task_guidance_decision() -> Result<(
                     parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
                     objective: "review task guidance".to_owned(),
                 },
-                attempt_id,
+                attempt_id: attempt_id.clone(),
                 child_session_ref,
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("review this guidance"),
@@ -3403,7 +3531,9 @@ async fn planner_output_returns_model_owned_task_guidance_decision() -> Result<(
                     dispatch_run_id: "dispatch_runtime_guidance".to_owned(),
                     accepted_plan,
                     eligible_pending_step_ids: vec![step_id],
-                }),
+                })
+                .with_child_cancellation(RunCancellationOwner::new().handle())
+                .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
                 options: run_options(temp.path().to_path_buf()),
                 discovery_options: run_options(temp.path().to_path_buf()),
             },
@@ -3489,7 +3619,8 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
                 worktree_availability:
                     TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             })
-            .with_cancellation(cancellation.handle());
+            .with_cancellation(cancellation.handle())
+            .with_logical_run_id(task_participant_logical_run_id(&attempt_id));
     let mut handler = RecordingEventHandler::default();
     let mut approval = CountingApprovalHandler::default();
 
@@ -3651,7 +3782,8 @@ async fn planner_discovery_rejects_overlapping_batch_without_consuming_valid_ret
                 worktree_availability:
                     TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             })
-            .with_cancellation(cancellation.handle());
+            .with_cancellation(cancellation.handle())
+            .with_logical_run_id(task_participant_logical_run_id(&attempt_id));
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
@@ -3760,7 +3892,8 @@ async fn planner_discovery_allows_only_one_batch_per_planning_attempt() -> Resul
                 worktree_availability:
                     TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
             })
-            .with_cancellation(cancellation.handle());
+            .with_cancellation(cancellation.handle())
+            .with_logical_run_id(task_participant_logical_run_id(&attempt_id));
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
@@ -3833,9 +3966,10 @@ async fn supervisor_records_post_run_usage_without_budget_warning() -> Result<()
                 step: step("usage")?,
                 attempt_id: participant_attempt_id_for("usage")?,
                 child_session_ref: participant_session_ref_for("usage")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("apply skill"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("usage")?,
+                    vec![ModelMessage::user("apply skill")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -3902,9 +4036,10 @@ async fn task_read_batch_overlaps_provider_runs_and_commits_in_request_order() -
                 step: step(step_id)?,
                 attempt_id: participant_attempt_id_for(step_id)?,
                 child_session_ref: participant_session_ref_for(step_id)?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("inspect {step_id}")),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for(step_id)?,
+                    vec![ModelMessage::user(format!("inspect {step_id}"))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             })
@@ -4035,9 +4170,16 @@ async fn task_parallel_approval_aggregates_only_exact_matching_routes() -> Resul
                         1,
                     )?,
                 )?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("inspect {step_id}")),
-                ]),
+                child_input: task_child_input(
+                    &task_participant_attempt_id(
+                        &task.task_id,
+                        TaskParticipantPurpose::Step,
+                        Some(1),
+                        Some(&TaskStepId::new(step_id)?),
+                        1,
+                    )?,
+                    vec![ModelMessage::user(format!("inspect {step_id}"))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             })
@@ -4176,10 +4318,11 @@ async fn task_parallel_approval_does_not_aggregate_distinct_tool_arguments() -> 
                 plan_version: 1,
                 step: step(step_id.as_str())?,
                 child_session_ref: task_participant_session_ref(&task.task_id, &attempt_id)?,
-                attempt_id,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("inspect {}", step_id.as_str())),
-                ]),
+                attempt_id: attempt_id.clone(),
+                child_input: task_child_input(
+                    &attempt_id,
+                    vec![ModelMessage::user(format!("inspect {}", step_id.as_str()))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             })
@@ -4264,10 +4407,11 @@ async fn task_parallel_approval_releases_followers_when_presentation_fails() -> 
                 plan_version: 1,
                 step: step(step_id.as_str())?,
                 child_session_ref: task_participant_session_ref(&task.task_id, &attempt_id)?,
-                attempt_id,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("inspect {}", step_id.as_str())),
-                ]),
+                attempt_id: attempt_id.clone(),
+                child_input: task_child_input(
+                    &attempt_id,
+                    vec![ModelMessage::user(format!("inspect {}", step_id.as_str()))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             })
@@ -4346,9 +4490,10 @@ async fn task_changeset_batch_overlaps_providers_and_returns_snapshot_bound_prop
                 step: changeset_step(step_id)?,
                 attempt_id: participant_attempt_id_for(step_id)?,
                 child_session_ref: participant_session_ref_for(step_id)?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("propose {step_id}")),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for(step_id)?,
+                    vec![ModelMessage::user(format!("propose {step_id}"))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: Some(base_snapshot_id.clone()),
             })
@@ -4456,9 +4601,10 @@ async fn task_changeset_batch_rejects_missing_base_snapshot_before_provider_star
                 step: changeset_step(step_id)?,
                 attempt_id: participant_attempt_id_for(step_id)?,
                 child_session_ref: participant_session_ref_for(step_id)?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("propose {step_id}")),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for(step_id)?,
+                    vec![ModelMessage::user(format!("propose {step_id}"))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             })
@@ -4518,9 +4664,10 @@ async fn task_changeset_batch_rejects_mixed_base_snapshots_before_provider_start
                 step: changeset_step(step_id)?,
                 attempt_id: participant_attempt_id_for(step_id)?,
                 child_session_ref: participant_session_ref_for(step_id)?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("propose {step_id}")),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for(step_id)?,
+                    vec![ModelMessage::user(format!("propose {step_id}"))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: Some(format!("snapshot-{index}")),
             })
@@ -4594,9 +4741,10 @@ async fn task_read_batch_rejects_capacity_before_any_provider_start() -> Result<
                 step: step(step_id)?,
                 attempt_id: participant_attempt_id_for(step_id)?,
                 child_session_ref: participant_session_ref_for(step_id)?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("inspect {step_id}")),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for(step_id)?,
+                    vec![ModelMessage::user(format!("inspect {step_id}"))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             })
@@ -4668,9 +4816,10 @@ async fn task_read_batch_rejects_member_preflight_before_any_provider_start() ->
                 step,
                 attempt_id: participant_attempt_id_for(&step_id)?,
                 child_session_ref: participant_session_ref_for(&step_id)?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("inspect {step_id}")),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for(&step_id)?,
+                    vec![ModelMessage::user(format!("inspect {step_id}"))],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             })
@@ -4707,6 +4856,91 @@ async fn task_read_batch_rejects_member_preflight_before_any_provider_start() ->
 }
 
 #[tokio::test]
+async fn task_step_capability_admission_fails_before_provider_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(CountingDiscoveryProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer done",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task_id = TaskId::new("task_1")?;
+    let step = step("read_vcs")?;
+    let plan = TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    };
+    let contracts = vec![sigil_kernel::TaskStepContractBoundEntryV2 {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step.step_id.clone(),
+        contract: sigil_kernel::TaskStepContractV2 {
+            schema_version: sigil_kernel::TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+            target_paths: Vec::new(),
+            required_capabilities: vec![
+                sigil_kernel::TaskCapabilityV2::WorkspaceRead,
+                sigil_kernel::TaskCapabilityV2::VcsRead,
+            ],
+            deliverables: vec!["bounded VCS inventory".to_owned()],
+            acceptance_criteria: Vec::new(),
+            check_spec_refs: Vec::new(),
+            risk: None,
+            notes: Vec::new(),
+        },
+    }];
+    let marker = sigil_kernel::TaskPlanContractSetCommittedV2::new(&plan, &contracts)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_controls(vec![
+        ControlEntry::TaskPlan(plan),
+        ControlEntry::TaskStepContractBoundV2(contracts[0].clone()),
+        ControlEntry::TaskPlanContractSetCommittedV2(marker),
+    ])?;
+    let attempt_id = participant_attempt_id_for("read_vcs")?;
+    let request = TaskChildSessionRunRequest {
+        task: sigil_kernel::SequentialTaskRequest {
+            task_id,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "inspect VCS state".to_owned(),
+        },
+        plan_version: 1,
+        step,
+        attempt_id: attempt_id.clone(),
+        child_session_ref: participant_session_ref_for("read_vcs")?,
+        child_input: task_child_input(&attempt_id, vec![ModelMessage::user("inspect VCS state")]),
+        options: run_options(temp.path().to_path_buf()),
+        isolated_base_snapshot_id: None,
+    };
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_child_session(&mut session, request, &mut handler, &mut approval)
+        .await
+        .expect_err("missing VCS capability must fail before provider dispatch");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("failed capability admission"), "{message}");
+    assert!(message.contains("vcs_read"), "{message}");
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn planner_rate_limit_preserves_zero_consumption_retry_proof() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
@@ -4738,7 +4972,8 @@ async fn planner_rate_limit_preserves_zero_consumption_retry_proof() -> Result<(
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("plan the task"),
                 ])
-                .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+                .with_logical_run_id(task_participant_logical_run_id(&attempt_id))
+                .with_child_cancellation(RunCancellationOwner::new().handle()),
                 options: run_options(temp.path().to_path_buf()),
                 discovery_options: run_options(temp.path().to_path_buf()),
             },
@@ -4803,7 +5038,8 @@ async fn synthesis_rate_limit_preserves_zero_consumption_retry_proof() -> Result
                 child_input: AgentRunInput::without_persisted_user_message(vec![
                     ModelMessage::user("synthesize the task"),
                 ])
-                .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+                .with_logical_run_id(task_participant_logical_run_id(&attempt_id))
+                .with_child_cancellation(RunCancellationOwner::new().handle()),
                 options: run_options(temp.path().to_path_buf()),
             },
             &mut handler,
@@ -4864,7 +5100,8 @@ async fn task_rate_limit_retry_proof_survives_a_confirmed_connect_retry_prefix()
         child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
             "inspect after a transient connect failure",
         )])
-        .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+        .with_logical_run_id(task_participant_logical_run_id(&attempt_id))
+        .with_child_cancellation(RunCancellationOwner::new().handle()),
         options: run_options(temp.path().to_path_buf()),
         isolated_base_snapshot_id: None,
     };
@@ -4952,7 +5189,8 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
             child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
                 format!("inspect {step_id}"),
             )])
-            .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+            .with_logical_run_id(task_participant_logical_run_id(&attempt_id))
+            .with_child_cancellation(RunCancellationOwner::new().handle()),
             options: run_options(temp.path().to_path_buf()),
             isolated_base_snapshot_id: None,
         })
@@ -5064,7 +5302,7 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
 }
 
 #[tokio::test]
-async fn task_provider_rate_limit_after_output_is_not_retryable() -> Result<()> {
+async fn read_only_task_provider_protocol_rejection_after_output_is_retryable() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
     let runner = AgentSupervisorTaskChildRunner::new(
@@ -5095,7 +5333,8 @@ async fn task_provider_rate_limit_after_output_is_not_retryable() -> Result<()> 
         child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
             "inspect after output",
         )])
-        .with_logical_run_id(task_participant_logical_run_id(&attempt_id)),
+        .with_logical_run_id(task_participant_logical_run_id(&attempt_id))
+        .with_child_cancellation(RunCancellationOwner::new().handle()),
         options: run_options(temp.path().to_path_buf()),
         isolated_base_snapshot_id: None,
     };
@@ -5109,8 +5348,19 @@ async fn task_provider_rate_limit_after_output_is_not_retryable() -> Result<()> 
         .await
         .expect_err("provider fails after emitting output");
 
-    assert!(error.downcast_ref::<TaskParticipantRetryError>().is_none());
-    assert!(format!("{error:#}").contains("rate limited after output"));
+    assert!(
+        error
+            .downcast_ref::<TaskParticipantRetryError>()
+            .is_some_and(|retry| matches!(
+                retry.proof(),
+                TaskParticipantRetryProof::ProviderProtocolRejectedAfterOutput {
+                    read_only_step: true,
+                    zero_effect: true,
+                    ..
+                }
+            )),
+        "a read-only participant should receive a bounded new-attempt recovery proof: {error:#}"
+    );
     let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
     let child = Session::load_from_store("deepseek", "deepseek-v4-flash", child_store)?;
     let projection = child.provider_physical_attempt_projection()?;
@@ -5124,6 +5374,273 @@ async fn task_provider_rate_limit_after_output_is_not_retryable() -> Result<()> 
             .map(|terminal| terminal.outcome),
         Some(ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_orchestrator_recovers_protocol_rejection_and_preserves_the_dag() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
+        supervisor,
+        Agent::new(
+            Box::new(TextProvider {
+                text: "planner is not needed",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "dependent step completed",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(RecoveringProtocolTaskChildProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer is not needed",
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "task completed after protocol recovery",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let cancellation_owner = RunCancellationOwner::new();
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(runner)
+        .with_cancellation(cancellation_owner.handle());
+    let task_id = TaskId::new("task_protocol_recovery_e2e")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let inspect = TaskStepSpec {
+        step_id: TaskStepId::new("inspect")?,
+        title: "Inspect the workspace".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        intent_refs: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let summarize = TaskStepSpec {
+        step_id: TaskStepId::new("summarize")?,
+        title: "Summarize the inspection".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::Executor,
+        depends_on: vec![inspect.step_id.clone()],
+        intent_refs: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("fixture", "model", parent_store)?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "recover a read-only provider protocol failure".to_owned(),
+        title: Some("Protocol recovery".to_owned()),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![inspect.clone(), summarize.clone()],
+        reason: None,
+    }))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            sigil_kernel::SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref,
+                objective: "recover a read-only provider protocol failure".to_owned(),
+            },
+            run_options(temp.path().to_path_buf()),
+            run_options(temp.path().to_path_buf()),
+            run_options(temp.path().to_path_buf()),
+            None,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(
+        output.status,
+        TaskRunStatus::Completed,
+        "unexpected task output: {output:#?}; entries: {:#?}",
+        session.entries()
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task projection");
+    assert_eq!(task.participant_retry_schedules.len(), 1);
+    assert_eq!(
+        task.steps
+            .get(&(1, inspect.step_id))
+            .map(|step| step.status),
+        Some(sigil_kernel::TaskStepStatus::Completed)
+    );
+    assert_eq!(
+        task.steps
+            .get(&(1, summarize.step_id))
+            .map(|step| step.status),
+        Some(sigil_kernel::TaskStepStatus::Completed)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn scheduled_task_retry_route_drift_blocks_before_provider_dispatch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let runner = AgentSupervisorTaskChildRunner::new(
+        supervisor,
+        Agent::new(
+            Box::new(RecoveringProtocolTaskChildProvider {
+                starts: Arc::clone(&starts),
+            }),
+            ToolRegistry::new(),
+        ),
+        Agent::new(
+            Box::new(TextProvider {
+                text: "writer is not needed",
+            }),
+            ToolRegistry::new(),
+        ),
+    );
+    let task_id = TaskId::new("task_retry_route_drift")?;
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("inspect")?,
+        title: "Inspect the workspace".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        intent_refs: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let failed_attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step.step_id),
+        1,
+    )?;
+    let retry_attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step.step_id),
+        2,
+    )?;
+    let retry_input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+        "inspect after restart",
+    )])
+    .with_logical_run_id(task_participant_logical_run_id(&retry_attempt_id))
+    .with_child_cancellation(RunCancellationOwner::new().handle());
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("fixture", "model", parent_store)?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "validate retry route identity".to_owned(),
+        title: Some("Retry route identity".to_owned()),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: failed_attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Step,
+            ordinal: 1,
+            plan_version: Some(1),
+            step_id: Some(step.step_id.clone()),
+            role: step.role,
+            child_session_ref: task_participant_session_ref(&task_id, &failed_attempt_id)?,
+            status: TaskParticipantAttemptStatus::Failed,
+            reason: Some("provider protocol recovery scheduled".to_owned()),
+        },
+    ))?;
+    session.append_control(ControlEntry::TaskParticipantRetryScheduled(
+        TaskParticipantRetryScheduledEntry {
+            task_id: task_id.clone(),
+            failed_attempt_id,
+            retry_attempt_id: retry_attempt_id.clone(),
+            purpose: TaskParticipantPurpose::Step,
+            retry_ordinal: 2,
+            plan_version: Some(1),
+            step_id: Some(step.step_id.clone()),
+            route_fingerprint: format!("sha256:{}", "4".repeat(64)),
+            input_hash: sigil_kernel::task_participant_input_hash(&retry_input)?,
+            scheduled_at_unix_ms: 1,
+            not_before_unix_ms: 2,
+            retry_after_ms: 1,
+            proof: TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
+                zero_output: true,
+                zero_tool: true,
+                zero_effect: true,
+            },
+        },
+    ))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let error = runner
+        .run_child_session(
+            &mut session,
+            TaskChildSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: task_id.clone(),
+                    parent_session_ref,
+                    objective: "validate retry route identity".to_owned(),
+                },
+                plan_version: 1,
+                step,
+                attempt_id: retry_attempt_id.clone(),
+                child_session_ref: task_participant_session_ref(&task_id, &retry_attempt_id)?,
+                child_input: retry_input,
+                options: run_options(temp.path().to_path_buf()),
+                isolated_base_snapshot_id: None,
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await
+        .expect_err("a scheduled retry must not cross provider/model routes");
+
+    assert!(
+        error
+            .downcast_ref::<TaskParticipantRetryRouteDriftError>()
+            .is_some(),
+        "route drift should remain a typed recovery boundary: {error:#}"
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
     Ok(())
 }
 
@@ -5158,9 +5675,10 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                 step: step("usage_one")?,
                 attempt_id: participant_attempt_id_for("usage_one")?,
                 child_session_ref: participant_session_ref_for("usage_one")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("apply skill"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("usage_one")?,
+                    vec![ModelMessage::user("apply skill")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -5182,9 +5700,10 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                 step: step("usage_two")?,
                 attempt_id: participant_attempt_id_for("usage_two")?,
                 child_session_ref: participant_session_ref_for("usage_two")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("apply skill again"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("usage_two")?,
+                    vec![ModelMessage::user("apply skill again")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -5206,9 +5725,10 @@ async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<(
                 step: step("usage_three")?,
                 attempt_id: participant_attempt_id_for("usage_three")?,
                 child_session_ref: participant_session_ref_for("usage_three")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("apply skill after budget"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("usage_three")?,
+                    vec![ModelMessage::user("apply skill after budget")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -5288,9 +5808,10 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
                 step: write_step("inspect")?,
                 attempt_id: participant_attempt_id_for("inspect")?,
                 child_session_ref: participant_session_ref_for("inspect")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("inspect only"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("inspect")?,
+                    vec![ModelMessage::user("inspect only")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -5379,9 +5900,10 @@ async fn direct_child_skill_uses_supervisor() -> Result<()> {
                 step: step("invoke_skill")?,
                 attempt_id: participant_attempt_id_for("invoke_skill")?,
                 child_session_ref: participant_session_ref_for("invoke_skill")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("apply skill"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("invoke_skill")?,
+                    vec![ModelMessage::user("apply skill")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -5445,9 +5967,10 @@ async fn child_tool_approval_routes_are_audited_and_stored() -> Result<()> {
                 step: step("approval_route")?,
                 attempt_id: participant_attempt_id_for("approval_route")?,
                 child_session_ref: participant_session_ref_for("approval_route")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("read through approval"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("approval_route")?,
+                    vec![ModelMessage::user("read through approval")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -5578,9 +6101,10 @@ async fn failed_child_does_not_append_successful_parent_answer() -> Result<()> {
                 step: step("invoke_skill")?,
                 attempt_id: participant_attempt_id_for("invoke_skill")?,
                 child_session_ref: participant_session_ref_for("invoke_skill")?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("apply skill"),
-                ]),
+                child_input: task_child_input(
+                    &participant_attempt_id_for("invoke_skill")?,
+                    vec![ModelMessage::user("apply skill")],
+                ),
                 options: run_options(temp.path().to_path_buf()),
                 isolated_base_snapshot_id: None,
             },
@@ -5677,10 +6201,13 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
                 plan_version: 1,
                 step,
                 child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-                attempt_id,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user(format!("edit the isolated file for {step_id}")),
-                ]),
+                attempt_id: attempt_id.clone(),
+                child_input: task_child_input(
+                    &attempt_id,
+                    vec![ModelMessage::user(format!(
+                        "edit the isolated file for {step_id}"
+                    ))],
+                ),
                 options: run_options(repository_root.clone()),
                 isolated_base_snapshot_id: Some(base_snapshot_id.clone()),
             })
@@ -5908,37 +6435,33 @@ async fn worktree_child_writes_only_inside_bound_workspace_and_returns_review_ar
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
     let step = worktree_step("isolated_write")?;
+    let task_id = TaskId::new("task_worktree")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step.step_id),
+        1,
+    )?;
     let output = runner
         .run_child_session(
             &mut session,
             TaskChildSessionRunRequest {
                 task: sigil_kernel::SequentialTaskRequest {
-                    task_id: TaskId::new("task_worktree")?,
+                    task_id: task_id.clone(),
                     parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
                     objective: "edit one file in a physical child worktree".to_owned(),
                 },
                 plan_version: 1,
                 step: step.clone(),
-                attempt_id: task_participant_attempt_id(
-                    &TaskId::new("task_worktree")?,
-                    TaskParticipantPurpose::Step,
-                    Some(1),
-                    Some(&step.step_id),
-                    1,
-                )?,
-                child_session_ref: task_participant_session_ref(
-                    &TaskId::new("task_worktree")?,
-                    &task_participant_attempt_id(
-                        &TaskId::new("task_worktree")?,
-                        TaskParticipantPurpose::Step,
-                        Some(1),
-                        Some(&step.step_id),
-                        1,
-                    )?,
-                )?,
-                child_input: AgentRunInput::without_persisted_user_message(vec![
-                    ModelMessage::user("write base.txt in the isolated worktree"),
-                ]),
+                attempt_id: attempt_id.clone(),
+                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+                child_input: task_child_input(
+                    &attempt_id,
+                    vec![ModelMessage::user(
+                        "write base.txt in the isolated worktree",
+                    )],
+                ),
                 options: run_options(repository_root.clone()),
                 isolated_base_snapshot_id: Some(base_snapshot_id.clone()),
             },
@@ -6112,6 +6635,7 @@ async fn cancelled_worktree_child_still_records_terminal_cleanup() -> Result<()>
         child_input: AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
             "this run is already cancelled",
         )])
+        .with_logical_run_id(task_participant_logical_run_id(&attempt_id))
         .with_child_cancellation(cancellation.handle()),
         options: run_options(repository_root.clone()),
         isolated_base_snapshot_id: Some(base_snapshot_id),

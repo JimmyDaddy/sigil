@@ -9,10 +9,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    AgentBatchId, AgentInvocationMode, AgentInvocationSource, AgentProfileSource, AgentRole,
-    AgentRouteId, AgentRunInput, AgentRunOptions, AgentThreadId, AgentTrustState, ApprovalHandler,
-    ApprovalMode, EventHandler, ModelMessage, RunCancellationHandle, RunEvent,
-    SequentialTaskRequest, Session, SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode,
+    AgentBatchId, AgentDelegationRunContext, AgentInvocationGrantSource, AgentInvocationMode,
+    AgentInvocationSource, AgentProfileSource, AgentRole, AgentRouteId, AgentRunInput,
+    AgentRunOptions, AgentThreadId, AgentTrustState, ApprovalHandler, ApprovalMode, EventHandler,
+    ModelMessage, RunCancellationHandle, RunEvent, SequentialTaskRequest, Session, SessionRef,
+    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskOrchestratorPhase,
     TaskParticipantAttemptId, TaskStepId, TaskStepMode, TaskStepSpec, Tool, ToolAccess,
     ToolAnalysisStatus, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
     ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
@@ -24,12 +25,17 @@ use sigil_kernel::{
 use crate::{
     EXPLORE_PROFILE_ID,
     agent_completion::{AgentCompletionHub, AgentCompletionRegistration},
-    agent_tools::tool_registry_is_safe_readonly_for_auto_spawn,
+    agent_tools::{
+        delegation_admission_entry, mint_agent_invocation_grant, revalidate_agent_invocation_grant,
+        tool_registry_is_safe_readonly_for_auto_spawn,
+    },
 };
 
 use super::{
     AgentResultMaterialization, AgentSupervisor, AgentTaskChildStart, AgentTaskChildThread,
-    BoxedAgent, hash_text, materialize_child_agent_final_answer, short_digest,
+    BoxedAgent, hash_text,
+    ids::{agent_thread_id_for_task_child, profile_id_for_role},
+    materialize_child_agent_final_answer, short_digest,
     task_runner::{build_child_session, task_child_status_from_outcome, usage_summary_from_stats},
 };
 
@@ -39,6 +45,15 @@ const MAX_DISCOVERY_PATH_HINTS: usize = 16;
 const MAX_DISCOVERY_TITLE_CHARS: usize = 160;
 const MAX_DISCOVERY_OBJECTIVE_CHARS: usize = 2_000;
 const MAX_DISCOVERY_PATH_CHARS: usize = 512;
+
+fn discovery_unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
 
 pub(crate) fn planner_tools_with_discovery(base: &ToolRegistry, max_probes: usize) -> ToolRegistry {
     let mut registry = base.snapshot();
@@ -192,15 +207,14 @@ impl<'a> TaskDiscoveryDelegate<'a> {
             )?;
             let child_session_ref =
                 child_session_ref(&self.task.task_id, &step_id, &child_task_id)?;
+            let logical_run_id =
+                discovery_logical_run_id(&self.planner_attempt_id, &probe.probe_id);
             let mut child_input = AgentRunInput::without_persisted_user_message(vec![
                 ModelMessage::system(task_discovery_system_prompt()),
                 ModelMessage::user(discovery_probe_prompt(&self.task.objective, &probe)),
             ])
             .with_child_cancellation(cancellation.clone())
-            .with_logical_run_id(discovery_logical_run_id(
-                &self.planner_attempt_id,
-                &probe.probe_id,
-            ));
+            .with_logical_run_id(logical_run_id.clone());
             if let Some(budget) = &self.web_task_tree_budget {
                 child_input = child_input.with_web_task_tree_budget(Arc::clone(budget));
             }
@@ -219,6 +233,52 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                 mode: Some(TaskStepMode::Read),
                 isolation: Some(TaskIsolationMode::SharedReadOnly),
             };
+            let profile_id = profile_id_for_role(AgentRole::SubagentRead)?;
+            let delegation_context = AgentDelegationRunContext {
+                source: AgentInvocationGrantSource::TaskOrchestrator {
+                    task_id: self.task.task_id.clone(),
+                    phase: TaskOrchestratorPhase::PlannerDiscovery,
+                },
+                authority: sigil_kernel::DelegationAuthority::TaskOrchestrator {
+                    task_id: self.task.task_id.clone(),
+                    phase: TaskOrchestratorPhase::PlannerDiscovery,
+                },
+            };
+            let now_ms = discovery_unix_time_ms();
+            let grant = mint_agent_invocation_grant(
+                delegation_context.clone(),
+                &logical_run_id,
+                &cancellation,
+                profile_id.clone(),
+                AgentRole::SubagentRead,
+                TaskIsolationMode::SharedReadOnly,
+                self.explore_agent.tool_registry(),
+                &self.options,
+                now_ms,
+            )?;
+            revalidate_agent_invocation_grant(
+                &grant,
+                &delegation_context,
+                &logical_run_id,
+                &cancellation,
+                &profile_id,
+                AgentRole::SubagentRead,
+                TaskIsolationMode::SharedReadOnly,
+                self.explore_agent.tool_registry(),
+                &self.options.workspace_root,
+                now_ms,
+            )?;
+            let thread_id =
+                agent_thread_id_for_task_child(&self.task.task_id, 0, &step, &child_task_id)?;
+            let delegation_admission = delegation_admission_entry(
+                &grant,
+                thread_id,
+                profile_id,
+                AgentInvocationMode::JoinBeforeFinal,
+                AgentInvocationSource::Task,
+                &probe.objective,
+            )?;
+            child_input = child_input.with_agent_invocation_grant(grant.clone());
             let start = AgentTaskChildStart {
                 task_id: self.task.task_id.clone(),
                 parent_thread_id: self.planner_thread_id.clone(),
@@ -237,6 +297,8 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                 role: AgentRole::SubagentRead,
                 invocation_mode: AgentInvocationMode::JoinBeforeFinal,
                 invocation_source: AgentInvocationSource::Task,
+                invocation_grant: grant,
+                delegation_admission,
                 isolated_workspace_id: None,
             };
             prepared.push(PreparedDiscoveryProbe {

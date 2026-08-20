@@ -10,12 +10,40 @@ use crate::{
     TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
     TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, ToolCall, continue_existing_task_tool_spec,
     continue_without_task_planning_tool_spec, conversation_route_decision_id_for_source,
-    conversation_route_routing_contract_material, project_conversation_prompt_for_persistence,
+    conversation_route_routing_contract_material, keep_pending_plan_tool_spec,
+    project_conversation_prompt_for_persistence, run_pending_plan_tool_spec,
     validate_continue_existing_task_call, validate_continue_without_task_planning_call,
 };
 
 fn source_turn(message_id: &str) -> Result<ConversationTurnRef> {
     ConversationTurnRef::new("session-1", message_id, "foreground-run-1")
+}
+
+#[test]
+fn legacy_task_continuation_receipt_keeps_action_unspecified() -> Result<()> {
+    let value = serde_json::json!({
+        "task_id": "task-legacy-continuation",
+        "source_turn": {
+            "session_scope_id": "session-1",
+            "message_id": "message-1",
+            "logical_run_id": "run-1"
+        },
+        "plan_version": 1,
+        "task_status": "paused",
+        "plan_status": "accepted",
+        "route_contract_fingerprint": "sha256:legacy-route",
+        "prompt_hash": "sha256:legacy-prompt",
+        "exact_prompt_required": false,
+        "guidance": "legacy safe guidance",
+        "selected_at_ms": 42
+    });
+
+    let receipt: TaskContinuationSelectedEntry = serde_json::from_value(value)?;
+    assert_eq!(
+        receipt.control,
+        crate::TaskContinuationControlKind::LegacyUnspecified
+    );
+    Ok(())
 }
 
 fn request(
@@ -96,14 +124,25 @@ fn existing_task_continuation_tool_keeps_task_identity_host_owned() {
     let valid = ToolCall {
         id: "call-continue-task".to_owned(),
         name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
-        args_json: r#"{"reason":"continue_current_task"}"#.to_owned(),
+        args_json: r#"{"reason":"continue_current_task","action":"resume_task"}"#.to_owned(),
     };
     assert!(validate_continue_existing_task_call(&valid).is_ok());
 
     let mut injected_identity = valid;
     injected_identity.args_json =
-        r#"{"reason":"continue_current_task","task_id":"task-decoy"}"#.to_owned();
+        r#"{"reason":"continue_current_task","action":"resume_task","task_id":"task-decoy"}"#
+            .to_owned();
     assert!(validate_continue_existing_task_call(&injected_identity).is_err());
+}
+
+#[test]
+fn pending_plan_decision_tools_keep_plan_identity_host_owned() {
+    for spec in [run_pending_plan_tool_spec(), keep_pending_plan_tool_spec()] {
+        let serialized = serde_json::to_string(&spec.input_schema).expect("serialize schema");
+        assert!(!serialized.contains("plan_id"));
+        assert!(!serialized.contains("plan_hash"));
+        assert_eq!(spec.input_schema["additionalProperties"], false);
+    }
 }
 
 #[test]
@@ -241,6 +280,7 @@ fn continuation_route_and_exact_selection_recover_as_one_crash_safe_bundle() -> 
         task_status: TaskRunStatus::Paused,
         plan_status: Some(TaskPlanStatus::Accepted),
         route_contract_fingerprint: route.route_contract_fingerprint.clone(),
+        control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: prompt.prompt_hash,
         exact_prompt_required: prompt.exact_prompt_required,
         guidance: prompt.safe_prompt,

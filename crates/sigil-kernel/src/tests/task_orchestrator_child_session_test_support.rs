@@ -81,6 +81,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             TaskPlannerSessionRunOutput {
                 attempt_id: request.attempt_id,
                 accepted_plan,
+                step_contracts: Vec::new(),
                 guidance_applied,
                 child_session_ref: request.child_session_ref,
             },

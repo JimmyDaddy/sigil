@@ -25,12 +25,12 @@ use tool_card_lifecycle::{
 use super::{
     ActiveTaskRuntimeStatus, AppState, ApprovalPresentationState, PaneFocus, RunPhase,
     TimelineRole,
-    formatting::{format_terminal_task_block_redacted, summarize_error},
+    formatting::{format_terminal_task_block_redacted, summarize_error, summarize_terminal_reason},
 };
 use crate::runner::{WorkerApprovalRouteState, WorkerCommand, WorkerMessage};
 use message_labels::{
     queued_prompt_summary_noun, summarize_queued_prompt, task_run_finish_notice,
-    task_run_status_label,
+    task_run_status_label, task_run_terminal_timeline_notice,
 };
 use run_event_helpers::notice_is_timeline_worthy;
 #[cfg(test)]
@@ -284,7 +284,7 @@ impl AppState {
             WorkerMessage::PlanRunStarted { prompt } => {
                 self.start_worker_run_phase(
                     RunPhase::Thinking,
-                    "planning",
+                    "Plan Review · preparing a draft for your approval",
                     format!("plan|{}", self.runtime.model_name),
                 );
                 self.push_event("plan:start", sigil_kernel::safe_persistence_text(&prompt));
@@ -404,7 +404,7 @@ impl AppState {
                     sigil_runtime::TaskCompletionProgressSnapshot::default();
                 self.start_worker_run_phase(
                     RunPhase::Thinking,
-                    format!("planning task {task_id}"),
+                    "Task · creating a durable execution plan",
                     format!("task|{}", self.runtime.model_name),
                 );
                 self.push_event(
@@ -591,12 +591,34 @@ impl AppState {
                     format!("{} -> {}", entry.plan_id.as_str(), entry.task_id.as_str()),
                 );
             }
+            WorkerMessage::PlanTaskCreationFailed {
+                plan_id,
+                error,
+                entries,
+            } => {
+                self.runtime.is_busy = false;
+                self.sync_current_session_state(entries);
+                self.restore_durable_attention_surfaces();
+                if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+                    pending.workbench_open = true;
+                }
+                self.refresh_session_history();
+                let summary = summarize_error(&error);
+                self.last_notice = Some(format!("plan could not start: {summary}"));
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    format!("Plan could not start: {summary}. The plan remains available."),
+                );
+                self.push_event("plan:task_error", format!("{plan_id}: {error}"));
+            }
             WorkerMessage::TaskRunFinished {
                 task_id,
                 status,
                 entries,
             } => {
                 let notice = task_run_finish_notice(&task_id, status, &entries);
+                let terminal_timeline_notice =
+                    task_run_terminal_timeline_notice(&task_id, status, &entries);
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.last_notice = Some(notice);
@@ -604,6 +626,9 @@ impl AppState {
                 self.refresh_session_history();
                 self.recompute_compaction_status(false);
                 self.schedule_balance_refresh();
+                if let Some(terminal_notice) = terminal_timeline_notice {
+                    self.push_timeline(TimelineRole::Notice, terminal_notice);
+                }
                 self.push_event(
                     "task:finish",
                     format!("{task_id} status={}", task_run_status_label(status)),
@@ -1249,7 +1274,16 @@ impl AppState {
                 self.refresh_usage_sidebar_cache();
                 let summary = summarize_error(&error);
                 self.last_notice = Some(summary.clone());
-                self.push_timeline(TimelineRole::Notice, format!("Run failed: {summary}"));
+                let terminal_summary = summarize_terminal_reason(&error, 120);
+                let task_failure_already_visible = self.timeline.last().is_some_and(|entry| {
+                    entry.role == TimelineRole::Notice
+                        && (entry.text.starts_with("Task failed:")
+                            || entry.text.starts_with("Task interrupted:"))
+                        && entry.text.contains(&terminal_summary)
+                });
+                if !task_failure_already_visible {
+                    self.push_timeline(TimelineRole::Notice, format!("Run failed: {summary}"));
+                }
                 self.push_event("run:error", error);
             }
         }

@@ -9,9 +9,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentBatchId, AgentInvocationMode,
-    AgentInvocationSource, AgentRole, AgentRouteStatus, AgentRunAttemptId, AgentRunInput,
-    AgentRunOptions, AgentThreadId, AgentUsageSummary, ApprovalHandler, ChangeSetId, ControlEntry,
+    AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentBatchId, AgentDelegationRunContext,
+    AgentInvocationGrant, AgentInvocationGrantSource, AgentInvocationMode, AgentInvocationSource,
+    AgentRole, AgentRouteStatus, AgentRunAttemptId, AgentRunInput, AgentRunOptions, AgentThreadId,
+    AgentUsageSummary, ApprovalHandler, ChangeSetId, ControlEntry,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope, ExecutionBackend,
     IntegrationContentClass, IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus,
     IntegrationObservedEffect, IntegrationProjection, IntegrationProposalFacts, InteractionMode,
@@ -23,22 +24,27 @@ use sigil_kernel::{
     TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
     TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
     TaskChildSessionStatus, TaskId, TaskIntegrationRunOutput, TaskIntegrationRunRequest,
-    TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
+    TaskIsolationMode, TaskOrchestratorPhase, TaskParticipantAttemptId, TaskParticipantRetryError,
+    TaskParticipantRetryProof, TaskParticipantRetryRouteDriftError,
     TaskPlannerSessionAwaitingUserInput, TaskPlannerSessionResumeRequest,
     TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
     TaskPlannerWorktreeAvailability, TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId,
     TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
     TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval,
-    ToolApprovalContext, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolSpec,
-    VerificationPolicy, WriteIsolationMode, build_task_promotion_preview,
-    changeset_only_child_tool_registry, decode_changeset_only_child_output, stable_event_uuid,
-    stable_workspace_id, task_participant_child_task_id, task_participant_input_hash,
-    task_participant_logical_run_id, task_step_owner_agent_id,
+    ToolApprovalContext, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolRegistry,
+    ToolSpec, VerificationPolicy, WriteIsolationMode, build_task_promotion_preview,
+    changeset_only_child_tool_registry, commit_task_planner_output,
+    decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
+    task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
+    task_step_owner_agent_id,
 };
 use sigil_tools_builtin::LocalExecutionBackend;
 
 use crate::{
     agent_completion::{AgentCompletionHub, AgentCompletionRegistration},
+    agent_tools::{
+        delegation_admission_entry, mint_agent_invocation_grant, revalidate_agent_invocation_grant,
+    },
     integration_lanes::{
         GitIntegrationPromotionPreparationRequest, GitIntegrationRunRequest, IntegrationArtifact,
         IntegrationLaneRuntimeEvent, IntegrationPromotionPreparationTarget,
@@ -51,7 +57,8 @@ use crate::{
         materialize_git_worktree_from_frozen_base,
     },
     provider_pressure::{
-        TaskProviderPressure, TaskProviderRouteConsumer, wrap_task_agent_provider,
+        TaskProviderPressure, TaskProviderRouteConsumer, provider_route_fingerprint,
+        wrap_task_agent_provider,
     },
     task_completion_progress::{TaskCompletionOutcome, TaskCompletionProgressRegistration},
 };
@@ -59,7 +66,10 @@ use crate::{
 use super::{
     AgentSupervisor, AgentTaskChildStart, AgentTaskChildThread, BoxedAgent, append_control,
     hash_text,
-    ids::{agent_route_id_for_call, task_route_id_for_call},
+    ids::{
+        agent_route_id_for_call, agent_thread_id_for_task_child, profile_id_for_role,
+        task_route_id_for_call,
+    },
     materialize_child_agent_final_answer,
     task_discovery::{
         MAX_TASK_DISCOVERY_PROBES, TaskDiscoveryDelegate, planner_tools_with_discovery,
@@ -183,6 +193,72 @@ impl AgentSupervisorTaskChildRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn bind_task_child_invocation(
+        &self,
+        task_id: &TaskId,
+        plan_version: u32,
+        step: &TaskStepSpec,
+        child_task_id: &TaskId,
+        child_input: AgentRunInput,
+        options: &AgentRunOptions,
+        tool_registry: &ToolRegistry,
+        invocation_mode: AgentInvocationMode,
+        objective: &str,
+        delegation_context: AgentDelegationRunContext,
+    ) -> Result<(
+        AgentRunInput,
+        AgentInvocationGrant,
+        sigil_kernel::AgentDelegationAdmissionEntry,
+    )> {
+        let root_logical_run_id = child_input
+            .logical_run_id()
+            .ok_or_else(|| anyhow::anyhow!("task child input is missing its logical run id"))?;
+        let root_cancellation = child_input.cancellation_handle().ok_or_else(|| {
+            anyhow::anyhow!("task child input is missing its root cancellation scope")
+        })?;
+        let profile_id = profile_id_for_role(step.role)?;
+        let isolation = step.effective_isolation();
+        let now_ms = unix_time_ms();
+        let grant = mint_agent_invocation_grant(
+            delegation_context.clone(),
+            root_logical_run_id,
+            &root_cancellation,
+            profile_id.clone(),
+            step.role,
+            isolation,
+            tool_registry,
+            options,
+            now_ms,
+        )?;
+        revalidate_agent_invocation_grant(
+            &grant,
+            &delegation_context,
+            root_logical_run_id,
+            &root_cancellation,
+            &profile_id,
+            step.role,
+            isolation,
+            tool_registry,
+            &options.workspace_root,
+            now_ms,
+        )?;
+        let thread_id = agent_thread_id_for_task_child(task_id, plan_version, step, child_task_id)?;
+        let admission = delegation_admission_entry(
+            &grant,
+            thread_id,
+            profile_id,
+            invocation_mode,
+            AgentInvocationSource::Task,
+            objective,
+        )?;
+        Ok((
+            child_input.with_agent_invocation_grant(grant.clone()),
+            grant,
+            admission,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn begin_isolated_participant<H>(
         &self,
         parent_session: &mut Session,
@@ -195,13 +271,45 @@ impl AgentSupervisorTaskChildRunner {
         options: AgentRunOptions,
         step: TaskStepSpec,
         agent: &BoxedAgent,
-    ) -> Result<(Session, AgentTaskChildThread, TaskId)>
+        tool_registry: &ToolRegistry,
+        phase: TaskOrchestratorPhase,
+    ) -> Result<(Session, AgentTaskChildThread, TaskId, AgentRunInput)>
     where
         H: EventHandler + Send,
     {
         let child_task_id = task_participant_child_task_id(&task.task_id, &attempt_id)?;
         let mut child_session = build_child_session(parent_session, &child_session_ref)?;
+        validate_scheduled_task_participant_retry_route(
+            parent_session,
+            &task.task_id,
+            &attempt_id,
+            agent,
+            &child_session,
+        )?;
         inherit_task_plan_permission_grant(parent_session, &mut child_session, &task.task_id)?;
+        let delegation_context = AgentDelegationRunContext {
+            source: AgentInvocationGrantSource::TaskOrchestrator {
+                task_id: task.task_id.clone(),
+                phase,
+            },
+            authority: sigil_kernel::DelegationAuthority::TaskOrchestrator {
+                task_id: task.task_id.clone(),
+                phase,
+            },
+        };
+        let (child_input, invocation_grant, delegation_admission) = self
+            .bind_task_child_invocation(
+                &task.task_id,
+                plan_version,
+                &step,
+                &child_task_id,
+                child_input,
+                &options,
+                tool_registry,
+                AgentInvocationMode::Foreground,
+                &task.objective,
+                delegation_context,
+            )?;
         let child_thread = self.supervisor.begin_task_child_thread(
             parent_session,
             handler,
@@ -216,17 +324,19 @@ impl AgentSupervisorTaskChildRunner {
                 step,
                 child_task_id: child_task_id.clone(),
                 child_session_ref: child_session_ref.clone(),
-                child_input,
+                child_input: child_input.clone(),
                 objective: task.objective.clone(),
                 workspace_root: options.workspace_root,
                 provider_capabilities: child_provider_capabilities(agent),
                 role: AgentRole::Planner,
                 invocation_mode: AgentInvocationMode::Foreground,
                 invocation_source: AgentInvocationSource::Task,
+                invocation_grant,
+                delegation_admission,
                 isolated_workspace_id: None,
             },
         )?;
-        Ok((child_session, child_thread, child_task_id))
+        Ok((child_session, child_thread, child_task_id, child_input))
     }
 
     async fn freeze_task_worktree_base(
@@ -442,7 +552,7 @@ impl AgentSupervisorTaskChildRunner {
     fn preflight_parallel_task_child(
         &self,
         parent_session: &Session,
-        request: TaskChildSessionRunRequest,
+        mut request: TaskChildSessionRunRequest,
     ) -> Result<PreflightParallelTaskChild> {
         ParallelTaskBatchKind::for_step(&request.step)?;
         if matches!(
@@ -457,12 +567,21 @@ impl AgentSupervisorTaskChildRunner {
             );
         }
         let agent = self.agent_for_step(&request.step)?;
+        let grant_registry = effective_task_child_tool_registry(&agent, &request.step);
+        validate_task_step_contract_admission(parent_session, &request, &grant_registry)?;
         let changeset_artifact_store =
             changeset_artifact_store(parent_session, &request.options.workspace_root, &request)?;
         let child_task_id =
             task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
         let child_session_ref = request.child_session_ref.clone();
         let mut child_session = build_child_session(parent_session, &child_session_ref)?;
+        validate_scheduled_task_participant_retry_route(
+            parent_session,
+            &request.task.task_id,
+            &request.attempt_id,
+            &agent,
+            &child_session,
+        )?;
         inherit_task_plan_permission_grant(
             parent_session,
             &mut child_session,
@@ -474,6 +593,25 @@ impl AgentSupervisorTaskChildRunner {
         {
             return Err(self.retryable_admission_error(&request, &agent, &child_session, error));
         }
+        let delegation_context = accepted_task_step_delegation_context(
+            &request.task.task_id,
+            request.plan_version,
+            &request.step.step_id,
+        );
+        let (child_input, invocation_grant, delegation_admission) = self
+            .bind_task_child_invocation(
+                &request.task.task_id,
+                request.plan_version,
+                &request.step,
+                &child_task_id,
+                request.child_input.clone(),
+                &request.options,
+                &grant_registry,
+                AgentInvocationMode::JoinBeforeFinal,
+                &request.task.objective,
+                delegation_context,
+            )?;
+        request.child_input = child_input.clone();
         let start = AgentTaskChildStart {
             task_id: request.task.task_id.clone(),
             parent_thread_id: main_thread_id()?,
@@ -485,13 +623,15 @@ impl AgentSupervisorTaskChildRunner {
             step: request.step.clone(),
             child_task_id: child_task_id.clone(),
             child_session_ref: child_session_ref.clone(),
-            child_input: request.child_input.clone(),
+            child_input,
             objective: request.task.objective.clone(),
             workspace_root: request.options.workspace_root.clone(),
             provider_capabilities: child_provider_capabilities(&agent),
             role: request.step.role,
             invocation_mode: AgentInvocationMode::JoinBeforeFinal,
             invocation_source: AgentInvocationSource::Task,
+            invocation_grant,
+            delegation_admission,
             isolated_workspace_id: None,
         };
         Ok(PreflightParallelTaskChild {
@@ -503,6 +643,38 @@ impl AgentSupervisorTaskChildRunner {
             child_session,
             changeset_artifact_store,
         })
+    }
+
+    fn rebind_parallel_task_child_invocation(
+        &self,
+        member: &mut PreflightParallelTaskChild,
+    ) -> Result<()> {
+        let grant_registry =
+            effective_task_child_tool_registry(&member.agent, &member.request.step);
+        let delegation_context = accepted_task_step_delegation_context(
+            &member.request.task.task_id,
+            member.request.plan_version,
+            &member.request.step.step_id,
+        );
+        let (child_input, invocation_grant, delegation_admission) = self
+            .bind_task_child_invocation(
+                &member.request.task.task_id,
+                member.request.plan_version,
+                &member.request.step,
+                &member.child_task_id,
+                member.request.child_input.clone(),
+                &member.request.options,
+                &grant_registry,
+                AgentInvocationMode::JoinBeforeFinal,
+                &member.request.task.objective,
+                delegation_context,
+            )?;
+        member.request.child_input = child_input.clone();
+        member.start.child_input = child_input;
+        member.start.invocation_grant = invocation_grant;
+        member.start.delegation_admission = delegation_admission;
+        member.start.workspace_root = member.request.options.workspace_root.clone();
+        Ok(())
     }
 
     fn preflight_parallel_task_batch(
@@ -914,6 +1086,13 @@ impl AgentSupervisorTaskChildRunner {
                 worktree.workspace_root().to_path_buf();
             member.start.workspace_root = worktree.workspace_root().to_path_buf();
             member.start.isolated_workspace_id = Some(worktree.isolated_workspace_id().to_owned());
+            if let Err(error) = self.rebind_parallel_task_child_invocation(&mut member) {
+                for pending in materialized_members {
+                    let _ = cleanup_task_worktree(parent_session, handler, pending.worktree).await;
+                }
+                let _ = cleanup_task_worktree(parent_session, handler, worktree).await;
+                return Ok(rejected_parallel_task_batch(&requests, error));
+            }
             materialized_members.push(PendingParallelWorktreeChild {
                 preflight: member,
                 worktree,
@@ -1013,6 +1192,18 @@ impl AgentSupervisorTaskChildRunner {
         child_session: &Session,
         error: anyhow::Error,
     ) -> anyhow::Error {
+        if retry_safe_step(&request.step)
+            && let Some(proof) = provider_protocol_retry_proof(&request.attempt_id, child_session)
+        {
+            let Ok(input_hash) = task_participant_input_hash(&request.child_input) else {
+                return error;
+            };
+            let route_fingerprint =
+                provider_route_fingerprint(agent.provider().name(), child_session.model_name());
+            return TaskParticipantRetryError::new(1, route_fingerprint, input_hash, proof, error)
+                .map(anyhow::Error::new)
+                .unwrap_or_else(|construction_error| construction_error);
+        }
         if !retry_safe_step(&request.step) {
             return error;
         }
@@ -1223,6 +1414,31 @@ impl AgentSupervisorTaskChildRunner {
             isolated_parent_snapshot_id,
         })
     }
+}
+
+fn provider_protocol_retry_proof(
+    attempt_id: &TaskParticipantAttemptId,
+    child_session: &Session,
+) -> Option<TaskParticipantRetryProof> {
+    let projection = child_session.provider_physical_attempt_projection().ok()?;
+    let logical_run_id = task_participant_logical_run_id(attempt_id);
+    let attempt = projection
+        .effective_attempt_for_logical_run_id(&logical_run_id)
+        .ok()??;
+    let terminal = attempt.terminal.as_ref()?;
+    if terminal.outcome != ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
+        || !terminal.durable_side_effect_event_ids.is_empty()
+    {
+        return None;
+    }
+    Some(
+        TaskParticipantRetryProof::ProviderProtocolRejectedAfterOutput {
+            physical_attempt_id: attempt.entry.physical_attempt_id.clone(),
+            request_material_fingerprint: attempt.entry.request_material_fingerprint.clone(),
+            read_only_step: true,
+            zero_effect: true,
+        },
+    )
 }
 
 struct PreflightParallelTaskChild {
@@ -2215,26 +2431,29 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             request.child_input.clone()
         };
         let step = participant_control_step("planner", "Plan task", AgentRole::Planner)?;
-        let (mut child_session, child_thread, _child_task_id) = self.begin_isolated_participant(
-            parent_session,
-            handler,
-            &request.task,
-            request.attempt_id.clone(),
-            0,
-            request.child_session_ref.clone(),
-            planner_input.clone(),
-            request.options.clone(),
-            step,
-            planner,
-        )?;
+        let tools = planner_tools_with_discovery(
+            planner.tool_registry(),
+            self.planner_discovery_max_probes,
+        );
+        let (mut child_session, child_thread, _child_task_id, planner_input) = self
+            .begin_isolated_participant(
+                parent_session,
+                handler,
+                &request.task,
+                request.attempt_id.clone(),
+                0,
+                request.child_session_ref.clone(),
+                planner_input,
+                request.options.clone(),
+                step,
+                planner,
+                &tools,
+                TaskOrchestratorPhase::Planner,
+            )?;
         let planner_input = planner_input.with_source_thread_id(child_thread.thread_id.clone());
         let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
         let planner_run = {
             let mut participant_handler = TaskParticipantEventHandler { inner: handler };
-            let tools = planner_tools_with_discovery(
-                planner.tool_registry(),
-                self.planner_discovery_max_probes,
-            );
             if self.planner_discovery_max_probes == 0 {
                 planner
                     .run_with_approval_input_and_tool_registry(
@@ -2351,8 +2570,29 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                         ) if applied.task_id == request.task.task_id => Some(applied.clone()),
                         _ => None,
                     });
+            let step_contracts = accepted_plan_step_contracts(&child_session, &accepted_plan);
+            let planner_output = TaskPlannerSessionRunOutput {
+                attempt_id: request.attempt_id.clone(),
+                accepted_plan,
+                step_contracts,
+                guidance_applied,
+                child_session_ref: request.child_session_ref.clone(),
+            };
+            if request.child_input.task_guidance_assessment.is_none() {
+                commit_task_planner_output(
+                    parent_session,
+                    handler,
+                    &request.task,
+                    &request.attempt_id,
+                    &request.child_session_ref,
+                    &planner_output,
+                )?;
+            }
             let materialized = super::AgentResultMaterialization::inline(
-                format!("accepted task plan v{}", accepted_plan.plan_version),
+                format!(
+                    "accepted task plan v{}",
+                    planner_output.accepted_plan.plan_version
+                ),
                 None,
             );
             self.supervisor.record_task_child_result(
@@ -2365,12 +2605,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 &output.outcome,
                 Some(usage_summary_from_stats(child_session.stats())),
             )?;
-            Ok(TaskPlannerSessionRunOutput {
-                attempt_id: request.attempt_id.clone(),
-                accepted_plan,
-                guidance_applied,
-                child_session_ref: request.child_session_ref.clone(),
-            })
+            Ok(planner_output)
         })();
         match postprocessed {
             Ok(output) => Ok(TaskPlannerSessionRunOutcome::Accepted(Box::new(output))),
@@ -2442,9 +2677,71 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         if continuation.continuation.physical_attempt_id != physical_attempt_id {
             anyhow::bail!("task planner continuation is owned by another physical attempt");
         }
-        let child_thread =
-            self.supervisor
-                .resume_task_planner_thread(parent_session, handler, &request.route)?;
+        let tools = planner_tools_with_discovery(
+            planner.tool_registry(),
+            self.planner_discovery_max_probes,
+        );
+        let planner_input = request
+            .child_input
+            .clone()
+            .with_initial_provider_physical_attempt_id(physical_attempt_id);
+        let root_logical_run_id = planner_input
+            .logical_run_id()
+            .ok_or_else(|| anyhow::anyhow!("resumed planner input lost its logical run id"))?;
+        let root_cancellation = planner_input.cancellation_handle().ok_or_else(|| {
+            anyhow::anyhow!("resumed planner input lost its root cancellation scope")
+        })?;
+        let profile_id = profile_id_for_role(AgentRole::Planner)?;
+        let delegation_context = AgentDelegationRunContext {
+            source: AgentInvocationGrantSource::TaskOrchestrator {
+                task_id: request.task.task_id.clone(),
+                phase: TaskOrchestratorPhase::Planner,
+            },
+            authority: sigil_kernel::DelegationAuthority::TaskOrchestrator {
+                task_id: request.task.task_id.clone(),
+                phase: TaskOrchestratorPhase::Planner,
+            },
+        };
+        let now_ms = unix_time_ms();
+        let invocation_grant = mint_agent_invocation_grant(
+            delegation_context.clone(),
+            root_logical_run_id,
+            &root_cancellation,
+            profile_id.clone(),
+            AgentRole::Planner,
+            TaskIsolationMode::SharedReadOnly,
+            &tools,
+            &request.options,
+            now_ms,
+        )?;
+        revalidate_agent_invocation_grant(
+            &invocation_grant,
+            &delegation_context,
+            root_logical_run_id,
+            &root_cancellation,
+            &profile_id,
+            AgentRole::Planner,
+            TaskIsolationMode::SharedReadOnly,
+            &tools,
+            &request.options.workspace_root,
+            now_ms,
+        )?;
+        let delegation_admission = delegation_admission_entry(
+            &invocation_grant,
+            request.route.source_thread_id.clone(),
+            profile_id,
+            AgentInvocationMode::Foreground,
+            AgentInvocationSource::Task,
+            &request.task.objective,
+        )?;
+        let child_thread = self.supervisor.resume_task_planner_thread(
+            parent_session,
+            handler,
+            &request.route,
+            &request.task.objective,
+            &invocation_grant,
+            &delegation_admission,
+        )?;
         let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
         let mut registered_route = request.route.clone();
         registered_route.request = continuation.request.clone();
@@ -2473,15 +2770,11 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 )?;
             return Err(error.context("failed to register resumed planner route ownership"));
         }
-        let input = request
-            .child_input
-            .with_initial_provider_physical_attempt_id(physical_attempt_id);
+        let input = planner_input
+            .with_agent_invocation_grant(invocation_grant)
+            .with_source_thread_id(child_thread.thread_id.clone());
         let planner_run = {
             let mut participant_handler = TaskParticipantEventHandler { inner: handler };
-            let tools = planner_tools_with_discovery(
-                planner.tool_registry(),
-                self.planner_discovery_max_probes,
-            );
             if self.planner_discovery_max_probes == 0 {
                 planner
                     .run_with_approval_input_and_tool_registry(
@@ -2625,8 +2918,27 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     })
             })
             .context("resumed planner did not produce an accepted plan")?;
+        let step_contracts = accepted_plan_step_contracts(&child_session, &accepted_plan);
+        let planner_output = TaskPlannerSessionRunOutput {
+            attempt_id: request.attempt_id.clone(),
+            accepted_plan,
+            step_contracts,
+            guidance_applied: None,
+            child_session_ref: request.child_session_ref.clone(),
+        };
+        commit_task_planner_output(
+            parent_session,
+            handler,
+            &request.task,
+            &request.attempt_id,
+            &request.child_session_ref,
+            &planner_output,
+        )?;
         let materialized = super::AgentResultMaterialization::inline(
-            format!("accepted task plan v{}", accepted_plan.plan_version),
+            format!(
+                "accepted task plan v{}",
+                planner_output.accepted_plan.plan_version
+            ),
             None,
         );
         self.supervisor.record_task_child_result(
@@ -2640,12 +2952,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             Some(usage_summary_from_stats(child_session.stats())),
         )?;
         Ok(TaskPlannerSessionRunOutcome::Accepted(Box::new(
-            TaskPlannerSessionRunOutput {
-                attempt_id: request.attempt_id,
-                accepted_plan,
-                guidance_applied: None,
-                child_session_ref: request.child_session_ref,
-            },
+            planner_output,
         )))
     }
 
@@ -2662,6 +2969,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
     {
         let mut request = request;
         let parent_options = request.options.clone();
+        let agent = self.agent_for_step(&request.step)?;
+        let grant_registry = effective_task_child_tool_registry(&agent, &request.step);
+        validate_task_step_contract_admission(parent_session, &request, &grant_registry)?;
         let changeset_artifact_store =
             changeset_artifact_store(parent_session, &parent_options.workspace_root, &request)?;
         let worktree =
@@ -2688,18 +2998,24 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             let child_task_id =
                 task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
             let child_session_ref = request.child_session_ref.clone();
-            let agent = match request.step.role {
-                AgentRole::Planner => self
-                    .planner
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("task planner role is not configured"))?,
-                AgentRole::Executor => self
-                    .executor
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("task executor role is not configured"))?,
-                AgentRole::SubagentRead => &self.subagent_read,
-                AgentRole::SubagentWrite => &self.subagent_write,
-            };
+            let delegation_context = accepted_task_step_delegation_context(
+                &request.task.task_id,
+                request.plan_version,
+                &request.step.step_id,
+            );
+            let (child_input, invocation_grant, delegation_admission) = self
+                .bind_task_child_invocation(
+                    &request.task.task_id,
+                    request.plan_version,
+                    &request.step,
+                    &child_task_id,
+                    request.child_input.clone(),
+                    &request.options,
+                    &grant_registry,
+                    AgentInvocationMode::Foreground,
+                    &request.task.objective,
+                    delegation_context,
+                )?;
             let child_thread = self.supervisor.begin_task_child_thread(
                 parent_session,
                 handler,
@@ -2714,13 +3030,15 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     step: request.step.clone(),
                     child_task_id: child_task_id.clone(),
                     child_session_ref: child_session_ref.clone(),
-                    child_input: request.child_input.clone(),
+                    child_input: child_input.clone(),
                     objective: request.task.objective.clone(),
                     workspace_root: request.options.workspace_root.clone(),
-                    provider_capabilities: child_provider_capabilities(agent),
+                    provider_capabilities: child_provider_capabilities(&agent),
                     role: request.step.role,
                     invocation_mode: AgentInvocationMode::Foreground,
                     invocation_source: AgentInvocationSource::Task,
+                    invocation_grant,
+                    delegation_admission,
                     isolated_workspace_id: worktree
                         .as_ref()
                         .map(|workspace| workspace.isolated_workspace_id().to_owned()),
@@ -2757,6 +3075,30 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     return Err(error);
                 }
             };
+            if let Err(error) = validate_scheduled_task_participant_retry_route(
+                parent_session,
+                &request.task.task_id,
+                &request.attempt_id,
+                &agent,
+                &child_session,
+            ) {
+                append_task_child_session(
+                    parent_session,
+                    handler,
+                    &request,
+                    &child_task_id,
+                    &child_session_ref,
+                    TaskChildSessionStatus::Failed,
+                    None,
+                )?;
+                self.supervisor.record_task_child_failure(
+                    parent_session,
+                    handler,
+                    &child_thread,
+                    format!("{error:#}"),
+                )?;
+                return Err(error);
+            }
             inherit_task_plan_permission_grant(
                 parent_session,
                 &mut child_session,
@@ -2771,12 +3113,12 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 source_agent_attempt_id: &child_thread.attempt_id,
                 approval_batch_id: task_single_approval_batch_id(&request)?,
             };
-            let child_input = request.child_input.clone();
+            let child_input = child_input;
             let options = request.options.clone();
             let child_run = {
                 let mut participant_handler = TaskParticipantEventHandler { inner: handler };
                 run_task_child_agent_for_step(
-                    agent,
+                    &agent,
                     &mut child_session,
                     child_input,
                     options,
@@ -2789,7 +3131,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             let output = match child_run {
                 Ok(output) => output,
                 Err(error) => {
-                    let error = self.retryable_child_error(&request, agent, &child_session, error);
+                    let error = self.retryable_child_error(&request, &agent, &child_session, error);
                     append_task_child_session(
                         route_handler.parent_session,
                         handler,
@@ -3085,25 +3427,28 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("task synthesis role is not configured"))?;
         let step = participant_control_step("synthesis", "Synthesize task", AgentRole::Planner)?;
-        let (mut child_session, child_thread, _child_task_id) = self.begin_isolated_participant(
-            parent_session,
-            handler,
-            &request.task,
-            request.attempt_id.clone(),
-            request.plan_version,
-            request.child_session_ref.clone(),
-            request.child_input.clone(),
-            request.options.clone(),
-            step,
-            synthesis,
-        )?;
+        let (mut child_session, child_thread, _child_task_id, synthesis_input) = self
+            .begin_isolated_participant(
+                parent_session,
+                handler,
+                &request.task,
+                request.attempt_id.clone(),
+                request.plan_version,
+                request.child_session_ref.clone(),
+                request.child_input.clone(),
+                request.options.clone(),
+                step,
+                synthesis,
+                synthesis.tool_registry(),
+                TaskOrchestratorPhase::Synthesis,
+            )?;
         let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
         let synthesis_run = {
             let mut participant_handler = TaskParticipantEventHandler { inner: handler };
             synthesis
                 .run_with_approval_input(
                     &mut child_session,
-                    request.child_input.clone(),
+                    synthesis_input,
                     request.options.clone(),
                     &mut participant_handler,
                     approval_handler,
@@ -3179,6 +3524,32 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             }
         }
     }
+}
+
+fn accepted_plan_step_contracts(
+    session: &Session,
+    plan: &sigil_kernel::TaskPlanEntry,
+) -> Vec<sigil_kernel::TaskStepContractBoundEntryV2> {
+    session
+        .task_state_projection()
+        .tasks
+        .get(&plan.task_id)
+        .and_then(|task| task.plans.get(&plan.plan_version))
+        .map(|projection| {
+            projection
+                .step_contracts
+                .iter()
+                .map(
+                    |(step_id, contract)| sigil_kernel::TaskStepContractBoundEntryV2 {
+                        task_id: plan.task_id.clone(),
+                        plan_version: plan.plan_version,
+                        step_id: step_id.clone(),
+                        contract: contract.clone(),
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn detached_task_batch_results<'a>(
@@ -3369,6 +3740,84 @@ where
             .map(|handler| handler.approval_is_explicit_user_action())
             .unwrap_or(false)
     }
+}
+
+fn accepted_task_step_delegation_context(
+    task_id: &TaskId,
+    plan_version: u32,
+    step_id: &TaskStepId,
+) -> AgentDelegationRunContext {
+    AgentDelegationRunContext {
+        source: AgentInvocationGrantSource::AcceptedTaskPlan {
+            task_id: task_id.clone(),
+            plan_version,
+            step_id: step_id.clone(),
+        },
+        authority: sigil_kernel::DelegationAuthority::AcceptedTaskPlan {
+            task_id: task_id.clone(),
+            plan_version,
+            step_id: step_id.clone(),
+        },
+    }
+}
+
+fn effective_task_child_tool_registry(agent: &BoxedAgent, step: &TaskStepSpec) -> ToolRegistry {
+    if step.effective_isolation() == sigil_kernel::TaskIsolationMode::ChangesetOnly {
+        changeset_only_child_tool_registry(agent.tool_registry())
+    } else {
+        agent.tool_registry().clone()
+    }
+}
+
+fn validate_task_step_contract_admission(
+    parent_session: &Session,
+    request: &TaskChildSessionRunRequest,
+    registry: &ToolRegistry,
+) -> Result<()> {
+    let projection = parent_session.task_state_projection();
+    let Some(plan) = projection
+        .tasks
+        .get(&request.task.task_id)
+        .and_then(|task| task.plans.get(&request.plan_version))
+    else {
+        return Ok(());
+    };
+    if !plan.contract_set_committed_v2 {
+        if !plan.step_contracts.is_empty() {
+            anyhow::bail!(
+                "task plan {} has an incomplete V2 execution contract set",
+                request.plan_version
+            );
+        }
+        return Ok(());
+    }
+    let contract = plan
+        .step_contracts
+        .get(&request.step.step_id)
+        .with_context(|| {
+            format!(
+                "task plan {} is missing the committed contract for step {}",
+                request.plan_version,
+                request.step.step_id.as_str()
+            )
+        })?;
+    sigil_kernel::validate_task_step_capability_admission(contract, &registry.contracts())
+        .with_context(|| {
+            format!(
+                "task step {} failed capability admission for role {}",
+                request.step.step_id.as_str(),
+                request.step.role.as_str()
+            )
+        })
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3985,6 +4434,30 @@ pub(crate) fn build_child_session(
     let mut session = Session::new(parent_session.provider_name(), parent_session.model_name());
     crate::attach_session_url_capability_store(&mut session)?;
     Ok(session)
+}
+
+fn validate_scheduled_task_participant_retry_route(
+    parent_session: &Session,
+    task_id: &TaskId,
+    attempt_id: &TaskParticipantAttemptId,
+    agent: &BoxedAgent,
+    child_session: &Session,
+) -> Result<()> {
+    let projection = parent_session.task_state_projection();
+    let Some(task) = projection.tasks.get(task_id) else {
+        return Ok(());
+    };
+    let Some(schedule) = task.participant_retry_schedules.get(attempt_id) else {
+        return Ok(());
+    };
+    let observed = provider_route_fingerprint(agent.provider().name(), child_session.model_name());
+    if observed == schedule.route_fingerprint {
+        return Ok(());
+    }
+    Err(
+        TaskParticipantRetryRouteDriftError::new(schedule.route_fingerprint.clone(), observed)?
+            .into(),
+    )
 }
 
 pub(crate) fn inherit_task_plan_permission_grant(

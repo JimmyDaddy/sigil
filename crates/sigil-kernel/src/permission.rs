@@ -521,6 +521,7 @@ pub enum PathTrustZone {
     WorkspaceIgnored,
     WorkspaceGitMetadata,
     WorkspaceConfigSecret,
+    RuntimeScratch,
     UserState,
     UserCache,
     External,
@@ -776,12 +777,13 @@ impl PermissionDecision {
         subject_risk_overlays: Vec<PathRiskOverlay>,
         external_directory_required: bool,
     ) -> Self {
-        let risk = derive_permission_risk_with_network_effect(
+        let risk = derive_permission_risk_with_subject_access(
             access,
             network_effect,
             operation,
             &subject_zones,
             &subject_risk_overlays,
+            &subjects,
         );
         let base_local_policy_decision =
             apply_permission_mode_cap(policy_mode, local_policy_decision, access);
@@ -889,26 +891,6 @@ impl PermissionDecision {
 
     fn suppress_danger_full_access_asks(&mut self) {
         if !self.danger_full_access {
-            return;
-        }
-        if matches!(
-            self.operation,
-            ToolOperation::RememberMemory | ToolOperation::ForgetMemory
-        ) {
-            self.source_policy_decision =
-                combine_modes(vec![self.source_policy_decision, ApprovalMode::Ask]);
-            self.recompute_mode();
-            if !self
-                .reasons
-                .iter()
-                .any(|reason| reason.code == "durable_memory_approval_required")
-            {
-                self.reasons.push(PermissionDecisionReason {
-                    source: PermissionDecisionSource::HardSafety,
-                    code: "durable_memory_approval_required".to_owned(),
-                    detail: "durable memory mutation requires an interactive approval even in danger-full-access mode".to_owned(),
-                });
-            }
             return;
         }
         let mut suppressed = false;
@@ -1085,6 +1067,109 @@ impl PermissionDecision {
             .to_owned(),
         });
         self.recompute_mode();
+    }
+}
+
+/// Derives risk while honoring access attached to each concrete subject. The enclosing tool
+/// access remains a conservative fallback for ordinary write tools, but an Execute shell call
+/// does not turn a read-only `.git` observation into a protected mutation.
+fn derive_permission_risk_with_subject_access(
+    access: ToolAccess,
+    network_effect: Option<NetworkEffect>,
+    operation: ToolOperation,
+    zones: &[PathTrustZone],
+    overlays: &[PathRiskOverlay],
+    subjects: &[ToolSubject],
+) -> PermissionRisk {
+    let operation_proves_path_mutation = matches!(
+        operation,
+        ToolOperation::CreateFile
+            | ToolOperation::EditFile
+            | ToolOperation::OverwriteFile
+            | ToolOperation::DeleteFile
+            | ToolOperation::RenamePath
+            | ToolOperation::CreateDirectory
+            | ToolOperation::DeleteDirectory
+            | ToolOperation::RecursiveDelete
+            | ToolOperation::ApplyChangeSet
+            | ToolOperation::ExecuteMutatingCommand
+            | ToolOperation::ExecuteDestructiveCommand
+    );
+    let path_mutates_sensitive_zone =
+        subjects
+            .iter()
+            .zip(zones.iter().copied())
+            .any(|(subject, zone)| {
+                let subject_writes =
+                    subject.access == ToolAccess::Write || access == ToolAccess::Write;
+                subject.kind == ToolSubjectKind::Path
+                    && ((matches!(
+                        zone,
+                        PathTrustZone::WorkspaceGitMetadata
+                            | PathTrustZone::WorkspaceRuntimeState
+                            | PathTrustZone::WorkspaceConfigSecret
+                            | PathTrustZone::UserState
+                            | PathTrustZone::UserCache
+                    ) && (subject_writes || operation_proves_path_mutation))
+                        || (subject_writes && overlays.contains(&PathRiskOverlay::SensitiveName)))
+            });
+    if path_mutates_sensitive_zone || (subjects.is_empty() && access != ToolAccess::Read) {
+        return derive_permission_risk_with_network_effect(
+            access,
+            network_effect,
+            operation,
+            zones,
+            overlays,
+        );
+    }
+
+    if overlays.contains(&PathRiskOverlay::SensitiveName)
+        && access != ToolAccess::Read
+        && !matches!(
+            operation,
+            ToolOperation::Read
+                | ToolOperation::Search
+                | ToolOperation::ExecuteReadOnlyCommand
+                | ToolOperation::NetworkRequest
+        )
+    {
+        return PermissionRisk::High;
+    }
+    if matches!(
+        operation,
+        ToolOperation::DeleteFile
+            | ToolOperation::DeleteDirectory
+            | ToolOperation::RecursiveDelete
+            | ToolOperation::ApplyChangeSet
+            | ToolOperation::ExecuteMutatingCommand
+            | ToolOperation::ExecuteDestructiveCommand
+    ) {
+        return PermissionRisk::Destructive;
+    }
+    if matches!(
+        operation,
+        ToolOperation::ExecuteUnknownCommand | ToolOperation::SendTerminalInput
+    ) {
+        return PermissionRisk::High;
+    }
+    if operation == ToolOperation::ExecuteWorkspaceCheckCommand {
+        return PermissionRisk::Medium;
+    }
+    if matches!(
+        operation,
+        ToolOperation::ResizeTerminalTask | ToolOperation::CancelTerminalTask
+    ) {
+        return PermissionRisk::Medium;
+    }
+    let local_risk = match access {
+        ToolAccess::Read => PermissionRisk::Low,
+        ToolAccess::Write => PermissionRisk::Medium,
+        ToolAccess::Execute => PermissionRisk::High,
+    };
+    if network_effect.is_some() {
+        local_risk.max(PermissionRisk::High)
+    } else {
+        local_risk
     }
 }
 
@@ -1747,6 +1832,12 @@ pub fn classify_path_trust_analysis(subject: &ToolSubject) -> PathTrustAnalysis 
             overlays: Vec::new(),
         };
     }
+    if subject.scope == ToolSubjectScope::RuntimeScratch {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::RuntimeScratch,
+            overlays: path_risk_overlays(subject),
+        };
+    }
     if subject.scope == ToolSubjectScope::External {
         return PathTrustAnalysis {
             zone: PathTrustZone::External,
@@ -1821,6 +1912,12 @@ pub fn classify_path_trust_analysis_with_context(
         return PathTrustAnalysis {
             zone: PathTrustZone::Unknown,
             overlays: Vec::new(),
+        };
+    }
+    if subject.scope == ToolSubjectScope::RuntimeScratch {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::RuntimeScratch,
+            overlays: path_risk_overlays(subject),
         };
     }
     if subject.scope == ToolSubjectScope::External {
@@ -2003,7 +2100,6 @@ fn path_operation_is_mutating(access: ToolAccess, operation: ToolOperation) -> b
                 | ToolOperation::RecursiveDelete
                 | ToolOperation::ApplyChangeSet
                 | ToolOperation::ExecuteMutatingCommand
-                | ToolOperation::ExecuteUnknownCommand
                 | ToolOperation::ExecuteDestructiveCommand
         )
 }
@@ -2126,6 +2222,13 @@ pub fn derive_permission_risk_with_network_effect(
     zones: &[PathTrustZone],
     overlays: &[PathRiskOverlay],
 ) -> PermissionRisk {
+    let operation_is_read_only = matches!(
+        operation,
+        ToolOperation::Read
+            | ToolOperation::Search
+            | ToolOperation::ExecuteReadOnlyCommand
+            | ToolOperation::NetworkRequest
+    );
     if (zones.iter().any(|zone| {
         matches!(
             zone,
@@ -2137,6 +2240,7 @@ pub fn derive_permission_risk_with_network_effect(
         )
     }) || overlays.contains(&PathRiskOverlay::SensitiveName))
         && access != ToolAccess::Read
+        && !operation_is_read_only
     {
         return PermissionRisk::Protected;
     }
@@ -2661,7 +2765,9 @@ fn tool_approval_session_grant_parts_result(
 fn subject_has_stable_session_grant_scope(subject: &ToolSubject, operation: ToolOperation) -> bool {
     match subject.kind {
         ToolSubjectKind::Path => match subject.scope {
-            ToolSubjectScope::Workspace => !subject.normalized.trim().is_empty(),
+            ToolSubjectScope::Workspace | ToolSubjectScope::RuntimeScratch => {
+                !subject.normalized.trim().is_empty()
+            }
             ToolSubjectScope::External => subject
                 .canonical_path
                 .as_ref()

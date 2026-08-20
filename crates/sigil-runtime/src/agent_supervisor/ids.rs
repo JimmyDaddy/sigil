@@ -17,7 +17,7 @@ pub(super) fn profile_id_for_role(role: AgentRole) -> Result<AgentProfileId> {
     }
 }
 
-pub(super) fn agent_thread_id_for_task_child(
+pub(crate) fn agent_thread_id_for_task_child(
     task_id: &TaskId,
     plan_version: u32,
     step: &TaskStepSpec,

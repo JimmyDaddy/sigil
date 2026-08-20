@@ -811,7 +811,7 @@ fn read_only_code_intelligence_tools_declare_no_workspace_mutation_tracking() {
     let contracts = registry
         .contracts()
         .into_iter()
-        .map(|(spec, tracking)| (spec.name, tracking))
+        .map(|contract| (contract.spec.name, contract.mutation_tracking))
         .collect::<BTreeMap<_, _>>();
 
     for name in [

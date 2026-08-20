@@ -17,6 +17,9 @@ use crate::{
 pub enum SessionLogEntry {
     User(ModelMessage),
     Assistant(ModelMessage),
+    /// Internal provider-visible Context V2 snapshot. It participates in request reconstruction
+    /// without being projected as an ordinary user-authored transcript message.
+    RuntimeContextSnapshotV2(RuntimeContextSnapshotV2),
     /// Artifact-backed result used by all new tool executions (RFC-0062 V3 contract).
     ToolResultV3(ToolResultRecordedV3),
     Control(ControlEntry),
@@ -130,7 +133,7 @@ pub const CONVERSATION_QUEUE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PLAN_ARTIFACT_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PLUGIN_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const SKILL_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
-pub const TASK_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const TASK_STATE_PROJECTION_SCHEMA_VERSION: u16 = 2;
 pub const TERMINAL_TASK_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const USAGE_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const WRITE_ISOLATION_PROJECTION_SCHEMA_VERSION: u16 = 1;
@@ -158,7 +161,7 @@ pub struct MemorySnapshot {
     pub report: MemoryLoadReport,
 }
 
-/// Audit entry recorded when Context V1 candidates are recalled but cannot be rendered safely.
+/// Audit entry recorded when Context V2 candidates are recalled but cannot be rendered safely.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ContextAssemblySkippedEntry {
@@ -166,6 +169,31 @@ pub struct ContextAssemblySkippedEntry {
     pub candidate_count: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_ids: Vec<ContextItemId>,
+}
+
+pub const RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION: u16 = 1;
+pub const MAX_RUNTIME_CONTEXT_SNAPSHOT_V2_BYTES: usize = 64 * 1024;
+
+/// Provider-visible state carried by one append-only Context V2 snapshot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeContextSnapshotStateV2 {
+    Active,
+    Cleared,
+}
+
+/// Durable, append-only runtime-context snapshot used by the provider history projection.
+///
+/// The full message is safe persistence material. Exact transient overlays and secret carriers
+/// are never allowed in this record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RuntimeContextSnapshotV2 {
+    pub schema_version: u16,
+    pub state: RuntimeContextSnapshotStateV2,
+    pub message: ModelMessage,
+    pub canonical_content_sha256: String,
+    pub source_tail_message_id: Option<String>,
 }
 
 /// Control-plane state that must survive resume and remain outside model-facing chat history.
@@ -249,12 +277,18 @@ pub enum ControlEntry {
     TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry),
     TaskRunTargetSelected(crate::TaskRunTargetSelectedEntry),
     TaskPlan(TaskPlanEntry),
+    /// V2 lossless execution metadata bound to one immutable task-plan step.
+    TaskStepContractBoundV2(crate::TaskStepContractBoundEntryV2),
+    /// Terminal marker for an atomically committed, complete V2 plan contract set.
+    TaskPlanContractSetCommittedV2(crate::TaskPlanContractSetCommittedV2),
     TaskGuidanceApplied(crate::TaskGuidanceAppliedEntry),
     TaskGuidanceMaterialized(crate::TaskGuidanceMaterializedEntry),
     TaskStep(TaskStepEntry),
     TaskParticipantAttempt(TaskParticipantAttemptEntry),
     TaskParticipantRetryScheduled(TaskParticipantRetryScheduledEntry),
     TaskParticipantResult(TaskParticipantResultEntry),
+    /// Hash-only participant frontier used for recovery and no-progress detection.
+    TaskStepCheckpointV2(crate::TaskStepCheckpointV2),
     TaskFinalAnswerCommitted(TaskFinalAnswerCommittedEntry),
     OrchestrationRouteDisabled(crate::OrchestrationRouteDisabledEntry),
     TaskChildSession(TaskChildSessionEntry),
@@ -346,6 +380,9 @@ impl ControlEntry {
             Self::ToolArtifactTombstonePlan(entry) => entry.validate(),
             Self::TaskContinuationSelected(entry) => entry.validate_shape(),
             Self::TaskRunTargetSelected(entry) => entry.validate_shape(),
+            Self::TaskStepContractBoundV2(entry) => entry.validate(),
+            Self::TaskPlanContractSetCommittedV2(entry) => entry.validate(),
+            Self::TaskStepCheckpointV2(entry) => entry.validate(),
             Self::TaskGuidanceMaterialized(entry) => entry.validate_shape(),
             Self::UserInputRequested(entry) => entry.validate(),
             Self::UserInputDecisionAccepted(entry) => entry.validate_shape(),
@@ -1317,7 +1354,12 @@ fn tool_subject_identity_value(subject: &ToolSubject) -> String {
 }
 
 fn tool_subject_relative_label(subject: &ToolSubject) -> Option<String> {
-    if subject.kind != ToolSubjectKind::Path || subject.scope != ToolSubjectScope::Workspace {
+    if subject.kind != ToolSubjectKind::Path
+        || !matches!(
+            subject.scope,
+            ToolSubjectScope::Workspace | ToolSubjectScope::RuntimeScratch
+        )
+    {
         return None;
     }
     let value = subject.normalized.trim();

@@ -1,4 +1,10 @@
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -10,13 +16,13 @@ use crate::{
     DelegationAuthority, DurableEventType, ExecutionCoverageLabel, ExecutionCoverageSummary,
     JsonlSessionStore, MessageRole, MutationEventRecorder, NetworkPolicy, PermissionConfig,
     PermissionMode, RunCancellationOwner, SessionStreamRecord, TaskIsolationMode, Tool, ToolAccess,
-    ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind,
-    ToolLifecycleOwner, ToolOperation, ToolPermissionPlanDraft, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision,
-    ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubjectKind, ToolSubjectScope, VerificationScope, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationScan, declared_tool_permission_plan,
-    provider::ToolCall,
+    ToolCategory, ToolConcurrencyClass, ToolContext, ToolDiffBudget, ToolDiffStats,
+    ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner, ToolMutationTracking, ToolOperation,
+    ToolPermissionPlanDraft, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind,
+    ToolSubjectScope, VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationScan, declared_tool_permission_plan, provider::ToolCall,
 };
 
 #[test]
@@ -247,6 +253,10 @@ impl Tool for RegistryFixtureTool {
 
 struct NamedRegistryTool(&'static str);
 
+struct ConcurrencyRegistryTool {
+    parallel: bool,
+}
+
 #[async_trait]
 impl Tool for NamedRegistryTool {
     fn spec(&self) -> ToolSpec {
@@ -276,9 +286,137 @@ impl Tool for NamedRegistryTool {
     }
 }
 
+#[async_trait]
+impl Tool for ConcurrencyRegistryTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "concurrency_fixture".to_owned(),
+            description: "concurrency fixture".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        if self.parallel {
+            ToolConcurrencyClass::ParallelReadOnly
+        } else {
+            ToolConcurrencyClass::Exclusive
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.spec().name,
+            "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[test]
+fn tool_runtime_concurrency_is_fail_closed_and_part_of_the_registry_fingerprint() -> Result<()> {
+    let mut default_registry = ToolRegistry::new();
+    default_registry.register(Arc::new(NamedRegistryTool("default_fixture")));
+    assert_eq!(
+        default_registry.contracts()[0].concurrency_class,
+        ToolConcurrencyClass::Exclusive
+    );
+
+    let mut exclusive_registry = ToolRegistry::new();
+    exclusive_registry.register(Arc::new(ConcurrencyRegistryTool { parallel: false }));
+    let mut parallel_registry = ToolRegistry::new();
+    parallel_registry.register(Arc::new(ConcurrencyRegistryTool { parallel: true }));
+    assert_ne!(
+        exclusive_registry.contract_fingerprint()?,
+        parallel_registry.contract_fingerprint()?
+    );
+    assert_eq!(
+        parallel_registry.contracts()[0].concurrency_class,
+        ToolConcurrencyClass::ParallelReadOnly
+    );
+    Ok(())
+}
+
+#[test]
+fn resolved_tool_invocation_rejects_same_name_generation_replacement() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ConcurrencyRegistryTool { parallel: true }));
+    let resolved = registry.resolve_invocation("concurrency_fixture")?;
+    assert!(registry.invocation_generation_is_current(&resolved));
+
+    registry.register(Arc::new(ConcurrencyRegistryTool { parallel: true }));
+    assert!(!registry.invocation_generation_is_current(&resolved));
+    Ok(())
+}
+
 struct OwnedRegistryTool {
     name: &'static str,
     owner: ToolLifecycleOwner,
+}
+
+struct QuiescentLifecycleTool {
+    owner: ToolLifecycleOwner,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    shutdown: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Tool for QuiescentLifecycleTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "quiescent_lifecycle".to_owned(),
+            description: "quiescent lifecycle fixture".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Mcp,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+
+    fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
+        Some(self.owner.clone())
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        self.shutdown.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(ToolResult::ok(
+            call_id,
+            "quiescent_lifecycle",
+            "done",
+            ToolResultMeta::default(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -404,7 +542,114 @@ async fn child_tool_execution_revalidates_workspace_and_tool_contract_grant() ->
     assert!(
         error
             .to_string()
-            .contains("workspace snapshot changed after grant minting")
+            .contains("workspace changed outside its audited mutation frontier")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn writable_child_grant_advances_after_audited_mutation_but_rejects_external_drift()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("tracked.txt"), "before\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MutatingShellFixtureTool {
+        path: "tracked.txt",
+        content: "owned\n",
+    }));
+    registry.register(Arc::new(ReadOnlyShellFixtureTool));
+    let cancellation = RunCancellationOwner::new().handle();
+    let grant = AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: AgentInvocationGrantSource::Conversation {
+                source_turn: crate::ConversationTurnRef::new(
+                    "session-1",
+                    "message-1",
+                    "root-run-1",
+                )?,
+            },
+            authority: DelegationAuthority::ModelProactive,
+            root_logical_run_id: "root-run-1".to_owned(),
+            profile_id: AgentProfileId::new("build")?,
+            role: AgentRole::SubagentWrite,
+            isolation: TaskIsolationMode::SequentialWorkspaceWrite,
+            permission_upper_bound: PermissionConfig {
+                mode: PermissionMode::DangerFullAccess,
+                ..PermissionConfig::default()
+            },
+            network_upper_bound: NetworkPolicy::Deny,
+            tool_contract_fingerprint: registry.contract_fingerprint()?,
+            workspace_snapshot_id: crate::agent_invocation_workspace_snapshot_id(&workspace)?,
+            root_cancellation_scope_id: cancellation.scope_id().to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )?;
+    let context = ToolContext::new(&workspace, 30)
+        .with_mutation_recorder(recorder)
+        .with_cancellation(cancellation)
+        .with_agent_invocation_grant(grant);
+
+    let invocation = registry.resolve_invocation("fixture_shell")?;
+    let write = invocation
+        .execute_after_started_audit(
+            &registry,
+            context.clone(),
+            ToolCall {
+                id: "grant-write-1".to_owned(),
+                name: "fixture_shell".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert!(!write.is_error());
+
+    let read = registry
+        .execute(
+            context.clone(),
+            ToolCall {
+                id: "grant-read-2".to_owned(),
+                name: "fixture_shell_read".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert!(!read.is_error());
+
+    let events = JsonlSessionStore::read_event_records(store.path())?;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_type
+                        == DurableEventType::WorkspaceMutationDetected.as_str()
+            ))
+            .count(),
+        1
+    );
+
+    fs::write(workspace.join("tracked.txt"), "external\n")?;
+    let error = registry
+        .execute(
+            context,
+            ToolCall {
+                id: "grant-read-3".to_owned(),
+                name: "fixture_shell_read".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await
+        .expect_err("unattributed workspace drift must still invalidate child authority");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace changed outside its audited mutation frontier")
     );
     Ok(())
 }
@@ -925,6 +1170,62 @@ fn tool_registry_drains_only_one_exact_lifecycle_generation() {
 }
 
 #[tokio::test]
+async fn lifecycle_retirement_stops_new_calls_and_waits_for_active_generation() -> Result<()> {
+    let owner = ToolLifecycleOwner::new("mcp", "server", "generation-1");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(QuiescentLifecycleTool {
+        owner: owner.clone(),
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+        shutdown: Arc::clone(&shutdown),
+    }));
+
+    let active_registry = registry.clone();
+    let active = tokio::spawn(async move {
+        active_registry
+            .execute(
+                ToolContext::new(std::env::temp_dir(), 5),
+                ToolCall {
+                    id: "call-active".to_owned(),
+                    name: "quiescent_lifecycle".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+            )
+            .await
+    });
+    started.notified().await;
+
+    let retirement = registry.retire_by_lifecycle_owner(&owner);
+    assert_eq!(retirement.len(), 1);
+    assert!(registry.spec_for("quiescent_lifecycle").is_none());
+    let disposal = tokio::spawn(async move { retirement.dispose_and_quiesce().await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(!shutdown.load(Ordering::SeqCst));
+    assert!(
+        registry
+            .execute(
+                ToolContext::new(std::env::temp_dir(), 5),
+                ToolCall {
+                    id: "call-new".to_owned(),
+                    name: "quiescent_lifecycle".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+            )
+            .await
+            .is_err()
+    );
+
+    release.notify_waiters();
+    active.await??;
+    disposal.await??;
+    assert!(shutdown.load(Ordering::SeqCst));
+    Ok(())
+}
+
+#[tokio::test]
 async fn scoped_tool_registry_denies_matching_names_after_allow_scope() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(NamedRegistryTool("read_file")));
@@ -1202,6 +1503,7 @@ fn tool_labels_are_stable() {
     assert_eq!(ToolSubjectKind::Other.as_str(), "other");
 
     assert_eq!(ToolSubjectScope::Workspace.as_str(), "workspace");
+    assert_eq!(ToolSubjectScope::RuntimeScratch.as_str(), "runtime_scratch");
     assert_eq!(ToolSubjectScope::External.as_str(), "external");
     assert_eq!(ToolSubjectScope::Unknown.as_str(), "unknown");
 
@@ -1229,6 +1531,15 @@ fn tool_labels_are_stable() {
     assert_eq!(
         serde_json::to_value(ToolErrorKind::ResourceLimit).expect("error kind should serialize"),
         serde_json::json!("resource_limit")
+    );
+    assert_eq!(
+        ToolErrorKind::ResourceExhausted.as_str(),
+        "resource_exhausted"
+    );
+    assert_eq!(
+        serde_json::to_value(ToolErrorKind::ResourceExhausted)
+            .expect("error kind should serialize"),
+        serde_json::json!("resource_exhausted")
     );
     assert_eq!(ToolErrorKind::Interrupted.as_str(), "interrupted");
     assert_eq!(ToolErrorKind::ExitStatus.as_str(), "exit_status");

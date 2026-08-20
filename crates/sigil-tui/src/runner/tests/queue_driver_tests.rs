@@ -68,7 +68,9 @@ fn append_queue_physical_attempt_named(
         request_material_fingerprint: request_material_fingerprint.to_owned(),
         provider_name: "test".to_owned(),
         model_name: "model".to_owned(),
+        request_envelope: None,
         cache_layout_proof: Some(cache_layout_proof()),
+        semantic_cache_layout_proof_v2: None,
         started_at_unix_ms: 1,
     };
     let started_record = DurableAuditRecord::new(
@@ -995,7 +997,7 @@ fn queued_pressure_candidate_binds_explicit_output_reservation_without_mutation(
 }
 
 #[test]
-fn queued_candidate_freezes_context_v1_for_the_exact_prompt_without_durable_leak() -> Result<()> {
+fn queued_candidate_freezes_context_v2_for_the_exact_prompt_without_durable_leak() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
@@ -1062,7 +1064,7 @@ fn queued_candidate_freezes_context_v1_for_the_exact_prompt_without_durable_leak
         .filter_map(|message| message.content.as_deref())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(request_text.contains("sigil_context_v1"));
+    assert!(request_text.contains("sigil_context_v2"));
     assert!(request_text.contains("warm_lsp_then_request_local_tree_sitter"));
     assert!(request_text.contains(body));
     assert!(!format!("{candidate:?}").contains(body));

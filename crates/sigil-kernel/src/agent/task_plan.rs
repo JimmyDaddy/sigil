@@ -5,8 +5,8 @@ use crate::{
     provider::ToolCall,
     session::{ControlEntry, Session, ToolExecutionStatus},
     task::{
-        TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanStatus, TaskPlanUpdateContext, task_plan_update_entry,
-        task_plan_update_result_content,
+        TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanStatus, TaskPlanUpdateContext,
+        task_plan_update_commit_v2, task_plan_update_entry, task_plan_update_result_content,
     },
     tool::{ToolErrorKind, ToolResult, ToolResultMeta},
 };
@@ -42,12 +42,27 @@ where
 {
     append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
     let mut accepted = false;
-    let result = match task_plan_update_entry(context, call) {
-        Ok(entry) => {
+    let result = match task_plan_update_commit_v2(context, call) {
+        Ok(commit) => {
+            let entry = commit.plan;
             accepted = entry.status == TaskPlanStatus::Accepted;
-            let control = ControlEntry::TaskPlan(entry.clone());
-            session.append_control(control.clone())?;
-            handler.handle(RunEvent::Control(control))?;
+            let mut controls = Vec::with_capacity(commit.step_contracts.len().saturating_add(1));
+            let contract_set_commit =
+                crate::TaskPlanContractSetCommittedV2::new(&entry, &commit.step_contracts)?;
+            controls.push(ControlEntry::TaskPlan(entry.clone()));
+            controls.extend(
+                commit
+                    .step_contracts
+                    .into_iter()
+                    .map(ControlEntry::TaskStepContractBoundV2),
+            );
+            controls.push(ControlEntry::TaskPlanContractSetCommittedV2(
+                contract_set_commit,
+            ));
+            session.append_controls(controls.clone())?;
+            for control in controls {
+                handler.handle(RunEvent::Control(control))?;
+            }
             let result = ToolResult::ok(
                 call.id.clone(),
                 call.name.clone(),

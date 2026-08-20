@@ -3,7 +3,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Arc, RwLock, Weak},
+    sync::{Arc, Mutex, RwLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tokio::sync::Notify;
 
 use crate::{
     mutation::{ExecutionMutationProfile, MutationEventRecorder, WorkspaceMutationScan},
@@ -230,6 +231,58 @@ pub enum ToolMutationTracking {
     Unknown,
 }
 
+/// Runtime-only scheduling contract for one registered tool generation.
+///
+/// This is intentionally excluded from [`ToolSpec`], so changing local execution scheduling does
+/// not perturb the provider-visible tool schema or its prompt-cache prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolConcurrencyClass {
+    /// The call is a barrier and may not overlap another tool body.
+    Exclusive,
+    /// The call may share a bounded lane after exact permission analysis confirms read-only
+    /// effects and no workspace mutation tracking.
+    ParallelReadOnly,
+}
+
+/// Provider-neutral semantic ability contributed by one concrete tool generation.
+///
+/// Unlike [`ToolCategory`], capabilities are used for task admission. They are part of the local
+/// runtime contract fingerprint but never enter the provider-visible tool JSON schema.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCapability {
+    WorkspaceRead,
+    WorkspaceWrite,
+    VcsRead,
+    ProcessExecute,
+    NetworkRead,
+    ArtifactRead,
+    VerificationRun,
+}
+
+impl ToolCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceRead => "workspace_read",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::VcsRead => "vcs_read",
+            Self::ProcessExecute => "process_execute",
+            Self::NetworkRead => "network_read",
+            Self::ArtifactRead => "artifact_read",
+            Self::VerificationRun => "verification_run",
+        }
+    }
+}
+
+/// Complete runtime contract for one visible registered tool.
+#[derive(Debug, Clone)]
+pub struct ToolRuntimeContract {
+    pub spec: ToolSpec,
+    pub mutation_tracking: ToolMutationTracking,
+    pub concurrency_class: ToolConcurrencyClass,
+    pub capabilities: BTreeSet<ToolCapability>,
+}
+
 /// One resource or capability subject touched by a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -240,6 +293,14 @@ pub struct ToolSubject {
     #[serde(default)]
     pub canonical_path: Option<PathBuf>,
     pub scope: ToolSubjectScope,
+    /// Access required for this individual subject. Shell commands may contain both read and
+    /// write paths, so policy must not infer every subject's access from the enclosing tool.
+    #[serde(default = "default_tool_subject_access")]
+    pub access: ToolAccess,
+}
+
+fn default_tool_subject_access() -> ToolAccess {
+    ToolAccess::Read
 }
 
 impl ToolSubject {
@@ -259,7 +320,14 @@ impl ToolSubject {
             normalized: normalized.into(),
             canonical_path,
             scope,
+            access: ToolAccess::Read,
         }
+    }
+
+    #[must_use]
+    pub fn with_access(mut self, access: ToolAccess) -> Self {
+        self.access = access;
+        self
     }
 
     pub fn command(command: impl Into<String>, normalized: impl Into<String>) -> Self {
@@ -269,6 +337,7 @@ impl ToolSubject {
             normalized: normalized.into(),
             canonical_path: None,
             scope: ToolSubjectScope::Unknown,
+            access: ToolAccess::Execute,
         }
     }
 
@@ -280,6 +349,7 @@ impl ToolSubject {
             normalized: name,
             canonical_path: None,
             scope: ToolSubjectScope::Unknown,
+            access: ToolAccess::Execute,
         }
     }
 
@@ -292,6 +362,7 @@ impl ToolSubject {
             normalized: format!("mcp_trust_class:{trust_class}"),
             canonical_path: None,
             scope: ToolSubjectScope::Unknown,
+            access: ToolAccess::Execute,
         }
     }
 
@@ -318,6 +389,7 @@ impl ToolSubject {
             normalized: format!("mcp_trust_class:{trust_class}"),
             canonical_path: None,
             scope: ToolSubjectScope::Unknown,
+            access: ToolAccess::Execute,
         }
     }
 
@@ -329,6 +401,7 @@ impl ToolSubject {
             normalized: format!("agent:{profile_id}"),
             canonical_path: None,
             scope: ToolSubjectScope::Unknown,
+            access: ToolAccess::Execute,
         }
     }
 }
@@ -376,6 +449,10 @@ impl ToolSubjectKind {
 #[serde(rename_all = "snake_case")]
 pub enum ToolSubjectScope {
     Workspace,
+    /// A path proven by a built-in analyzer to remain inside the runtime-owned, session-scoped
+    /// scratch capability. It is outside the workspace physically but is not an arbitrary
+    /// external-directory request.
+    RuntimeScratch,
     External,
     Unknown,
 }
@@ -384,6 +461,7 @@ impl ToolSubjectScope {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Workspace => "workspace",
+            Self::RuntimeScratch => "runtime_scratch",
             Self::External => "external",
             Self::Unknown => "unknown",
         }
@@ -1379,6 +1457,8 @@ pub enum ToolErrorKind {
     Timeout,
     /// Execution exceeded a bounded runtime resource such as captured output.
     ResourceLimit,
+    /// Execution could not start or continue because a local resource is exhausted.
+    ResourceExhausted,
     Interrupted,
     ExitStatus,
     Io,
@@ -1407,6 +1487,7 @@ impl ToolErrorKind {
             Self::NotFound => "not_found",
             Self::Timeout => "timeout",
             Self::ResourceLimit => "resource_limit",
+            Self::ResourceExhausted => "resource_exhausted",
             Self::Interrupted => "interrupted",
             Self::ExitStatus => "exit_status",
             Self::Io => "io",
@@ -2328,6 +2409,41 @@ pub trait Tool: Send + Sync {
         default_tool_mutation_tracking(&self.spec())
     }
 
+    /// Declares whether an exactly analyzed read-only call may enter the bounded parallel lane.
+    ///
+    /// The default is fail-closed. The scheduler still checks the concrete permission plan and
+    /// mutation contract, so this opt-in can never widen an analyzed call's effects.
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::Exclusive
+    }
+
+    /// Declares semantic abilities used by task admission.
+    ///
+    /// The default is deliberately conservative and derives only unambiguous abilities from the
+    /// provider-neutral tool spec. Specialized tools such as VCS inspection or artifact readers
+    /// must opt in explicitly.
+    fn capabilities(&self) -> BTreeSet<ToolCapability> {
+        let spec = self.spec();
+        let mut capabilities = BTreeSet::new();
+        match (spec.category, spec.access) {
+            (ToolCategory::File | ToolCategory::Search, ToolAccess::Read) => {
+                capabilities.insert(ToolCapability::WorkspaceRead);
+            }
+            (ToolCategory::File, ToolAccess::Write) => {
+                capabilities.insert(ToolCapability::WorkspaceRead);
+                capabilities.insert(ToolCapability::WorkspaceWrite);
+            }
+            (ToolCategory::Shell, ToolAccess::Execute) => {
+                capabilities.insert(ToolCapability::ProcessExecute);
+            }
+            _ => {}
+        }
+        if spec.network_effect == Some(NetworkEffect::Read) {
+            capabilities.insert(ToolCapability::NetworkRead);
+        }
+        capabilities
+    }
+
     /// Shuts down lifecycle resources owned by this registered tool generation.
     ///
     /// Stateless tools use the default no-op. Long-lived process or transport tools override this
@@ -2439,10 +2555,281 @@ pub trait Tool: Send + Sync {
 /// Runtime registry for built-in and remote tools.
 #[derive(Clone)]
 pub struct ToolRegistry {
-    tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
+    tools: Arc<RwLock<BTreeMap<String, RegisteredTool>>>,
     run_input_preparer: Arc<RwLock<Option<RunInputPreparerBinding>>>,
     scope: Option<Arc<ToolRegistryScope>>,
     deny_scope: Option<Arc<ToolRegistryScope>>,
+}
+
+#[derive(Clone)]
+struct RegisteredTool {
+    tool: Arc<dyn Tool>,
+    invocation_gate: Arc<ToolInvocationGate>,
+}
+
+impl RegisteredTool {
+    fn new(tool: Arc<dyn Tool>) -> Self {
+        Self {
+            tool,
+            invocation_gate: Arc::new(ToolInvocationGate::default()),
+        }
+    }
+
+    fn acquire(&self) -> Result<Arc<ToolInvocationLease>> {
+        self.invocation_gate.acquire()
+    }
+}
+
+#[derive(Default)]
+struct ToolInvocationGate {
+    state: Mutex<ToolInvocationGateState>,
+    notify: Notify,
+}
+
+#[derive(Default)]
+struct ToolInvocationGateState {
+    active: usize,
+    retired: bool,
+}
+
+impl ToolInvocationGate {
+    fn acquire(self: &Arc<Self>) -> Result<Arc<ToolInvocationLease>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.retired {
+            bail!("registered tool generation is retiring");
+        }
+        state.active = state.active.saturating_add(1);
+        Ok(Arc::new(ToolInvocationLease {
+            gate: Arc::clone(self),
+        }))
+    }
+
+    fn retire(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retired = true;
+    }
+
+    async fn wait_quiescent(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active
+                == 0
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct ToolInvocationLease {
+    gate: Arc<ToolInvocationGate>,
+}
+
+impl Drop for ToolInvocationLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = state.active.saturating_sub(1);
+        let quiescent = state.active == 0;
+        drop(state);
+        if quiescent {
+            self.gate.notify.notify_waiters();
+        }
+    }
+}
+
+/// Exact removed tool generation that can be shut down only after active invocations drain.
+pub struct ToolLifecycleRetirement {
+    registrations: Vec<RegisteredTool>,
+}
+
+impl ToolLifecycleRetirement {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.registrations.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.registrations.is_empty()
+    }
+
+    #[must_use]
+    pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.registrations
+            .iter()
+            .map(|registration| Arc::clone(&registration.tool))
+            .collect()
+    }
+
+    /// Waits for every exact pinned invocation and then shuts down each resource owner once.
+    pub async fn dispose_and_quiesce(&self) -> Result<()> {
+        for registration in &self.registrations {
+            registration.invocation_gate.wait_quiescent().await;
+        }
+        let mut attempted_owners = BTreeSet::new();
+        let mut failures = Vec::new();
+        for registration in &self.registrations {
+            if let Some(owner) = registration.tool.lifecycle_owner()
+                && !attempted_owners.insert(owner)
+            {
+                continue;
+            }
+            if let Err(error) = registration.tool.shutdown().await {
+                failures.push(format!(
+                    "failed to shut down registered tool {}: {error:#}",
+                    registration.tool.spec().name
+                ));
+            }
+        }
+        if !failures.is_empty() {
+            bail!(failures.join("; "));
+        }
+        Ok(())
+    }
+}
+
+/// Exact registered tool generation pinned for one authorization/execution lifecycle.
+#[derive(Clone)]
+pub(crate) struct ResolvedToolInvocation {
+    tool: Arc<dyn Tool>,
+    pub(crate) contract: ToolRuntimeContract,
+    _invocation_lease: Arc<ToolInvocationLease>,
+}
+
+impl std::fmt::Debug for ResolvedToolInvocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedToolInvocation")
+            .field("contract", &self.contract)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResolvedToolInvocation {
+    pub(crate) async fn prepare(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<Option<ToolPreparationDraft>> {
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        let args_digest = prepared_args_digest(&args)?;
+        let Some(preparation) = self
+            .tool
+            .prepare(ctx, call.id.clone(), args.clone())
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ToolPreparationDraft {
+            tool: Arc::clone(&self.tool),
+            args,
+            preparation,
+            call_id: call.id,
+            tool_name: call.name,
+            args_digest,
+        }))
+    }
+
+    pub(crate) fn permission_plan(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+        prepared_subjects: Option<&[ToolSubject]>,
+    ) -> Result<ToolPermissionPlanV2> {
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        let mut draft = self.tool.permission_plan(ctx, &args)?;
+        if let Some(subjects) = prepared_subjects {
+            draft.subjects = subjects.to_vec();
+        }
+        ToolPermissionPlanV2::bind(&call.name, &args, &ctx.workspace_root, draft)
+    }
+
+    pub(crate) fn egress_audit(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<ToolEgressAudit>> {
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        self.tool.egress_audit(ctx, &args)
+    }
+
+    pub(crate) async fn preview(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<Option<ToolPreview>> {
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        self.tool.preview(ctx, args).await
+    }
+
+    pub(crate) fn execution_mutation_profile(
+        &self,
+        ctx: &ToolContext,
+        call_id: &str,
+    ) -> Result<Option<ExecutionMutationProfile>> {
+        execution_mutation_profile_for_tool(
+            ctx,
+            &self.contract.spec,
+            self.contract.mutation_tracking,
+            call_id,
+        )
+    }
+
+    pub(crate) async fn execute_after_started_audit(
+        &self,
+        registry: &ToolRegistry,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<ToolResult> {
+        let ctx = ctx.with_execution_mutation_profile_recorded(call.id.clone());
+        let workspace_frontier = registry.validate_agent_invocation_grant(&ctx)?;
+        ensure_execution_mutation_profile_recorded(
+            &ctx,
+            &self.contract.spec,
+            self.contract.mutation_tracking,
+            &call.id,
+        )?;
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        let mutation_scan = begin_unknown_mutation_scan(&ctx, self.contract.mutation_tracking)
+            .map_err(|error| {
+                anyhow!(
+                    "failed to start workspace mutation detection for {}: {error:#}",
+                    self.contract.spec.name
+                )
+            })?;
+        let call_id = call.id;
+        let result = self.tool.execute(ctx.clone(), call_id.clone(), args).await;
+        let audited_workspace_scan =
+            finish_unknown_mutation_scan(&ctx, &self.contract.spec, &call_id, mutation_scan)
+                .map_err(|error| unknown_mutation_scan_finish_error(&self.contract.spec, error))?;
+        finish_agent_invocation_workspace_effect(
+            &ctx,
+            &self.contract.spec,
+            self.contract.mutation_tracking,
+            workspace_frontier,
+            audited_workspace_scan,
+        )?;
+        result
+    }
 }
 
 #[derive(Clone)]
@@ -2457,7 +2844,7 @@ struct RunInputPreparerBinding {
 /// cycle. It upgrades only while some external [`ToolRegistry`] owner remains alive.
 #[derive(Clone)]
 pub struct WeakToolRegistry {
-    tools: Weak<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
+    tools: Weak<RwLock<BTreeMap<String, RegisteredTool>>>,
     run_input_preparer: Weak<RwLock<Option<RunInputPreparerBinding>>>,
     scope: Option<Arc<ToolRegistryScope>>,
     deny_scope: Option<Arc<ToolRegistryScope>>,
@@ -2510,7 +2897,7 @@ impl ToolRegistry {
             tools
                 .iter()
                 .filter(|(name, _)| self.allows(name))
-                .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+                .map(|(name, registration)| (name.clone(), registration.clone()))
                 .collect::<BTreeMap<_, _>>()
         };
         let input_preparer = {
@@ -2535,7 +2922,7 @@ impl ToolRegistry {
             Ok(tools) => tools,
             Err(poisoned) => poisoned.into_inner(),
         };
-        tools.insert(name, tool);
+        tools.insert(name, RegisteredTool::new(tool));
     }
 
     /// Attaches one runtime-owned per-run input resolver shared by every scoped registry view.
@@ -2656,6 +3043,10 @@ impl ToolRegistry {
         names
             .into_iter()
             .filter_map(|name| tools.remove(&name))
+            .map(|registration| {
+                registration.invocation_gate.retire();
+                registration.tool
+            })
             .collect()
     }
 
@@ -2667,13 +3058,39 @@ impl ToolRegistry {
         };
         let names = tools
             .iter()
-            .filter(|(_, tool)| tool.lifecycle_owner().as_ref() == Some(owner))
+            .filter(|(_, registration)| registration.tool.lifecycle_owner().as_ref() == Some(owner))
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         names
             .into_iter()
             .filter_map(|name| tools.remove(&name))
+            .map(|registration| {
+                registration.invocation_gate.retire();
+                registration.tool
+            })
             .collect()
+    }
+
+    /// Removes an exact lifecycle generation and returns its quiescent disposal owner.
+    pub fn retire_by_lifecycle_owner(
+        &mut self,
+        owner: &ToolLifecycleOwner,
+    ) -> ToolLifecycleRetirement {
+        let mut tools = match self.tools.write() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let names = tools
+            .iter()
+            .filter(|(_, registration)| registration.tool.lifecycle_owner().as_ref() == Some(owner))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let registrations = names
+            .into_iter()
+            .filter_map(|name| tools.remove(&name))
+            .inspect(|registration| registration.invocation_gate.retire())
+            .collect();
+        ToolLifecycleRetirement { registrations }
     }
 
     /// Returns distinct lifecycle generations registered for one exact opaque scope.
@@ -2688,10 +3105,26 @@ impl ToolRegistry {
         };
         tools
             .values()
-            .filter_map(|tool| tool.lifecycle_owner())
+            .filter_map(|registration| registration.tool.lifecycle_owner())
             .filter(|owner| owner.belongs_to(namespace, scope))
             .collect::<BTreeSet<_>>()
             .into_iter()
+            .collect()
+    }
+
+    /// Returns provider-visible names owned by one exact lifecycle generation.
+    #[must_use]
+    pub fn tool_names_by_lifecycle_owner(&self, owner: &ToolLifecycleOwner) -> Vec<String> {
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools
+            .iter()
+            .filter(|(name, registration)| {
+                self.allows(name) && registration.tool.lifecycle_owner().as_ref() == Some(owner)
+            })
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
@@ -2703,8 +3136,8 @@ impl ToolRegistry {
         };
         tools
             .values()
-            .filter_map(|tool| {
-                let spec = tool.spec();
+            .filter_map(|registration| {
+                let spec = registration.tool.spec();
                 self.allows(&spec.name).then_some(spec)
             })
             .collect()
@@ -2714,17 +3147,21 @@ impl ToolRegistry {
     ///
     /// Admission checks use this instead of tool-name allowlists so a same-name replacement with
     /// broader effects cannot inherit read-only trust from the replaced implementation.
-    pub fn contracts(&self) -> Vec<(ToolSpec, ToolMutationTracking)> {
+    pub fn contracts(&self) -> Vec<ToolRuntimeContract> {
         let tools = match self.tools.read() {
             Ok(tools) => tools,
             Err(poisoned) => poisoned.into_inner(),
         };
         tools
             .values()
-            .filter_map(|tool| {
-                let spec = tool.spec();
-                self.allows(&spec.name)
-                    .then(|| (spec, tool.mutation_tracking()))
+            .filter_map(|registration| {
+                let spec = registration.tool.spec();
+                self.allows(&spec.name).then(|| ToolRuntimeContract {
+                    spec,
+                    mutation_tracking: registration.tool.mutation_tracking(),
+                    concurrency_class: registration.tool.concurrency_class(),
+                    capabilities: registration.tool.capabilities(),
+                })
             })
             .collect()
     }
@@ -2738,14 +3175,23 @@ impl ToolRegistry {
         let contracts = self
             .contracts()
             .into_iter()
-            .map(|(spec, tracking)| {
+            .map(|contract| {
                 json!({
-                    "spec": spec,
-                    "mutation_tracking": match tracking {
+                    "spec": contract.spec,
+                    "mutation_tracking": match contract.mutation_tracking {
                         ToolMutationTracking::None => "none",
                         ToolMutationTracking::Controlled => "controlled",
                         ToolMutationTracking::Unknown => "unknown",
                     },
+                    "concurrency_class": match contract.concurrency_class {
+                        ToolConcurrencyClass::Exclusive => "exclusive",
+                        ToolConcurrencyClass::ParallelReadOnly => "parallel_read_only",
+                    },
+                    "capabilities": contract
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.as_str())
+                        .collect::<Vec<_>>(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2753,6 +3199,37 @@ impl ToolRegistry {
         let mut hasher = Sha256::new();
         hasher.update(encoded);
         Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    pub(crate) fn resolve_invocation(&self, name: &str) -> Result<ResolvedToolInvocation> {
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let registration = self.allowed_registration(&tools, name)?;
+        let tool = Arc::clone(&registration.tool);
+        Ok(ResolvedToolInvocation {
+            contract: ToolRuntimeContract {
+                spec: tool.spec(),
+                mutation_tracking: tool.mutation_tracking(),
+                concurrency_class: tool.concurrency_class(),
+                capabilities: tool.capabilities(),
+            },
+            tool,
+            _invocation_lease: registration.acquire()?,
+        })
+    }
+
+    pub(crate) fn invocation_generation_is_current(
+        &self,
+        invocation: &ResolvedToolInvocation,
+    ) -> bool {
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.allowed_tool(&tools, &invocation.contract.spec.name)
+            .is_ok_and(|current| Arc::ptr_eq(&current, &invocation.tool))
     }
 
     /// Returns one registered spec by name.
@@ -2764,7 +3241,7 @@ impl ToolRegistry {
             Ok(tools) => tools,
             Err(poisoned) => poisoned.into_inner(),
         };
-        tools.get(name).map(|tool| tool.spec())
+        tools.get(name).map(|registration| registration.tool.spec())
     }
 
     /// Executes a tool call by name.
@@ -2777,17 +3254,11 @@ impl ToolRegistry {
         ctx: ToolContext,
         call: crate::provider::ToolCall,
     ) -> Result<ToolResult> {
-        let (tool, spec, mutation_tracking) = {
-            let tools = match self.tools.read() {
-                Ok(tools) => tools,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let tool = self.allowed_tool(&tools, &call.name)?;
-            let spec = tool.spec();
-            let mutation_tracking = tool.mutation_tracking();
-            (tool, spec, mutation_tracking)
-        };
-        self.validate_agent_invocation_grant(&ctx)?;
+        let invocation = self.resolve_invocation(&call.name)?;
+        let tool = Arc::clone(&invocation.tool);
+        let spec = invocation.contract.spec.clone();
+        let mutation_tracking = invocation.contract.mutation_tracking;
+        let workspace_frontier = self.validate_agent_invocation_grant(&ctx)?;
         ensure_execution_mutation_profile_recorded(&ctx, &spec, mutation_tracking, &call.id)?;
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -2800,8 +3271,16 @@ impl ToolRegistry {
             })?;
         let call_id = call.id;
         let result = tool.execute(ctx.clone(), call_id.clone(), args).await;
-        finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
-            .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
+        let audited_workspace_scan =
+            finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
+                .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
+        finish_agent_invocation_workspace_effect(
+            &ctx,
+            &spec,
+            mutation_tracking,
+            workspace_frontier,
+            audited_workspace_scan,
+        )?;
         result
     }
 
@@ -2860,16 +3339,17 @@ impl ToolRegistry {
         call: crate::provider::ToolCall,
         prepared: PreparedToolCall,
     ) -> Result<ToolResult> {
-        let current_tool = {
+        let (current_tool, _invocation_lease) = {
             let tools = match self.tools.read() {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            self.allowed_tool(&tools, &call.name)?
+            let registration = self.allowed_registration(&tools, &call.name)?;
+            (Arc::clone(&registration.tool), registration.acquire()?)
         };
         let spec = current_tool.spec();
         let mutation_tracking = current_tool.mutation_tracking();
-        self.validate_agent_invocation_grant(&ctx)?;
+        let workspace_frontier = self.validate_agent_invocation_grant(&ctx)?;
         ensure_execution_mutation_profile_recorded(&ctx, &spec, mutation_tracking, &call.id)?;
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -2906,14 +3386,25 @@ impl ToolRegistry {
         let result = current_tool
             .execute_prepared(ctx.clone(), args, prepared.into_execution())
             .await;
-        finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
-            .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
+        let audited_workspace_scan =
+            finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
+                .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
+        finish_agent_invocation_workspace_effect(
+            &ctx,
+            &spec,
+            mutation_tracking,
+            workspace_frontier,
+            audited_workspace_scan,
+        )?;
         result
     }
 
-    fn validate_agent_invocation_grant(&self, ctx: &ToolContext) -> Result<()> {
+    fn validate_agent_invocation_grant(
+        &self,
+        ctx: &ToolContext,
+    ) -> Result<Option<crate::WorkspaceSnapshotId>> {
         let Some(grant) = ctx.agent_invocation_grant.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         let cancellation = ctx.cancellation.as_ref().ok_or_else(|| {
             anyhow!("child tool execution is missing its root cancellation scope")
@@ -2927,12 +3418,15 @@ impl ToolRegistry {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
+        let workspace_snapshot_id =
+            crate::agent_invocation_workspace_snapshot_id(&ctx.workspace_root)?;
         grant.validate_tool_effect(
             &self.contract_fingerprint()?,
-            &crate::agent_invocation_workspace_snapshot_id(&ctx.workspace_root)?,
+            &workspace_snapshot_id,
             cancellation.scope_id(),
             now_ms,
-        )
+        )?;
+        Ok(Some(workspace_snapshot_id))
     }
 
     /// Returns the mutation profile that must be persisted before executing this tool call.
@@ -3076,15 +3570,22 @@ impl ToolRegistry {
 
     fn allowed_tool(
         &self,
-        tools: &BTreeMap<String, Arc<dyn Tool>>,
+        tools: &BTreeMap<String, RegisteredTool>,
         name: &str,
     ) -> Result<Arc<dyn Tool>> {
+        Ok(Arc::clone(&self.allowed_registration(tools, name)?.tool))
+    }
+
+    fn allowed_registration<'a>(
+        &self,
+        tools: &'a BTreeMap<String, RegisteredTool>,
+        name: &str,
+    ) -> Result<&'a RegisteredTool> {
         if !self.allows(name) {
             return Err(anyhow!("tool {name} is not available in this role scope"));
         }
         tools
             .get(name)
-            .cloned()
             .ok_or_else(|| anyhow!("unknown tool {name}"))
     }
 }
@@ -3260,21 +3761,15 @@ fn finish_unknown_mutation_scan(
     spec: &ToolSpec,
     call_id: &str,
     scan: Option<WorkspaceMutationScan>,
-) -> Result<()> {
+) -> Result<Option<WorkspaceMutationScan>> {
     let Some(scan) = scan else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(recorder) = &ctx.mutation_recorder else {
-        return Ok(());
+        return Ok(None);
     };
-    match recorder.record_workspace_mutation_if_changed(
-        &scan,
-        &ctx.workspace_root,
-        call_id.to_owned(),
-        spec.name.clone(),
-        unknown_mutation_tool_effect(spec),
-    ) {
-        Ok(_) => {}
+    let after = match recorder.capture_workspace_scan(&ctx.workspace_root, &scan.scope) {
+        Ok(after) => after,
         Err(_) => {
             recorder.record_workspace_scan_unavailable_after(
                 &scan,
@@ -3282,9 +3777,55 @@ fn finish_unknown_mutation_scan(
                 spec.name.clone(),
                 unknown_mutation_tool_effect(spec),
             )?;
+            return Ok(None);
+        }
+    };
+    recorder.record_workspace_mutation_scan_result(
+        &scan,
+        &after,
+        call_id.to_owned(),
+        spec.name.clone(),
+        unknown_mutation_tool_effect(spec),
+    )?;
+    Ok(Some(after))
+}
+
+fn finish_agent_invocation_workspace_effect(
+    ctx: &ToolContext,
+    spec: &ToolSpec,
+    mutation_tracking: ToolMutationTracking,
+    validated_workspace_snapshot_id: Option<crate::WorkspaceSnapshotId>,
+    audited_workspace_scan: Option<WorkspaceMutationScan>,
+) -> Result<()> {
+    let Some(grant) = ctx.agent_invocation_grant.as_ref() else {
+        return Ok(());
+    };
+    let Some(validated_workspace_snapshot_id) = validated_workspace_snapshot_id else {
+        bail!("child tool execution lost its validated workspace frontier");
+    };
+    if spec.access == ToolAccess::Read && mutation_tracking == ToolMutationTracking::None {
+        return Ok(());
+    }
+    let observed_after = crate::agent_invocation_workspace_snapshot_id(&ctx.workspace_root)?;
+    if mutation_tracking == ToolMutationTracking::Unknown {
+        let audited_workspace_scan = audited_workspace_scan.ok_or_else(|| {
+            anyhow!("workspace mutation audit is unavailable after child tool execution")
+        })?;
+        let Some(audited_workspace_snapshot_id) =
+            audited_workspace_scan.workspace_snapshot_id.as_ref()
+        else {
+            bail!("workspace mutation audit produced an incomplete snapshot");
+        };
+        let recorder = ctx.mutation_recorder.as_ref().ok_or_else(|| {
+            anyhow!("workspace mutation recorder is unavailable after child tool execution")
+        })?;
+        let confirmed =
+            recorder.capture_workspace_scan(&ctx.workspace_root, &audited_workspace_scan.scope)?;
+        if confirmed.workspace_snapshot_id.as_ref() != Some(audited_workspace_snapshot_id) {
+            bail!("workspace changed after mutation audit and before grant frontier advancement");
         }
     }
-    Ok(())
+    grant.advance_workspace_frontier(&validated_workspace_snapshot_id, observed_after)
 }
 
 fn unknown_mutation_scan_finish_error(spec: &ToolSpec, error: anyhow::Error) -> anyhow::Error {

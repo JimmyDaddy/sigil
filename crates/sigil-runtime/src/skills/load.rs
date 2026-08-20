@@ -13,10 +13,10 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ControlEntry, ModelMessage, SkillConfig, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
     SkillTrustState, Tool, ToolAccess, ToolAnalysisReason, ToolAnalysisReasonCode,
-    ToolAnalysisStatus, ToolCategory, ToolContext, ToolErrorKind, ToolMutationTracking,
-    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec,
-    ToolSubject, ToolSubjectKind, ToolSubjectScope, sha256_hex,
+    ToolAnalysisStatus, ToolCategory, ToolConcurrencyClass, ToolContext, ToolErrorKind,
+    ToolMutationTracking, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope, sha256_hex,
 };
 
 use super::{LOAD_SKILL_TOOL_NAME, SkillDiscoveryReport, discover_skill_index_with_user_dir};
@@ -96,6 +96,10 @@ impl Tool for LoadSkillTool {
 
     fn mutation_tracking(&self) -> ToolMutationTracking {
         ToolMutationTracking::None
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
     }
 
     fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -436,6 +440,7 @@ fn skill_subject(skill_id: &str) -> ToolSubject {
         normalized: format!("skill:{skill_id}"),
         canonical_path: None,
         scope: ToolSubjectScope::Unknown,
+        access: ToolAccess::Read,
     }
 }
 

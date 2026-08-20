@@ -277,11 +277,27 @@ pub(in crate::runner) fn cancel_active_run(
                 (
                     RunCancellationTerminalOutcome::Cancelled,
                     ActiveRunStopDisposition::Cancel,
+                    RunCancellationTarget::Task { task_id },
+                ) => append_interrupted_task_state(
+                    &mut session,
+                    Some(task_id),
+                    "task run stopped from TUI; task remains available to continue",
+                ),
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::Cancel,
+                    RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. },
+                ) => Ok(()),
+                (
+                    RunCancellationTerminalOutcome::Interrupted,
                     _,
-                ) => append_cancelled_task_state(&mut session),
-                (RunCancellationTerminalOutcome::Interrupted, _, _) => {
-                    append_interrupted_task_state(&mut session, &terminal_reason)
-                }
+                    RunCancellationTarget::Task { task_id },
+                ) => append_interrupted_task_state(&mut session, Some(task_id), &terminal_reason),
+                (
+                    RunCancellationTerminalOutcome::Interrupted,
+                    _,
+                    RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. },
+                ) => Ok(()),
             };
             if let Err(error) = task_state {
                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
@@ -290,17 +306,13 @@ pub(in crate::runner) fn cancel_active_run(
             }
             let entries = session.entries().to_vec();
             *current_session = Some(session);
-            let message = match (outcome, disposition) {
+            let message = match (outcome, disposition, &active_run.cancellation_target) {
                 (
                     RunCancellationTerminalOutcome::Cancelled,
                     ActiveRunStopDisposition::PauseTask,
+                    RunCancellationTarget::Task { task_id },
                 ) => WorkerMessage::TaskRunPaused {
-                    task_id: match active_run.cancellation_target {
-                        RunCancellationTarget::Task { task_id } => task_id,
-                        RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. } => {
-                            unreachable!("pause disposition requires a task cancellation target")
-                        }
-                    },
+                    task_id: task_id.clone(),
                     session_log_path: current_session_log_path.to_path_buf(),
                     provider_name: current_session
                         .as_ref()
@@ -312,8 +324,46 @@ pub(in crate::runner) fn cancel_active_run(
                         .unwrap_or_else(|| root_config.agent.model.clone()),
                     entries,
                 },
-                (RunCancellationTerminalOutcome::Cancelled, ActiveRunStopDisposition::Cancel) => {
-                    WorkerMessage::RunCancelled {
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::PauseTask,
+                    RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. },
+                ) => unreachable!("pause disposition requires a task cancellation target"),
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::Cancel,
+                    RunCancellationTarget::Task { .. },
+                ) => WorkerMessage::RunInterrupted {
+                    session_log_path: current_session_log_path.to_path_buf(),
+                    provider_name: current_session
+                        .as_ref()
+                        .map(|session| session.provider_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
+                    model_name: current_session
+                        .as_ref()
+                        .map(|session| session.model_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.model.clone()),
+                    reason: "task run stopped; task remains available to continue".to_owned(),
+                    entries,
+                },
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::Cancel,
+                    RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. },
+                ) => WorkerMessage::RunCancelled {
+                    session_log_path: current_session_log_path.to_path_buf(),
+                    provider_name: current_session
+                        .as_ref()
+                        .map(|session| session.provider_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
+                    model_name: current_session
+                        .as_ref()
+                        .map(|session| session.model_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.model.clone()),
+                    entries,
+                },
+                (RunCancellationTerminalOutcome::Interrupted, _, _) => {
+                    WorkerMessage::RunInterrupted {
                         session_log_path: current_session_log_path.to_path_buf(),
                         provider_name: current_session
                             .as_ref()
@@ -323,22 +373,10 @@ pub(in crate::runner) fn cancel_active_run(
                             .as_ref()
                             .map(|session| session.model_name().to_owned())
                             .unwrap_or_else(|| root_config.agent.model.clone()),
+                        reason: terminal_reason,
                         entries,
                     }
                 }
-                (RunCancellationTerminalOutcome::Interrupted, _) => WorkerMessage::RunInterrupted {
-                    session_log_path: current_session_log_path.to_path_buf(),
-                    provider_name: current_session
-                        .as_ref()
-                        .map(|session| session.provider_name().to_owned())
-                        .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
-                    model_name: current_session
-                        .as_ref()
-                        .map(|session| session.model_name().to_owned())
-                        .unwrap_or_else(|| root_config.agent.model.clone()),
-                    reason: terminal_reason,
-                    entries,
-                },
             };
             let _ = message_tx.send(message);
         }

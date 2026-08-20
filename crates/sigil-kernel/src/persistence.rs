@@ -948,11 +948,20 @@ fn redact_secret_carriers(value: &str) -> String {
 
 /// Byte bounds of the last non-whitespace token in `value`, or `None` when no such token exists.
 fn last_non_whitespace_token_bounds(value: &str) -> Option<(usize, usize)> {
-    let last_non_ws = value.rfind(|character: char| !character.is_whitespace())?;
-    let start = value[..=last_non_ws]
-        .rfind(|character: char| character.is_whitespace())
-        .map_or(0, |ws| ws + 1);
-    Some((start, last_non_ws + 1))
+    let mut end = None;
+    for (index, character) in value.char_indices().rev() {
+        if end.is_none() {
+            if character.is_whitespace() {
+                continue;
+            }
+            end = Some(index + character.len_utf8());
+            continue;
+        }
+        if character.is_whitespace() {
+            return Some((index + character.len_utf8(), end?));
+        }
+    }
+    end.map(|end| (0, end))
 }
 
 /// Byte bounds of the first non-whitespace token in `value`, or `None` when no such token exists.
@@ -970,12 +979,9 @@ fn is_carry_marker(token: &str) -> bool {
 
 /// The non-whitespace token immediately before byte position `before`, or `None`.
 fn previous_non_whitespace_token(value: &str, before: usize) -> Option<&str> {
-    let head = &value[..before];
-    let end = head.rfind(|character: char| !character.is_whitespace())?;
-    let start = head[..=end]
-        .rfind(|character: char| character.is_whitespace())
-        .map_or(0, |ws| ws + 1);
-    Some(&head[start..=end])
+    let head = value.get(..before)?;
+    let (start, end) = last_non_whitespace_token_bounds(head)?;
+    Some(&head[start..end])
 }
 
 /// RFC-0062 16.1: closes the cross-stream secret reassembly gap.

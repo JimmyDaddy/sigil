@@ -1412,19 +1412,6 @@ pub(in crate::runner) fn revise_plan(
     })
 }
 
-pub(in crate::runner) fn append_cancelled_task_state(
-    session: &mut Session,
-) -> std::result::Result<(), String> {
-    sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
-        session,
-        None,
-        sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Cancelled,
-        "run cancelled from TUI",
-    )
-    .map(|_| ())
-    .map_err(|error| error.to_string())
-}
-
 pub(in crate::runner) fn append_paused_task_state(
     session: &mut Session,
     task_id: &str,
@@ -1443,11 +1430,18 @@ pub(in crate::runner) fn append_paused_task_state(
 
 pub(in crate::runner) fn append_interrupted_task_state(
     session: &mut Session,
+    task_id: Option<&str>,
     reason: &str,
 ) -> std::result::Result<(), String> {
+    let task_id = task_id
+        .map(|value| {
+            TaskId::new(value.to_owned())
+                .map_err(|error| format!("invalid active task id: {error}"))
+        })
+        .transpose()?;
     sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
         session,
-        None,
+        task_id.as_ref(),
         sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
         reason,
     )

@@ -5,7 +5,8 @@ use sigil_kernel::{
     ControlEntry, ModelMessage, TOOL_ARTIFACT_READ_SCHEMA_VERSION, Tool, ToolAccess,
     ToolArtifactReadOutcome, ToolArtifactReadRecordedV1, ToolArtifactRefV1,
     ToolArtifactRetrievalPolicyV1, ToolArtifactSelectorV1, ToolArtifactSensitivity, ToolCategory,
-    ToolContext, ToolErrorKind, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
+    ToolConcurrencyClass, ToolContext, ToolErrorKind, ToolMutationTracking, ToolPreviewCapability,
+    ToolResult, ToolResultMeta, ToolSpec,
 };
 
 pub(crate) struct ReadToolArtifactTool;
@@ -81,21 +82,53 @@ impl Tool for ReadToolArtifactTool {
         }
     }
 
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
+    }
+
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
-        let artifact_ref: ToolArtifactRefV1 = serde_json::from_value(
-            args.get("artifact_ref")
-                .cloned()
-                .context("artifact_ref is required")?,
-        )
-        .context("artifact_ref is malformed")?;
-        let selector: ToolArtifactSelectorV1 = serde_json::from_value(
-            args.get("selector")
-                .cloned()
-                .context("selector is required")?,
-        )
-        .context("selector is malformed")?;
-        artifact_ref.validate()?;
-        selector.validate()?;
+        let artifact_ref: ToolArtifactRefV1 = match args
+            .get("artifact_ref")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("artifact_ref is required"))
+            .and_then(|value| serde_json::from_value(value).context("artifact_ref is malformed"))
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(invalid_artifact_input_result(call_id, error.to_string()));
+            }
+        };
+        let selector: ToolArtifactSelectorV1 = match args
+            .get("selector")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("selector is required"))
+            .and_then(|value| serde_json::from_value(value).context("selector is malformed"))
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(invalid_artifact_input_result(call_id, error.to_string()));
+            }
+        };
+        if let Err(error) = artifact_ref.validate() {
+            return Ok(invalid_artifact_input_result(call_id, error.to_string()));
+        }
+        if let Err(error) = selector.validate() {
+            let message = match &selector {
+                ToolArtifactSelectorV1::LinePage { line_count, .. } if *line_count > 200 => {
+                    format!(
+                        "line_page line_count {line_count} exceeds the allowed range 1..=200; reduce line_count and retry"
+                    )
+                }
+                _ => format!(
+                    "invalid artifact selector: {error}; use a bounded byte slice, line page (1..=200 lines), or literal search"
+                ),
+            };
+            return Ok(invalid_artifact_input_result(call_id, message));
+        }
         let Some(store) = ctx.tool_artifact_store() else {
             return Ok(ToolResult::error(
                 call_id,
@@ -234,4 +267,21 @@ impl Tool for ReadToolArtifactTool {
         .to_string();
         Ok(result.with_transient_context(vec![ModelMessage::system(transient_page)]))
     }
+}
+
+fn invalid_artifact_input_result(call_id: String, message: String) -> ToolResult {
+    ToolResult::error(
+        call_id,
+        "read_tool_artifact",
+        ToolErrorKind::InvalidInput,
+        message,
+    )
+    .with_error_details(
+        true,
+        json!({
+            "retryable": true,
+            "allowed_line_count": {"min": 1, "max": 200},
+            "hint": "reduce the selector bounds and retry"
+        }),
+    )
 }

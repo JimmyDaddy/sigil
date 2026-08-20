@@ -18,8 +18,7 @@ use sigil_kernel::{
     changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
     conversation_route_routing_contract_material,
     direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
-    runtime_context_v1_system_prompt_contract_material,
-    task_participant_finalization_prompt_contract_material,
+    runtime_context_v2_contract_material, task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, write_file_with_mutation,
 };
 use tempfile::tempdir;
@@ -283,7 +282,7 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     let mut expected_system_material = b"sigil-orchestration-system-prompt-v1\0".to_vec();
     expected_system_material.extend(
         serde_json::to_vec(&serde_json::json!({
-            "runtime_context": runtime_context_v1_system_prompt_contract_material(),
+            "runtime_context": runtime_context_v2_contract_material(),
             "changeset_only_child": changeset_only_child_contract_prompt(),
             "planner_discovery": task_discovery_system_prompt(),
             "task_participant": task_participant_system_prompt_contract_material(),

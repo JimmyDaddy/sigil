@@ -1138,8 +1138,9 @@ fn render_timeline_entry_lines_formats_tool_cards() {
         lines[0]
             .spans
             .iter()
-            .any(|span| span.content.as_ref().contains("OK"))
+            .any(|span| span.content.as_ref().contains('✓'))
     );
+    assert!(!first_line.contains("OK"));
     let summary_span = lines[1]
         .spans
         .iter()
@@ -1452,9 +1453,10 @@ fn render_timeline_entry_lines_simplifies_bash_no_output() {
     let plain = rendered_plain_lines(&render_timeline_entry_lines(&entry)).join("\n");
 
     assert!(plain.contains("Ran cargo fmt --all --check"));
-    assert!(plain.contains("OK"));
+    assert!(plain.contains('✓'));
+    assert!(!plain.contains("OK"));
     assert!(plain.contains("exit 0"));
-    assert!(plain.contains("(no output)"));
+    assert!(plain.contains("No output"));
     assert!(!plain.contains("terminal tail"));
 }
 
@@ -1520,14 +1522,10 @@ fn render_timeline_entry_lines_prioritizes_bash_failure_output() {
 
     assert!(stderr_plain.contains("ERROR"));
     assert!(stderr_plain.contains("exit 101"));
-    assert!(stderr_plain.contains("stderr"));
-    assert!(stderr_plain.contains("exit 101"));
-    assert!(stderr_plain.contains("error: clippy failed"));
+    assert!(stderr_plain.contains("! error: clippy failed"));
     assert!(stdout_plain.contains("ERROR"));
     assert!(stdout_plain.contains("exit 1"));
-    assert!(stdout_plain.contains("stdout"));
-    assert!(stdout_plain.contains("exit 1"));
-    assert!(stdout_plain.contains("failed on stdout"));
+    assert!(stdout_plain.contains("│ failed on stdout"));
 }
 
 #[test]
@@ -1607,7 +1605,7 @@ fn render_timeline_entry_lines_formats_grep_cards_by_file() {
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("matches"))
+            .any(|span| span.content.as_ref().contains("2 hits"))
     }));
     assert!(lines.iter().any(|line| {
         line.spans
@@ -1617,8 +1615,9 @@ fn render_timeline_entry_lines_formats_grep_cards_by_file() {
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("L12"))
+            .any(|span| span.content.as_ref().contains("12"))
     }));
+    assert!(!rendered_plain_lines(&lines).join("\n").contains("result"));
 }
 
 #[test]

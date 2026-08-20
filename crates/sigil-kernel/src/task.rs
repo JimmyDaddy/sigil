@@ -17,6 +17,11 @@ use crate::{
 
 pub const TASK_PLAN_UPDATE_TOOL_NAME: &str = "task_plan_update";
 pub const TASK_GUIDANCE_APPLY_TOOL_NAME: &str = "task_guidance_apply";
+/// Durable schema carried by task-step execution-contract sidecars.
+pub const TASK_STEP_CONTRACT_V2_SCHEMA_VERSION: u16 = 2;
+const TASK_STEP_CONTRACT_MAX_ITEMS: usize = 64;
+const TASK_STEP_CONTRACT_MAX_TEXT_CHARS: usize = 2_048;
+const TASK_STEP_CONTRACT_MAX_PATH_CHARS: usize = 1_024;
 /// Maximum number of characters copied from a participant transcript into parent task control.
 pub const TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS: usize = 4_000;
 /// Maximum artifact references copied from one participant into parent task control.
@@ -33,6 +38,9 @@ pub const TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS: usize = 128;
 pub const MAX_TASK_PARTICIPANT_AUTO_RETRIES: usize = 2;
 /// Maximum cumulative delay admitted for automatic retries of one participant identity.
 pub const MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS: u64 = 120_000;
+/// Repeating the same semantic call batch against the same result frontier twice requests a
+/// bounded participant finalization turn instead of allowing another analysis loop.
+pub const TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD: u32 = 2;
 
 const TASK_PARTICIPANT_ATTEMPT_ID_DOMAIN: &str = "sigil-task-participant-attempt-v1";
 const TASK_PARTICIPANT_CHILD_ID_DOMAIN: &str = "sigil-task-participant-child-v1";
@@ -531,6 +539,280 @@ pub struct TaskStepSpec {
     pub isolation: Option<TaskIsolationMode>,
 }
 
+/// Capability a task step must possess before a participant may be launched.
+///
+/// These values describe semantic abilities, not concrete tool names. The runtime resolves them
+/// against the exact scoped registry for the selected participant and fails admission closed when
+/// a required capability is missing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCapabilityV2 {
+    WorkspaceRead,
+    WorkspaceWrite,
+    VcsRead,
+    ProcessExecute,
+    NetworkRead,
+    ArtifactRead,
+    VerificationRun,
+}
+
+impl TaskCapabilityV2 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceRead => "workspace_read",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::VcsRead => "vcs_read",
+            Self::ProcessExecute => "process_execute",
+            Self::NetworkRead => "network_read",
+            Self::ArtifactRead => "artifact_read",
+            Self::VerificationRun => "verification_run",
+        }
+    }
+
+    fn tool_capability(self) -> crate::ToolCapability {
+        match self {
+            Self::WorkspaceRead => crate::ToolCapability::WorkspaceRead,
+            Self::WorkspaceWrite => crate::ToolCapability::WorkspaceWrite,
+            Self::VcsRead => crate::ToolCapability::VcsRead,
+            Self::ProcessExecute => crate::ToolCapability::ProcessExecute,
+            Self::NetworkRead => crate::ToolCapability::NetworkRead,
+            Self::ArtifactRead => crate::ToolCapability::ArtifactRead,
+            Self::VerificationRun => crate::ToolCapability::VerificationRun,
+        }
+    }
+}
+
+/// Versioned, append-only execution contract for one accepted task-plan step.
+///
+/// This is intentionally a sidecar instead of a field on [`TaskStepSpec`]. Historic V1 plan
+/// payloads therefore retain their exact meaning and replay with an empty contract, while V2
+/// planners can preserve scope, deliverables, acceptance criteria, and capability requirements.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskStepContractV2 {
+    pub schema_version: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capabilities: Vec<TaskCapabilityV2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_spec_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+impl TaskStepContractV2 {
+    /// Validates that the contract is bounded, persistence-safe, and deterministic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported schema versions, duplicate capabilities or references,
+    /// unsafe paths, or unbounded text.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TASK_STEP_CONTRACT_V2_SCHEMA_VERSION {
+            bail!("unsupported task step contract schema version");
+        }
+        validate_contract_item_count("target paths", self.target_paths.len())?;
+        validate_contract_item_count("required capabilities", self.required_capabilities.len())?;
+        validate_contract_item_count("deliverables", self.deliverables.len())?;
+        validate_contract_item_count("acceptance criteria", self.acceptance_criteria.len())?;
+        validate_contract_item_count("check spec refs", self.check_spec_refs.len())?;
+        validate_contract_item_count("notes", self.notes.len())?;
+        if self
+            .required_capabilities
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != self.required_capabilities.len()
+        {
+            bail!("task step contract repeats a required capability");
+        }
+        if self.check_spec_refs.iter().collect::<BTreeSet<_>>().len() != self.check_spec_refs.len()
+        {
+            bail!("task step contract repeats a check spec ref");
+        }
+        for path in &self.target_paths {
+            validate_contract_workspace_path(path)?;
+        }
+        for (label, values) in [
+            ("deliverable", &self.deliverables),
+            ("acceptance criterion", &self.acceptance_criteria),
+            ("check spec ref", &self.check_spec_refs),
+            ("note", &self.notes),
+        ] {
+            for value in values {
+                validate_contract_text(label, value, TASK_STEP_CONTRACT_MAX_TEXT_CHARS)?;
+            }
+        }
+        if let Some(risk) = self.risk.as_deref() {
+            validate_contract_text("risk", risk, TASK_STEP_CONTRACT_MAX_TEXT_CHARS)?;
+        }
+        Ok(())
+    }
+}
+
+/// Binds a V2 execution contract to one immutable task-plan incarnation and step.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskStepContractBoundEntryV2 {
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub step_id: TaskStepId,
+    pub contract: TaskStepContractV2,
+}
+
+/// Terminal marker proving that one accepted plan and its complete V2 sidecar set were committed
+/// as a single recovery unit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskPlanContractSetCommittedV2 {
+    pub schema_version: u16,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub contract_count: usize,
+    pub contract_set_sha256: String,
+}
+
+impl TaskPlanContractSetCommittedV2 {
+    /// Builds a deterministic commit marker for the exact plan incarnation.
+    pub fn new(plan: &TaskPlanEntry, contracts: &[TaskStepContractBoundEntryV2]) -> Result<Self> {
+        if contracts.len() != plan.steps.len() {
+            bail!("V2 task plan contract set is incomplete");
+        }
+        let plan_step_ids = plan
+            .steps
+            .iter()
+            .map(|step| &step.step_id)
+            .collect::<BTreeSet<_>>();
+        let contract_step_ids = contracts
+            .iter()
+            .map(|binding| &binding.step_id)
+            .collect::<BTreeSet<_>>();
+        if plan_step_ids != contract_step_ids {
+            bail!("V2 task plan contract set does not match plan steps");
+        }
+        for binding in contracts {
+            binding.validate()?;
+            if binding.task_id != plan.task_id || binding.plan_version != plan.plan_version {
+                bail!("V2 task plan contract set targets another plan");
+            }
+        }
+        let contract_set_sha256 = task_contract_set_sha256(contracts)?;
+        Ok(Self {
+            schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+            task_id: plan.task_id.clone(),
+            plan_version: plan.plan_version,
+            contract_count: contracts.len(),
+            contract_set_sha256,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TASK_STEP_CONTRACT_V2_SCHEMA_VERSION
+            || self.plan_version == 0
+            || self.contract_count == 0
+        {
+            bail!("invalid V2 task plan contract-set commit marker");
+        }
+        let Some(digest) = self.contract_set_sha256.strip_prefix("sha256:") else {
+            bail!("task plan contract-set hash must use sha256 prefix");
+        };
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("task plan contract-set hash is invalid");
+        }
+        Ok(())
+    }
+}
+
+fn task_contract_set_sha256(contracts: &[TaskStepContractBoundEntryV2]) -> Result<String> {
+    let mut canonical = contracts.to_vec();
+    canonical.sort_by(|left, right| left.step_id.cmp(&right.step_id));
+    Ok(format!(
+        "sha256:{}",
+        crate::sha256_hex(&serde_json::to_vec(&canonical)?)
+    ))
+}
+
+impl TaskStepContractBoundEntryV2 {
+    /// Validates the sidecar independently of replay order.
+    pub fn validate(&self) -> Result<()> {
+        if self.plan_version == 0 {
+            bail!("task step contract plan version must be at least one");
+        }
+        self.contract.validate()
+    }
+}
+
+/// Resolves one step contract against the exact visible tool generations selected for a run.
+///
+/// # Errors
+///
+/// Returns an error listing every missing semantic capability. Callers must run this immediately
+/// before participant launch so a same-name registry replacement cannot bypass admission.
+pub fn validate_task_step_capability_admission(
+    contract: &TaskStepContractV2,
+    tool_contracts: &[crate::ToolRuntimeContract],
+) -> Result<()> {
+    contract.validate()?;
+    let available = tool_contracts
+        .iter()
+        .flat_map(|tool| tool.capabilities.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let missing = contract
+        .required_capabilities
+        .iter()
+        .copied()
+        .filter(|capability| !available.contains(&capability.tool_capability()))
+        .map(TaskCapabilityV2::as_str)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!(
+            "task step is missing required capabilities: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn validate_contract_item_count(label: &str, count: usize) -> Result<()> {
+    if count > TASK_STEP_CONTRACT_MAX_ITEMS {
+        bail!("task step contract has too many {label}");
+    }
+    Ok(())
+}
+
+fn validate_contract_text(label: &str, value: &str, max_chars: usize) -> Result<()> {
+    if value.trim().is_empty()
+        || value.chars().count() > max_chars
+        || crate::safe_persistence_text(value) != value
+    {
+        bail!("task step contract {label} is not safely bounded");
+    }
+    Ok(())
+}
+
+fn validate_contract_workspace_path(value: &str) -> Result<()> {
+    validate_contract_text("target path", value, TASK_STEP_CONTRACT_MAX_PATH_CHARS)?;
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        bail!("task step contract target path must be workspace-relative");
+    }
+    Ok(())
+}
+
 impl TaskStepSpec {
     pub fn effective_mode(&self) -> TaskStepMode {
         self.mode
@@ -967,6 +1249,39 @@ pub(crate) fn task_plan_update_tool_spec_for_worktree(
                                 "type": "string",
                                 "description": "Bounded execution instructions. Any repository path must be workspace-relative and must not begin with a slash."
                             },
+                            "target_paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Concrete workspace-relative files or directories this step may inspect or change."
+                            },
+                            "required_capabilities": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["workspace_read", "workspace_write", "vcs_read", "process_execute", "network_read", "artifact_read"]
+                                },
+                                "description": "Semantic participant capabilities required before the step may launch. Use vcs_read for git status/diff inspection instead of assuming shell access. Trusted verification is host-owned and must be expressed through check_spec_refs, not verification_run."
+                            },
+                            "deliverables": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Concrete outputs this step must return to its dependents."
+                            },
+                            "acceptance_criteria": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Observable completion criteria for this step."
+                            },
+                            "check_spec_refs": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Trusted verification check identifiers consumed by the host verifier."
+                            },
+                            "risk": {"type": "string"},
+                            "notes": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            },
                             "role": {
                                 "type": "string",
                                 "enum": ["planner", "executor", "subagent_read", "subagent_write"],
@@ -1016,6 +1331,25 @@ pub fn task_plan_update_entry(
     context: &TaskPlanUpdateContext,
     call: &ToolCall,
 ) -> Result<TaskPlanEntry> {
+    Ok(task_plan_update_commit_v2(context, call)?.plan)
+}
+
+/// Parsed task plan plus its lossless V2 execution-contract sidecars.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPlanUpdateCommitV2 {
+    pub plan: TaskPlanEntry,
+    pub step_contracts: Vec<TaskStepContractBoundEntryV2>,
+}
+
+/// Parses one internal `task_plan_update` call without dropping step execution metadata.
+///
+/// # Errors
+///
+/// Returns an error when the plan or any V2 sidecar is invalid.
+pub fn task_plan_update_commit_v2(
+    context: &TaskPlanUpdateContext,
+    call: &ToolCall,
+) -> Result<TaskPlanUpdateCommitV2> {
     if call.name != TASK_PLAN_UPDATE_TOOL_NAME {
         bail!("unexpected internal task tool {}", call.name);
     }
@@ -1041,48 +1375,81 @@ pub fn task_plan_update_entry(
             context.max_plan_steps
         );
     }
-    let steps = args
-        .steps
-        .into_iter()
-        .map(|step| {
-            let display_name = match step.display_name.as_deref() {
-                Some(display_name) => {
-                    let normalized =
-                        normalize_task_agent_display_name(display_name).map_err(|error| {
-                            anyhow!("invalid display_name for step {}: {error}", step.step_id)
-                        })?;
-                    Some(
-                        normalize_task_agent_display_name(&crate::safe_persistence_text(
-                            &normalized,
-                        ))
+    let plan_version = args.plan_version;
+    let status = args.status;
+    let reason = args.reason;
+    let mut steps = Vec::with_capacity(args.steps.len());
+    let mut step_contracts = Vec::with_capacity(args.steps.len());
+    for step in args.steps {
+        let raw_step_id = step.step_id.clone();
+        let display_name = match step.display_name.as_deref() {
+            Some(display_name) => {
+                let normalized =
+                    normalize_task_agent_display_name(display_name).map_err(|error| {
+                        anyhow!("invalid display_name for step {}: {error}", step.step_id)
+                    })?;
+                Some(
+                    normalize_task_agent_display_name(&crate::safe_persistence_text(&normalized))
                         .map_err(|error| {
-                            anyhow!("invalid display_name for step {}: {error}", step.step_id)
-                        })?,
-                    )
-                }
-                None => None,
-            };
-            let mode = step
-                .mode
-                .unwrap_or_else(|| TaskStepMode::default_for_role(step.role));
-            let isolation = canonical_task_plan_update_isolation(mode, step.isolation);
-            Ok(TaskStepSpec {
-                step_id: TaskStepId::new(step.step_id)?,
-                title: crate::safe_persistence_text(&step.title),
-                display_name,
-                detail: step.detail.as_deref().map(crate::safe_persistence_text),
-                role: step.role,
-                depends_on: step
-                    .depends_on
-                    .into_iter()
-                    .map(TaskStepId::new)
-                    .collect::<Result<Vec<_>>>()?,
-                intent_refs: Vec::new(),
-                mode: Some(mode),
-                isolation: Some(isolation),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+                        anyhow!("invalid display_name for step {}: {error}", step.step_id)
+                    })?,
+                )
+            }
+            None => None,
+        };
+        let mode = step
+            .mode
+            .unwrap_or_else(|| TaskStepMode::default_for_role(step.role));
+        let isolation = canonical_task_plan_update_isolation(mode, step.isolation);
+        let step_id = TaskStepId::new(step.step_id)?;
+        let task_step = TaskStepSpec {
+            step_id: step_id.clone(),
+            title: crate::safe_persistence_text(&step.title),
+            display_name,
+            detail: step.detail.as_deref().map(crate::safe_persistence_text),
+            role: step.role,
+            depends_on: step
+                .depends_on
+                .into_iter()
+                .map(TaskStepId::new)
+                .collect::<Result<Vec<_>>>()?,
+            intent_refs: Vec::new(),
+            mode: Some(mode),
+            isolation: Some(isolation),
+        };
+        if step
+            .required_capabilities
+            .contains(&TaskCapabilityV2::VerificationRun)
+        {
+            bail!(
+                "task planner cannot delegate verification_run for step {raw_step_id}; use check_spec_refs for host-owned verification"
+            );
+        }
+        let mut required_capabilities = default_task_step_capabilities(mode, isolation)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        required_capabilities.extend(step.required_capabilities);
+        let contract = TaskStepContractV2 {
+            schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+            target_paths: step.target_paths,
+            required_capabilities: required_capabilities.into_iter().collect(),
+            deliverables: step.deliverables,
+            acceptance_criteria: step.acceptance_criteria,
+            check_spec_refs: step.check_spec_refs,
+            risk: step.risk,
+            notes: step.notes,
+        };
+        contract.validate().map_err(|error| {
+            anyhow!("invalid execution contract for step {raw_step_id}: {error}")
+        })?;
+        steps.push(task_step);
+        step_contracts.push(TaskStepContractBoundEntryV2 {
+            task_id: context.task_id.clone(),
+            plan_version,
+            step_id,
+            contract,
+        });
+    }
     validate_task_plan_graph_steps(&steps)?;
     if steps
         .iter()
@@ -1101,13 +1468,33 @@ pub fn task_plan_update_entry(
             "worktree isolation is unavailable for this planning run; use executor with sequential_workspace_write"
         );
     }
-    Ok(TaskPlanEntry {
-        task_id: context.task_id.clone(),
-        plan_version: args.plan_version,
-        status: args.status,
-        steps,
-        reason: args.reason.as_deref().map(crate::safe_persistence_text),
+    Ok(TaskPlanUpdateCommitV2 {
+        plan: TaskPlanEntry {
+            task_id: context.task_id.clone(),
+            plan_version,
+            status,
+            steps,
+            reason: reason.as_deref().map(crate::safe_persistence_text),
+        },
+        step_contracts,
     })
+}
+
+fn default_task_step_capabilities(
+    mode: TaskStepMode,
+    isolation: TaskIsolationMode,
+) -> Vec<TaskCapabilityV2> {
+    match mode {
+        TaskStepMode::Write if isolation == TaskIsolationMode::ChangesetOnly => {
+            vec![TaskCapabilityV2::WorkspaceRead]
+        }
+        TaskStepMode::Write => vec![
+            TaskCapabilityV2::WorkspaceRead,
+            TaskCapabilityV2::WorkspaceWrite,
+        ],
+        TaskStepMode::Read | TaskStepMode::Review => vec![TaskCapabilityV2::WorkspaceRead],
+        TaskStepMode::Verify => vec![TaskCapabilityV2::VerificationRun],
+    }
 }
 
 fn canonical_task_plan_update_isolation(
@@ -1314,6 +1701,20 @@ struct RawTaskStepSpec {
     pub display_name: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    #[serde(default)]
+    pub required_capabilities: Vec<TaskCapabilityV2>,
+    #[serde(default)]
+    pub deliverables: Vec<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub check_spec_refs: Vec<String>,
+    #[serde(default)]
+    pub risk: Option<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub role: AgentRole,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -1566,8 +1967,7 @@ impl TaskParticipantAttemptEntry {
     }
 }
 
-/// Durable proof that a provider-pressure retry cannot duplicate model output, tool work, or an
-/// external effect.
+/// Durable proof that a bounded participant retry is safe for its declared recovery class.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TaskParticipantRetryProof {
@@ -1585,15 +1985,26 @@ pub enum TaskParticipantRetryProof {
         zero_tool: bool,
         zero_effect: bool,
     },
+    /// A read-only participant's latest physical attempt ended after provider output was
+    /// observed, but the attempt produced no external side effect. The replacement is a new
+    /// durable participant attempt using the exact same task input; it is not a transparent
+    /// replay of the failed physical request.
+    ProviderProtocolRejectedAfterOutput {
+        physical_attempt_id: String,
+        request_material_fingerprint: String,
+        read_only_step: bool,
+        zero_effect: bool,
+    },
 }
 
 impl TaskParticipantRetryProof {
-    /// Validates that all three safety facts are explicit and that referenced provider evidence is
-    /// structurally safe.
+    /// Validates the explicit safety facts for the selected recovery class and the referenced
+    /// provider evidence.
     ///
     /// # Errors
     ///
-    /// Returns an error when any zero-effect fact is false or an evidence fingerprint is invalid.
+    /// Returns an error when a required safety fact is false or an evidence fingerprint is
+    /// invalid.
     pub fn validate_shape(&self) -> Result<()> {
         let (zero_output, zero_tool, zero_effect) = match self {
             Self::ProviderConfirmedNoConsumption {
@@ -1616,11 +2027,39 @@ impl TaskParticipantRetryProof {
                 zero_tool,
                 zero_effect,
             } => (*zero_output, *zero_tool, *zero_effect),
+            Self::ProviderProtocolRejectedAfterOutput {
+                physical_attempt_id,
+                request_material_fingerprint,
+                read_only_step,
+                zero_effect,
+            } => {
+                validate_stable_id("provider physical attempt id", physical_attempt_id)?;
+                validate_prefixed_sha256(
+                    "provider request material fingerprint",
+                    request_material_fingerprint,
+                    "hmac-sha256:",
+                )?;
+                if !read_only_step || !zero_effect {
+                    bail!(
+                        "provider protocol recovery proof must establish a read-only step and zero effect"
+                    );
+                }
+                return Ok(());
+            }
         };
         if !zero_output || !zero_tool || !zero_effect {
             bail!("task participant retry proof must establish zero output, tool, and effect");
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn recovery_label(&self) -> &'static str {
+        match self {
+            Self::ProviderConfirmedNoConsumption { .. }
+            | Self::AdmissionRejectedBeforeDispatch { .. } => "provider pressure",
+            Self::ProviderProtocolRejectedAfterOutput { .. } => "provider protocol recovery",
+        }
     }
 }
 
@@ -1704,6 +2143,62 @@ pub struct TaskParticipantResultEntry {
     pub changed_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verification_refs: Vec<String>,
+}
+
+/// Durable, hash-only checkpoint for one task-participant model turn.
+///
+/// The entry intentionally stores neither tool arguments nor tool output. It lets recovery and
+/// the live agent loop distinguish useful frontier movement from an exact repeated analysis batch
+/// without copying potentially sensitive child-session content into control state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskStepCheckpointV2 {
+    pub schema_version: u16,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub step_id: TaskStepId,
+    pub attempt_id: TaskParticipantAttemptId,
+    pub model_turn: u32,
+    pub semantic_call_hash: String,
+    pub result_frontier_hash: String,
+    pub no_progress_count: u32,
+}
+
+impl TaskStepCheckpointV2 {
+    /// Validates the bounded checkpoint identity and hash-only frontier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the schema, task binding, turn, or digest is invalid.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TASK_STEP_CONTRACT_V2_SCHEMA_VERSION {
+            bail!(
+                "unsupported task step checkpoint schema version {}",
+                self.schema_version
+            );
+        }
+        if self.plan_version == 0 || self.model_turn == 0 {
+            bail!("task step checkpoint is missing its plan or model-turn identity");
+        }
+        TaskId::new(self.task_id.as_str())?;
+        TaskStepId::new(self.step_id.as_str())?;
+        TaskParticipantAttemptId::new(self.attempt_id.as_str())?;
+        validate_sha256_fingerprint("task semantic call hash", &self.semantic_call_hash)?;
+        validate_sha256_fingerprint("task result frontier hash", &self.result_frontier_hash)?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn repeated_frontier(&self, previous: Option<&Self>) -> bool {
+        previous.is_some_and(|previous| {
+            previous.task_id == self.task_id
+                && previous.plan_version == self.plan_version
+                && previous.step_id == self.step_id
+                && previous.attempt_id == self.attempt_id
+                && previous.semantic_call_hash == self.semantic_call_hash
+                && previous.result_frontier_hash == self.result_frontier_hash
+        })
+    }
 }
 
 impl TaskParticipantResultEntry {
@@ -1905,7 +2400,9 @@ impl TaskStateProjection {
         match entry {
             SessionLogEntry::User(_) => self.clear_current_task(),
             SessionLogEntry::Control(control) => self.apply_control_entry(control),
-            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResultV3(_) => {}
+            SessionLogEntry::Assistant(_)
+            | SessionLogEntry::RuntimeContextSnapshotV2(_)
+            | SessionLogEntry::ToolResultV3(_) => {}
         }
     }
 
@@ -1979,6 +2476,10 @@ impl TaskStateProjection {
             }
             ControlEntry::TaskRun(entry) => self.apply_run(entry),
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),
+            ControlEntry::TaskStepContractBoundV2(entry) => self.apply_step_contract(entry),
+            ControlEntry::TaskPlanContractSetCommittedV2(entry) => {
+                self.apply_contract_set_commit(entry)
+            }
             ControlEntry::TaskStep(entry) => self.apply_step(entry),
             ControlEntry::TaskParticipantAttempt(entry) => self.apply_participant_attempt(entry),
             ControlEntry::TaskParticipantRetryScheduled(entry) => {
@@ -2083,6 +2584,9 @@ impl TaskStateProjection {
         }
         task.objective = entry.objective.clone();
         task.parent_session_ref = entry.parent_session_ref.clone();
+        if task.title.is_none() {
+            task.title = entry.title.clone();
+        }
         task.status = entry.status;
         task.reason = entry.reason.clone();
         if entry.status.is_terminal() {
@@ -2125,11 +2629,76 @@ impl TaskStateProjection {
                 plan_version: entry.plan_version,
                 status: entry.status,
                 steps: entry.steps.clone(),
+                step_contracts: BTreeMap::new(),
+                contract_set_committed_v2: false,
                 graph,
                 graph_validation_error,
                 reason: entry.reason.clone(),
             },
         );
+    }
+
+    fn apply_step_contract(&mut self, entry: &TaskStepContractBoundEntryV2) {
+        self.record_task_replay(&entry.task_id, false);
+        if entry.validate().is_err() {
+            let task = self.ensure_task(&entry.task_id);
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        let task = self.ensure_task(&entry.task_id);
+        let Some(plan) = task.plans.get_mut(&entry.plan_version) else {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        };
+        if !plan.steps.iter().any(|step| step.step_id == entry.step_id) {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        match plan.step_contracts.get(&entry.step_id) {
+            Some(existing) if existing == &entry.contract => {}
+            Some(_) => {
+                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            }
+            None => {
+                plan.step_contracts
+                    .insert(entry.step_id.clone(), entry.contract.clone());
+            }
+        }
+    }
+
+    fn apply_contract_set_commit(&mut self, entry: &TaskPlanContractSetCommittedV2) {
+        self.record_task_replay(&entry.task_id, false);
+        if entry.validate().is_err() {
+            let task = self.ensure_task(&entry.task_id);
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        let task = self.ensure_task(&entry.task_id);
+        let Some(plan) = task.plans.get_mut(&entry.plan_version) else {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        };
+        let bindings = plan
+            .step_contracts
+            .iter()
+            .map(|(step_id, contract)| TaskStepContractBoundEntryV2 {
+                task_id: entry.task_id.clone(),
+                plan_version: entry.plan_version,
+                step_id: step_id.clone(),
+                contract: contract.clone(),
+            })
+            .collect::<Vec<_>>();
+        let plan_entry = TaskPlanEntry {
+            task_id: entry.task_id.clone(),
+            plan_version: entry.plan_version,
+            status: plan.status,
+            steps: plan.steps.clone(),
+            reason: plan.reason.clone(),
+        };
+        match TaskPlanContractSetCommittedV2::new(&plan_entry, &bindings) {
+            Ok(expected) if expected == *entry => plan.contract_set_committed_v2 = true,
+            _ => task.participant_conflicts = task.participant_conflicts.saturating_add(1),
+        }
     }
 
     fn apply_step(&mut self, entry: &TaskStepEntry) {
@@ -2623,6 +3192,10 @@ pub struct TaskPlanProjection {
     pub plan_version: u32,
     pub status: TaskPlanStatus,
     pub steps: Vec<TaskStepSpec>,
+    /// V2 sidecars keyed by step. Empty for legacy V1 plans.
+    pub step_contracts: BTreeMap<TaskStepId, TaskStepContractV2>,
+    /// True only after the exact complete V2 set commit marker replays successfully.
+    pub contract_set_committed_v2: bool,
     pub graph: Option<TaskGraphProjection>,
     pub graph_validation_error: Option<String>,
     pub reason: Option<String>,
@@ -2666,7 +3239,15 @@ impl TaskGraphProjection {
                 let not_started = statuses.get(&step_key).is_none_or(|status| {
                     matches!(
                         status.status,
-                        TaskStepStatus::Pending | TaskStepStatus::Interrupted
+                        // A continuation is also the recovery lane for a step whose previous
+                        // attempt ended in a recoverable block.  Keeping these states in the
+                        // ready set lets the dependency graph re-evaluate downstream steps
+                        // after the prerequisite succeeds, instead of requiring a new plan.
+                        TaskStepStatus::Pending
+                            | TaskStepStatus::Failed
+                            | TaskStepStatus::Blocked
+                            | TaskStepStatus::Cancelled
+                            | TaskStepStatus::Interrupted
                     )
                 });
                 not_started
@@ -3169,7 +3750,14 @@ pub const TASK_SEMANTIC_TITLE_MAX_CHARS: usize = 64;
 #[must_use]
 pub fn task_semantic_title(source: &str) -> String {
     let safe = crate::safe_persistence_text(source);
-    let mut title = safe.trim().to_owned();
+    let summary = safe.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Summary:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    });
+    let first_line = safe.lines().map(str::trim).find(|line| !line.is_empty());
+    let mut title = summary.or(first_line).unwrap_or_default().to_owned();
     if title.chars().count() > TASK_SEMANTIC_TITLE_MAX_CHARS {
         title = format!(
             "{}…",

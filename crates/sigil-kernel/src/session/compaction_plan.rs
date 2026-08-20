@@ -372,6 +372,7 @@ fn validate_prior_folded_through(
 struct FoldMessage {
     event: CompactionEventRef,
     message: crate::ModelMessage,
+    origin: SessionProjectionOrigin,
 }
 
 type PreparedFoldCandidates = (
@@ -423,21 +424,38 @@ fn prepare_fold_candidates(
                 messages.push(FoldMessage {
                     event: reference,
                     message: promotion.durable_user_message,
+                    origin: SessionProjectionOrigin::ConversationPromotion,
                 });
             }
             Some(SessionLogEntry::User(message)) if promoted_message_ids.contains(&message.id) => {
                 protected.insert(reference, CompactionFoldProtectionReason::ControlState);
             }
-            Some(SessionLogEntry::User(message)) | Some(SessionLogEntry::Assistant(message)) => {
+            Some(SessionLogEntry::User(message)) => {
                 messages.push(FoldMessage {
                     event: reference,
                     message,
+                    origin: SessionProjectionOrigin::DurableUser,
+                });
+            }
+            Some(SessionLogEntry::Assistant(message)) => {
+                messages.push(FoldMessage {
+                    event: reference,
+                    message,
+                    origin: SessionProjectionOrigin::Assistant,
+                });
+            }
+            Some(SessionLogEntry::RuntimeContextSnapshotV2(snapshot)) => {
+                messages.push(FoldMessage {
+                    event: reference,
+                    message: snapshot.message,
+                    origin: SessionProjectionOrigin::RuntimeContextSnapshotV2,
                 });
             }
             Some(SessionLogEntry::ToolResultV3(result)) => {
                 messages.push(FoldMessage {
                     event: reference,
                     message: result.model_message()?,
+                    origin: SessionProjectionOrigin::ToolResult,
                 });
             }
             Some(SessionLogEntry::Control(_)) => {
@@ -529,7 +547,7 @@ fn classify_turn_groups(
         if candidate.event.stream_sequence < first_current_sequence {
             continue;
         }
-        if matches!(candidate.message.role, MessageRole::User) {
+        if candidate.origin.is_user_authored() {
             if !current.is_empty() {
                 raw_groups.push(std::mem::take(&mut current));
             }

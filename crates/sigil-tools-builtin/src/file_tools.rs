@@ -13,10 +13,10 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sigil_kernel::{
     DeclaredToolPermissionFacts, Tool, ToolAccess, ToolAnalysisStatus, ToolArtifactDescriptorV1,
-    ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext, ToolErrorKind,
-    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta,
-    ToolSemanticScope, ToolSpec, ToolSubjectScope, declared_tool_permission_plan,
+    ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolConcurrencyClass, ToolContext,
+    ToolErrorKind, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolResult,
+    ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubjectScope, declared_tool_permission_plan,
     delete_file_with_mutation, safe_persistence_json_value, safe_persistence_text, sha256_hex,
     write_file_with_mutation,
 };
@@ -94,6 +94,10 @@ impl Tool for ReadFileTool {
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -276,13 +280,28 @@ impl Tool for ReadFileTool {
                 oversized_lines,
             ),
             ReadFileLoad::Missing => {
+                let file_name = Path::new(&path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("*");
+                let suggested_pattern = format!("**/{file_name}");
                 return Ok(ToolResult::error(
                     call_id,
                     self.spec().name,
                     ToolErrorKind::NotFound,
                     format!(
-                        "read_file path {path:?} does not exist; use a workspace-relative file path returned by list or glob"
+                        "read_file path {path:?} does not exist; discover the exact workspace-relative path with glob pattern {suggested_pattern:?}; do not guess another path"
                     ),
+                )
+                .with_error_details(
+                    true,
+                    json!({
+                        "requested_path": path,
+                        "recovery": "discover_path",
+                        "suggested_tool": "glob",
+                        "suggested_pattern": suggested_pattern,
+                    }),
                 ));
             }
             ReadFileLoad::NotAFile => {
@@ -902,6 +921,10 @@ impl Tool for ListTool {
         }
     }
 
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
+    }
+
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let path = optional_string(args, "path").unwrap_or(".");
         let spec = self.spec();
@@ -993,6 +1016,10 @@ impl Tool for GlobTool {
         }
     }
 
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
+    }
+
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         required_string(args, "pattern")?;
         let spec = self.spec();
@@ -1073,6 +1100,10 @@ impl Tool for GrepTool {
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {

@@ -3031,6 +3031,7 @@ where
                         root_config,
                         agent.tool_registry(),
                         options,
+                        context_resolver,
                         &state.agent.background_runs,
                         &mut state.session.current,
                         &state.run.result_tx,

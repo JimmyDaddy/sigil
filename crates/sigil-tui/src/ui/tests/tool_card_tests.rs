@@ -184,12 +184,13 @@ fn tool_card_collapsed_preview_and_title_truncation_cover_edge_cases() {
         .collect::<String>();
 
     assert_eq!(collapsed.len(), COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS + 1);
-    assert!(collapsed_text.contains("output"));
+    assert!(!collapsed_text.contains("output"));
     assert!(collapsed_text.contains("line 1"));
     assert!(collapsed_text.contains("line 2"));
     assert!(collapsed_text.contains("line 3"));
-    assert!(collapsed_text.contains("7 more lines hidden"));
-    assert!(!collapsed_text.contains("line 4"));
+    assert!(collapsed_text.contains("line 4"));
+    assert!(collapsed_text.contains("6 more lines hidden"));
+    assert!(!collapsed_text.contains("line 5"));
 
     assert!(title_text.ends_with("..."));
     assert!(title_spans[0].style.add_modifier.contains(Modifier::BOLD));
@@ -530,6 +531,7 @@ fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
             exit_code: Some(0),
             execution_backend: Some("docker".to_owned()),
             execution_network_policy: Some("denied".to_owned()),
+            call_summary: Some("command=printf ok".to_owned()),
             ..ToolCardMetadata::default()
         },
         ..base_summary("bash")
@@ -583,17 +585,31 @@ fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
     let bash_lines = render_bash_preview(&bash_error, accent_rose());
     let diff_lines = render_tool_diff_preview(&diff_summary, diff, accent_rose());
 
-    assert!(plain_text(&bash_lines).contains("stderr"));
-    assert!(plain_text(&bash_lines).contains("exit 9"));
-    assert!(plain_text(&bash_lines).contains("(no output)"));
+    assert!(plain_text(&bash_lines).contains("No output"));
+    assert_eq!(
+        build_tool_card_display(&bash_error)
+            .status
+            .detail
+            .as_deref(),
+        Some("exit 9")
+    );
     assert_eq!(
         tool_display_summary(&no_output).as_deref(),
-        Some("(no output)")
+        Some("0 lines · 0 B")
     );
     assert_eq!(
         build_tool_card_display(&no_output).status.detail.as_deref(),
-        Some("docker · exit 0 · network denied")
+        Some("docker · exit 0")
     );
+    assert!(!build_tool_card_display(&no_output).status.is_error);
+    let expanded_bash = render_tool_expanded_preview_body_with_palette(
+        &no_output,
+        accent_rose(),
+        120,
+        SyntaxThemeId::default(),
+        &crate::ui::theme::default_palette(),
+    );
+    assert!(plain_text(&expanded_bash).contains("network: Offline"));
     assert_eq!(
         build_tool_card_display(&unknown_network)
             .status
@@ -831,7 +847,7 @@ fn tool_card_frame_keeps_header_meta_and_body_in_one_block() {
     assert!(lines.iter().skip(2).all(|line| {
         line.spans
             .first()
-            .is_some_and(|span| span.content.as_ref() == "  ")
+            .is_some_and(|span| span.content.as_ref() == "│ ")
     }));
     assert!(lines.iter().all(|line| {
         line.spans
@@ -840,8 +856,31 @@ fn tool_card_frame_keeps_header_meta_and_body_in_one_block() {
     }));
     assert!(text.contains("Read README.md"));
     assert!(text.contains("first 2/4 lines · 42 B"));
-    assert!(text.contains("document excerpt"));
+    assert!(!text.contains("result"));
+    assert!(!text.contains("document excerpt"));
+    assert!(!text.contains(" OK "));
     assert!(text.contains("2 more lines hidden"));
+    assert!(lines[2].spans.iter().skip(1).any(|span| {
+        span.content.as_ref().contains("Title") && span.style.bg == Some(palette.surface_panel_alt)
+    }));
+
+    let unselected = render_tool_entry_lines(
+        &entry,
+        &TimelineRenderOptions {
+            max_content_width: 72,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    assert_eq!(unselected[1].spans[0].style.bg, None);
+    assert_eq!(
+        unselected[2].spans[0].style.bg,
+        Some(palette.surface_panel_alt)
+    );
+    assert_eq!(
+        unselected[3].spans[0].style.bg,
+        Some(palette.surface_panel_alt)
+    );
 }
 
 #[test]
@@ -1082,7 +1121,7 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
             .as_deref()
             .is_some_and(|detail| detail.contains("could not be interrupted"))
     );
-    assert!(plain_text(&failed_lines).contains("(no output preview)"));
+    assert!(plain_text(&failed_lines).contains("No output"));
 
     assert_eq!(exited_display.status.label, "EXITED");
     assert_eq!(
@@ -1163,13 +1202,14 @@ fn tool_card_preview_renderers_cover_text_bash_and_file_change_variants() {
         render_file_change_preview(&file_change, accent_rose()).expect("expected file change");
     let generic_code_lines = render_tool_preview_body(&generic_code, accent_rose(), 72);
 
-    assert!(plain_text(&read_lines).contains("file excerpt"));
+    assert!(!plain_text(&read_lines).contains("file excerpt"));
     assert!(plain_text(&read_lines).contains("alpha"));
+    assert!(plain_text(&read_lines).contains("1 │ alpha"));
     assert!(plain_text(&read_lines).contains("1 more lines hidden"));
     assert!(plain_text(&path_lines).contains("files"));
     assert!(plain_text(&path_lines).contains("3 paths"));
-    assert!(plain_text(&bash_summary_lines).contains("1 line · 2 B"));
-    assert!(plain_text(&bash_plain_lines).contains("terminal tail"));
+    assert!(plain_text(&bash_summary_lines).contains("No output"));
+    assert!(plain_text(&bash_plain_lines).contains("No output"));
     assert!(plain_text(&file_change_lines).contains("1 changed"));
     assert!(plain_text(&file_change_lines).contains("write summary"));
     assert!(plain_text(&generic_code_lines).contains("captured output"));
@@ -1737,7 +1777,7 @@ fn tool_card_action_title_helpers_cover_remaining_builtin_and_fallback_paths() {
 }
 
 #[test]
-fn tool_card_read_file_preview_uses_document_and_file_sections() {
+fn tool_card_read_file_preview_uses_document_and_numbered_code_surfaces() {
     let markdown_summary = ToolCardRender {
         preview_kind: ToolPreviewKind::Markdown,
         preview_lines: vec!["# Title".to_owned()],
@@ -1763,9 +1803,12 @@ fn tool_card_read_file_preview_uses_document_and_file_sections() {
     let code_text = plain_text(&render_read_file_preview(&code_summary, accent_rose(), 80));
     let text = plain_text(&render_read_file_preview(&text_summary, accent_rose(), 80));
 
-    assert!(markdown_text.contains("document excerpt"));
-    assert!(code_text.contains("code excerpt"));
-    assert!(text.contains("file excerpt"));
+    assert!(markdown_text.contains("Title"));
+    assert!(!markdown_text.contains("document excerpt"));
+    assert!(code_text.contains("1 │ fn main()"));
+    assert!(!code_text.contains("code excerpt"));
+    assert!(text.contains("1 │ plain text"));
+    assert!(!text.contains("file excerpt"));
 
     let code_lines = render_read_file_preview(&code_summary, accent_rose(), 80);
     let default_code_fg = crate::ui::theme::default_palette().markdown_code_fg;
@@ -1776,6 +1819,88 @@ fn tool_card_read_file_preview_uses_document_and_file_sections() {
                 && span.style.fg != Some(default_code_fg)
         })
     }));
+}
+
+#[test]
+fn tool_card_read_file_uses_offset_line_numbers_and_structured_hidden_tail() {
+    let summary = parsed_summary(json!({
+        "tool_name": "read_file",
+        "status": "ok",
+        "preview_kind": "code",
+        "preview_language": "rust",
+        "preview_lines": [
+            "let first = 1;",
+            "let second = 2;",
+            "[sigil: output truncated; use offset/limit or a narrower path/pattern to continue]"
+        ],
+        "hidden_lines": 0,
+        "metadata": {
+            "returned_lines": 2,
+            "total_lines": 10,
+            "details": {"offset": 4}
+        }
+    }));
+
+    assert_eq!(summary.hidden_lines, 4);
+    let text = plain_text(&render_read_file_preview(&summary, accent_rose(), 64));
+    assert!(text.contains("5 │ let first"));
+    assert!(text.contains("6 │ let second"));
+    assert!(text.contains("4 more lines hidden"));
+    assert!(!text.contains("[sigil:"));
+}
+
+#[test]
+fn tool_card_search_surface_groups_files_compacts_paths_and_highlights_literal_matches() {
+    let summary = ToolCardRender {
+        metadata: ToolCardMetadata {
+            call_summary: Some("pattern=needle path=workspace".to_owned()),
+            ..ToolCardMetadata::default()
+        },
+        preview_value: Some(json!([
+            {
+                "path": "dev/docs/a-very-long-directory/technical-solution.md",
+                "line": 42,
+                "text": "prefix needle suffix"
+            }
+        ])),
+        ..base_summary("grep")
+    };
+    let palette = test_palette();
+    let lines = render_grep_preview_with_palette(&summary, accent_rose(), 32, &palette)
+        .expect("search results should render");
+    let text = plain_text(&lines);
+
+    assert!(text.contains("..."));
+    assert!(text.contains("1 hit"));
+    assert!(text.contains("42 │ prefix needle"));
+    assert!(!text.contains("L42"));
+    assert!(!text.contains("result"));
+    assert!(lines.iter().any(|line| {
+        line.spans.iter().any(|span| {
+            span.content.as_ref() == "needle" && span.style.add_modifier.contains(Modifier::BOLD)
+        })
+    }));
+
+    let narrow = render_grep_preview_with_palette(&summary, accent_rose(), 12, &palette)
+        .expect("narrow search results should render");
+    assert!(
+        narrow
+            .iter()
+            .all(|line| terminal_cell_width(&line_plain_text(line)) <= 12)
+    );
+}
+
+#[test]
+fn tool_card_shell_surface_uses_terminal_rails_without_output_labels() {
+    let summary = ToolCardRender {
+        preview_lines: vec!["running tests".to_owned(), "test result: ok".to_owned()],
+        ..base_summary("bash")
+    };
+    let text = plain_text(&render_bash_preview(&summary, accent_rose()));
+
+    assert!(text.contains("│ running tests"));
+    assert!(text.contains("│ test result: ok"));
+    assert!(!text.lines().any(|line| line.trim() == "output"));
 }
 
 #[test]
@@ -1808,8 +1933,8 @@ fn tool_card_grep_bash_and_file_change_helpers_cover_remaining_labels() {
     };
     let grep_text =
         plain_text(&render_grep_preview(&grep_summary, accent_rose()).expect("empty grep preview"));
-    assert!(grep_text.contains("0 files"));
-    assert!(grep_text.contains("no matches"));
+    assert!(grep_text.contains("No matches in workspace"));
+    assert!(!grep_text.contains("matches 0 files"));
 
     let generic_empty_search = ToolCardRender {
         preview_value: Some(json!([])),
@@ -1820,8 +1945,7 @@ fn tool_card_grep_bash_and_file_change_helpers_cover_remaining_labels() {
         accent_rose(),
         80,
     ));
-    assert!(generic_empty_text.contains("0 files"));
-    assert!(generic_empty_text.contains("no matches"));
+    assert!(generic_empty_text.contains("No matches in workspace"));
     assert!(!generic_empty_text.contains("[array]"));
 
     let generic_search = ToolCardRender {
@@ -1836,21 +1960,22 @@ fn tool_card_grep_bash_and_file_change_helpers_cover_remaining_labels() {
         80,
     ));
     assert!(generic_search_text.contains("src/lib.rs"));
-    assert!(generic_search_text.contains("L7"));
+    assert!(generic_search_text.contains("7 │"));
     assert!(!generic_search_text.contains("{3 keys}"));
 
     let bash_summary = ToolCardRender {
         is_error: true,
+        preview_lines: vec!["permission denied".to_owned()],
         metadata: ToolCardMetadata {
             exit_code: Some(7),
-            stdout_bytes: Some(4),
+            stderr_bytes: Some(4),
             ..ToolCardMetadata::default()
         },
         ..base_summary("bash")
     };
     let bash_text = plain_text(&render_bash_preview(&bash_summary, accent_rose()));
-    assert!(bash_text.contains("stdout"));
-    assert!(bash_text.contains("exit 7"));
+    assert!(bash_text.contains("! permission denied"));
+    assert!(!bash_text.contains("output"));
 
     let delete_summary = ToolCardRender {
         metadata: ToolCardMetadata {

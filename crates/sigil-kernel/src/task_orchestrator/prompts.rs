@@ -50,7 +50,7 @@ pub fn task_planner_system_prompt_contract_material() -> &'static str {
 /// Stable system-level contract for one accepted task-plan participant.
 #[must_use]
 pub fn task_participant_system_prompt_contract_material() -> &'static str {
-    "You are executing exactly one accepted durable task-plan step. Work only on that step and return a bounded final result as soon as its requested outcome is achieved.\n\nUse only tool names explicitly advertised in the current request; never invent shell aliases, terminal commands, or verification tools that are absent. File-tool paths are relative to the bound workspace root: use paths such as src/lib.rs directly, never /workspace, the workspace directory itself, an absolute host path, or an environment-variable placeholder. When the step names exact files or modules, access those paths directly instead of enumerating the repository. When the host supplies direct dependency results, treat them as the authoritative handoff; do not search for or invent result files. Do not perform sibling plan steps or add unrequested verification after the step is complete. If a requested check cannot be executed with the available tools, report that limitation without guessing or repeatedly retrying unavailable tools."
+    "You are executing exactly one accepted durable task-plan step. Work only on that step and return a bounded final result as soon as its requested outcome is achieved.\n\nUse only tool names explicitly advertised in the current request; never invent shell aliases, terminal commands, or verification tools that are absent. File-tool paths are relative to the bound workspace root: use paths such as src/lib.rs directly, never /workspace, the workspace directory itself, an absolute host path, or an environment-variable placeholder. When the step names exact files or modules, access those paths directly instead of enumerating the repository. A path not explicitly named by the step, objective, or direct dependency result must be discovered with list, glob, or grep before read_file; never derive a conventional neighboring module or test path. After read_file reports not_found, discover the exact path instead of trying another guessed path. When the host supplies direct dependency results, treat them as the authoritative handoff; do not search for or invent result files. Do not perform sibling plan steps or add unrequested verification after the step is complete. If a requested check cannot be executed with the available tools, report that limitation without guessing or repeatedly retrying unavailable tools."
 }
 
 /// Stable host-owned convergence instruction for a participant that already mutated its workspace
@@ -145,10 +145,11 @@ pub(super) fn task_continue_reason(plan_version: u32, guidance: Option<&str>) ->
     }
 }
 
-pub(super) fn executor_step_prompt(
+pub(super) fn executor_step_prompt_with_contract(
     objective: &str,
     plan_version: u32,
     step: &TaskStepSpec,
+    contract: Option<&TaskStepContractV2>,
     dependency_results: Option<&str>,
     guidance: Option<&str>,
 ) -> String {
@@ -157,11 +158,13 @@ pub(super) fn executor_step_prompt(
         objective,
         plan_version,
         step,
+        contract,
         dependency_results,
         guidance,
     )
 }
 
+#[cfg(test)]
 pub(super) fn subagent_step_prompt(
     objective: &str,
     plan_version: u32,
@@ -174,6 +177,26 @@ pub(super) fn subagent_step_prompt(
         objective,
         plan_version,
         step,
+        None,
+        dependency_results,
+        guidance,
+    )
+}
+
+pub(super) fn subagent_step_prompt_with_contract(
+    objective: &str,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    contract: Option<&TaskStepContractV2>,
+    dependency_results: Option<&str>,
+    guidance: Option<&str>,
+) -> String {
+    role_step_prompt(
+        "Execute this delegated subagent step in the child session. Keep output bounded and focused on the step result.",
+        objective,
+        plan_version,
+        step,
+        contract,
         dependency_results,
         guidance,
     )
@@ -192,6 +215,35 @@ fn task_participant_handoff_text(
     verified_task_participant_final_report(session, attempt, result)
         .or_else(|| compact_task_participant_excerpt(&result.summary))
         .unwrap_or_else(|| result.summary.clone())
+}
+
+fn typed_task_dependency_handoff(
+    session: &Session,
+    attempt: &TaskParticipantAttemptEntry,
+    result: &TaskParticipantResultEntry,
+) -> String {
+    let handoff_text = task_participant_handoff_text(session, attempt, result);
+    let artifacts = result
+        .artifact_refs
+        .iter()
+        .map(|artifact| {
+            serde_json::json!({
+                "kind": artifact.kind,
+                "hash": artifact.hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "output_hash": result.output_hash,
+        "summary_source_hash": result.summary_hash,
+        "handoff_text_hash": hash_text(&handoff_text),
+        "handoff_text": handoff_text,
+        "artifacts": artifacts,
+        "changed_paths": result.changed_paths,
+        "verification_refs": result.verification_refs,
+    })
+    .to_string()
 }
 
 fn verified_task_participant_final_report(
@@ -313,7 +365,7 @@ pub(super) fn task_step_dependency_result_context(
             .find_map(|attempt| {
                 task.participant_results
                     .get(&attempt.attempt_id)
-                    .map(|result| task_participant_handoff_text(session, attempt, result))
+                    .map(|result| typed_task_dependency_handoff(session, attempt, result))
             })
             .or_else(|| dependency_state.summary.clone())
             .unwrap_or_else(|| "completed without a retained summary".to_owned());
@@ -325,7 +377,7 @@ pub(super) fn task_step_dependency_result_context(
         ));
     }
     let context = format!(
-        "Direct dependency results supplied by the host. Treat these as the handoff; do not search for or invent result files:\n{}",
+        "Typed dependency handoff supplied by the host. Each JSON object is bound by output_hash, summary_source_hash, and handoff_text_hash. Treat these records as the complete handoff; do not search for or invent result files:\n{}",
         results.join("\n")
     );
     if context.chars().count() <= TASK_STEP_DEPENDENCY_CONTEXT_MAX_CHARS {
@@ -439,7 +491,13 @@ fn completed_step_participant_result<'a>(
                     .steps
                     .iter()
                     .find(|candidate| candidate.step_id == step.step_id)?;
+                let target_contract = task
+                    .plans
+                    .get(&plan_version)
+                    .and_then(|plan| plan.step_contracts.get(&step.step_id));
+                let source_contract = source_plan.step_contracts.get(&step.step_id);
                 if !task_step_specs_match(source_step, step)
+                    || source_contract != target_contract
                     || task
                         .steps
                         .get(&(source_version, step.step_id.clone()))
@@ -491,6 +549,7 @@ pub(super) fn role_step_prompt(
     objective: &str,
     plan_version: u32,
     step: &TaskStepSpec,
+    contract: Option<&TaskStepContractV2>,
     dependency_results: Option<&str>,
     guidance: Option<&str>,
 ) -> String {
@@ -505,6 +564,44 @@ pub(super) fn role_step_prompt(
         step.title,
         step.role.as_str()
     );
+    if let Some(contract) = contract {
+        prompt.push_str("\n\nExecution contract (host-bound; do not broaden or omit):");
+        if !contract.target_paths.is_empty() {
+            prompt.push_str(&format!(
+                "\nTarget paths: {}",
+                contract.target_paths.join(", ")
+            ));
+        }
+        if !contract.required_capabilities.is_empty() {
+            prompt.push_str(&format!(
+                "\nAdmitted capabilities: {}",
+                contract
+                    .required_capabilities
+                    .iter()
+                    .map(|capability| capability.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for deliverable in &contract.deliverables {
+            prompt.push_str(&format!("\nDeliverable: {deliverable}"));
+        }
+        for criterion in &contract.acceptance_criteria {
+            prompt.push_str(&format!("\nAcceptance: {criterion}"));
+        }
+        if !contract.check_spec_refs.is_empty() {
+            prompt.push_str(&format!(
+                "\nHost verification refs: {}",
+                contract.check_spec_refs.join(", ")
+            ));
+        }
+        if let Some(risk) = contract.risk.as_deref() {
+            prompt.push_str(&format!("\nRisk: {risk}"));
+        }
+        for note in &contract.notes {
+            prompt.push_str(&format!("\nNote: {note}"));
+        }
+    }
     if let Some(dependency_results) = dependency_results.filter(|value| !value.trim().is_empty()) {
         prompt.push_str("\n\n");
         prompt.push_str(dependency_results.trim());

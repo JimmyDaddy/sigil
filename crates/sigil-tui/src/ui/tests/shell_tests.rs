@@ -6,7 +6,11 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{Terminal, backend::TestBackend, style::Color};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    style::{Color, Style},
+};
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
@@ -508,6 +512,39 @@ fn long_plan_workbench_is_fully_reachable_at_all_supported_acceptance_sizes() ->
 }
 
 #[test]
+fn plan_workbench_shows_a_recoverable_task_creation_failure() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(88, 28);
+    let mut pending = PendingPlanApproval::test_fixture(
+        "plan-1",
+        "commit the prepared changes",
+        "sha256:plan",
+        "Commit the prepared changes",
+        vec!["Commit support crates".to_owned()],
+        vec!["crates".to_owned()],
+        Vec::new(),
+    );
+    pending.workbench_open = true;
+    pending.last_run_failure = Some("agent display name is too long".to_owned());
+    app.composer.pending_plan_approval = Some(pending);
+
+    let backend = TestBackend::new(88, 28);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| render(frame, &app))?;
+    let rendered = rendered_content(&terminal);
+    assert!(
+        rendered.contains("Task could not start"),
+        "rendered: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("agent display name is too long"),
+        "rendered: {rendered:?}"
+    );
+    assert!(rendered.contains("Run"), "plan must remain actionable");
+    Ok(())
+}
+
+#[test]
 fn short_shell_reserves_action_and_egress_disclosure_without_overlap() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(80, 10);
@@ -615,7 +652,72 @@ fn render_main_screen_keeps_composer_text_visible() -> anyhow::Result<()> {
 }
 
 #[test]
-fn footer_context_width_uses_half_width_cap_and_hides_small_areas() {
+fn render_main_screen_clears_old_cells_after_width_reflow() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    for index in 0..48 {
+        app.handle(RunEvent::Notice(format!(
+            "resize-history-{index:02} {}",
+            "wide narrow reflow ".repeat(8)
+        )))?;
+    }
+
+    let mut resized_terminal = Terminal::new(TestBackend::new(120, 20))?;
+    resized_terminal.draw(|frame| render(frame, &app))?;
+
+    resized_terminal.backend_mut().resize(48, 20);
+    resized_terminal
+        .current_buffer_mut()
+        .set_string(0, 0, "stale resized cell", Style::default());
+    assert!(app.set_terminal_size(48, 20));
+    resized_terminal.draw(|frame| render(frame, &app))?;
+
+    let mut fresh_terminal = Terminal::new(TestBackend::new(48, 20))?;
+    fresh_terminal.draw(|frame| render(frame, &app))?;
+
+    assert_eq!(
+        resized_terminal.backend().buffer(),
+        fresh_terminal.backend().buffer(),
+        "a resized frame must not retain cells from the previous timeline width"
+    );
+    Ok(())
+}
+
+#[test]
+fn transcript_history_remains_reachable_after_width_reflow() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.handle(RunEvent::TextDelta(
+        (0..48)
+            .map(|index| format!("scroll-history-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ))?;
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 20))?;
+    terminal.draw(|frame| render(frame, &app))?;
+    terminal.backend_mut().resize(48, 20);
+    assert!(app.set_terminal_size(48, 20));
+    terminal.draw(|frame| render(frame, &app))?;
+    let live_tail = rendered_content(&terminal);
+    assert!(live_tail.contains("scroll-history-47"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL))?;
+    assert!(app.timeline_scroll_back > 0);
+    terminal.draw(|frame| render(frame, &app))?;
+    let oldest_page = rendered_content(&terminal);
+    assert!(oldest_page.contains("scroll-history-00"));
+    assert_ne!(oldest_page, live_tail);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))?;
+    assert_eq!(app.timeline_scroll_back, 0);
+    terminal.draw(|frame| render(frame, &app))?;
+    assert!(rendered_content(&terminal).contains("scroll-history-47"));
+    Ok(())
+}
+
+#[test]
+fn footer_context_width_uses_available_space_and_hides_small_areas() {
     let footer = FooterViewModel {
         phase: crate::timeline::RunPhase::Idle,
         is_busy: false,
@@ -630,7 +732,7 @@ fn footer_context_width_uses_half_width_cap_and_hides_small_areas() {
 }
 
 #[test]
-fn render_main_screen_shows_esc_interrupt_for_running_turn() -> anyhow::Result<()> {
+fn render_main_screen_does_not_advertise_escape_as_run_cancellation() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;
     let _ = app.submit_input()?;
@@ -832,7 +934,7 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
     );
     assert_eq!(
         cell_bg_at_text(&terminal, "tool-code", "tool-code"),
-        Color::Rgb(65, 66, 67)
+        Color::Rgb(49, 50, 51)
     );
     Ok(())
 }
@@ -2110,7 +2212,7 @@ fn footer_context_width_covers_empty_and_bounded_states() {
             },
             160,
         ),
-        42
+        96
     );
 }
 
@@ -2205,6 +2307,29 @@ fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() ->
     assert!(!rendered.contains("ready"));
     assert!(!rendered.contains("Enter send"));
     assert!(!rendered.contains("ctx"));
+    Ok(())
+}
+
+#[test]
+fn render_footer_status_uses_empty_workspace_space_for_context() -> anyhow::Result<()> {
+    let context_label =
+        "ctx: 1% · cache=19% · prompt 9.2K / 1.0M provider · soft at 700.0K".to_owned();
+    let footer = FooterViewModel {
+        phase: RunPhase::Idle,
+        is_busy: false,
+        run_label: "ready".to_owned(),
+        hints: String::new(),
+        workspace_git_label: String::new(),
+        context_label: context_label.clone(),
+    };
+    let backend = TestBackend::new(96, 2);
+    let mut terminal = Terminal::new(backend)?;
+    let theme = theme::Theme::default();
+
+    terminal.draw(|frame| render_footer_status(frame, Rect::new(0, 0, 96, 1), &footer, &theme))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains(&context_label));
     Ok(())
 }
 

@@ -181,6 +181,23 @@ fn compaction_v2_taxonomy_is_explicit_and_recovery_critical() {
 }
 
 #[test]
+fn runtime_context_v2_snapshot_is_recovery_critical() {
+    let event_type = DurableEventType::RuntimeContextSnapshotRecordedV2;
+    assert_eq!(
+        event_type.expected_event_class(),
+        Some(EventClass::Critical)
+    );
+    assert_eq!(
+        event_type.sync_class(),
+        Some(EventSyncClass::RecoveryCritical)
+    );
+    assert_eq!(
+        event_type.payload_metadata().storage,
+        DurableEventPayloadStorage::SessionLogEntry
+    );
+}
+
+#[test]
 fn stored_event_rejects_checksum_mismatch_and_bad_json_separately() {
     let mut event = StoredEvent::new(
         DurableEventType::ToolExecutionStarted,

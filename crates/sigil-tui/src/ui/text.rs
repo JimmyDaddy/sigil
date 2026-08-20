@@ -130,6 +130,48 @@ pub(crate) fn truncate_display_width(text: &str, max_width: usize) -> String {
     format!("{out}{ellipsis}")
 }
 
+pub(crate) fn truncate_middle_display_width(text: &str, max_width: usize) -> String {
+    let max_width = max_width.max(1);
+    let sanitized = sanitize_terminal_text(text);
+    if terminal_cell_width(&sanitized) <= max_width {
+        return sanitized;
+    }
+    let ellipsis = "...";
+    let ellipsis_width = usize::from(ellipsis.cell_width());
+    if max_width <= ellipsis_width {
+        return ".".repeat(max_width);
+    }
+
+    let budget = max_width - ellipsis_width;
+    let head_budget = budget.div_ceil(2);
+    let tail_budget = budget - head_budget;
+    let graphemes = sanitized.graphemes(true).collect::<Vec<_>>();
+
+    let mut head = String::new();
+    let mut head_width = 0usize;
+    for grapheme in &graphemes {
+        let grapheme_width = terminal_grapheme_width(grapheme).unwrap_or(0);
+        if head_width + grapheme_width > head_budget {
+            break;
+        }
+        head.push_str(grapheme);
+        head_width += grapheme_width;
+    }
+
+    let mut tail = Vec::new();
+    let mut tail_width = 0usize;
+    for grapheme in graphemes.iter().rev() {
+        let grapheme_width = terminal_grapheme_width(grapheme).unwrap_or(0);
+        if tail_width + grapheme_width > tail_budget {
+            break;
+        }
+        tail.push(*grapheme);
+        tail_width += grapheme_width;
+    }
+    tail.reverse();
+    format!("{head}{ellipsis}{}", tail.concat())
+}
+
 pub(crate) fn wrap_display_width(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     if text.is_empty() {

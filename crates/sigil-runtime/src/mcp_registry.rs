@@ -337,7 +337,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
     .registry)
 }
 
-/// Builds the complete runtime tool and Context V1 surface with explicit process network
+/// Builds the complete runtime tool and Context V2 surface with explicit process network
 /// admission.
 ///
 /// The returned resolver owns a clone of the exact `CodeIntelligenceService` registered behind
@@ -591,7 +591,7 @@ pub fn build_tool_registry_without_eager_mcp_with_workspace_trust(
     .registry)
 }
 
-/// Builds the local tool and Context V1 surface with an explicit workspace-trust projection.
+/// Builds the local tool and Context V2 surface with an explicit workspace-trust projection.
 ///
 /// # Errors
 ///
@@ -1553,9 +1553,13 @@ async fn refresh_mcp_server_tools_inner(
     let server = declaration.config();
     let retired_owners =
         registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name);
-    let removed = retired_owners
+    let retirements = retired_owners
         .iter()
-        .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+        .map(|owner| registry.retire_by_lifecycle_owner(owner))
+        .collect::<Vec<_>>();
+    let removed = retirements
+        .iter()
+        .flat_map(sigil_kernel::ToolLifecycleRetirement::tools)
         .collect::<Vec<_>>();
     let removed_tools = removed.len();
     let before = registry.specs().len();
@@ -1584,13 +1588,27 @@ async fn refresh_mcp_server_tools_inner(
             return Err(error);
         }
     };
-    if let Err(retirement_error) = shutdown_registered_tools(&removed).await {
-        let replacement = report
+    let retirement_result = async {
+        for retirement in &retirements {
+            retirement.dispose_and_quiesce().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(retirement_error) = retirement_result {
+        let replacement_retirements = report
             .lifecycle_owners
             .iter()
-            .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+            .map(|owner| registry.retire_by_lifecycle_owner(owner))
             .collect::<Vec<_>>();
-        let rollback_error = shutdown_registered_tools(&replacement).await.err();
+        let rollback_error = async {
+            for retirement in &replacement_retirements {
+                retirement.dispose_and_quiesce().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await
+        .err();
         return Err(anyhow!(
             "failed to retire previous MCP server {server_name} generation: {retirement_error:#}{}",
             rollback_error
@@ -1606,6 +1624,7 @@ async fn refresh_mcp_server_tools_inner(
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn shutdown_registered_tools(tools: &[Arc<dyn Tool>]) -> Result<()> {
     let mut attempted_owners = Vec::new();
     let mut failures = Vec::new();
@@ -2160,6 +2179,7 @@ fn mcp_server_subject(server_name: &str) -> ToolSubject {
         normalized: format!("mcp_server:{server_name}"),
         canonical_path: None,
         scope: ToolSubjectScope::Unknown,
+        access: ToolAccess::Execute,
     }
 }
 

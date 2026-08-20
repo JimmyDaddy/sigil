@@ -105,6 +105,7 @@ pub(crate) fn resolve_tool_path_from_base(
                 relative
             }
         }
+        ToolSubjectScope::RuntimeScratch => canonical.to_string_lossy().to_string(),
         ToolSubjectScope::External => canonical.to_string_lossy().to_string(),
         ToolSubjectScope::Unknown => canonical.to_string_lossy().to_string(),
     };

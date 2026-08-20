@@ -140,7 +140,8 @@ pub(super) fn render_tool_preview_body_with_palette(
         return lines;
     }
     if tool_name_matches(&summary.tool_name, "grep")
-        && let Some(lines) = render_grep_preview_with_palette(summary, accent, palette)
+        && let Some(lines) =
+            render_grep_preview_with_palette(summary, accent, max_content_width, palette)
     {
         return lines;
     }

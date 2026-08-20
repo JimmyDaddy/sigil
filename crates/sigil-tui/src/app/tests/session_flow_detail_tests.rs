@@ -60,6 +60,18 @@ fn audit_integration_verification_receipt() -> sigil_kernel::VerificationReceipt
     }
 }
 
+fn runtime_context_snapshot_fixture() -> sigil_kernel::RuntimeContextSnapshotV2 {
+    let mut message = ModelMessage::user("tui-internal context snapshot body");
+    message.id = "context:v2:tui-fixture".to_owned();
+    sigil_kernel::RuntimeContextSnapshotV2 {
+        schema_version: sigil_kernel::RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION,
+        state: sigil_kernel::RuntimeContextSnapshotStateV2::Active,
+        message,
+        canonical_content_sha256: "fixture-hash".to_owned(),
+        source_tail_message_id: Some("user-fixture".to_owned()),
+    }
+}
+
 #[test]
 fn session_labels_and_identifiers_truncate_as_expected() {
     assert_eq!(
@@ -1842,6 +1854,7 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
     let app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
     let entries = vec![
         SessionLogEntry::User(ModelMessage::user("child prompt")),
+        SessionLogEntry::RuntimeContextSnapshotV2(runtime_context_snapshot_fixture()),
         SessionLogEntry::Assistant(ModelMessage::assistant(Some(String::new()), Vec::new())),
         SessionLogEntry::Assistant(ModelMessage::assistant(
             Some("child answer".to_owned()),
@@ -1967,6 +1980,10 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
         }),
     ];
 
+    let context_audit = render_session_log_entry(&entries[1]);
+    assert!(context_audit.contains("[context] v2 state=Active"));
+    assert!(!context_audit.contains("tui-internal context snapshot body"));
+
     let restored = app.restored_timeline_entries_from_session_entries(&entries);
     let rendered = restored
         .iter()
@@ -1980,6 +1997,7 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
             .any(|entry| entry.role == TimelineRole::User)
     );
     assert!(rendered.contains("child prompt"));
+    assert!(!rendered.contains("tui-internal context snapshot body"));
     assert!(rendered.contains("child answer"));
     assert!(rendered.contains("checking provider shape"));
     assert!(rendered.contains("tool output"));
@@ -1999,6 +2017,33 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
     );
     assert!(!rendered.contains("other"));
     Ok(())
+}
+
+#[test]
+fn restored_timeline_hides_internal_conversation_route_tool_cards() {
+    let app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    let route_tools = [
+        sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+        sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME,
+        sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
+        sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
+    ];
+    let entries = route_tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool_name)| {
+            v2_tool_result_entry(
+                &format!("call-route-{index}"),
+                tool_name,
+                "internal routing result",
+                ToolResultMeta::default(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let restored = app.restored_timeline_entries_from_session_entries(&entries);
+
+    assert!(restored.is_empty());
 }
 
 #[test]

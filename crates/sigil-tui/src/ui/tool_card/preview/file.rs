@@ -23,52 +23,32 @@ pub(in crate::ui::tool_card) fn render_read_file_preview_with_palette(
     syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let (section_label, section_description) = match summary.preview_kind {
-        ToolPreviewKind::Markdown => ("doc", "document excerpt"),
-        ToolPreviewKind::Code => ("code", "code excerpt"),
-        ToolPreviewKind::Json | ToolPreviewKind::Text => ("file", "file excerpt"),
-    };
-    let mut lines = vec![timeline_section_line_with_palette(
-        accent,
-        section_label,
-        palette.accent_info,
-        vec![Span::styled(
-            section_description,
-            Style::default().fg(palette.text_muted),
-        )],
-        palette,
-    )];
+    let preview_lines = summary
+        .preview_lines
+        .iter()
+        .filter(|line| !read_file_truncation_notice(line))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
     match summary.preview_kind {
         ToolPreviewKind::Markdown => {
             lines.extend(render_markdown_timeline_lines_with_palette(
                 accent,
                 Style::default().fg(palette.text_primary),
-                &summary.preview_lines.join("\n"),
+                &preview_lines.join("\n"),
                 MarkdownRenderOptions::tool_preview(max_content_width)
                     .with_syntax_theme(syntax_theme),
                 palette,
             ));
         }
         ToolPreviewKind::Json | ToolPreviewKind::Code | ToolPreviewKind::Text => {
-            if summary.preview_kind == ToolPreviewKind::Code
-                && let Some(language) = summary.preview_language.as_deref()
-                && let Some(highlighted) = render_highlighted_code_preview_lines_with_palette(
-                    accent,
-                    &summary.preview_lines,
-                    language,
-                    syntax_theme,
-                    palette.markdown_code_bg,
-                )
-            {
-                lines.extend(highlighted);
-            } else {
-                lines.extend(render_code_preview_lines_with_palette(
-                    accent,
-                    &summary.preview_lines,
-                    palette.markdown_code_bg,
-                    palette,
-                ));
-            }
+            lines.extend(render_numbered_file_preview_lines(
+                summary,
+                &preview_lines,
+                accent,
+                syntax_theme,
+                palette,
+            ));
         }
     }
     lines.extend(render_tool_hidden_tail(
@@ -77,6 +57,70 @@ pub(in crate::ui::tool_card) fn render_read_file_preview_with_palette(
         palette,
     ));
     lines
+}
+
+fn read_file_truncation_notice(line: &str) -> bool {
+    line.starts_with("[sigil: output truncated")
+}
+
+fn render_numbered_file_preview_lines(
+    summary: &ToolCardRender,
+    preview_lines: &[String],
+    accent: Color,
+    syntax_theme: SyntaxThemeId,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let start_line = summary.metadata.read_offset.unwrap_or(0).saturating_add(1);
+    let end_line = start_line
+        .saturating_add(preview_lines.len().saturating_sub(1) as u64)
+        .max(start_line);
+    let line_number_width = end_line.to_string().len();
+    let highlighted = (summary.preview_kind == ToolPreviewKind::Code)
+        .then_some(summary.preview_language.as_deref())
+        .flatten()
+        .and_then(|language| {
+            highlight_code_to_spans_with_theme(&preview_lines.join("\n"), language, syntax_theme)
+        });
+
+    preview_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line_number = start_line.saturating_add(index as u64);
+            let mut spans = vec![
+                Span::styled(
+                    format!("{line_number:>line_number_width$}"),
+                    Style::default()
+                        .fg(palette.text_muted)
+                        .bg(palette.markdown_code_bg),
+                ),
+                Span::styled(
+                    " │ ",
+                    Style::default()
+                        .fg(palette.accent_info)
+                        .bg(palette.markdown_code_bg),
+                ),
+            ];
+            if let Some(highlighted) = highlighted.as_ref().and_then(|rows| rows.get(index)) {
+                spans.extend(highlighted.iter().cloned().map(|mut span| {
+                    span.style = span.style.bg(palette.markdown_code_bg);
+                    span
+                }));
+            } else {
+                spans.push(Span::styled(
+                    if line.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        line.clone()
+                    },
+                    Style::default()
+                        .fg(palette.markdown_code_fg)
+                        .bg(palette.markdown_code_bg),
+                ));
+            }
+            timeline_content_line(accent, spans)
+        })
+        .collect()
 }
 
 #[cfg(test)]

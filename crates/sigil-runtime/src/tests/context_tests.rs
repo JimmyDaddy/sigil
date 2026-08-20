@@ -688,6 +688,49 @@ fn safe_context_sources_fall_back_when_warm_lsp_rows_are_unrelated() -> Result<(
     Ok(())
 }
 
+#[test]
+fn safe_context_sources_do_not_turn_natural_language_into_lsp_switches() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let snapshot = LspContextSnapshot::ready()
+        .with_symbols(vec![CodeSymbol {
+            name: "parse_config".to_owned(),
+            kind: "function".to_owned(),
+            path: "src/context.rs".to_owned(),
+            range: code_range(),
+            container_name: Some("context".to_owned()),
+        }])
+        .with_diagnostics(vec![CodeDiagnostic {
+            path: "src/context.rs".to_owned(),
+            range: code_range(),
+            severity: "warning".to_owned(),
+            message: "parse_config has an unused result".to_owned(),
+            source: Some("rust-analyzer".to_owned()),
+        }])
+        .with_references(vec![CodeLocation {
+            path: "src/main.rs".to_owned(),
+            range: code_range(),
+            preview: Some("parse_config();".to_owned()),
+        }]);
+
+    let context = context_candidates_from_safe_sources(
+        temp.path(),
+        "Please inspect diagnostics, references, and source code",
+        Some(&snapshot),
+    )?;
+
+    assert!(context.items.iter().all(|item| {
+        !matches!(
+            item.source,
+            ContextSource::LspSymbol | ContextSource::LspDiagnostic | ContextSource::LspReference
+        ) || item.id == "lsp-context:miss"
+    }));
+    assert!(context.items.iter().any(|item| {
+        item.id == "lsp-context:miss"
+            && item.inclusion_reason == ContextInclusionReason::ExcludedUnsupported
+    }));
+    Ok(())
+}
+
 #[tokio::test]
 async fn request_context_resolver_without_service_uses_bounded_fallback() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -1089,7 +1132,7 @@ fn context_source_symbol_snippet_centers_definition_range() -> Result<()> {
 }
 
 #[test]
-fn context_source_symbol_candidates_rank_source_paths_for_source_intent() -> Result<()> {
+fn context_source_symbol_candidates_rank_source_paths_from_lexical_evidence() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
     fs::write(
@@ -1104,7 +1147,7 @@ fn context_source_symbol_candidates_rank_source_paths_for_source_intent() -> Res
 
     let context = context_candidates_from_repo_query(
         temp.path(),
-        "Which Rust source file implements the bounded runtime repo-file context provider?",
+        "Which Rust source file implements the bounded runtime context provider?",
     )?;
 
     let ids = context
@@ -1165,7 +1208,7 @@ fn context_source_symbol_candidates_do_not_treat_rust_as_symbol() -> Result<()> 
 }
 
 #[test]
-fn context_source_symbol_candidates_do_not_score_natural_language_terms() -> Result<()> {
+fn context_source_symbol_candidates_do_not_use_natural_language_as_hidden_intent() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
     fs::write(

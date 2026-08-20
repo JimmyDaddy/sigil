@@ -85,9 +85,9 @@ impl std::fmt::Debug for TaskChildSessionBatchPreparation<'_> {
 }
 
 /// Typed runtime-to-orchestrator failure that carries the complete proof needed to schedule one
-/// bounded provider-pressure retry.
+/// bounded participant retry.
 #[derive(Debug, thiserror::Error)]
-#[error("task participant was rate limited before output or effect: {source}")]
+#[error("task participant requires a bounded recovery attempt: {source}")]
 pub struct TaskParticipantRetryError {
     retry_after_ms: u64,
     route_fingerprint: String,
@@ -98,8 +98,7 @@ pub struct TaskParticipantRetryError {
 }
 
 impl TaskParticipantRetryError {
-    /// Builds one retryable failure after runtime has proven that dispatch produced no observable
-    /// model output, tool work, or external effect.
+    /// Builds one retryable failure after runtime has validated the proof for its recovery class.
     ///
     /// # Errors
     ///
@@ -155,6 +154,68 @@ impl TaskParticipantRetryError {
     #[must_use]
     pub fn proof(&self) -> &TaskParticipantRetryProof {
         &self.proof
+    }
+}
+
+/// Typed recovery boundary raised when a durable participant retry is about to cross a different
+/// provider/model route than the one admitted by its retry schedule.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "scheduled task participant retry route drifted before provider dispatch (expected {expected_route_fingerprint}, observed {observed_route_fingerprint}); restore the scheduled route or explicitly replan the task"
+)]
+pub struct TaskParticipantRetryRouteDriftError {
+    expected_route_fingerprint: String,
+    observed_route_fingerprint: String,
+}
+
+impl TaskParticipantRetryRouteDriftError {
+    /// Builds a typed recovery error from two validated provider-route fingerprints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either route fingerprint is malformed or both routes are identical.
+    pub fn new(
+        expected_route_fingerprint: impl Into<String>,
+        observed_route_fingerprint: impl Into<String>,
+    ) -> Result<Self> {
+        let expected_route_fingerprint = expected_route_fingerprint.into();
+        let observed_route_fingerprint = observed_route_fingerprint.into();
+        for (label, fingerprint) in [
+            (
+                "expected task participant route",
+                &expected_route_fingerprint,
+            ),
+            (
+                "observed task participant route",
+                &observed_route_fingerprint,
+            ),
+        ] {
+            if fingerprint.len() != 71
+                || !fingerprint.starts_with("sha256:")
+                || !fingerprint[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                bail!("{label} fingerprint is invalid");
+            }
+        }
+        if expected_route_fingerprint == observed_route_fingerprint {
+            bail!("task participant route drift requires two different fingerprints");
+        }
+        Ok(Self {
+            expected_route_fingerprint,
+            observed_route_fingerprint,
+        })
+    }
+
+    #[must_use]
+    pub fn expected_route_fingerprint(&self) -> &str {
+        &self.expected_route_fingerprint
+    }
+
+    #[must_use]
+    pub fn observed_route_fingerprint(&self) -> &str {
+        &self.observed_route_fingerprint
     }
 }
 
@@ -353,6 +414,8 @@ pub struct TaskPlannerSessionRunRequest {
 pub struct TaskPlannerSessionRunOutput {
     pub attempt_id: TaskParticipantAttemptId,
     pub accepted_plan: TaskPlanEntry,
+    /// Lossless execution contracts committed atomically with `accepted_plan` in the parent.
+    pub step_contracts: Vec<crate::TaskStepContractBoundEntryV2>,
     pub guidance_applied: Option<crate::TaskGuidanceAppliedEntry>,
     pub child_session_ref: SessionRef,
 }

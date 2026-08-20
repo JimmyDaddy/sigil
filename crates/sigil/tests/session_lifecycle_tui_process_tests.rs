@@ -4,6 +4,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -25,13 +26,35 @@ use sigil_runtime::{SessionExportV1, resolve_sigil_paths};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn test_workspace() -> Result<PathBuf> {
+struct TestWorkspace(PathBuf);
+
+impl Deref for TestWorkspace {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TestWorkspace {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn test_workspace() -> Result<TestWorkspace> {
     let path = std::env::temp_dir().join(format!(
         "sigil-session-lifecycle-tui-{}",
         uuid::Uuid::new_v4()
     ));
     fs::create_dir_all(&path)?;
-    Ok(path)
+    Ok(TestWorkspace(path))
 }
 
 fn write_config(path: &Path, workspace: &Path, session_dir: &Path) -> Result<()> {
@@ -552,7 +575,7 @@ fn run_tui_process_with_optional_config(
 }
 
 #[test]
-fn real_plain_tui_process_starts_fresh_instead_of_reopening_latest() -> Result<()> {
+fn real_plain_tui_process_starts_fresh_without_persisting_an_empty_session() -> Result<()> {
     let workspace = test_workspace()?;
     let config_path = workspace.join("sigil.toml");
     let session_dir = workspace.join("sessions");
@@ -584,7 +607,11 @@ fn real_plain_tui_process_starts_fresh_instead_of_reopening_latest() -> Result<(
                 .is_some_and(|extension| extension == "jsonl")
         })
         .collect::<Vec<_>>();
-    assert_eq!(session_logs.len(), 2);
+    assert_eq!(
+        session_logs,
+        vec![existing_path.clone()],
+        "opening and quitting a fresh TUI without conversation content must not create a resumable session"
+    );
     assert!(session_logs.contains(&existing_path));
     assert!(JsonlSessionStore::read_entries(&existing_path)?
         .iter()
@@ -821,7 +848,7 @@ fn real_tui_process_opens_session_actions_and_exports_safe_transcript() -> Resul
         "--config",
         config_path.to_str().context("UTF-8 config path")?,
     ]);
-    command.cwd(&workspace);
+    command.cwd(workspace.to_path_buf());
     configure_isolated_process_home(&mut command, &workspace)?;
     command.env("TERM", "xterm-256color");
     command.env("SIGIL_API_KEY", "test-key");

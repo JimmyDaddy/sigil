@@ -16,15 +16,17 @@ impl AppState {
         let resolved = self.resolved_context_window();
         match resolved.tokens {
             Some(cap) if cap > 0 => format!(
-                "ctx: {}% · prompt {} / {} {} · {}",
+                "ctx: {}% · cache={:.0}% · prompt {} / {} {} · {}",
                 self.context_usage_percent(cap),
+                self.cache_hit_ratio() * 100.0,
                 format_token_compact(self.runtime.stats.last_prompt_tokens),
                 format_token_compact(cap as u64),
                 context_window_source_label(resolved.source),
                 self.context_usage_hint(cap)
             ),
             _ => format!(
-                "ctx: n/a · prompt {} · set fallback_context_window_tokens",
+                "ctx: n/a · cache={:.0}% · prompt {} · set fallback_context_window_tokens",
+                self.cache_hit_ratio() * 100.0,
                 format_token_compact(self.runtime.stats.last_prompt_tokens)
             ),
         }

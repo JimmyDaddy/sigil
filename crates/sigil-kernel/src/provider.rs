@@ -1087,7 +1087,7 @@ pub struct PrefixSnapshot {
 }
 
 /// Provider-specific response handle that can be reused across turns or resume.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ResponseHandle {
     pub provider_name: String,
@@ -1123,7 +1123,7 @@ pub struct ReasoningArtifact {
 }
 
 /// Opaque continuation state that must survive turn boundaries and process restarts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationState {
     pub provider_name: String,
@@ -1363,6 +1363,18 @@ pub enum ProviderRequestRejection {
     /// Provider-owned HTTP 429 or an already-active route cooldown rejected the request before
     /// model generation.
     RateLimited,
+}
+
+/// Provider-neutral protocol violation reported by an adapter after parsing a response.
+///
+/// Adapter crates retain ownership of wire sentinels and vendor-specific syntax. The kernel only
+/// receives the recovery class: text that attempts to encode a tool invocation outside the typed
+/// tool-call channel must never be executed or accepted as a final answer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProtocolViolation {
+    #[error("provider emitted an unstructured tool invocation outside the typed tool-call channel")]
+    UnstructuredToolInvocation,
 }
 
 impl ModelMessage {

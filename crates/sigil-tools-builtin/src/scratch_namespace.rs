@@ -27,12 +27,12 @@ use std::{
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
-use sigil_kernel::secure_private_path_permissions;
+use serde_json::json;
+use sigil_kernel::{ToolErrorKind, ToolResult, secure_private_path_permissions};
 
 use crate::constants::{
     NO_SESSION_SCRATCH_KEY, SCRATCH_NAMESPACE_TTL_MS, SCRATCH_QUOTA_PER_SESSION_BYTES,
-    SCRATCH_QUOTA_WORKSPACE_HARD_BYTES, SCRATCH_WALK_MAX_DEPTH, SCRATCH_WALK_MAX_ENTRIES,
-    SESSION_SCRATCH_NAMESPACE_DIR,
+    SCRATCH_QUOTA_WORKSPACE_HARD_BYTES, SCRATCH_WALK_MAX_ENTRIES, SESSION_SCRATCH_NAMESPACE_DIR,
 };
 
 /// Stable, filesystem-safe namespace key for one session scope. Falls back to a fixed
@@ -99,12 +99,31 @@ impl std::fmt::Display for ScratchQuotaScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "scratch quota exceeded ({scope}): {usage_bytes} bytes used of {quota_bytes} bytes allowed; \
-     delete files under $SIGIL_SCRATCH_DIR or start a new session"
+     ask the user to reset scratch storage or remove unneeded scratch files"
 )]
 pub struct ScratchQuotaExceededError {
     pub scope: ScratchQuotaScope,
     pub usage_bytes: u64,
     pub quota_bytes: u64,
+}
+
+/// Stable failures produced while measuring a scratch namespace.
+///
+/// Paths are relative to the session namespace so these errors can be projected to a tool result
+/// without disclosing the host cache layout.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScratchMeasurementError {
+    #[error(
+        "scratch namespace measurement exceeded the {limit}-entry safety bound after at least {observed_entries} entries"
+    )]
+    EntryLimitExceeded {
+        limit: usize,
+        observed_entries: usize,
+    },
+    #[error("scratch namespace contains a symlink at {relative_path}")]
+    Symlink { relative_path: String },
+    #[error("scratch namespace contains an unsupported filesystem entry at {relative_path}")]
+    UnsupportedEntry { relative_path: String },
 }
 
 /// Deterministic usage snapshot of one workspace scratch root.
@@ -279,96 +298,64 @@ fn entry_modified_ms(metadata: &fs::Metadata) -> u64 {
     }
 }
 
-/// Bounded deterministic walk of one namespace. Refuses symlinks and any entry that cannot be
-/// measured, so quota/activity numbers are never silently fabricated.
-fn walk_namespace(namespace_root: &Path, max_entries: usize, max_depth: u32) -> Result<WalkState> {
+/// Entry-bounded deterministic walk of one namespace. Refuses symlinks and any entry that cannot
+/// be measured, so quota/activity numbers are never silently fabricated. Directory depth is not a
+/// validity constraint; traversal work is bounded by the total entry budget instead.
+fn walk_namespace(namespace_root: &Path, max_entries: usize) -> Result<WalkState> {
     let mut state = WalkState::default();
-    walk_entries(
-        namespace_root,
-        namespace_root,
-        max_entries,
-        max_depth,
-        &mut state,
-    )?;
+    let mut pending = vec![namespace_root.to_path_buf()];
+    let mut observed_entries = 0usize;
+    while let Some(current) = pending.pop() {
+        if current != namespace_root {
+            observed_entries = observed_entries.saturating_add(1);
+            if observed_entries > max_entries {
+                return Err(ScratchMeasurementError::EntryLimitExceeded {
+                    limit: max_entries,
+                    observed_entries,
+                }
+                .into());
+            }
+        }
+        let metadata = fs::symlink_metadata(&current)
+            .with_context(|| format!("failed to inspect scratch entry {}", current.display()))?;
+        let relative_path = scratch_relative_label(namespace_root, &current);
+        if metadata.file_type().is_symlink() {
+            return Err(ScratchMeasurementError::Symlink { relative_path }.into());
+        }
+        if metadata.is_file() {
+            state.bytes = state.bytes.saturating_add(metadata.len());
+            state.entries = state.entries.saturating_add(1);
+            state.newest_ms = state.newest_ms.max(entry_modified_ms(&metadata));
+            continue;
+        }
+        if !metadata.is_dir() {
+            return Err(ScratchMeasurementError::UnsupportedEntry { relative_path }.into());
+        }
+        state.newest_ms = state.newest_ms.max(entry_modified_ms(&metadata));
+        let entries = fs::read_dir(&current)
+            .with_context(|| format!("failed to read scratch directory {}", current.display()))?;
+        let mut children = entries
+            .map(|entry| {
+                entry.map(|entry| entry.path()).with_context(|| {
+                    format!(
+                        "failed to read scratch directory entry in {}",
+                        current.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        children.sort();
+        pending.extend(children.into_iter().rev());
+    }
     Ok(state)
 }
 
-fn walk_entries(
-    root: &Path,
-    current: &Path,
-    max_entries: usize,
-    max_depth: u32,
-    state: &mut WalkState,
-) -> Result<()> {
-    let metadata = fs::symlink_metadata(current)
-        .with_context(|| format!("failed to inspect scratch entry {}", current.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!(
-            "scratch namespace contains a symlink, refusing to measure: {}",
-            current.display()
-        );
-    }
-    if metadata.is_file() {
-        state.bytes = state.bytes.saturating_add(metadata.len());
-        state.entries += 1;
-        state.newest_ms = state.newest_ms.max(entry_modified_ms(&metadata));
-        if state.entries > max_entries {
-            bail!(
-                "scratch namespace walk exceeded the entry bound at {}",
-                root.display()
-            );
-        }
-        return Ok(());
-    }
-    if !metadata.is_dir() {
-        bail!(
-            "scratch namespace contains a non-file, non-directory entry: {}",
-            current.display()
-        );
-    }
-    state.newest_ms = state.newest_ms.max(entry_modified_ms(&metadata));
-    let entries = fs::read_dir(current)
-        .with_context(|| format!("failed to read scratch directory {}", current.display()))?;
-    for entry in entries {
-        let entry = entry.with_context(|| {
-            format!(
-                "failed to read scratch directory entry in {}",
-                current.display()
-            )
-        })?;
-        let path = entry.path();
-        if path == root {
-            continue;
-        }
-        let entry_metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to inspect scratch entry {}", path.display()))?;
-        if entry_metadata.file_type().is_symlink() {
-            bail!(
-                "scratch namespace contains a symlink, refusing to measure: {}",
-                path.display()
-            );
-        }
-        if entry_metadata.is_dir() {
-            if max_depth == 0 {
-                bail!(
-                    "scratch namespace walk exceeded the depth bound at {}",
-                    path.display()
-                );
-            }
-            walk_entries(root, &path, max_entries, max_depth - 1, state)?;
-        } else {
-            state.bytes = state.bytes.saturating_add(entry_metadata.len());
-            state.entries += 1;
-            state.newest_ms = state.newest_ms.max(entry_modified_ms(&entry_metadata));
-        }
-        if state.entries > max_entries {
-            bail!(
-                "scratch namespace walk exceeded the entry bound at {}",
-                root.display()
-            );
-        }
-    }
-    Ok(())
+fn scratch_relative_label(namespace_root: &Path, path: &Path) -> String {
+    path.strip_prefix(namespace_root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| ".".to_owned())
 }
 
 /// Measures usage of one session namespace plus the aggregate workspace scratch usage.
@@ -385,11 +372,7 @@ pub fn measure_scratch_usage(scratch_root: &Path, session_key: &str) -> Result<S
     }
     let namespace_root = sessions_root.join(session_key);
     if namespace_root.is_dir() {
-        let session_state = walk_namespace(
-            &namespace_root,
-            SCRATCH_WALK_MAX_ENTRIES,
-            SCRATCH_WALK_MAX_DEPTH,
-        )?;
+        let session_state = walk_namespace(&namespace_root, SCRATCH_WALK_MAX_ENTRIES)?;
         usage.session_bytes = session_state.bytes;
         usage.session_entry_count = session_state.entries;
     }
@@ -419,7 +402,7 @@ pub fn measure_scratch_usage(scratch_root: &Path, session_key: &str) -> Result<S
         if path == namespace_root {
             continue;
         }
-        let state = walk_namespace(&path, SCRATCH_WALK_MAX_ENTRIES, SCRATCH_WALK_MAX_DEPTH)?;
+        let state = walk_namespace(&path, SCRATCH_WALK_MAX_ENTRIES)?;
         usage.workspace_bytes = usage.workspace_bytes.saturating_add(state.bytes);
         usage.workspace_entry_count += state.entries;
     }
@@ -498,6 +481,105 @@ pub fn ensure_session_scratch(
         dir: namespace_root,
         usage,
     })
+}
+
+/// Projects a provisioning failure into a bounded, actionable tool error without exposing the
+/// host cache path.
+pub(crate) fn scratch_provision_error_result(
+    call_id: String,
+    tool_name: String,
+    scratch_label: &str,
+    error: anyhow::Error,
+) -> ToolResult {
+    if let Some(quota_error) = error.downcast_ref::<ScratchQuotaExceededError>() {
+        return ToolResult::error(
+            call_id,
+            tool_name,
+            ToolErrorKind::ScratchQuotaExceeded,
+            quota_error.to_string(),
+        )
+        .with_error_details(
+            false,
+            json!({
+                "scope": quota_error.scope.as_str(),
+                "usage_bytes": quota_error.usage_bytes,
+                "quota_bytes": quota_error.quota_bytes,
+                "scratch_label": scratch_label,
+                "recovery": {
+                    "user_action": "reset_scratch_storage",
+                    "automatic": false,
+                    "requires_confirmation": true,
+                },
+            }),
+        );
+    }
+    if let Some(measurement_error) = error.downcast_ref::<ScratchMeasurementError>() {
+        let (kind, reason_code, details) = match measurement_error {
+            ScratchMeasurementError::EntryLimitExceeded {
+                limit,
+                observed_entries,
+            } => (
+                ToolErrorKind::ResourceLimit,
+                "scratch_measurement_limit_exceeded",
+                json!({
+                    "limit_kind": "entries",
+                    "limit": limit,
+                    "observed_entries": observed_entries,
+                }),
+            ),
+            ScratchMeasurementError::Symlink { relative_path } => (
+                ToolErrorKind::Io,
+                "scratch_namespace_symlink",
+                json!({ "relative_path": relative_path }),
+            ),
+            ScratchMeasurementError::UnsupportedEntry { relative_path } => (
+                ToolErrorKind::Io,
+                "scratch_namespace_unsupported_entry",
+                json!({ "relative_path": relative_path }),
+            ),
+        };
+        return ToolResult::error(
+            call_id,
+            tool_name,
+            kind,
+            format!(
+                "failed to provision {scratch_label}: {measurement_error}; ask the user to reset this workspace scratch storage"
+            ),
+        )
+        .with_error_details(
+            false,
+            json!({
+                "reason_code": reason_code,
+                "measurement": details,
+                "scratch_label": scratch_label,
+                "recovery": {
+                    "user_action": "reset_scratch_storage",
+                    "automatic": false,
+                    "requires_confirmation": true,
+                },
+            }),
+        );
+    }
+    ToolResult::error(
+        call_id,
+        tool_name,
+        ToolErrorKind::Io,
+        format!(
+            "failed to provision {scratch_label}: scratch storage could not be prepared safely; ask the user to reset this workspace scratch storage"
+        ),
+    )
+    .with_error_details(
+        false,
+        json!({
+            "reason_code": "scratch_provisioning_failed",
+            "scratch_label": scratch_label,
+            "recovery": {
+                "user_action": "reset_scratch_storage",
+                "automatic": false,
+                "requires_confirmation": true,
+            },
+        }),
+    )
 }
 
 /// TTL/GC configuration for one workspace scratch root.
@@ -593,7 +675,7 @@ pub fn gc_scratch_namespaces(
             report.skipped_leased += 1;
             continue;
         }
-        let state = match walk_namespace(&path, SCRATCH_WALK_MAX_ENTRIES, SCRATCH_WALK_MAX_DEPTH) {
+        let state = match walk_namespace(&path, SCRATCH_WALK_MAX_ENTRIES) {
             Ok(state) => state,
             Err(error) => {
                 report.skipped_invalid += 1;

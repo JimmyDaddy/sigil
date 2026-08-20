@@ -64,6 +64,12 @@ impl Tool for PlannerDiscoveryReadTool {
     }
 }
 
+fn task_workspace_read_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(PlannerDiscoveryReadTool));
+    registry
+}
+
 #[test]
 fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> Result<()> {
     let temp = tempdir()?;
@@ -130,7 +136,7 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path.clone(),
-        Agent::new(provider, ToolRegistry::new()),
+        Agent::new(provider, task_workspace_read_registry()),
         workspace_root,
         role_provider_builder,
     )?;
@@ -150,7 +156,11 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
     else {
         unreachable!("recv_until only returns TaskRunFinished");
     };
-    assert_eq!(status, TaskRunStatus::Completed);
+    assert_eq!(
+        status,
+        TaskRunStatus::Completed,
+        "unexpected durable task entries: {entries:#?}"
+    );
     assert_eq!(
         entries
             .iter()
@@ -290,7 +300,7 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path.clone(),
-        Agent::new(provider, ToolRegistry::new()),
+        Agent::new(provider, task_workspace_read_registry()),
         workspace_root,
         role_provider_builder,
     )?;
@@ -407,7 +417,7 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
 }
 
 #[test]
-fn automatic_handoff_task_can_pause_and_resume_on_its_inherited_run_scope() -> Result<()> {
+fn automatic_handoff_task_can_pause_stop_and_resume_on_its_inherited_run_scope() -> Result<()> {
     let worker_timeout = Duration::from_secs(30);
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -463,6 +473,7 @@ fn automatic_handoff_task_can_pause_and_resume_on_its_inherited_run_scope() -> R
                 ProviderChunk::Done,
             ]),
             StreamPlan::Pending,
+            StreamPlan::Pending,
             StreamPlan::Chunks(vec![
                 ProviderChunk::TextDelta("resumed task completed".to_owned()),
                 ProviderChunk::Done,
@@ -475,7 +486,7 @@ fn automatic_handoff_task_can_pause_and_resume_on_its_inherited_run_scope() -> R
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path.clone(),
-        Agent::new(provider, ToolRegistry::new()),
+        Agent::new(provider, task_workspace_read_registry()),
         workspace_root,
         role_provider_builder,
     )?;
@@ -560,6 +571,47 @@ fn automatic_handoff_task_can_pause_and_resume_on_its_inherited_run_scope() -> R
             matches!(message, WorkerMessage::TaskRunStarted { .. })
         })
         .context("waiting for paused task to resume")?;
+    role_stream_started_rx
+        .recv_timeout(worker_timeout)
+        .context("waiting for resumed task executor stream to start")?;
+    wait_for_session_entry(&session_log_path, |entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.task_id == expected_task_id && step.status == TaskStepStatus::Running
+        )
+    })
+    .context("waiting for the resumed task step to become running")?;
+
+    worker.send(WorkerCommand::CancelRun)?;
+    let interrupted = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::RunInterrupted { .. })
+        })
+        .context("waiting for stopped task run to remain resumable")?;
+    let WorkerMessage::RunInterrupted { entries, .. } = interrupted else {
+        unreachable!("recv_until only returns RunInterrupted");
+    };
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(task))
+            if task.task_id == expected_task_id && task.status == TaskRunStatus::Interrupted
+    )));
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(task))
+            if task.task_id == expected_task_id && task.status == TaskRunStatus::Cancelled
+    )));
+
+    worker.send(WorkerCommand::ContinueTask {
+        task_id: Some(expected_task_id.as_str().to_owned()),
+        guidance: None,
+    })?;
+    let _ = worker
+        .recv_until_with_timeout(worker_timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunStarted { .. })
+        })
+        .context("waiting for interrupted task to resume")?;
     let finished = worker
         .recv_until_with_timeout(worker_timeout, |message| {
             matches!(message, WorkerMessage::TaskRunFinished { .. })
@@ -674,7 +726,10 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
-        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        Agent::new(
+            PlannedProvider::new(Vec::new()),
+            task_workspace_read_registry(),
+        ),
         workspace_root,
         role_provider_builder,
     )?;
@@ -781,7 +836,8 @@ fn run_typed_task_continuation_from_conversation(
     drop(session);
 
     let exact_guidance = "finish the task we were already working on";
-    let continue_args = r#"{"reason":"continue_current_task"}"#;
+    let continue_args =
+        r#"{"reason":"continue_current_task","action":"apply_current_request_as_guidance"}"#;
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
         ProviderChunk::ToolCallStart {
             id: "continue-existing-task".to_owned(),
@@ -1084,7 +1140,10 @@ fn run_explicit_task_continuation_after_user_clear(
     let worker = spawn_test_worker_with_role_provider_builder(
         test_root_config(&workspace_root, "planned", "planned-model"),
         session_log_path,
-        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        Agent::new(
+            PlannedProvider::new(Vec::new()),
+            task_workspace_read_registry(),
+        ),
         workspace_root,
         planned_role_provider_builder(role_plans),
     )?;
@@ -1454,7 +1513,9 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
         "steps": [{
             "step_id": "resume_recovered_task",
             "title": "Resume recovered task",
-            "role": "executor"
+            "role": "executor",
+            "mode": "read",
+            "isolation": "shared_read_only"
         }]
     }"#;
     let role_provider_builder = planned_role_provider_builder(vec![
@@ -1510,7 +1571,7 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
                     ProviderChunk::Done,
                 ]),
             ]),
-            ToolRegistry::new(),
+            task_workspace_read_registry(),
         ),
         workspace_root,
         role_provider_builder,
@@ -1562,7 +1623,9 @@ fn explicit_task_command_uses_typed_handoff_admission_before_planning() -> Resul
         "steps": [{
             "step_id": "execute_explicit_task",
             "title": "Execute explicit task",
-            "role": "executor"
+            "role": "executor",
+            "mode": "read",
+            "isolation": "shared_read_only"
         }]
     }"#;
     let role_provider_builder = planned_role_provider_builder(vec![
@@ -1594,7 +1657,10 @@ fn explicit_task_command_uses_typed_handoff_admission_before_planning() -> Resul
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
-        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        Agent::new(
+            PlannedProvider::new(Vec::new()),
+            task_workspace_read_registry(),
+        ),
         workspace_root,
         role_provider_builder,
     )?;
@@ -1662,7 +1728,9 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
         "steps": [{
             "step_id": "execute_after_discovery",
             "title": "Execute after discovery",
-            "role": "executor"
+            "role": "executor",
+            "mode": "read",
+            "isolation": "shared_read_only"
         }]
     }"#;
     let role_provider_builder = planned_role_provider_builder(vec![
@@ -1699,8 +1767,7 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
             ProviderChunk::Done,
         ]),
     ]);
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(PlannerDiscoveryReadTool));
+    let registry = task_workspace_read_registry();
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
@@ -1805,7 +1872,7 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
             ProviderChunk::Done,
         ]),
     ]);
-    let agent = Agent::new(provider, ToolRegistry::new());
+    let agent = Agent::new(provider, task_workspace_read_registry());
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path.clone(),

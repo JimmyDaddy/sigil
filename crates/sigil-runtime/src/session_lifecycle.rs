@@ -1895,6 +1895,7 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
                 messages_by_id.insert(message.id.clone(), message.clone());
                 projection.messages.push(message);
             }
+            SessionLogEntry::RuntimeContextSnapshotV2(_) => {}
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name,
                 model_name,

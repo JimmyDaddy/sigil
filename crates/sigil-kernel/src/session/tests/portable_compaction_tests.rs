@@ -469,6 +469,24 @@ fn portable_executor_pins_cjk_user_constraints_and_projects_checkpoint_after_app
 
 #[test]
 fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -> Result<()> {
+    task_compaction_preserves_task_list_memory_and_executable_projection(
+        CompactionInitiation::IdleAutomatic {
+            scope_fingerprint: "idle-task-survival-scope".to_owned(),
+            circuit_scope: None,
+        },
+    )
+}
+
+#[test]
+fn manual_compaction_preserves_task_list_memory_and_executable_projection() -> Result<()> {
+    task_compaction_preserves_task_list_memory_and_executable_projection(
+        CompactionInitiation::Manual,
+    )
+}
+
+fn task_compaction_preserves_task_list_memory_and_executable_projection(
+    initiation: CompactionInitiation,
+) -> Result<()> {
     let (temp, store, mut session) = setup_session()?;
     let task_id = crate::TaskId::new("task-compact-survival")?;
     let inspect_step_id = crate::TaskStepId::new("inspect")?;
@@ -481,8 +499,7 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         )?,
         crate::UserDeclaredIntentV1 {
             title: "Preserve the accepted task and Intent".to_owned(),
-            statement: "Retain executable task and Intent identity across automatic compaction."
-                .to_owned(),
+            statement: "Retain executable task and Intent identity across compaction.".to_owned(),
             acceptance_criteria: vec![crate::IntentProposalCriterionV1 {
                 criterion_alias: "compact-survival".to_owned(),
                 statement: "Task and Intent projections reload from the durable source.".to_owned(),
@@ -538,15 +555,58 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
             },
         ],
     )?;
+    let step_contracts = vec![
+        crate::TaskStepContractBoundEntryV2 {
+            task_id: task_id.clone(),
+            plan_version: 3,
+            step_id: inspect_step_id.clone(),
+            contract: crate::TaskStepContractV2 {
+                schema_version: crate::TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+                target_paths: vec!["crates/sigil-kernel".to_owned()],
+                required_capabilities: vec![
+                    crate::TaskCapabilityV2::WorkspaceRead,
+                    crate::TaskCapabilityV2::VcsRead,
+                ],
+                deliverables: vec!["durable state inventory".to_owned()],
+                acceptance_criteria: vec!["projection reloads exactly".to_owned()],
+                check_spec_refs: Vec::new(),
+                risk: Some("low".to_owned()),
+                notes: Vec::new(),
+            },
+        },
+        crate::TaskStepContractBoundEntryV2 {
+            task_id: task_id.clone(),
+            plan_version: 3,
+            step_id: implement_step_id.clone(),
+            contract: crate::TaskStepContractV2 {
+                schema_version: crate::TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+                target_paths: vec!["crates/sigil-runtime".to_owned()],
+                required_capabilities: vec![
+                    crate::TaskCapabilityV2::WorkspaceRead,
+                    crate::TaskCapabilityV2::WorkspaceWrite,
+                ],
+                deliverables: vec!["bounded implementation".to_owned()],
+                acceptance_criteria: vec!["targeted tests pass".to_owned()],
+                check_spec_refs: vec!["check:runtime".to_owned()],
+                risk: Some("medium".to_owned()),
+                notes: Vec::new(),
+            },
+        },
+    ];
     session.append_control(crate::ControlEntry::TaskRun(crate::TaskRunEntry {
         task_id: task_id.clone(),
         parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
-        objective: "Preserve the active task across automatic compaction".to_owned(),
+        objective: "Preserve the active task across compaction".to_owned(),
         title: None,
         status: crate::TaskRunStatus::Paused,
         reason: Some("waiting for continuation".to_owned()),
     }))?;
-    crate::append_task_intent_plan_admission(&mut session, &admission, task_plan)?;
+    crate::append_task_intent_plan_admission_with_step_contracts(
+        &mut session,
+        &admission,
+        task_plan,
+        step_contracts,
+    )?;
     session.append_controls(vec![
         crate::ControlEntry::TaskStep(crate::TaskStepEntry {
             task_id: task_id.clone(),
@@ -568,6 +628,17 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
             summary: None,
             reason: Some("dependency completed; awaiting continue".to_owned()),
         }),
+        crate::ControlEntry::TaskStepCheckpointV2(crate::TaskStepCheckpointV2 {
+            schema_version: crate::TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+            task_id: task_id.clone(),
+            plan_version: 3,
+            step_id: implement_step_id.clone(),
+            attempt_id: crate::TaskParticipantAttemptId::new("attempt-compact-survival")?,
+            model_turn: 2,
+            semantic_call_hash: format!("sha256:{}", "a".repeat(64)),
+            result_frontier_hash: format!("sha256:{}", "b".repeat(64)),
+            no_progress_count: 1,
+        }),
     ])?;
 
     let session_scope_id = session_scope_id(&store)?;
@@ -577,10 +648,7 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         "idle-task-survival-compaction",
         None,
     )?;
-    request.initiation = CompactionInitiation::IdleAutomatic {
-        scope_fingerprint: "idle-task-survival-scope".to_owned(),
-        circuit_scope: None,
-    };
+    request.initiation = initiation;
     let task_control_event_ids = store
         .read_event_records_writer()?
         .into_iter()
@@ -589,7 +657,7 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         })
         .map(|record| record.event_id().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(task_control_event_ids.len(), 4);
+    assert_eq!(task_control_event_ids.len(), 8);
     for event_id in &task_control_event_ids {
         assert!(
             request.plan.protected_events.iter().any(|protected| {
@@ -637,7 +705,7 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         .task_memory
         .as_ref()
         .and_then(|memory| memory.active_plan.as_ref())
-        .expect("automatic compaction should retain an active plan for model continuation");
+        .expect("compaction should retain an active plan for model continuation");
     assert_eq!(active_plan.task_id, task_id.as_str());
     assert_eq!(active_plan.plan_version, 3);
     assert_eq!(active_plan.steps.len(), 2);
@@ -668,6 +736,12 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         .get(&3)
         .expect("accepted executable plan should survive compaction");
     assert_eq!(plan.steps.len(), 2);
+    assert!(plan.contract_set_committed_v2);
+    assert_eq!(plan.step_contracts.len(), 2);
+    assert_eq!(
+        plan.step_contracts[&implement_step_id].deliverables,
+        vec!["bounded implementation"]
+    );
     assert_eq!(plan.steps[1].depends_on, vec![inspect_step_id]);
     assert_eq!(plan.steps[1].role, crate::AgentRole::SubagentWrite);
     assert_eq!(plan.steps[1].mode, Some(crate::TaskStepMode::Write));
@@ -678,7 +752,7 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
     assert_eq!(
         plan.steps[1].intent_refs,
         vec![accepted_intent_ref.clone()],
-        "Task to Intent binding must survive automatic compaction"
+        "Task to Intent binding must survive compaction"
     );
     assert_eq!(
         task.steps
@@ -691,9 +765,15 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         task_projection,
         "the reloaded entry list forwarded to TUI must match durable Task replay"
     );
+    assert!(reloaded.entries().iter().any(|entry| matches!(
+        entry,
+        crate::SessionLogEntry::Control(crate::ControlEntry::TaskStepCheckpointV2(checkpoint))
+            if checkpoint.attempt_id.as_str() == "attempt-compact-survival"
+                && checkpoint.no_progress_count == 1
+    )));
     let intent_state = reloaded.public_intent_stack_state_for_workspace(temp.path())?;
     let crate::PublicIntentStackStateV1::Available { stack, .. } = intent_state else {
-        panic!("accepted Intent history must survive automatic compaction");
+        panic!("accepted Intent history must survive compaction");
     };
     assert_eq!(stack.intents.len(), 1);
     assert_eq!(stack.intents[0].intent_ref, accepted_intent_ref);
@@ -776,9 +856,16 @@ fn portable_preflight_materializes_the_full_candidate_without_durable_writes() -
     let target_ids = target_request
         .messages
         .iter()
+        .filter(|message| !message.id.starts_with("context:v2:"))
         .map(|message| message.id.as_str())
         .collect::<Vec<_>>();
     assert!(target_ids.ends_with(&candidate_ids));
+    assert!(
+        target_request
+            .messages
+            .last()
+            .is_some_and(|message| message.id.starts_with("context:v2:"))
+    );
 
     let target_material = target_material_for_request(&session_scope_id, target_request)?;
     store.execute_portable_semantic_compaction(preflight, target_material)?;

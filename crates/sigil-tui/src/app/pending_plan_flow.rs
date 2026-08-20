@@ -314,6 +314,7 @@ impl AppState {
             workspace_snapshot_id: detail.workspace_snapshot_id.clone(),
             stale: stale_reason.is_some(),
             stale_reason,
+            last_run_failure: None,
             // Action authority comes only from the canonical public projection. A detail payload
             // is immutable display data and must never grant actions by itself.
             allowed_actions: Vec::new(),

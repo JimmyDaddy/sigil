@@ -14,6 +14,7 @@ mod support;
 mod terminal_process;
 mod terminal_tools;
 mod tool_artifact_tool;
+mod vcs_inspect;
 pub mod webfetch;
 
 pub use changeset_tool::{

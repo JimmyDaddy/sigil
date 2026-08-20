@@ -1051,6 +1051,7 @@ fn approval_path_zone_label(zone: PathTrustZone) -> &'static str {
         PathTrustZone::WorkspaceIgnored => "ignored file",
         PathTrustZone::WorkspaceGitMetadata => "git metadata",
         PathTrustZone::WorkspaceConfigSecret => "config or secret",
+        PathTrustZone::RuntimeScratch => "session scratch",
         PathTrustZone::UserState => "user state",
         PathTrustZone::UserCache => "user cache",
         PathTrustZone::External => "external path",

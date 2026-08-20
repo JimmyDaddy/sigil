@@ -128,17 +128,10 @@ pub async fn activate_or_refresh_configured_remote_mcp_server(
 
     let retired_owners =
         registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name);
-    let retired_tools = retired_owners
+    let replaced_tool_names = retired_owners
         .iter()
-        .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
-        .collect::<Vec<_>>();
-    let replaced_tool_names = retired_tools
-        .iter()
-        .map(|tool| tool.spec().name)
+        .flat_map(|owner| registry.tool_names_by_lifecycle_owner(owner))
         .collect::<BTreeSet<_>>();
-    for tool in &retired_tools {
-        registry.register(Arc::clone(tool));
-    }
 
     let replacement = prepare_remote_mcp_generation(
         registry,
@@ -153,20 +146,28 @@ pub async fn activate_or_refresh_configured_remote_mcp_server(
     .await?;
     let replacement_owner = replacement.lifecycle_owner.clone();
     let added_tools = replacement.tools.len();
+    let retirements = retired_owners
+        .iter()
+        .map(|owner| registry.retire_by_lifecycle_owner(owner))
+        .collect::<Vec<_>>();
+    let retired_count = retirements
+        .iter()
+        .map(sigil_kernel::ToolLifecycleRetirement::len)
+        .sum();
     for tool in replacement.tools {
         registry.register(tool);
     }
-    for owner in &retired_owners {
-        let _ = registry.drain_by_lifecycle_owner(owner);
-    }
 
-    if let Err(retirement_error) =
-        crate::mcp_registry::shutdown_registered_tools(&retired_tools).await
-    {
-        let replacement_tools = registry.drain_by_lifecycle_owner(&replacement_owner);
-        let rollback_error = crate::mcp_registry::shutdown_registered_tools(&replacement_tools)
-            .await
-            .err();
+    let retirement_result = async {
+        for retirement in &retirements {
+            retirement.dispose_and_quiesce().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(retirement_error) = retirement_result {
+        let replacement_retirement = registry.retire_by_lifecycle_owner(&replacement_owner);
+        let rollback_error = replacement_retirement.dispose_and_quiesce().await.err();
         return Err(anyhow!(
             "failed to retire previous remote MCP server {server_name} generation: {retirement_error:#}{}",
             rollback_error
@@ -177,7 +178,7 @@ pub async fn activate_or_refresh_configured_remote_mcp_server(
 
     Ok(crate::McpRefreshResult {
         matched_servers: 1,
-        removed_tools: retired_tools.len(),
+        removed_tools: retired_count,
         added_tools,
         process_launch_receipts: Vec::new(),
     })
@@ -191,12 +192,17 @@ pub async fn deactivate_configured_remote_mcp_server(
 ) -> Result<usize> {
     let owners =
         registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name);
-    let retired = owners
+    let retirements = owners
         .iter()
-        .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+        .map(|owner| registry.retire_by_lifecycle_owner(owner))
         .collect::<Vec<_>>();
-    let retired_count = retired.len();
-    crate::mcp_registry::shutdown_registered_tools(&retired).await?;
+    let retired_count = retirements
+        .iter()
+        .map(sigil_kernel::ToolLifecycleRetirement::len)
+        .sum();
+    for retirement in &retirements {
+        retirement.dispose_and_quiesce().await?;
+    }
     Ok(retired_count)
 }
 

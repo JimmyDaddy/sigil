@@ -10,10 +10,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, PreparedToolExecution, Tool, ToolAccess,
-    ToolAnalysisStatus, ToolCategory, ToolContext, ToolErrorKind, ToolMutationTracking,
-    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
-    ToolPreparation, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope, WorkspaceTrust,
+    ToolAnalysisStatus, ToolCategory, ToolConcurrencyClass, ToolContext, ToolErrorKind,
+    ToolMutationTracking, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope,
+    WorkspaceTrust,
 };
 
 use crate::{
@@ -144,6 +145,10 @@ impl Tool for CodeSymbolsTool {
         ToolMutationTracking::None
     }
 
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
+    }
+
     fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         code_read_permission_plan(
             "code_symbols",
@@ -203,6 +208,10 @@ impl Tool for CodeWorkspaceSymbolsTool {
         ToolMutationTracking::None
     }
 
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
+    }
+
     fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         code_read_permission_plan(
             "code_workspace_symbols",
@@ -245,6 +254,10 @@ impl Tool for CodeDefinitionTool {
 
     fn mutation_tracking(&self) -> ToolMutationTracking {
         ToolMutationTracking::None
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
     }
 
     fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -301,6 +314,10 @@ impl Tool for CodeReferencesTool {
 
     fn mutation_tracking(&self) -> ToolMutationTracking {
         ToolMutationTracking::None
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
     }
 
     fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -366,6 +383,10 @@ impl Tool for CodeActionsTool {
             network_effect: None,
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
     }
 
     fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -616,6 +637,10 @@ impl Tool for CodeDiagnosticsTool {
 
     fn mutation_tracking(&self) -> ToolMutationTracking {
         ToolMutationTracking::None
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        ToolConcurrencyClass::ParallelReadOnly
     }
 
     fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {

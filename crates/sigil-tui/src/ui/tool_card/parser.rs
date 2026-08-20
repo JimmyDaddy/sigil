@@ -66,7 +66,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         .filter(|language| !language.trim().is_empty())
         .map(str::to_owned);
     let preview_value = object.get("preview_value").cloned();
-    let (preview_lines, hidden_lines) = object
+    let (preview_lines, mut hidden_lines) = object
         .get("preview_lines")
         .and_then(serde_json::Value::as_array)
         .map(|lines| {
@@ -82,6 +82,20 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
             (preview, hidden)
         })
         .unwrap_or_default();
+    if tool_name_matches(&tool_name, "read_file") {
+        let returned_lines = metadata
+            .returned_lines
+            .unwrap_or(preview_lines.len() as u64);
+        let returned_end = metadata
+            .read_offset
+            .unwrap_or(0)
+            .saturating_add(returned_lines);
+        let remaining_lines = metadata
+            .total_lines
+            .unwrap_or(returned_end)
+            .saturating_sub(returned_end) as usize;
+        hidden_lines = hidden_lines.max(remaining_lines);
+    }
     let diff = object.get("diff").and_then(parse_tool_diff);
     let artifact = object.get("artifact").and_then(parse_tool_artifact);
 
@@ -214,8 +228,13 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
         .and_then(|details| details.get("shell_analysis"))
         .or_else(|| details.and_then(|details| details.get("shell")));
     ToolCardMetadata {
+        duration_ms: object.get("duration_ms").and_then(Value::as_u64),
         exit_code: object.get("exit_code").and_then(Value::as_i64),
-        stdout_bytes: object.get("stdout_bytes").and_then(Value::as_u64),
+        returned_lines: object.get("returned_lines").and_then(Value::as_u64),
+        total_lines: object.get("total_lines").and_then(Value::as_u64),
+        read_offset: details
+            .and_then(|details| details.get("offset"))
+            .and_then(Value::as_u64),
         stderr_bytes: object.get("stderr_bytes").and_then(Value::as_u64),
         changed_files: object
             .get("changed_files")

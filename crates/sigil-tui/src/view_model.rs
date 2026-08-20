@@ -726,7 +726,7 @@ impl ContextProvenanceSummaryViewModel {
         summary: &PrefixRuntimeContextSummary,
         top_source_limit: usize,
     ) -> Option<Self> {
-        if summary.schema != "sigil_context_v1"
+        if summary.schema != sigil_kernel::RUNTIME_CONTEXT_V2_SCHEMA
             || summary.included_count == 0 && summary.excluded_count == 0
         {
             return None;
@@ -1037,7 +1037,7 @@ fn footer_hints(app: &AppState) -> String {
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
         return format!(
-            "{agent} · {queue}Enter add follow-up · Ctrl-B background · Esc interrupt · Ctrl-L copy reply · Ctrl-T details"
+            "{agent} · {queue}Enter add follow-up · Ctrl-B background · Ctrl-C stop · Ctrl-L copy reply · Ctrl-T details"
         );
     }
     if app.runtime.is_busy {
@@ -1046,7 +1046,7 @@ fn footer_hints(app: &AppState) -> String {
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
         return format!(
-            "{agent} · {queue}Enter add follow-up · Esc interrupt · Ctrl-L copy reply · Ctrl-T details"
+            "{agent} · {queue}Enter add follow-up · Ctrl-C stop · Ctrl-L copy reply · Ctrl-T details"
         );
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {

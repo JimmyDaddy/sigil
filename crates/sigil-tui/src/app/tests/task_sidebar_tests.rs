@@ -63,6 +63,105 @@ fn provider_route_diagnostics_format_live_attribution_and_audit_identity() {
 }
 
 #[test]
+fn provider_route_diagnostics_do_not_look_like_plan_step_progress() {
+    let snapshot = sigil_runtime::TaskProviderRouteDiagnosticsSnapshot {
+        routes: vec![sigil_runtime::TaskProviderRouteDiagnostics {
+            route_fingerprint: "sha256:route".to_owned(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            consumers: vec![sigil_runtime::TaskProviderRouteConsumerDiagnostics {
+                consumer: sigil_runtime::TaskProviderRouteConsumer::Executor,
+                in_flight: 1,
+                waiting: 0,
+            }],
+            in_flight: 1,
+            waiting: 0,
+            concurrency_window: 4,
+            max_concurrency: 4,
+            cooldown_remaining_ms: 0,
+            consecutive_rate_limits: 0,
+        }],
+    };
+
+    assert_eq!(
+        task_provider_route_live_lines(&snapshot),
+        vec![
+            "executor → deepseek/deepseek-v4-flash · 1 model request running · concurrency limit 4"
+        ]
+    );
+}
+
+#[test]
+fn failed_task_strip_surfaces_durable_reason_without_internal_step_ids() {
+    let task_id = TaskId::new("task_failed").expect("task id");
+    let step_id = TaskStepId::new("batch-core-finalize").expect("step id");
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Finalize the core batches".to_owned(),
+            title: Some("Finalize core batches".to_owned()),
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Finalize the core batch".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id,
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Failed,
+            title: Some("Finalize the core batch".to_owned()),
+            summary: None,
+            reason: Some(
+                "agent failed: hosted provider stream failed: error decoding response body"
+                    .to_owned(),
+            ),
+        })),
+    ];
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskRun(
+        TaskRunEntry {
+            task_id,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Finalize the core batches".to_owned(),
+            title: Some("Finalize core batches".to_owned()),
+            status: TaskRunStatus::Failed,
+            reason: Some(
+                "step batch-core-finalize failed: hosted provider stream failed: error decoding response body"
+                    .to_owned(),
+            ),
+        },
+    )));
+
+    let strip = task_strip_view(&entries).expect("failed task strip");
+
+    assert_eq!(strip.title, "Finalize core batches");
+    assert!(strip.detail.contains("error decoding response body"));
+    assert!(!strip.detail.contains("batch-core-finalize"));
+    assert_eq!(strip.rows[0].label, "1. Finalize the core batch");
+    assert_eq!(
+        strip.rows[0].detail,
+        "failed · error decoding response body"
+    );
+}
+
+#[test]
 fn completion_progress_formats_arrival_and_durable_orders_separately() {
     let snapshot = sigil_runtime::TaskCompletionProgressSnapshot {
         batch: Some(sigil_runtime::TaskCompletionProgress {

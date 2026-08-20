@@ -662,7 +662,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     assert!(rows.iter().any(|row| {
         row.label == "仓库审查"
             && row.detail
-                == "completed · reviewer · foreground task · deepseek-v4-pro · tools scoped · workspace inherited · result missing"
+                == "completed · reviewer · foreground task · deepseek-v4-pro · tools scoped · workspace inherited · completed without final response"
             && !row.muted
     }));
     Ok(())
@@ -806,6 +806,17 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         app.agent_graph_summary_line().as_deref(),
         Some("graph: 1 agents · 1 active")
     );
+
+    let mut failed_entries = recovering_entries;
+    failed_entries.pop();
+    app.sync_current_session_state(failed_entries);
+    let failed_rows = app.agent_sidebar_rows();
+    assert!(failed_rows.iter().any(|row| {
+        row.label == "kernel map"
+            && row.detail.contains("failed before final response")
+            && row.detail.contains("provider stream timed out")
+            && !row.detail.contains("result missing")
+    }));
 
     app.sync_current_session_state(base_entries);
 
@@ -1239,10 +1250,21 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
                 reason: None,
             },
         ))]);
-        assert!(
-            app.task_sidebar_lines()
-                .contains(&format!("status: {label}"))
-        );
+        if matches!(
+            status,
+            sigil_kernel::TaskRunStatus::Completed | sigil_kernel::TaskRunStatus::Cancelled
+        ) {
+            assert!(
+                app.task_sidebar_lines()
+                    .iter()
+                    .all(|line| !line.starts_with("status:"))
+            );
+        } else {
+            assert!(
+                app.task_sidebar_lines()
+                    .contains(&format!("status: {label}"))
+            );
+        }
     }
     assert_eq!(
         super::super::task_sidebar::task_child_session_status_label(
@@ -1419,7 +1441,8 @@ fn task_sidebar_lines_surface_missing_verification_actions() -> Result<()> {
     assert_eq!(strip.detail, "paused · v1 · 0/1 done · missing");
     assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Warning);
     assert_eq!(strip.rows[0].label, "1. needs check · Fix typo");
-    assert_eq!(strip.rows[0].detail, "needs check · fix-typo");
+    assert_eq!(strip.rows[0].detail, "needs check · missing verification");
+    assert!(!strip.rows[0].detail.contains("fix-typo"));
     Ok(())
 }
 
@@ -1499,7 +1522,8 @@ fn task_sidebar_lines_label_failed_verification_as_check_failed() -> Result<()> 
     assert_eq!(strip.detail, "paused · v1 · 0/1 done · check failed");
     assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Error);
     assert_eq!(strip.rows[0].label, "1. check failed · Fix typo");
-    assert_eq!(strip.rows[0].detail, "check failed · fix-typo");
+    assert_eq!(strip.rows[0].detail, "check failed · verification failed");
+    assert!(!strip.rows[0].detail.contains("fix-typo"));
     Ok(())
 }
 
@@ -1606,8 +1630,8 @@ fn task_sidebar_lines_distinguish_cancelled_and_interrupted_steps() -> Result<()
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
             title: None,
-            status: sigil_kernel::TaskRunStatus::Cancelled,
-            reason: Some("user cancelled task".to_owned()),
+            status: sigil_kernel::TaskRunStatus::Interrupted,
+            reason: Some("task run interrupted".to_owned()),
         })),
         SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
             task_id: task_id.clone(),
@@ -1747,7 +1771,7 @@ fn task_sidebar_lines_keeps_hidden_current_step_visible() -> Result<()> {
 }
 
 #[test]
-fn task_sidebar_lines_completed_long_plan_shows_final_step_and_hidden_summary() -> Result<()> {
+fn task_sidebar_lines_closes_a_completed_long_plan() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let steps = (1..=10)
@@ -1810,11 +1834,9 @@ fn task_sidebar_lines_completed_long_plan_shows_final_step_and_hidden_summary() 
     app.sync_current_session_state(entries);
     let lines = app.task_sidebar_lines();
 
-    assert!(lines.contains(&"status: completed".to_owned()));
-    assert!(lines.contains(&"progress: 10/10 done".to_owned()));
-    assert!(lines.contains(&"last: v1:step_10 completed".to_owned()));
-    assert!(lines.contains(&"✓ 10. completed step_10 · step 10".to_owned()));
-    assert!(lines.contains(&"+4 more steps · 4 completed".to_owned()));
+    assert!(lines.iter().all(|line| !line.starts_with("task:")));
+    assert!(lines.iter().all(|line| !line.starts_with("status:")));
+    assert!(app.task_strip_view().is_none());
     Ok(())
 }
 
@@ -2052,11 +2074,10 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
             reason: None,
         },
     ))]);
-    let completed = app
-        .task_strip_view()
-        .expect("task strip should render completed run-only task");
-    assert_eq!(completed.rows[0].kind, crate::ui::StatusKind::Success);
-    assert!(!completed.rows[0].active);
+    assert!(
+        app.task_strip_view().is_none(),
+        "completed run-only task should close instead of sticking to the conversation"
+    );
 
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
         sigil_kernel::TaskRunEntry {
@@ -2319,7 +2340,7 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
     app.compaction_config.context_window_tokens = None;
     assert_eq!(
         app.context_usage_line(),
-        "ctx: n/a · prompt 0 · set fallback_context_window_tokens"
+        "ctx: n/a · cache=0% · prompt 0 · set fallback_context_window_tokens"
     );
     assert_eq!(app.context_usage_hint(100), "threshold n/a");
     assert_eq!(

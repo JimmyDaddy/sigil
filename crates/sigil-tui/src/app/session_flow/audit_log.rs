@@ -59,6 +59,11 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
         SessionLogEntry::ToolResultV3(result) => {
             format!("[tool] {}", render_tool_result_v2_content(result))
         }
+        SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => format!(
+            "[context] v2 state={:?} id={}",
+            snapshot.state,
+            truncate_session_view_text(&snapshot.message.id, 96)
+        ),
         SessionLogEntry::Control(control) => render_control_entry_line(control),
     }
 }
@@ -468,6 +473,20 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             task_plan_status_label(plan.status),
             plan.steps.len()
         ),
+        ControlEntry::TaskStepContractBoundV2(entry) => format!(
+            "[ctl] plan contract {} v{}:{} capabilities={} deliverables={}",
+            entry.task_id.as_str(),
+            entry.plan_version,
+            entry.step_id.as_str(),
+            entry.contract.required_capabilities.len(),
+            entry.contract.deliverables.len()
+        ),
+        ControlEntry::TaskPlanContractSetCommittedV2(entry) => format!(
+            "[ctl] plan contract set {} v{} steps={}",
+            entry.task_id.as_str(),
+            entry.plan_version,
+            entry.contract_count
+        ),
         ControlEntry::TaskGuidanceApplied(applied) => format!(
             "[ctl] task guidance applied task={} plan=v{} targets={} reason={:?}",
             applied.task_id.as_str(),
@@ -488,6 +507,14 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             step.plan_version,
             step.step_id.as_str(),
             task_step_status_label(step.status)
+        ),
+        ControlEntry::TaskStepCheckpointV2(entry) => format!(
+            "[ctl] step checkpoint {} v{}:{} turn={} no_progress={}",
+            entry.task_id.as_str(),
+            entry.plan_version,
+            entry.step_id.as_str(),
+            entry.model_turn,
+            entry.no_progress_count
         ),
         ControlEntry::TaskParticipantAttempt(attempt) => format!(
             "[ctl] participant {} purpose={:?} ordinal={} status={:?}",
@@ -1087,7 +1114,9 @@ pub(super) fn restored_tool_occurrences(entries: &[SessionLogEntry]) -> Restored
                     }
                 }
             }
-            SessionLogEntry::User(_) | SessionLogEntry::Control(_) => {}
+            SessionLogEntry::User(_)
+            | SessionLogEntry::RuntimeContextSnapshotV2(_)
+            | SessionLogEntry::Control(_) => {}
         }
     }
     for (call_id, occurrence) in pending {
@@ -1654,6 +1683,15 @@ pub(super) fn delegation_authority_record_label(
             task_id.as_str(),
             plan_version,
             step_id.as_str()
+        ),
+        sigil_kernel::DelegationAuthorityRecord::TaskOrchestrator { task_id, phase } => format!(
+            "task_orchestrator:{}:{}",
+            task_id.as_str(),
+            match phase {
+                sigil_kernel::TaskOrchestratorPhase::Planner => "planner",
+                sigil_kernel::TaskOrchestratorPhase::PlannerDiscovery => "planner_discovery",
+                sigil_kernel::TaskOrchestratorPhase::Synthesis => "synthesis",
+            }
         ),
         sigil_kernel::DelegationAuthorityRecord::ModelProactive => "model_proactive".to_owned(),
         sigil_kernel::DelegationAuthorityRecord::SystemRecovery => "system_recovery".to_owned(),

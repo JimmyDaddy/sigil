@@ -17,11 +17,24 @@ const HOSTED_DOMAIN_FILTER_MAX_ITEMS: usize = 100;
 const HOSTED_DOMAIN_FILTER_MAX_BYTES: usize = 2_048;
 const HOSTED_DOMAIN_FILTER_TOTAL_BYTES: usize = 32 * 1_024;
 
+/// Schema version for provider-visible hosted-tool declarations.
+pub const HOSTED_TOOL_DECLARATION_SCHEMA_VERSION: u16 = 1;
+
 /// Provider-neutral hosted capability requested for one completion.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostedToolKind {
     WebSearch,
+}
+
+impl HostedToolKind {
+    /// Stable provider-visible tool name derived from the provider-neutral capability kind.
+    #[must_use]
+    pub const fn semantic_name(self) -> &'static str {
+        match self {
+            Self::WebSearch => "web_search",
+        }
+    }
 }
 
 /// Provider-neutral limits attached to one hosted-tool request.
@@ -34,6 +47,48 @@ pub struct HostedToolLimits {
     pub allowed_domains: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_domains: Vec<String>,
+}
+
+impl HostedToolLimits {
+    #[must_use]
+    fn canonicalized(&self) -> Self {
+        let mut canonical = self.clone();
+        canonical.allowed_domains.sort();
+        canonical.blocked_domains.sort();
+        canonical
+    }
+}
+
+/// Provider-visible semantic declaration for one hosted capability.
+///
+/// Per-turn authorization and request-correlation identities deliberately do not appear here.
+/// Providers derive their route-specific wire `type` from [`Self::kind`], while `name` and limits
+/// correspond to the declaration fields visible to the model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HostedToolDeclarationV1 {
+    pub schema_version: u16,
+    pub kind: HostedToolKind,
+    pub name: String,
+    #[serde(default)]
+    pub limits: HostedToolLimits,
+}
+
+impl HostedToolDeclarationV1 {
+    /// Validates the versioned semantic declaration independently of authorization state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostedToolRequestError`] when the schema version, derived name or limits drift.
+    pub fn validate(&self) -> Result<(), HostedToolRequestError> {
+        if self.schema_version != HOSTED_TOOL_DECLARATION_SCHEMA_VERSION {
+            return Err(HostedToolRequestError::UnsupportedDeclarationSchema);
+        }
+        if self.name != self.kind.semantic_name() {
+            return Err(HostedToolRequestError::DeclarationNameMismatch);
+        }
+        self.limits.validate()
+    }
 }
 
 impl HostedToolLimits {
@@ -137,6 +192,21 @@ impl HostedToolRequest {
         }
         Ok(())
     }
+
+    /// Returns the canonical provider-visible declaration without per-turn authorization state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostedToolRequestError`] when the request cannot be safely materialized.
+    pub fn semantic_declaration(&self) -> Result<HostedToolDeclarationV1, HostedToolRequestError> {
+        self.validate()?;
+        Ok(HostedToolDeclarationV1 {
+            schema_version: HOSTED_TOOL_DECLARATION_SCHEMA_VERSION,
+            kind: self.kind,
+            name: self.kind.semantic_name().to_owned(),
+            limits: self.limits.canonicalized(),
+        })
+    }
 }
 
 /// Typed provider-neutral hosted request validation failure.
@@ -164,6 +234,10 @@ pub enum HostedToolRequestError {
     InvalidIdentity,
     #[error("hosted tool request fingerprint does not match its canonical content")]
     RequestFingerprintMismatch,
+    #[error("hosted tool declaration schema version is unsupported")]
+    UnsupportedDeclarationSchema,
+    #[error("hosted tool declaration name does not match its capability kind")]
+    DeclarationNameMismatch,
 }
 
 fn validate_hosted_identity(value: &str) -> Result<(), HostedToolRequestError> {
@@ -728,9 +802,7 @@ impl HostedTurnBuffer {
 }
 
 fn hosted_kind_label(kind: HostedToolKind) -> &'static str {
-    match kind {
-        HostedToolKind::WebSearch => "web_search",
-    }
+    kind.semantic_name()
 }
 
 fn evidence_exact_bytes(evidence: &HostedEvidence) -> usize {

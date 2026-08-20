@@ -272,13 +272,21 @@ pub(super) fn step_status_from_outcome(output: &StepRunOutput) -> TaskStepStatus
         .outcome
         .terminal_reason
         .blocks_successful_completion()
-        || output.outcome.approval_denials > 0
-        || has_blocking_tool_error(&output.outcome)
+        // Tool errors belong to the attempt history.  They are only a current blocker when the
+        // participant still has no accepted final answer.  This is what allows a denied command
+        // followed by a safe alternate command to finish as a completed step with a warning.
+        || unresolved_blocking_tool_error(output)
+        || (output.outcome.approval_denials > 0 && output.final_text.trim().is_empty())
     {
         TaskStepStatus::Blocked
     } else if !output.outcome.tool_errors.is_empty() && output.final_text.trim().is_empty() {
         TaskStepStatus::Failed
     } else if output.changeset_proposal.is_some() {
+        TaskStepStatus::Blocked
+    } else if output.final_text.trim().is_empty() {
+        // A task participant must leave a bounded, durable completion report. Tool activity
+        // alone is not an acceptance signal: without a final report the host cannot safely
+        // distinguish a completed step from a provider stream that ended mid-protocol.
         TaskStepStatus::Blocked
     } else {
         TaskStepStatus::Completed
@@ -312,15 +320,61 @@ pub(super) fn step_reason_from_output(
     status: TaskStepStatus,
     output: &StepRunOutput,
 ) -> Option<String> {
+    if status == TaskStepStatus::Blocked
+        && output.outcome.terminal_reason == AgentRunTerminalReason::RepairReplanRequired
+    {
+        return Some(
+            "repair/replan required: repeated semantic frontier produced no bounded final result"
+                .to_owned(),
+        );
+    }
     if status == TaskStepStatus::Blocked && output.changeset_proposal.is_some() {
         return Some("changeset ready for merge review".to_owned());
     }
-    let error = output.outcome.tool_errors.first()?;
+    if status == TaskStepStatus::Blocked && output.final_text.trim().is_empty() {
+        return Some("participant ended without a bounded completion report".to_owned());
+    }
+    let error = output.outcome.tool_errors.iter().rev().find(|error| {
+        status != TaskStepStatus::Blocked
+            || matches!(
+                error.kind,
+                ToolErrorKind::ApprovalRequired
+                    | ToolErrorKind::ApprovalDenied
+                    | ToolErrorKind::PermissionDenied
+                    | ToolErrorKind::PathOutsideWorkspace
+                    | ToolErrorKind::ExternalDirectoryRequired
+                    | ToolErrorKind::ResourceExhausted
+            )
+    })?;
     if status == TaskStepStatus::Completed {
-        Some(format!("recovered tool error: {}", error.message))
+        Some(format!(
+            "completed with warnings: recovered tool error: {}",
+            error.message
+        ))
     } else {
         Some(error.message.clone())
     }
+}
+
+pub(super) fn step_reason_after_readiness(
+    status: TaskStepStatus,
+    output: &StepRunOutput,
+    readiness: &ReadinessEvaluatedEntry,
+) -> Option<String> {
+    if status == TaskStepStatus::Blocked && readiness_blocks_step(readiness) {
+        let blockers = readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .filter(|action| required_action_blocks_task_step(action))
+            .map(|action| format!("{action:?}"))
+            .collect::<Vec<_>>();
+        return Some(format!(
+            "unresolved readiness blocker: {}",
+            blockers.join(", ")
+        ));
+    }
+    step_reason_from_output(status, output)
 }
 
 pub(super) fn task_status_from_step_status(status: TaskStepStatus) -> TaskRunStatus {
@@ -358,6 +412,14 @@ pub(super) fn has_blocking_tool_error(outcome: &AgentRunOutcome) -> bool {
                 | ToolErrorKind::PermissionDenied
                 | ToolErrorKind::PathOutsideWorkspace
                 | ToolErrorKind::ExternalDirectoryRequired
+                | ToolErrorKind::ResourceExhausted
         )
     })
+}
+
+/// Returns true only when a blocking tool error is still preventing a final answer.  A tool error
+/// from an earlier command is historical evidence once the participant has produced a final
+/// answer; it must not poison the parent task status.
+pub(super) fn unresolved_blocking_tool_error(output: &StepRunOutput) -> bool {
+    output.final_text.trim().is_empty() && has_blocking_tool_error(&output.outcome)
 }

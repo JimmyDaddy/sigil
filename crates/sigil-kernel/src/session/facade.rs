@@ -13,6 +13,7 @@ pub struct Session {
     pub(super) stats: SessionStats,
     pub(super) runtime_attachments: SessionRuntimeAttachments,
     durable_session_entry_count: Option<u64>,
+    reconstruction_records: Option<Arc<[SessionStreamRecord]>>,
 }
 
 #[derive(Clone, Default)]
@@ -96,6 +97,7 @@ impl StableCompactionSnapshot {
             stats: self.stats.clone(),
             runtime_attachments: self.runtime_attachments.clone(),
             durable_session_entry_count: Some(self.durable_session_entry_count),
+            reconstruction_records: None,
         }))
     }
 
@@ -143,9 +145,9 @@ struct AssembledRequest {
     prefix_snapshot: PrefixSnapshot,
 }
 
-struct RuntimeContextMaterialization {
-    message: ModelMessage,
-    summary: PrefixRuntimeContextSummary,
+pub(super) struct RuntimeContextResolution {
+    pub(super) staged_snapshot: Option<RuntimeContextSnapshotV2>,
+    pub(super) effective_summary: Option<PrefixRuntimeContextSummary>,
 }
 
 impl Session {
@@ -161,6 +163,7 @@ impl Session {
             stats: SessionStats::default(),
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
+            reconstruction_records: None,
         }
     }
 
@@ -176,6 +179,7 @@ impl Session {
             stats: SessionStats::default(),
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
+            reconstruction_records: None,
         }
     }
 
@@ -308,6 +312,7 @@ impl Session {
             stats,
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
+            reconstruction_records: None,
         }
     }
 
@@ -318,6 +323,47 @@ impl Session {
         store: JsonlSessionStore,
     ) -> Result<Self> {
         Self::load_from_store_with_route(provider_name, model_name, None, store)
+    }
+
+    /// Reconstructs the privacy-safe session source at one exact provider-request frontier.
+    ///
+    /// This is a read-only replay surface: records after the frontier are ignored, no recovery or
+    /// reconciliation events are appended, and no durable store is attached to the returned
+    /// session. Callers must still supply the same stable runtime inputs (tools, memory policy,
+    /// transient system messages, route options) to the normal request builder and verify the
+    /// result with [`crate::ProviderRequestEnvelopeV1::verify_reconstructed_request_at_frontier`].
+    pub fn reconstruct_from_provider_frontier(
+        provider_name: impl Into<String>,
+        model_name: impl Into<String>,
+        session_path: impl AsRef<Path>,
+        frontier: &crate::ProviderRequestSourceFrontierV1,
+    ) -> Result<Self> {
+        let fallback_provider_name = provider_name.into();
+        let fallback_model_name = model_name.into();
+        let records = JsonlSessionStore::read_event_records_through_provider_frontier(
+            session_path,
+            frontier,
+        )?;
+        let entries = session_entries_from_records(&records)?;
+        let (entries, audit_needed) = validated_recovered_entries(&frontier.session_id, entries);
+        if audit_needed {
+            bail!("provider request frontier requires unsafe external recovery");
+        }
+        let stats = session_stats_from_entries(&entries);
+        let (provider_name, model_name) = session_identity_from_entries(&entries)
+            .unwrap_or((fallback_provider_name, fallback_model_name));
+        Ok(Self {
+            session_scope_id: frontier.session_id.clone(),
+            provider_name,
+            model_name,
+            resolved_model_route: session_resolved_route_from_entries(&entries),
+            entries,
+            store: None,
+            stats,
+            runtime_attachments: SessionRuntimeAttachments::default(),
+            durable_session_entry_count: None,
+            reconstruction_records: Some(records.into()),
+        })
     }
 
     /// Loads a durable session while supplying the exact route for a newly initialized stream.
@@ -376,6 +422,7 @@ impl Session {
             stats,
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count,
+            reconstruction_records: None,
         };
         if audit_needed {
             session.append_control(unsafe_external_recovery_audit_control())?;
@@ -393,6 +440,7 @@ impl Session {
     pub fn append(&mut self, entry: SessionLogEntry) -> Result<()> {
         match &entry {
             SessionLogEntry::ToolResultV3(result) => result.validate()?,
+            SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => snapshot.validate()?,
             SessionLogEntry::Control(control) => {
                 control.validate_durable_contract()?;
                 self.validate_user_input_controls(std::iter::once(control))?;
@@ -469,6 +517,63 @@ impl Session {
 
     pub fn append_assistant_message(&mut self, message: ModelMessage) -> Result<()> {
         self.append(SessionLogEntry::Assistant(message))
+    }
+
+    fn append_runtime_context_snapshot_v2(
+        &mut self,
+        snapshot: RuntimeContextSnapshotV2,
+    ) -> Result<()> {
+        snapshot.validate()?;
+        self.append(SessionLogEntry::RuntimeContextSnapshotV2(snapshot))
+    }
+
+    pub(crate) fn ensure_frozen_request_runtime_context_v2(
+        &mut self,
+        frozen_request: &crate::FrozenProviderRequestMaterial,
+    ) -> Result<()> {
+        if frozen_request.session_scope_id() != self.session_scope_id() {
+            bail!("frozen request runtime context belongs to a different session");
+        }
+        let durable = self
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => {
+                    Some((snapshot.message.id.as_str(), snapshot))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut missing = Vec::new();
+        for (index, message) in frozen_request.request().messages.iter().enumerate() {
+            if !is_runtime_context_v2_message(message) {
+                continue;
+            }
+            if let Some(snapshot) = durable.get(message.id.as_str()) {
+                if serde_json::to_value(&snapshot.message)? != serde_json::to_value(message)? {
+                    bail!(
+                        "frozen request runtime context conflicts with durable snapshot {}",
+                        message.id
+                    );
+                }
+                continue;
+            }
+            let source_tail_message_id = index
+                .checked_sub(1)
+                .and_then(|tail_index| frozen_request.request().messages.get(tail_index))
+                .map(|tail| tail.id.clone());
+            missing.push(RuntimeContextSnapshotV2::from_provider_message(
+                message.clone(),
+                source_tail_message_id,
+            )?);
+        }
+        let [snapshot] = missing.as_slice() else {
+            if missing.is_empty() {
+                return Ok(());
+            }
+            bail!("frozen request contains multiple non-durable runtime context snapshots v2");
+        };
+        self.append_runtime_context_snapshot_v2(snapshot.clone())
     }
 
     /// Crate-local helper for tests that need a current durable tool-result record.
@@ -1021,9 +1126,10 @@ impl Session {
                         decision.decision,
                         crate::PlanDecision::RevisionFailed
                             | crate::PlanDecision::RevisionSucceeded
+                            | crate::PlanDecision::TaskCreationFailed
                     ) != (decision.decided_by == crate::PlanDecisionActor::System)
                     {
-                        bail!("plan revision settlement has an invalid decision actor");
+                        bail!("plan host settlement has an invalid decision actor");
                     }
                     if let Some(previous) = artifacts.latest_decision(&decision.plan_id) {
                         let idempotent = previous == decision;
@@ -1056,6 +1162,27 @@ impl Session {
                             ) | (
                                 crate::PlanDecision::RevisionFailed,
                                 crate::PlanDecision::RevisionRequested
+                            ) | (
+                                crate::PlanDecision::RevisionFailed,
+                                crate::PlanDecision::TaskCreationFailed
+                            ) | (
+                                crate::PlanDecision::SavedOnly,
+                                crate::PlanDecision::TaskCreationFailed
+                            ) | (
+                                crate::PlanDecision::TaskCreationFailed,
+                                crate::PlanDecision::SavedOnly
+                            ) | (
+                                crate::PlanDecision::TaskCreationFailed,
+                                crate::PlanDecision::Accepted
+                            ) | (
+                                crate::PlanDecision::TaskCreationFailed,
+                                crate::PlanDecision::Rejected
+                            ) | (
+                                crate::PlanDecision::TaskCreationFailed,
+                                crate::PlanDecision::RevisionRequested
+                            ) | (
+                                crate::PlanDecision::TaskCreationFailed,
+                                crate::PlanDecision::TaskCreationFailed
                             )
                         );
                         if !idempotent && !legal {
@@ -1071,6 +1198,7 @@ impl Session {
                         crate::PlanDecision::Accepted
                             | crate::PlanDecision::Rejected
                             | crate::PlanDecision::RevisionRequested
+                            | crate::PlanDecision::TaskCreationFailed
                             | crate::PlanDecision::SavedOnly
                     ) {
                         bail!("plan revision settlement is missing its requested prefix");
@@ -1699,6 +1827,10 @@ impl Session {
     /// Returns an error when the V2 lifecycle or sidecar stream is malformed. This query never
     /// performs recovery writes.
     pub fn try_context_projection_from_durable(&self) -> Result<Option<SessionContextProjection>> {
+        if let Some(records) = &self.reconstruction_records {
+            return SessionContextProjection::from_durable_records(&self.entries, records, None)
+                .map(Some);
+        }
         let Some(store) = &self.store else {
             return Ok(None);
         };
@@ -1766,8 +1898,11 @@ impl Session {
     }
 
     pub fn continuation_states(&self, provider_name: &str) -> Vec<ProviderContinuationState> {
-        let mut latest_by_key: HashMap<(String, Option<String>), ProviderContinuationState> =
-            HashMap::new();
+        // A provider request is cache- and reconstruction-sensitive to vector order. Keep the
+        // latest state per provider key, but emit keys in a deterministic order across processes.
+        let mut latest_by_key =
+            std::collections::BTreeMap::<(String, Option<String>), ProviderContinuationState>::new(
+            );
         for entry in self.entries_after_latest_route_boundary() {
             if let SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(state)) = entry
                 && state.provider_name == provider_name
@@ -2237,6 +2372,50 @@ impl Session {
         )
     }
 
+    /// Rebuilds the current provider-visible durable surface without creating new snapshots.
+    ///
+    /// The session must come from [`Self::reconstruct_from_provider_frontier`]. The caller then
+    /// supplies the exact stable runtime inputs owned by configuration and the tool registry.
+    /// Dynamic context is consumed from the already durable Context V2 entry and is never
+    /// re-resolved or implicitly cleared.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconstruct_provider_request(
+        &self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        tools: Vec<ToolSpec>,
+        max_output_tokens: Option<u32>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+    ) -> Result<CompletionRequest> {
+        let memory = self.memory_snapshot_for_pure_request(workspace_root, memory_config)?;
+        let projected_messages = self.request_context_projection()?.model_messages();
+        let mut request = self
+            .assemble_request_from_components(
+                &memory,
+                projected_messages,
+                None,
+                None,
+                tools,
+                max_output_tokens,
+                reasoning_effort,
+                previous_response_handle,
+                traffic_partition_key,
+                transient_messages,
+                &[],
+            )?
+            .request;
+        crate::resolve_request_image_attachments(
+            &mut request,
+            self.runtime_attachments
+                .image_attachment_resolver
+                .as_deref(),
+        )?;
+        Ok(request)
+    }
+
     /// Builds one provider request with extra transient messages that are not appended as
     /// provider-visible session history.
     ///
@@ -2266,14 +2445,14 @@ impl Session {
         )
     }
 
-    /// Builds one provider request with extra transient messages and runtime-selected Context V1
+    /// Builds one provider request with extra transient messages and runtime-selected Context V2
     /// candidates.
     ///
     /// # Errors
     ///
     /// Returns an error when memory loading, prefix materialization, or durable control writes fail.
     /// Context assembly failures are recorded as `ContextAssemblySkipped` and degrade to a request
-    /// without Context V1.
+    /// without Context V2.
     #[allow(clippy::too_many_arguments)]
     pub fn build_request_with_transient_messages_and_context(
         &mut self,
@@ -2300,7 +2479,7 @@ impl Session {
     }
 
     /// Builds one request while applying non-serializable exact-message overlays only after the
-    /// safe PrefixSnapshot and Context V1 materialization have been durably recorded.
+    /// safe PrefixSnapshot and Context V2 materialization have been durably recorded.
     #[allow(clippy::too_many_arguments)]
     pub fn build_request_with_transient_messages_context_and_overlays(
         &mut self,
@@ -2343,18 +2522,23 @@ impl Session {
         runtime_context: RuntimeContextCandidates,
         overlays: &[crate::TransientMessageOverlay],
     ) -> Result<CompletionRequest> {
-        let session_projection = self.request_context_projection()?;
         let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
+        let session_projection = self.request_context_projection()?;
         let projected_messages = session_projection.model_messages();
-        let context_message = self.runtime_context_v0_message(
+        let context_resolution = self.runtime_context_v2_resolution_or_skip(
             &session_projection,
             &projected_messages,
             runtime_context,
         )?;
+        if let Some(snapshot) = context_resolution.staged_snapshot {
+            self.append_runtime_context_snapshot_v2(snapshot)?;
+        }
+        let projected_messages = self.request_context_projection()?.model_messages();
         let mut assembled = self.assemble_request_from_components(
             &memory,
             projected_messages,
-            context_message,
+            context_resolution.effective_summary,
+            None,
             tools,
             max_output_tokens,
             reasoning_effort,
@@ -2421,7 +2605,7 @@ impl Session {
             let (safe_transient, _) = crate::project_message_for_persistence(transient.clone())?;
             context_query_messages.push(safe_transient);
         }
-        let context_message = self.build_runtime_context_v1_message(
+        let context_resolution = self.build_runtime_context_v2_resolution(
             &session_projection,
             &context_query_messages,
             runtime_context,
@@ -2430,7 +2614,8 @@ impl Session {
             .assemble_request_from_components(
                 &memory,
                 projected_messages,
-                context_message,
+                context_resolution.effective_summary,
+                context_resolution.staged_snapshot,
                 tools,
                 target_max_tokens,
                 reasoning_effort,
@@ -2453,7 +2638,7 @@ impl Session {
     /// appending a `MemorySnapshot`, `ContextAssemblySkipped`, or `PrefixSnapshot` control entry.
     ///
     /// The caller must freeze and prove the returned request before it records the compaction
-    /// `Started` barrier. Context V1 assembly errors are returned rather than downgraded because
+    /// `Started` barrier. Context V2 assembly errors are returned rather than downgraded because
     /// a downgraded request would no longer be the reviewed candidate target.
     #[allow(clippy::too_many_arguments)]
     pub fn build_portable_compaction_candidate_request(
@@ -2480,16 +2665,25 @@ impl Session {
         )?;
         let memory = self.memory_snapshot_for_pure_request(workspace_root, memory_config)?;
         let projected_messages = candidate_projection.model_messages();
-        let context_message = self.build_runtime_context_v1_message(
+        let mut context_query_messages = projected_messages.clone();
+        for transient in transient_messages
+            .iter()
+            .filter(|message| message.role != crate::MessageRole::System)
+        {
+            let (safe_transient, _) = crate::project_message_for_persistence(transient.clone())?;
+            context_query_messages.push(safe_transient);
+        }
+        let context_resolution = self.build_runtime_context_v2_resolution(
             &candidate_projection,
-            &projected_messages,
+            &context_query_messages,
             runtime_context,
         )?;
         let mut request = self
             .assemble_request_from_components(
                 &memory,
                 projected_messages,
-                context_message,
+                context_resolution.effective_summary,
+                context_resolution.staged_snapshot,
                 tools,
                 target_max_tokens,
                 reasoning_effort,
@@ -2508,7 +2702,8 @@ impl Session {
         &self,
         memory: &MemorySnapshot,
         projected_messages: Vec<ModelMessage>,
-        runtime_context: Option<RuntimeContextMaterialization>,
+        runtime_context_summary: Option<PrefixRuntimeContextSummary>,
+        staged_runtime_context_snapshot: Option<RuntimeContextSnapshotV2>,
         tools: Vec<ToolSpec>,
         target_max_tokens: Option<u32>,
         reasoning_effort: Option<crate::provider::ReasoningEffort>,
@@ -2518,10 +2713,6 @@ impl Session {
         overlays: &[crate::TransientMessageOverlay],
     ) -> Result<AssembledRequest> {
         let mut safe_request_messages = memory.messages.clone();
-        let runtime_context_summary = runtime_context.map(|materialization| {
-            safe_request_messages.push(materialization.message);
-            materialization.summary
-        });
         let mut exact_overlays = overlays.to_vec();
         let (system_transients, non_system_transients): (Vec<_>, Vec<_>) = transient_messages
             .iter()
@@ -2538,6 +2729,10 @@ impl Session {
                 crate::project_message_for_persistence(transient.clone())?;
             safe_request_messages.push(safe_transient);
             exact_overlays.push(exact_overlay);
+        }
+        if let Some(snapshot) = staged_runtime_context_snapshot {
+            snapshot.validate()?;
+            safe_request_messages.push(snapshot.message);
         }
 
         let materialized_messages = serde_json::to_string(&safe_request_messages)
@@ -2569,6 +2764,8 @@ impl Session {
         apply_memory_report(&mut prefix_snapshot, &memory.report);
         let request_messages =
             crate::apply_exact_message_overlays(&safe_request_messages, &exact_overlays)?;
+        let deterministic_materialization = serde_json::to_value(&request_messages)?
+            == serde_json::to_value(&safe_request_messages)?;
         Ok(AssembledRequest {
             request: CompletionRequest {
                 provider_name: self.provider_name.clone(),
@@ -2583,19 +2780,19 @@ impl Session {
                 traffic_partition_key,
                 background: false,
                 store: false,
-                deterministic_materialization: true,
+                deterministic_materialization,
                 hosted_tools: Vec::new(),
             },
             prefix_snapshot,
         })
     }
 
-    fn runtime_context_v0_message(
+    fn runtime_context_v2_resolution_or_skip(
         &mut self,
         session_projection: &SessionContextProjection,
         projected_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
-    ) -> Result<Option<RuntimeContextMaterialization>> {
+    ) -> Result<RuntimeContextResolution> {
         let runtime_candidate_count = runtime_context.items.len();
         let runtime_item_ids = runtime_context
             .items
@@ -2603,7 +2800,7 @@ impl Session {
             .take(12)
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
-        match self.build_runtime_context_v1_message(
+        match self.build_runtime_context_v2_resolution(
             session_projection,
             projected_messages,
             runtime_context,
@@ -2617,21 +2814,26 @@ impl Session {
                         item_ids: runtime_item_ids,
                     },
                 ))?;
-                Ok(None)
+                Ok(RuntimeContextResolution {
+                    staged_snapshot: None,
+                    effective_summary: None,
+                })
             }
         }
     }
 
-    fn build_runtime_context_v1_message(
+    pub(super) fn build_runtime_context_v2_resolution(
         &self,
         session_projection: &SessionContextProjection,
         projected_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
-    ) -> Result<Option<RuntimeContextMaterialization>> {
+    ) -> Result<RuntimeContextResolution> {
         let mut snippets = BTreeMap::new();
         let mut items = Vec::new();
 
-        if let Some((latest_user_index, query)) = latest_user_context_query(projected_messages) {
+        if let Some((latest_user_index, query)) =
+            latest_user_context_query_from_projection(session_projection, projected_messages)
+        {
             let mut external_message_ids = self
                 .external_provenance_entries()
                 .into_iter()
@@ -2645,6 +2847,7 @@ impl Session {
                     .cloned(),
             );
             let archive = session_archive_from_projected_messages_with_external(
+                session_projection,
                 projected_messages,
                 latest_user_index,
                 &external_message_ids,
@@ -2696,8 +2899,41 @@ impl Session {
             items.push(item);
         }
 
+        let latest_visible = projected_messages
+            .iter()
+            .rev()
+            .find(|message| is_runtime_context_v2_message(message));
+        let latest_durable = self.entries.iter().rev().find_map(|entry| match entry {
+            SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => Some(snapshot),
+            _ => None,
+        });
+        let source_tail_message_id = projected_messages.last().map(|message| message.id.clone());
+
         if items.is_empty() {
-            return Ok(None);
+            if latest_visible.is_none() && latest_durable.is_none() {
+                return Ok(RuntimeContextResolution {
+                    staged_snapshot: None,
+                    effective_summary: None,
+                });
+            }
+            let content = render_runtime_context_v2_clear_content()?;
+            let summary = empty_runtime_context_v2_summary();
+            if latest_visible.and_then(|message| message.content.as_deref())
+                == Some(content.as_str())
+            {
+                return Ok(RuntimeContextResolution {
+                    staged_snapshot: None,
+                    effective_summary: Some(summary),
+                });
+            }
+            return Ok(RuntimeContextResolution {
+                staged_snapshot: Some(RuntimeContextSnapshotV2::new(
+                    RuntimeContextSnapshotStateV2::Cleared,
+                    content,
+                    source_tail_message_id,
+                )),
+                effective_summary: Some(summary),
+            });
         }
 
         let packed = pack_context_items(
@@ -2705,8 +2941,21 @@ impl Session {
             ContextPackOptions::new(REQUEST_CONTEXT_V0_MAX_TOKENS),
         )?;
         let summary = summarize_runtime_context(&packed);
-        Ok(render_runtime_context_v1_message(&packed, &snippets)?
-            .map(|message| RuntimeContextMaterialization { message, summary }))
+        let content = render_runtime_context_v2_content(&packed, &snippets)?;
+        if latest_visible.and_then(|message| message.content.as_deref()) == Some(content.as_str()) {
+            return Ok(RuntimeContextResolution {
+                staged_snapshot: None,
+                effective_summary: Some(summary),
+            });
+        }
+        Ok(RuntimeContextResolution {
+            staged_snapshot: Some(RuntimeContextSnapshotV2::new(
+                RuntimeContextSnapshotStateV2::Active,
+                content,
+                source_tail_message_id,
+            )),
+            effective_summary: Some(summary),
+        })
     }
 
     fn memory_snapshot_for_request(

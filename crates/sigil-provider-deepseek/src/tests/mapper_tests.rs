@@ -187,3 +187,27 @@ fn map_envelope_keeps_stream_event_id_when_provider_id_arrives_late() -> Result<
     ));
     Ok(())
 }
+
+#[test]
+fn map_envelope_rejects_native_dsml_tool_protocol_split_across_text_deltas() -> Result<()> {
+    let first: DeepSeekStreamEnvelope = serde_json::from_value(serde_json::json!({
+        "choices": [{"delta": {"content": "working <｜｜DSML｜｜tool_cal"}}]
+    }))?;
+    let second: DeepSeekStreamEnvelope = serde_json::from_value(serde_json::json!({
+        "choices": [{"delta": {"content": "ls>{\\\"name\\\":\\\"bash\\\"}"}}]
+    }))?;
+
+    let mut mapper = StreamMapper::new("deepseek-v4-flash");
+    assert!(matches!(
+        mapper.map_envelope(first)?.as_slice(),
+        [ProviderChunk::TextDelta(text)] if text == "working <｜｜DSML｜｜tool_cal"
+    ));
+    let error = mapper
+        .map_envelope(second)
+        .expect_err("raw DSML must never become a final answer");
+    assert_eq!(
+        error.downcast_ref::<sigil_kernel::ProviderProtocolViolation>(),
+        Some(&sigil_kernel::ProviderProtocolViolation::UnstructuredToolInvocation)
+    );
+    Ok(())
+}

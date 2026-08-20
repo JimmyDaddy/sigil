@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "source": "sanitized DeepSeek-compatible SSE capture; credentials and request bodies removed",
+  "responses": [
+    {
+      "name": "cold",
+      "sse": "data: {\"choices\":[{\"delta\":{\"content\":\"CACHE-REPLAY-COLD\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7789,\"completion_tokens\":1,\"total_tokens\":7790,\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":7789}}\n\ndata: [DONE]\n\n",
+      "expected_hit_tokens": 0,
+      "expected_miss_tokens": 7789
+    },
+    {
+      "name": "warm_tool_turn",
+      "sse": "data: {\"choices\":[{\"delta\":{\"content\":\"CACHE-REPLAY-TOOL\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7901,\"completion_tokens\":1,\"total_tokens\":7902,\"prompt_cache_hit_tokens\":7680,\"prompt_cache_miss_tokens\":221}}\n\ndata: [DONE]\n\n",
+      "expected_hit_tokens": 7680,
+      "expected_miss_tokens": 221
+    },
+    {
+      "name": "warm_user_turn",
+      "sse": "data: {\"choices\":[{\"delta\":{\"content\":\"CACHE-REPLAY-TURN\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8032,\"completion_tokens\":1,\"total_tokens\":8033,\"prompt_cache_hit_tokens\":7808,\"prompt_cache_miss_tokens\":224}}\n\ndata: [DONE]\n\n",
+      "expected_hit_tokens": 7808,
+      "expected_miss_tokens": 224
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 use super::*;
+use sigil_kernel::Session;
 
 fn plain_transcript(app: &AppState, max_lines: usize) -> String {
     app.transcript_lines(max_lines)
@@ -1052,8 +1053,14 @@ fn sessions_filter_narrows_sidebar_results() -> Result<()> {
     };
     let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
-    std::fs::write(session_dir.join("session-alpha.jsonl"), "")?;
-    std::fs::write(session_dir.join("session-beta.jsonl"), "")?;
+    write_session_log(
+        &session_dir.join("session-alpha.jsonl"),
+        &[SessionLogEntry::User(ModelMessage::user("alpha"))],
+    )?;
+    write_session_log(
+        &session_dir.join("session-beta.jsonl"),
+        &[SessionLogEntry::User(ModelMessage::user("beta"))],
+    )?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.refresh_session_history();
@@ -1061,6 +1068,129 @@ fn sessions_filter_narrows_sidebar_results() -> Result<()> {
     let lines = app.recent_session_lines().join("\n");
     assert!(lines.contains("beta"));
     assert!(!lines.contains("alpha"));
+    Ok(())
+}
+
+#[test]
+fn session_history_hides_bootstrap_only_sessions() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        config_version: 2,
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = resolved_session_log_dir(&config, temp.path());
+    std::fs::create_dir_all(&session_dir)?;
+    let bootstrap_path = session_dir.join("session-bootstrap.jsonl");
+    let conversation_path = session_dir.join("session-conversation.jsonl");
+    drop(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&bootstrap_path)?,
+    )?);
+    let mut conversation = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&conversation_path)?,
+    )?;
+    conversation.append_user_message(ModelMessage::user("hello"))?;
+    drop(conversation);
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.refresh_session_history();
+
+    assert!(
+        app.session_browser
+            .history
+            .iter()
+            .all(|entry| entry.path != bootstrap_path)
+    );
+    assert!(
+        app.session_browser
+            .history
+            .iter()
+            .any(|entry| entry.path == conversation_path)
+    );
+    Ok(())
+}
+
+#[test]
+fn clean_exit_discard_removes_bootstrap_only_session_but_keeps_conversation() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        config_version: 2,
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = resolved_session_log_dir(&config, temp.path());
+    std::fs::create_dir_all(&session_dir)?;
+    let bootstrap_path = session_dir.join("session-bootstrap.jsonl");
+    drop(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&bootstrap_path)?,
+    )?);
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.session_log_path = bootstrap_path.clone();
+    assert!(app.discard_current_bootstrap_only_session());
+    assert!(!bootstrap_path.exists());
+
+    let conversation_path = session_dir.join("session-conversation.jsonl");
+    let mut conversation = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&conversation_path)?,
+    )?;
+    conversation.append_user_message(ModelMessage::user("keep me"))?;
+    drop(conversation);
+    app.session_log_path = conversation_path.clone();
+    assert!(!app.discard_current_bootstrap_only_session());
+    assert!(conversation_path.exists());
+    Ok(())
+}
+
+#[test]
+fn clean_exit_keeps_the_only_hidden_workspace_trust_anchor() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        config_version: 2,
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = resolved_session_log_dir(&config, temp.path());
+    std::fs::create_dir_all(&session_dir)?;
+    let bootstrap_path = session_dir.join("session-trust-anchor.jsonl");
+    let workspace_id = sigil_kernel::stable_workspace_id(temp.path())?;
+    let store = JsonlSessionStore::new(&bootstrap_path)?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::WorkspaceTrustDecision(sigil_kernel::WorkspaceTrustDecisionEntry {
+            workspace_id: workspace_id.clone(),
+            workspace_trust_snapshot_id: "workspace-trust:test".to_owned(),
+            trust: sigil_kernel::WorkspaceTrust::Trusted,
+            decided_by_event_id: None,
+            reason: Some("test".to_owned()),
+        }),
+    ))?;
+    drop(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store,
+    )?);
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.session_log_path = bootstrap_path.clone();
+    assert!(!app.discard_current_bootstrap_only_session());
+    assert!(bootstrap_path.exists());
+    app.refresh_session_history();
+    assert!(app.session_browser.history.is_empty());
+    assert!(app.workspace_is_trusted_from_history());
     Ok(())
 }
 
@@ -1078,8 +1208,11 @@ fn session_rows_mark_selected_and_current_entry() -> Result<()> {
     std::fs::create_dir_all(&session_dir)?;
     let alpha = session_dir.join("session-alpha.jsonl");
     let beta = session_dir.join("session-beta.jsonl");
-    std::fs::write(&alpha, "")?;
-    std::fs::write(&beta, "")?;
+    write_session_log(
+        &alpha,
+        &[SessionLogEntry::User(ModelMessage::user("alpha"))],
+    )?;
+    write_session_log(&beta, &[SessionLogEntry::User(ModelMessage::user("beta"))])?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.session_log_path = beta.clone();
@@ -1862,9 +1995,18 @@ fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
     let alpha = session_dir.join("session-alpha.jsonl");
     let alpha_copy = session_dir.join("session-alpha-copy.jsonl");
     let current = session_dir.join("session-current.jsonl");
-    std::fs::write(&alpha, "")?;
-    std::fs::write(&alpha_copy, "")?;
-    std::fs::write(&current, "")?;
+    write_session_log(
+        &alpha,
+        &[SessionLogEntry::User(ModelMessage::user("alpha"))],
+    )?;
+    write_session_log(
+        &alpha_copy,
+        &[SessionLogEntry::User(ModelMessage::user("alpha copy"))],
+    )?;
+    write_session_log(
+        &current,
+        &[SessionLogEntry::User(ModelMessage::user("current"))],
+    )?;
     for (path, modified_epoch_secs) in [(&alpha, 1), (&alpha_copy, 2), (&current, 3)] {
         std::fs::File::open(path)?.set_times(std::fs::FileTimes::new().set_modified(
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(modified_epoch_secs),

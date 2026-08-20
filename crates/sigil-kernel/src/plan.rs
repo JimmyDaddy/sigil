@@ -12,8 +12,9 @@ use crate::{
     PlanReviewId, TaskStepIntentAliasBindingV1,
     session::{ControlEntry, SessionLogEntry},
     task::{
-        AgentRole, TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
-        TaskStepId, TaskStepMode, TaskStepSpec,
+        AgentRole, TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskCapabilityV2, TaskGraphProjection,
+        TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskStepContractBoundEntryV2,
+        TaskStepContractV2, TaskStepId, TaskStepMode, TaskStepSpec,
     },
     tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
     verification::{CheckCommand, ToolEffect},
@@ -105,6 +106,12 @@ pub struct PlanDraftStep {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capabilities: Vec<TaskCapabilityV2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggested_checks: Vec<PlanSuggestedCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,
@@ -159,6 +166,9 @@ pub struct PlanReviewStepDetailV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<TaskIsolationMode>,
     pub target_paths: Vec<String>,
+    pub required_capabilities: Vec<TaskCapabilityV2>,
+    pub deliverables: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
     pub suggested_checks: Vec<PlanSuggestedCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,
@@ -247,6 +257,9 @@ pub fn plan_review_detail_from_entries(
             mode: step.mode,
             isolation: step.isolation,
             target_paths: step.target_paths,
+            required_capabilities: step.required_capabilities,
+            deliverables: step.deliverables,
+            acceptance_criteria: step.acceptance_criteria,
             suggested_checks: step.suggested_checks,
             risk: step.risk,
             notes: step.notes,
@@ -290,6 +303,9 @@ pub enum PlanDecision {
     RevisionFailed,
     /// A revision candidate was committed and atomically replaced this base plan.
     RevisionSucceeded,
+    /// The user's Run action could not create a runnable Task. The plan remains actionable and a
+    /// later Run retries the same id/hash-bound promotion.
+    TaskCreationFailed,
     SavedOnly,
 }
 
@@ -301,6 +317,7 @@ impl PlanDecision {
             Self::RevisionRequested => "revision_requested",
             Self::RevisionFailed => "revision_failed",
             Self::RevisionSucceeded => "revision_succeeded",
+            Self::TaskCreationFailed => "task_creation_failed",
             Self::SavedOnly => "saved_only",
         }
     }
@@ -599,6 +616,23 @@ fn plan_draft_entry_from_structured(
     created_at_ms: u64,
     workspace_snapshot_id: Option<String>,
 ) -> Result<Option<PlanDraftCreatedEntry>> {
+    if structured
+        .steps
+        .iter()
+        .any(|step| step.mode == Some(TaskStepMode::Verify))
+    {
+        bail!(
+            "plan draft cannot create verify participant steps; add the check as a suggested check and let the host run trusted verification"
+        );
+    }
+    if structured.steps.iter().any(|step| {
+        step.required_capabilities
+            .contains(&TaskCapabilityV2::VerificationRun)
+    }) {
+        bail!(
+            "plan draft cannot delegate verification_run; add trusted checks to suggested_checks"
+        );
+    }
     let intent_proposal = intent_proposal_from_structured(&structured, &plan_hash)?;
     let inline_text = render_structured_plan_text(&structured);
     let inline_text = (inline_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then_some(inline_text);
@@ -746,6 +780,15 @@ pub fn task_plan_from_plan_draft(
     {
         return Ok(None);
     }
+    if entry
+        .steps
+        .iter()
+        .any(|step| step.mode == Some(TaskStepMode::Verify))
+    {
+        bail!(
+            "plan draft cannot promote verify participant steps; trusted verification is system-owned"
+        );
+    }
     let steps = entry
         .steps
         .iter()
@@ -753,11 +796,7 @@ pub fn task_plan_from_plan_draft(
             Ok(TaskStepSpec {
                 step_id: TaskStepId::new(step.step_id.clone())?,
                 title: crate::safe_persistence_text(&step.title),
-                display_name: step
-                    .display_name
-                    .as_deref()
-                    .map(crate::normalize_task_agent_display_name)
-                    .transpose()?,
+                display_name: bounded_plan_step_display_name(step.display_name.as_deref())?,
                 detail: step.detail.as_deref().map(crate::safe_persistence_text),
                 role: step.role.expect("executable schema was checked"),
                 depends_on: step
@@ -783,6 +822,53 @@ pub fn task_plan_from_plan_draft(
         )),
     };
     TaskGraphProjection::from_plan_entry(&plan)?;
+    let step_contracts = entry
+        .steps
+        .iter()
+        .zip(plan.steps.iter())
+        .map(|(draft_step, task_step)| {
+            let mut required_capabilities =
+                match (task_step.effective_mode(), task_step.effective_isolation()) {
+                    (TaskStepMode::Write, TaskIsolationMode::ChangesetOnly) => {
+                        vec![TaskCapabilityV2::WorkspaceRead]
+                    }
+                    (TaskStepMode::Write, _) => vec![
+                        TaskCapabilityV2::WorkspaceRead,
+                        TaskCapabilityV2::WorkspaceWrite,
+                    ],
+                    (TaskStepMode::Read | TaskStepMode::Review, _) => {
+                        vec![TaskCapabilityV2::WorkspaceRead]
+                    }
+                    (TaskStepMode::Verify, _) => bail!(
+                        "plan draft cannot promote verify participant steps; trusted verification is system-owned"
+                    ),
+                }
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            required_capabilities.extend(draft_step.required_capabilities.iter().copied());
+            let contract = TaskStepContractV2 {
+                schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+                target_paths: draft_step.target_paths.clone(),
+                required_capabilities: required_capabilities.into_iter().collect(),
+                deliverables: draft_step.deliverables.clone(),
+                acceptance_criteria: draft_step.acceptance_criteria.clone(),
+                check_spec_refs: draft_step
+                    .suggested_checks
+                    .iter()
+                    .map(|check| check.check_spec_id.clone())
+                    .collect(),
+                risk: draft_step.risk.clone(),
+                notes: draft_step.notes.clone(),
+            };
+            contract.validate()?;
+            Ok(TaskStepContractBoundEntryV2 {
+                task_id: plan.task_id.clone(),
+                plan_version: plan.plan_version,
+                step_id: task_step.step_id.clone(),
+                contract,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mapping = plan
         .steps
         .iter()
@@ -805,6 +891,7 @@ pub fn task_plan_from_plan_draft(
         .collect::<Result<Vec<_>>>()?;
     Ok(Some(PlanTaskPromotion {
         task_plan: plan,
+        step_contracts,
         step_mapping: mapping,
         intent_alias_bindings,
     }))
@@ -814,6 +901,7 @@ pub fn task_plan_from_plan_draft(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanTaskPromotion {
     pub task_plan: TaskPlanEntry,
+    pub step_contracts: Vec<TaskStepContractBoundEntryV2>,
     pub step_mapping: Vec<PlanToTaskStepMapping>,
     pub intent_alias_bindings: Vec<TaskStepIntentAliasBindingV1>,
 }
@@ -975,10 +1063,7 @@ fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> Result<Structure
         };
         step.step_id = unique_plan_step_id(&id_seed, index, &mut step_ids);
         step.title = crate::safe_persistence_text(&step.title);
-        step.display_name = step
-            .display_name
-            .as_deref()
-            .map(crate::safe_persistence_text);
+        step.display_name = bounded_plan_step_display_name(step.display_name.as_deref())?;
         step.detail = step.detail.as_deref().map(crate::safe_persistence_text);
         step.depends_on = step
             .depends_on
@@ -995,6 +1080,25 @@ fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> Result<Structure
         step.target_paths.retain(|path| {
             crate::safe_persistence_text(path) == *path && !plan_identifier_has_secret_marker(path)
         });
+        step.required_capabilities = step
+            .required_capabilities
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        step.deliverables = step
+            .deliverables
+            .iter()
+            .map(|value| crate::safe_persistence_text(value))
+            .filter(|value| !value.trim().is_empty())
+            .collect();
+        step.acceptance_criteria = step
+            .acceptance_criteria
+            .iter()
+            .map(|value| crate::safe_persistence_text(value))
+            .filter(|value| !value.trim().is_empty())
+            .collect();
         step.notes = step
             .notes
             .iter()
@@ -1007,6 +1111,30 @@ fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> Result<Structure
             .collect();
     }
     Ok(plan)
+}
+
+/// Canonicalizes optional presentation metadata without allowing it to block execution.
+///
+/// A plan step's full semantic label remains in `title`; `display_name` is only the compact child
+/// label. Older drafts may predate the model-visible length constraint, so promotion applies this
+/// same canonicalizer defensively instead of rejecting an otherwise executable plan.
+fn bounded_plan_step_display_name(value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let safe = crate::safe_persistence_text(value);
+    let safe = safe.trim();
+    if safe.is_empty() {
+        return Ok(None);
+    }
+    let max_chars = crate::TASK_AGENT_DISPLAY_NAME_MAX_CHARS;
+    let bounded = if safe.chars().count() > max_chars {
+        let retained = max_chars.saturating_sub(1);
+        format!("{}…", safe.chars().take(retained).collect::<String>())
+    } else {
+        safe.to_owned()
+    };
+    crate::normalize_task_agent_display_name(&bounded).map(Some)
 }
 
 fn safe_plan_suggested_check(mut check: PlanSuggestedCheck) -> Option<PlanSuggestedCheck> {
@@ -1109,6 +1237,10 @@ pub(crate) struct RawPlanDraftStep {
     isolation: Option<String>,
     #[serde(default)]
     target_paths: Vec<String>,
+    #[serde(default)]
+    required_capabilities: Vec<TaskCapabilityV2>,
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
+    deliverables: Vec<String>,
     #[serde(default)]
     suggested_checks: Vec<RawPlanSuggestedCheck>,
     #[serde(default)]
@@ -1293,18 +1425,16 @@ fn materialize_plan_step(
         .into_iter()
         .filter_map(materialize_plan_suggested_check)
         .collect::<Vec<_>>();
-    let mut notes = raw_step
+    let notes = raw_step
         .notes
         .into_iter()
         .filter_map(nonempty_trimmed)
         .collect::<Vec<_>>();
-    notes.extend(
-        raw_step
-            .acceptance
-            .into_iter()
-            .filter_map(nonempty_trimmed)
-            .map(|acceptance| format!("acceptance: {acceptance}")),
-    );
+    let acceptance_criteria = raw_step
+        .acceptance
+        .into_iter()
+        .filter_map(nonempty_trimmed)
+        .collect::<Vec<_>>();
     let step_id = unique_plan_step_id(
         raw_step.step_id.as_deref().unwrap_or(&title),
         index,
@@ -1329,6 +1459,13 @@ fn materialize_plan_step(
         mode: raw_step.mode.as_deref().and_then(parse_plan_step_mode),
         isolation: raw_step.isolation.as_deref().and_then(parse_plan_isolation),
         target_paths: collapse_plan_workspace_paths(target_paths),
+        required_capabilities: raw_step.required_capabilities,
+        deliverables: raw_step
+            .deliverables
+            .into_iter()
+            .filter_map(nonempty_trimmed)
+            .collect(),
+        acceptance_criteria,
         suggested_checks,
         risk: raw_step.risk.and_then(nonempty_trimmed),
         notes,
@@ -1508,6 +1645,22 @@ fn render_structured_plan_text(plan: &StructuredPlanDraft) -> String {
         }
         if !step.target_paths.is_empty() {
             lines.push(format!("   Paths: {}", step.target_paths.join(", ")));
+        }
+        if !step.required_capabilities.is_empty() {
+            lines.push(format!(
+                "   Required capabilities: {}",
+                step.required_capabilities
+                    .iter()
+                    .map(|capability| capability.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for deliverable in &step.deliverables {
+            lines.push(format!("   Deliverable: {deliverable}"));
+        }
+        for criterion in &step.acceptance_criteria {
+            lines.push(format!("   Acceptance: {criterion}"));
         }
         if !step.suggested_checks.is_empty() {
             lines.push(format!(

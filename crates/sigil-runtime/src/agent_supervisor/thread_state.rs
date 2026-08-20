@@ -60,6 +60,8 @@ pub struct AgentTaskChildStart {
     pub role: AgentRole,
     pub invocation_mode: AgentInvocationMode,
     pub invocation_source: AgentInvocationSource,
+    pub invocation_grant: AgentInvocationGrant,
+    pub delegation_admission: AgentDelegationAdmissionEntry,
     /// Exact durable worktree identity required before a write-capable Worktree child can start.
     pub isolated_workspace_id: Option<String>,
 }

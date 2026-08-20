@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use super::*;
 
 pub(super) fn check_workspace(report: &mut DoctorReport, workspace_root: &Path) -> Option<PathBuf> {
@@ -186,6 +188,195 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
         );
     } else {
         report.push(DoctorStatus::Ok, "session:stream", message);
+    }
+}
+
+/// Audits the runtime contracts that preserve provider-request and tool-result closure.
+pub(super) fn check_cache_runtime_invariants(report: &mut DoctorReport, session_dir: &Path) {
+    let Ok(metadata) = fs::metadata(session_dir) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    let Ok(mut paths) = session_log_paths(session_dir) else {
+        return;
+    };
+    paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
+
+    let mut provider_attempts = 0usize;
+    let mut current_envelopes = 0usize;
+    let mut durable_frontiers_proven = 0usize;
+    let mut process_local_overlay_required = 0usize;
+    let mut legacy_without_envelope = 0usize;
+    let mut unfinished_attempts = 0usize;
+    let mut open_tool_executions = 0usize;
+    let mut unclosed_tool_calls = 0usize;
+    let mut orphan_tool_results = 0usize;
+    let mut duplicate_tool_call_ids = 0usize;
+    let mut duplicate_tool_result_ids = 0usize;
+    let mut mismatched_tool_result_names = 0usize;
+    for path in paths {
+        if session_stream_too_large_for_doctor(&path) {
+            continue;
+        }
+        let records = match JsonlSessionStore::read_event_records(&path) {
+            Ok(records) => records,
+            Err(_) => continue,
+        };
+        let projection = match sigil_kernel::ProviderPhysicalAttemptProjection::from_records(
+            &records,
+        ) {
+            Ok(projection) => projection,
+            Err(error) => {
+                report.push_with_remediation(
+                    DoctorStatus::Error,
+                    "session:runtime_invariants",
+                    format!("provider request envelope or attempt lifecycle is invalid: {error:#}"),
+                    Some(
+                        "preserve the affected session and inspect its provider-attempt audit before resuming",
+                    ),
+                );
+                return;
+            }
+        };
+        let durable_bytes = fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        for attempt in projection.attempts() {
+            provider_attempts += 1;
+            if let Some(envelope) = &attempt.entry.request_envelope {
+                current_envelopes += 1;
+                if envelope.source_frontier.as_ref().is_some_and(|frontier| {
+                    frontier.session_id != attempt.session_id()
+                        || frontier.durable_end_offset > durable_bytes
+                }) {
+                    report.push_with_remediation(
+                        DoctorStatus::Error,
+                        "session:runtime_invariants",
+                        "provider request source frontier is outside its owning durable session",
+                        Some(
+                            "preserve the affected session and inspect the request envelope frontier before resuming",
+                        ),
+                    );
+                    return;
+                }
+                match envelope.reconstruction_disposition {
+                    sigil_kernel::ProviderRequestReconstructionDispositionV1::DurableFrontierAndRuntimeInputs => {
+                        let Some(frontier) = envelope.source_frontier.as_ref() else {
+                            unreachable!("validated reconstructable envelope has a frontier")
+                        };
+                        if let Err(error) =
+                            JsonlSessionStore::read_event_records_through_provider_frontier(
+                                &path, frontier,
+                            )
+                        {
+                            report.push_with_remediation(
+                                DoctorStatus::Error,
+                                "session:runtime_invariants",
+                                format!(
+                                    "provider request source frontier failed exact durable-prefix proof: {error:#}"
+                                ),
+                                Some(
+                                    "preserve the affected session and inspect the exact request-envelope byte frontier before resuming",
+                                ),
+                            );
+                            return;
+                        }
+                        durable_frontiers_proven += 1;
+                    }
+                    sigil_kernel::ProviderRequestReconstructionDispositionV1::ProcessLocalOverlayRequired => {
+                        process_local_overlay_required += 1;
+                    }
+                    sigil_kernel::ProviderRequestReconstructionDispositionV1::InMemoryOnly => {}
+                }
+            } else {
+                legacy_without_envelope += 1;
+            }
+            unfinished_attempts += usize::from(attempt.terminal.is_none());
+        }
+
+        let mut open = BTreeSet::new();
+        let mut open_result_pairs = BTreeMap::<String, String>::new();
+        let mut declared_call_ids = BTreeSet::new();
+        let mut recorded_result_ids = BTreeSet::new();
+        for record in &records {
+            let Ok(Some(entry)) = record.session_log_entry() else {
+                continue;
+            };
+            match entry {
+                sigil_kernel::SessionLogEntry::Assistant(message) => {
+                    for call in message.tool_calls {
+                        if !declared_call_ids.insert(call.id.clone()) {
+                            duplicate_tool_call_ids += 1;
+                        }
+                        open_result_pairs.insert(call.id, call.name);
+                    }
+                }
+                sigil_kernel::SessionLogEntry::ToolResultV3(result) => {
+                    if !recorded_result_ids.insert(result.call_id.clone()) {
+                        duplicate_tool_result_ids += 1;
+                    }
+                    match open_result_pairs.remove(&result.call_id) {
+                        Some(tool_name) if tool_name != result.tool_name => {
+                            mismatched_tool_result_names += 1;
+                        }
+                        Some(_) => {}
+                        None => orphan_tool_results += 1,
+                    }
+                }
+                sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::ToolExecution(execution),
+                ) => match execution.status {
+                    sigil_kernel::ToolExecutionStatus::Started => {
+                        open.insert(execution.call_id.clone());
+                    }
+                    sigil_kernel::ToolExecutionStatus::Completed
+                    | sigil_kernel::ToolExecutionStatus::Failed
+                    | sigil_kernel::ToolExecutionStatus::Cancelled
+                    | sigil_kernel::ToolExecutionStatus::Interrupted => {
+                        open.remove(&execution.call_id);
+                    }
+                },
+                sigil_kernel::SessionLogEntry::User(_)
+                | sigil_kernel::SessionLogEntry::RuntimeContextSnapshotV2(_)
+                | sigil_kernel::SessionLogEntry::Control(_) => {}
+            }
+        }
+        open_tool_executions += open.len();
+        unclosed_tool_calls += open_result_pairs.len();
+    }
+
+    let message = format!(
+        "provider_attempts={provider_attempts}, current_envelopes={current_envelopes}, durable_frontiers_proven={durable_frontiers_proven}, process_local_overlay_required={process_local_overlay_required}, legacy_without_envelope={legacy_without_envelope}, unfinished_attempts={unfinished_attempts}, open_tool_executions={open_tool_executions}, unclosed_tool_calls={unclosed_tool_calls}, orphan_tool_results={orphan_tool_results}, duplicate_tool_call_ids={duplicate_tool_call_ids}, duplicate_tool_result_ids={duplicate_tool_result_ids}, mismatched_tool_result_names={mismatched_tool_result_names}"
+    );
+    if unfinished_attempts > 0
+        || open_tool_executions > 0
+        || unclosed_tool_calls > 0
+        || orphan_tool_results > 0
+        || duplicate_tool_call_ids > 0
+        || duplicate_tool_result_ids > 0
+        || mismatched_tool_result_names > 0
+    {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "session:runtime_invariants",
+            message,
+            Some(
+                "open the affected session in writer mode so interrupted provider/tool lifecycles can be reconciled; preserve malformed call/result evidence for audit",
+            ),
+        );
+    } else if legacy_without_envelope > 0 {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "session:runtime_invariants",
+            message,
+            Some(
+                "legacy attempts remain readable but cannot provide ProviderRequestEnvelope V1 reconstruction evidence",
+            ),
+        );
+    } else {
+        report.push(DoctorStatus::Ok, "session:runtime_invariants", message);
     }
 }
 

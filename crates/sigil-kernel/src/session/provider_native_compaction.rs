@@ -191,7 +191,7 @@ where
         {
             bail!("native carrier expiry must be in the future before provider dispatch");
         }
-        let (prior_cache_layout, portable_checkpoint_id) = {
+        let (prior_cache_layout, prior_semantic_cache_layout_v2, portable_checkpoint_id) = {
             let store = store.clone();
             let session_scope_id = session_scope_id.clone();
             let portable_compaction_id = request.portable_compaction_id.clone();
@@ -209,6 +209,9 @@ where
                     projection
                         .latest_cache_layout_proof_for_internal_use()
                         .cloned(),
+                    projection
+                        .latest_semantic_cache_layout_proof_v2_for_internal_use()
+                        .cloned(),
                     portable_checkpoint_id,
                 ))
             })
@@ -217,6 +220,25 @@ where
         };
         let cache_layout_proof =
             Some(frozen_request.cache_layout_proof(prior_cache_layout.as_ref())?);
+        let semantic_cache_layout_proof_v2 = Some(
+            frozen_request
+                .semantic_cache_layout_proof_v2(prior_semantic_cache_layout_v2.as_ref())?,
+        );
+        let source_projection = store.active_projection_snapshot()?;
+        let source_frontier = Some(crate::ProviderRequestSourceFrontierV1::from(
+            source_projection.frontier(),
+        ));
+        let context_epoch_id = source_projection
+            .tool_output_pressure()
+            .active_epoch_id
+            .clone();
+        let request_envelope = frozen_request.request_envelope(
+            cache_layout_proof
+                .as_ref()
+                .expect("native compaction cache layout is always materialized"),
+            source_frontier,
+            context_epoch_id,
+        )?;
 
         let physical_attempt_id = format!("native-provider-compaction-{}", Uuid::new_v4());
         let start_event_id = Uuid::new_v4().to_string();
@@ -228,7 +250,9 @@ where
             request_material_fingerprint: frozen_request.fingerprint().to_owned(),
             provider_name: provider_request.provider_name.clone(),
             model_name: provider_request.model_name.clone(),
+            request_envelope: Some(request_envelope),
             cache_layout_proof,
+            semantic_cache_layout_proof_v2,
             started_at_unix_ms: unix_time_ms(),
         };
         entry.validate_shape()?;

@@ -286,6 +286,8 @@ pub async fn prepare_application_task_continuation(
     let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
+        workspace_root: workspace_root.clone(),
+        parent_session_ref: task.parent_session_ref.clone(),
         options,
         base_registry: surface.registry,
         agent_supervisor: crate::AgentSupervisor::new(
@@ -408,6 +410,8 @@ impl ApplicationTaskContinuationExecution {
 
         let ApplicationTaskExecutionRuntime {
             root_config,
+            workspace_root: _,
+            parent_session_ref: _,
             options,
             base_registry,
             agent_supervisor,

@@ -63,16 +63,11 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
         if let Some(code) = summary.metadata.exit_code {
             details.push(format!("exit {code}"));
         }
+        if let Some(duration_ms) = summary.metadata.duration_ms {
+            details.push(format_duration_ms(duration_ms));
+        }
         if let Some(verdict) = summary.metadata.shell_verdict.as_deref() {
             details.push(verdict.to_owned());
-        }
-        if let Some(network_policy) = summary
-            .metadata
-            .execution_network_policy
-            .as_deref()
-            .filter(|policy| *policy != "unknown")
-        {
-            details.push(format!("network {network_policy}"));
         }
         if let Some(timeout_source) = summary
             .metadata
@@ -110,6 +105,14 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
     }
 }
 
+pub(super) fn execution_network_display_label(policy: &str) -> &'static str {
+    match policy {
+        "deny" | "denied" => "Offline",
+        "allow" | "allowed" => "Network available",
+        _ => "Network isolated",
+    }
+}
+
 pub(super) fn shell_runtime_label(metadata: &ToolCardMetadata) -> Option<String> {
     metadata.shell_dialect.as_deref().map(|dialect| {
         let dialect = match dialect {
@@ -143,18 +146,17 @@ pub(super) fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
     {
         return Some(summary);
     }
-    if tool_name_matches(&summary.tool_name, "bash")
-        && !summary.is_error
-        && summary.preview_lines.is_empty()
-        && summary.preview_value.is_none()
-        && summary.hidden_lines == 0
-    {
-        return Some("(no output)".to_owned());
-    }
     if let Some(diff) = &summary.diff {
         return Some(format!("diff {}", diff.summary));
     }
     summary.summary.clone()
+}
+
+fn format_duration_ms(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        return format!("{duration_ms} ms");
+    }
+    format!("{:.1} s", duration_ms as f64 / 1_000.0)
 }
 
 pub(super) fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {

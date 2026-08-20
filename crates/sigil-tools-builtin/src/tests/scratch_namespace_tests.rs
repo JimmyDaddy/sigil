@@ -157,6 +157,32 @@ fn symlink_inside_namespace_is_rejected_by_measurement() -> Result<()> {
 }
 
 #[test]
+fn deeply_nested_namespace_remains_measurable_and_does_not_poison_siblings() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session_a = "deep-session-a-0000-0000-0000-000000000021";
+    let session_b = "deep-session-b-0000-0000-0000-000000000022";
+    ensure_session_scratch(&scratch_root, Some(session_a), &ScratchQuota::default())?;
+
+    let mut nested = session_scratch_dir(&scratch_root, Some(session_a));
+    for depth in 0..32 {
+        nested = nested.join(format!("level-{depth}"));
+    }
+    fs::create_dir_all(&nested)?;
+    fs::write(nested.join("payload"), b"measured")?;
+
+    let usage = measure_scratch_usage(&scratch_root, session_a)?;
+    assert_eq!(usage.session_bytes, 8);
+    assert_eq!(usage.session_entry_count, 1);
+
+    let provision_b =
+        ensure_session_scratch(&scratch_root, Some(session_b), &ScratchQuota::default())?;
+    assert_eq!(provision_b.usage.session_bytes, 0);
+    assert_eq!(provision_b.usage.workspace_bytes, 8);
+    Ok(())
+}
+
+#[test]
 fn quota_exceeded_is_structured_and_releases_deterministically() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let scratch_root = temp.path().join("cache").join("tmp");
@@ -177,7 +203,7 @@ fn quota_exceeded_is_structured_and_releases_deterministically() -> Result<()> {
     assert_eq!(quota_error.scope, ScratchQuotaScope::Session);
     assert_eq!(quota_error.usage_bytes, 32);
     assert_eq!(quota_error.quota_bytes, 16);
-    assert!(quota_error.to_string().contains("$SIGIL_SCRATCH_DIR"));
+    assert!(quota_error.to_string().contains("reset scratch storage"));
 
     // Releasing space makes the next provision succeed deterministically.
     fs::remove_file(namespace.join("blob"))?;

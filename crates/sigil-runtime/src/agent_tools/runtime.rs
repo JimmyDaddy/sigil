@@ -157,6 +157,12 @@ impl AgentToolRuntime {
                     plan_version: *plan_version,
                     step_id: step_id.clone(),
                 },
+                DelegationAuthority::TaskOrchestrator { task_id, phase } => {
+                    AgentInvocationGrantSource::TaskOrchestrator {
+                        task_id: task_id.clone(),
+                        phase: *phase,
+                    }
+                }
                 DelegationAuthority::UserExplicit | DelegationAuthority::ModelProactive => {
                     AgentInvocationGrantSource::Conversation {
                         source_turn: sigil_kernel::ConversationTurnRef::new(

@@ -136,7 +136,7 @@ fn danger_full_access_suppresses_delegated_ask_but_preserves_delegated_deny() ->
 }
 
 #[test]
-fn danger_full_access_preserves_mandatory_durable_memory_approval() -> Result<()> {
+fn danger_full_access_suppresses_durable_memory_ask_but_preserves_explicit_deny() -> Result<()> {
     let config = PermissionConfig {
         mode: PermissionMode::DangerFullAccess,
         ..PermissionConfig::default()
@@ -155,14 +155,35 @@ fn danger_full_access_preserves_mandatory_durable_memory_approval() -> Result<()
             Vec::new(),
             Some(ApprovalMode::Ask),
         )?;
-        assert_eq!(decision.mode, ApprovalMode::Ask, "operation={operation:?}");
+        assert_eq!(
+            decision.mode,
+            ApprovalMode::Allow,
+            "operation={operation:?}"
+        );
         assert!(
             decision
                 .reasons
                 .iter()
-                .any(|reason| reason.code == "durable_memory_approval_required")
+                .any(|reason| reason.code == "danger_full_access_ask_suppressed")
         );
     }
+
+    let denied_config = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        tools: BTreeMap::from([("durable_memory_tool".to_owned(), ApprovalMode::Deny)]),
+        ..PermissionConfig::default()
+    };
+    let denied_policy = PermissionPolicyChain::new_with_context(&denied_config, &context);
+    let denied = denied_policy.decide_with_operation_network_effect_and_default(
+        &tool_spec,
+        "durable_memory_tool",
+        ToolAccess::Write,
+        ToolOperation::RememberMemory,
+        None,
+        Vec::new(),
+        Some(ApprovalMode::Ask),
+    )?;
+    assert_eq!(denied.mode, ApprovalMode::Deny);
     Ok(())
 }
 
@@ -204,6 +225,7 @@ fn external_network_endpoint_subject(url: &str) -> ToolSubject {
         normalized: url.to_owned(),
         canonical_path: None,
         scope: ToolSubjectScope::External,
+        access: ToolAccess::Read,
     }
 }
 
@@ -220,6 +242,10 @@ fn permission_fine_grained_enums_serde_roundtrip() -> Result<()> {
     assert_eq!(
         serde_json::from_str::<PathTrustZone>(r#""workspace_project_asset""#)?,
         PathTrustZone::WorkspaceProjectAsset
+    );
+    assert_eq!(
+        serde_json::from_str::<PathTrustZone>(r#""runtime_scratch""#)?,
+        PathTrustZone::RuntimeScratch
     );
     assert_eq!(
         serde_json::from_str::<PathRiskOverlay>(r#""sensitive_name""#)?,
@@ -566,6 +592,14 @@ fn critical_path_circuit_breaker_denies_root_home_and_system_mutations() -> Resu
             vec![subject],
             Some(ApprovalMode::Allow),
         )?;
+        if label == "system-unknown" {
+            assert_ne!(decision.risk, PermissionRisk::Protected, "{label}");
+            assert!(!decision.reasons.iter().any(|reason| {
+                reason.source == super::PermissionDecisionSource::HardSafety
+                    && reason.code == "critical_path_circuit_breaker"
+            }));
+            continue;
+        }
         assert_eq!(decision.risk, PermissionRisk::Protected, "{label}");
         assert_eq!(decision.mode, ApprovalMode::Deny, "{label}");
         assert!(!decision.external_directory_required, "{label}");
@@ -1369,6 +1403,34 @@ fn danger_full_access_does_not_turn_disabled_external_directory_deny_into_ask() 
     assert!(decision.external_directory_required);
     decision.request_external_directory_interactive_approval();
     assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn runtime_scratch_scope_bypasses_only_the_external_directory_gate() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let scratch_path = temp.path().canonicalize()?.join("cache/tmp/result.txt");
+    let config = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteMutatingCommand,
+        vec![ToolSubject::path_with_scope(
+            "$SIGIL_SCRATCH_DIR/result.txt",
+            "cache/tmp/result.txt",
+            Some(scratch_path),
+            ToolSubjectScope::RuntimeScratch,
+        )],
+        None,
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Allow);
+    assert!(!decision.external_directory_required);
+    assert_eq!(decision.subject_zones, [PathTrustZone::RuntimeScratch]);
     Ok(())
 }
 

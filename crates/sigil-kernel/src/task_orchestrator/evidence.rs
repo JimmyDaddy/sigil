@@ -231,6 +231,7 @@ pub(super) fn running_execution_mutation_evidence(
             }
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
+            | SessionLogEntry::RuntimeContextSnapshotV2(_)
             | SessionLogEntry::ToolResultV3(_)
             | SessionLogEntry::Control(_) => {}
         }

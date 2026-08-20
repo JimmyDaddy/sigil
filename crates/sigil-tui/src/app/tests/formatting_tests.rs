@@ -5,6 +5,7 @@ use super::super::{
     hash_timeline_line, human_file_size, line_has_visible_content, non_empty_or,
     normalize_command_prefix_character, parse_reasoning_effort, persisted_root_config,
     plain_line_text, ratio_to_percent, sidebar_width_for_terminal, summarize_error,
+    summarize_terminal_reason,
 };
 use super::*;
 use ratatui::text::{Line, Span};
@@ -21,6 +22,17 @@ fn summarize_error_prefers_last_non_empty_cause_line() {
     assert_eq!(
         summarize_error("  single line failure  "),
         "single line failure"
+    );
+}
+
+#[test]
+fn terminal_reason_summary_prefers_the_actionable_leaf() {
+    assert_eq!(
+        summarize_terminal_reason(
+            "step finalize failed: hosted provider stream failed: error decoding response body",
+            72,
+        ),
+        "error decoding response body"
     );
 }
 

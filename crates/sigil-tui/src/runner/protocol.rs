@@ -708,6 +708,11 @@ pub enum WorkerMessage {
         start_mode: PlanTaskStartMode,
         entries: Vec<SessionLogEntry>,
     },
+    PlanTaskCreationFailed {
+        plan_id: String,
+        error: String,
+        entries: Vec<SessionLogEntry>,
+    },
     TaskRunFinished {
         task_id: String,
         status: TaskRunStatus,

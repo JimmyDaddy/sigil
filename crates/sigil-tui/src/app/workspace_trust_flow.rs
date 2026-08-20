@@ -134,11 +134,16 @@ impl AppState {
         {
             return true;
         }
-        self.session_browser.history.iter().any(|entry| {
-            JsonlSessionStore::read_entries(&entry.path)
-                .ok()
-                .and_then(|entries| workspace_trust_from_entries(&entries, &workspace_id))
-                == Some(WorkspaceTrust::Trusted)
+        let Ok(entries) = std::fs::read_dir(&self.session_log_dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                && JsonlSessionStore::read_entries(path)
+                    .ok()
+                    .and_then(|entries| workspace_trust_from_entries(&entries, &workspace_id))
+                    == Some(WorkspaceTrust::Trusted)
         })
     }
 

@@ -539,6 +539,60 @@ impl JsonlSessionStore {
         read_stream_records_from_file(&mut file, path)
     }
 
+    /// Reads and validates the exact durable prefix named by a provider-request source frontier.
+    ///
+    /// Unlike a file-length check, this proves that `durable_end_offset` lands on the recorded
+    /// JSONL event boundary and that the terminal sequence, event id, checksum, and session id all
+    /// match. Records appended after the frontier are deliberately ignored.
+    pub fn read_event_records_through_provider_frontier(
+        path: impl AsRef<Path>,
+        frontier: &crate::ProviderRequestSourceFrontierV1,
+    ) -> Result<Vec<SessionStreamRecord>> {
+        let path = path.as_ref();
+        let _guard = SESSION_LOG_IO_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
+        let mut file =
+            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        lock_shared_with_retry(&file, path)?;
+        let file_len = file
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .len();
+        if frontier.durable_end_offset > file_len {
+            bail!("provider request source frontier exceeds the durable session length");
+        }
+        let prefix_len = usize::try_from(frontier.durable_end_offset)
+            .context("provider request source frontier exceeds platform limits")?;
+        let mut prefix = vec![0_u8; prefix_len];
+        file.seek(SeekFrom::Start(0))
+            .with_context(|| format!("failed to seek {}", path.display()))?;
+        file.read_exact(&mut prefix)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if !prefix.is_empty() && !prefix.ends_with(b"\n") {
+            bail!("provider request source frontier is not a durable record boundary");
+        }
+        let content = std::str::from_utf8(&prefix)
+            .context("provider request source frontier is not valid UTF-8")?;
+        let records = read_stream_records_from_str(path, content)?;
+        match (records.last(), frontier.stream_sequence) {
+            (None, None) if frontier.session_id == session_id_for_path(path) => {}
+            (Some(record), Some(sequence))
+                if record.session_id() == frontier.session_id
+                    && record.stream_sequence() == sequence
+                    && frontier.event_id.as_deref() == Some(record.event_id())
+                    && frontier.record_checksum.as_deref() == Some(record.record_checksum()) => {}
+            _ => bail!("provider request source frontier does not match its durable record"),
+        }
+        if records
+            .iter()
+            .any(|record| record.session_id() != frontier.session_id)
+        {
+            bail!("provider request source frontier belongs to another durable session");
+        }
+        Ok(records)
+    }
+
     /// Reads all durable records in writer mode, performing tail recovery when needed.
     pub fn read_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
         let mut writer = self
@@ -834,6 +888,7 @@ fn validate_session_entry_durable_contract(entry: &SessionLogEntry) -> Result<()
     match entry {
         SessionLogEntry::Control(control) => control.validate_durable_contract(),
         SessionLogEntry::ToolResultV3(result) => result.validate(),
+        SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => snapshot.validate(),
         _ => Ok(()),
     }
 }
@@ -1036,6 +1091,9 @@ pub(super) fn session_entry_event_type(entry: &SessionLogEntry) -> DurableEventT
     match entry {
         SessionLogEntry::User(_) => DurableEventType::UserMessageRecorded,
         SessionLogEntry::Assistant(_) => DurableEventType::AssistantMessageRecorded,
+        SessionLogEntry::RuntimeContextSnapshotV2(_) => {
+            DurableEventType::RuntimeContextSnapshotRecordedV2
+        }
         SessionLogEntry::ToolResultV3(_) => DurableEventType::ToolResultRecordedV3,
         SessionLogEntry::Control(control) => control_entry_event_type(control),
     }
@@ -1089,12 +1147,15 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::TaskRunCancellationScopeBound(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskRunTargetSelected(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::TaskStepContractBoundV2(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::TaskPlanContractSetCommittedV2(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskGuidanceApplied(_) => DurableEventType::TaskGuidanceApplied,
         ControlEntry::TaskGuidanceMaterialized(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskParticipantAttempt(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskParticipantRetryScheduled(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskParticipantResult(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::TaskStepCheckpointV2(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskFinalAnswerCommitted(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::JobIntentRecorded(_) => DurableEventType::JobIntentRecorded,
         ControlEntry::StepLeaseRecorded(_) => DurableEventType::StepLeaseRecorded,

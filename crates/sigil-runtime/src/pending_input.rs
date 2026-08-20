@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sigil_kernel::{
     ControlEntry, ConversationInputStatus, ConversationInputStatusEntry, ModelMessage,
-    PendingConversationInputProvider, Session,
+    PendingConversationInputProvider, PromotedConversationInput, Session,
 };
 
 use crate::current_unix_time_ms;
@@ -9,7 +9,19 @@ use crate::current_unix_time_ms;
 /// Safe-point follow-up source shared by every interactive surface: durably promotes the
 /// queue's next main-thread item into the running conversation session at a turn boundary,
 /// without interrupting the run.
-pub struct DurableQueuePendingInputProvider;
+#[derive(Clone, Default)]
+pub struct DurableQueuePendingInputProvider {
+    context_resolver: Option<crate::RequestContextResolver>,
+}
+
+impl DurableQueuePendingInputProvider {
+    #[must_use]
+    pub fn new(context_resolver: crate::RequestContextResolver) -> Self {
+        Self {
+            context_resolver: Some(context_resolver),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl PendingConversationInputProvider for DurableQueuePendingInputProvider {
@@ -17,7 +29,7 @@ impl PendingConversationInputProvider for DurableQueuePendingInputProvider {
         &self,
         session: &mut Session,
         logical_run_id: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<PromotedConversationInput>> {
         let snapshot = match session.active_projection_snapshot() {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) | Err(_) => return Ok(None),
@@ -48,6 +60,13 @@ impl PendingConversationInputProvider for DurableQueuePendingInputProvider {
         let mut message = ModelMessage::user(prompt.clone());
         message.id = uuid::Uuid::new_v4().to_string();
         session.append_user_message(message)?;
-        Ok(Some(prompt))
+        let runtime_context = match self.context_resolver.as_ref() {
+            Some(resolver) => resolver.resolve(&prompt).await.unwrap_or_default(),
+            None => Default::default(),
+        };
+        Ok(Some(PromotedConversationInput {
+            prompt,
+            runtime_context,
+        }))
     }
 }

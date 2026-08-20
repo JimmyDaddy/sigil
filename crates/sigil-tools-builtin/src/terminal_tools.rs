@@ -27,8 +27,8 @@ use crate::{
         tool_path_subject,
     },
     scratch_namespace::{
-        ScratchNamespaceControl, ScratchQuota, ScratchQuotaExceededError, ensure_session_scratch,
-        session_scratch_dir, session_scratch_key,
+        ScratchNamespaceControl, ScratchQuota, ensure_session_scratch,
+        scratch_provision_error_result, session_scratch_dir, session_scratch_key,
     },
     shell::{
         CommandFamily, ShellCommandAnalysis, ShellPathPolicyBinding,
@@ -631,29 +631,13 @@ impl Tool for TerminalStartTool {
         let session_key = session_scratch_key(ctx.session_scope_id());
         match provision {
             Ok(_provision) => {}
-            Err(error) if error.downcast_ref::<ScratchQuotaExceededError>().is_some() => {
-                let quota_error = error
-                    .downcast::<ScratchQuotaExceededError>()
-                    .expect("downcast checked above");
-                return Ok(ToolResult::error(
+            Err(error) => {
+                return Ok(scratch_provision_error_result(
                     call_id,
                     self.spec().name,
-                    ToolErrorKind::ScratchQuotaExceeded,
-                    quota_error.to_string(),
-                )
-                .with_error_details(
-                    false,
-                    json!({
-                        "scope": quota_error.scope.as_str(),
-                        "usage_bytes": quota_error.usage_bytes,
-                        "quota_bytes": quota_error.quota_bytes,
-                        "scratch_label": self.scratch_label,
-                    }),
+                    &self.scratch_label,
+                    error,
                 ));
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to provision {}", self.scratch_label));
             }
         };
         let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;

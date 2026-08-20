@@ -22,9 +22,12 @@ use super::active_projection::ActiveSessionProjection;
 use super::*;
 
 const DURABLE_IDENTITY_MAX_BYTES: usize = 512;
+const SESSION_EMERGENCY_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
+const SESSION_EMERGENCY_RESERVE_NAME: &str = ".sigil-session-emergency.reserve";
 
 static SESSION_WRITER_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<SharedSessionCoordinator>>>> =
     OnceLock::new();
+static SESSION_EMERGENCY_RESERVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 enum ActiveProjectionState {
     Uninitialized,
@@ -564,11 +567,14 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
             | ControlEntry::TaskRunTargetSelected(_)
             | ControlEntry::TaskRun(_)
             | ControlEntry::TaskPlan(_)
+            | ControlEntry::TaskStepContractBoundV2(_)
+            | ControlEntry::TaskPlanContractSetCommittedV2(_)
             | ControlEntry::TaskGuidanceMaterialized(_)
             | ControlEntry::TaskStep(_)
             | ControlEntry::TaskParticipantAttempt(_)
             | ControlEntry::TaskParticipantRetryScheduled(_)
             | ControlEntry::TaskParticipantResult(_)
+            | ControlEntry::TaskStepCheckpointV2(_)
             | ControlEntry::TaskFinalAnswerCommitted(_)
             | ControlEntry::TaskChildSession(_)
             | ControlEntry::TaskChildSessionDisplayName(_)
@@ -1392,6 +1398,7 @@ pub(crate) enum SessionWriterFault {
     PartialFirstRecord,
     PartialSecondRecord,
     BeforeSync,
+    DiskSpaceExhaustedBeforeWrite,
 }
 
 #[derive(Debug)]
@@ -1726,92 +1733,146 @@ impl LinearSessionWriter {
             let end_offset = start_offset
                 .checked_add(bundle_bytes.len() as u64)
                 .context("session crash-safe bundle offset overflow")?;
-            write_append_bundle_intent(
-                &self.path,
-                &AppendBundleIntent {
-                    start_offset,
-                    end_offset,
-                    event_count: u32::try_from(lines.len())
-                        .context("session crash-safe bundle has too many events")?,
-                    bundle_sha256: stable_event_hash(bundle_bytes),
-                    bundle_jsonl: String::from_utf8(bundle_bytes.clone())
-                        .context("session crash-safe bundle is not valid UTF-8")?,
-                },
-            )?;
+            let intent = AppendBundleIntent {
+                start_offset,
+                end_offset,
+                event_count: u32::try_from(lines.len())
+                    .context("session crash-safe bundle has too many events")?,
+                bundle_sha256: stable_event_hash(bundle_bytes),
+                bundle_jsonl: String::from_utf8(bundle_bytes.clone())
+                    .context("session crash-safe bundle is not valid UTF-8")?,
+            };
+            let mut intent_result = write_append_bundle_intent(&self.path, &intent);
+            if intent_result
+                .as_ref()
+                .is_err_and(error_chain_is_storage_full)
+                && release_session_emergency_reserve(&self.path)?
+            {
+                intent_result = write_append_bundle_intent(&self.path, &intent);
+            }
+            intent_result.with_context(|| {
+                format!(
+                    "failed to persist crash-safe session bundle intent for {}",
+                    self.path.display()
+                )
+            })?;
         }
         let mut offsets = Vec::with_capacity(lines.len());
-        let mut cursor = start_offset;
+        let prefix_hasher_before_write = prefix_hasher.clone();
         #[cfg(test)]
         let injected_fault = self.next_fault.take();
-        let write_result = (|| -> Result<()> {
-            #[cfg(test)]
-            if injected_fault == Some(SessionWriterFault::BeforeWrite) {
-                bail!("injected stored event pre-write failure");
+        let mut storage_retry = false;
+        let write_result = loop {
+            offsets.clear();
+            let mut cursor = start_offset;
+            prefix_hasher = prefix_hasher_before_write.clone();
+            if storage_retry {
+                file.set_len(start_offset)
+                    .context("failed to roll back partial session append before storage retry")?;
             }
-            #[cfg(test)]
-            if injected_fault == Some(SessionWriterFault::PartialFirstRecord) {
-                let line = &lines[0];
-                let partial_len = (line.len() / 2).max(1);
-                file.write_all(&line[..partial_len])
-                    .context("failed to inject partial stored event write")?;
-                file.flush()
-                    .context("failed to flush injected partial stored event write")?;
-                bail!("injected partial stored event write failure");
-            }
-            #[cfg(test)]
-            let mut line_index = 0_usize;
-            for line in &lines {
+            file.seek(SeekFrom::Start(start_offset))
+                .context("failed to seek session log for append attempt")?;
+            let attempt = (|| -> Result<u64> {
                 #[cfg(test)]
-                if injected_fault == Some(SessionWriterFault::PartialSecondRecord)
-                    && line_index == 1
+                if !storage_retry && injected_fault == Some(SessionWriterFault::BeforeWrite) {
+                    bail!("injected stored event pre-write failure");
+                }
+                #[cfg(test)]
+                if !storage_retry
+                    && injected_fault == Some(SessionWriterFault::DiskSpaceExhaustedBeforeWrite)
                 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "injected session storage exhaustion",
+                    ))
+                    .context("failed to append stored event batch");
+                }
+                #[cfg(test)]
+                if !storage_retry && injected_fault == Some(SessionWriterFault::PartialFirstRecord)
+                {
+                    let line = &lines[0];
                     let partial_len = (line.len() / 2).max(1);
                     file.write_all(&line[..partial_len])
-                        .context("failed to inject partial second stored event write")?;
+                        .context("failed to inject partial stored event write")?;
                     file.flush()
                         .context("failed to flush injected partial stored event write")?;
-                    bail!("injected partial second stored event write failure");
+                    bail!("injected partial stored event write failure");
                 }
-                file.write_all(line)
-                    .context("failed to append stored event batch")?;
-                prefix_hasher.update(line);
-                let end = cursor
-                    .checked_add(line.len() as u64)
-                    .context("session durable offset overflow")?;
-                offsets.push((cursor, end));
-                cursor = end;
                 #[cfg(test)]
-                {
-                    line_index = line_index.saturating_add(1);
+                let mut line_index = 0_usize;
+                for line in &lines {
+                    #[cfg(test)]
+                    if !storage_retry
+                        && injected_fault == Some(SessionWriterFault::PartialSecondRecord)
+                        && line_index == 1
+                    {
+                        let partial_len = (line.len() / 2).max(1);
+                        file.write_all(&line[..partial_len])
+                            .context("failed to inject partial second stored event write")?;
+                        file.flush()
+                            .context("failed to flush injected partial stored event write")?;
+                        bail!("injected partial second stored event write failure");
+                    }
+                    file.write_all(line)
+                        .context("failed to append stored event batch")?;
+                    prefix_hasher.update(line);
+                    let end = cursor
+                        .checked_add(line.len() as u64)
+                        .context("session durable offset overflow")?;
+                    offsets.push((cursor, end));
+                    cursor = end;
+                    #[cfg(test)]
+                    {
+                        line_index = line_index.saturating_add(1);
+                    }
                 }
+                file.flush().context("failed to flush stored event batch")?;
+                #[cfg(test)]
+                if !storage_retry && injected_fault == Some(SessionWriterFault::BeforeSync) {
+                    bail!("injected stored event sync failure");
+                }
+                if any_recovery_critical {
+                    file.sync_all()
+                        .context("failed to sync stored event batch")?;
+                }
+                if crash_safe_bundle {
+                    clear_append_bundle_intent(&self.path)?;
+                }
+                let observed_len = file
+                    .metadata()
+                    .context("failed to inspect stored event batch length")?
+                    .len();
+                if observed_len != cursor {
+                    bail!(
+                        "stored event batch durable offset mismatch: expected {cursor}, got {observed_len}"
+                    );
+                }
+                Ok(cursor)
+            })();
+            match attempt {
+                Ok(cursor) => break Ok(cursor),
+                Err(error)
+                    if !storage_retry
+                        && error_chain_is_storage_full(&error)
+                        && release_session_emergency_reserve(&self.path)? =>
+                {
+                    storage_retry = true;
+                }
+                Err(error) => break Err(error),
             }
-            file.flush().context("failed to flush stored event batch")?;
-            #[cfg(test)]
-            if injected_fault == Some(SessionWriterFault::BeforeSync) {
-                bail!("injected stored event sync failure");
+        };
+        let cursor = match write_result {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                self.requires_reload = true;
+                if error_chain_is_storage_full(&error) {
+                    return Err(error).context(
+                        "session storage exhausted before a recovery-critical terminal could be persisted",
+                    );
+                }
+                return Err(error);
             }
-            if any_recovery_critical {
-                file.sync_all()
-                    .context("failed to sync stored event batch")?;
-            }
-            if crash_safe_bundle {
-                clear_append_bundle_intent(&self.path)?;
-            }
-            let observed_len = file
-                .metadata()
-                .context("failed to inspect stored event batch length")?
-                .len();
-            if observed_len != cursor {
-                bail!(
-                    "stored event batch durable offset mismatch: expected {cursor}, got {observed_len}"
-                );
-            }
-            Ok(())
-        })();
-        if let Err(error) = write_result {
-            self.requires_reload = true;
-            return Err(error);
-        }
+        };
         #[cfg(test)]
         if any_recovery_critical {
             self.data_sync_count = self.data_sync_count.saturating_add(1);
@@ -1840,6 +1901,7 @@ impl LinearSessionWriter {
             event_links.extend(&events);
         }
         self.requires_reload = false;
+        let _ = ensure_session_emergency_reserve(&self.path);
         Ok((events, offsets))
     }
 
@@ -2152,6 +2214,90 @@ impl LinearSessionWriter {
     }
 }
 
+fn session_emergency_reserve_path(session_path: &Path) -> Result<PathBuf> {
+    let parent = session_path.parent().with_context(|| {
+        format!(
+            "session path has no parent for emergency reserve: {}",
+            session_path.display()
+        )
+    })?;
+    Ok(parent.join(SESSION_EMERGENCY_RESERVE_NAME))
+}
+
+fn ensure_session_emergency_reserve(session_path: &Path) -> Result<()> {
+    let _guard = SESSION_EMERGENCY_RESERVE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("session emergency reserve lock poisoned"))?;
+    let reserve_path = session_emergency_reserve_path(session_path)?;
+    if reserve_path.metadata().is_ok_and(|metadata| {
+        metadata.is_file() && metadata.len() == SESSION_EMERGENCY_RESERVE_BYTES
+    }) {
+        return Ok(());
+    }
+    if reserve_path.exists() {
+        fs::remove_file(&reserve_path)
+            .with_context(|| format!("failed to replace {}", reserve_path.display()))?;
+    }
+    let parent = reserve_path
+        .parent()
+        .context("session emergency reserve path has no parent")?;
+    let available = fs2::available_space(parent)
+        .with_context(|| format!("failed to inspect free space for {}", parent.display()))?;
+    if available < SESSION_EMERGENCY_RESERVE_BYTES.saturating_mul(2) {
+        return Ok(());
+    }
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    let mut reserve = options
+        .open(&reserve_path)
+        .with_context(|| format!("failed to create {}", reserve_path.display()))?;
+    let zeros = [0_u8; 64 * 1024];
+    let mut remaining = SESSION_EMERGENCY_RESERVE_BYTES;
+    while remaining > 0 {
+        let write = usize::try_from(remaining.min(zeros.len() as u64))
+            .context("session emergency reserve write exceeds platform limits")?;
+        reserve
+            .write_all(&zeros[..write])
+            .with_context(|| format!("failed to allocate {}", reserve_path.display()))?;
+        remaining = remaining.saturating_sub(write as u64);
+    }
+    reserve
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", reserve_path.display()))?;
+    sync_parent_dir(&reserve_path)?;
+    Ok(())
+}
+
+fn release_session_emergency_reserve(session_path: &Path) -> Result<bool> {
+    let _guard = SESSION_EMERGENCY_RESERVE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("session emergency reserve lock poisoned"))?;
+    let reserve_path = session_emergency_reserve_path(session_path)?;
+    match fs::remove_file(&reserve_path) {
+        Ok(()) => {
+            sync_parent_dir(&reserve_path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to release {}", reserve_path.display()))
+        }
+    }
+}
+
+fn error_chain_is_storage_full(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            error.kind() == std::io::ErrorKind::StorageFull
+                || matches!(error.raw_os_error(), Some(28 | 112))
+        })
+    })
+}
+
 fn harden_private_open_file(file: &File, path: &Path) -> Result<()> {
     let metadata = file
         .metadata()
@@ -2179,6 +2325,10 @@ pub(super) fn shared_session_writer(
     path: impl Into<PathBuf>,
 ) -> Result<(PathBuf, Arc<SharedSessionCoordinator>)> {
     let path = canonical_session_path(path.into())?;
+    // One workspace-shared reserve is created when the first store is opened. It is not a
+    // session JSONL and therefore never appears in Resume. The writer may release it once to
+    // persist a bounded recovery-critical terminal when the volume becomes full.
+    let _ = ensure_session_emergency_reserve(&path);
     let registry = SESSION_WRITER_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
     let mut registry = registry
         .lock()

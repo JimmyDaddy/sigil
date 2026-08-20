@@ -491,6 +491,108 @@ where
                                         }
                                     }
                                 }
+                                AgentRunDisposition::RunPendingPlan(action) => {
+                                    let created = sigil_runtime::PlanReviewCoordinator::create_task_from_plan(
+                                        &mut run_session,
+                                        &task_root_config,
+                                        &options.workspace_root,
+                                        parent_session_ref.clone(),
+                                        &sigil_runtime::CreateTaskFromPlanRequest {
+                                            plan_id: action.plan_id.as_str().to_owned(),
+                                            expected_plan_hash: action.plan_hash,
+                                            start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+                                            permission_grant: None,
+                                        },
+                                    )
+                                    .map_err(|error| format!("failed to execute the selected pending plan: {error:#}"));
+                                    match created {
+                                        Ok(created) => {
+                                            let _ = run_message_tx.send(
+                                                WorkerMessage::TaskCreatedFromPlan {
+                                                    entry: created.entry.clone(),
+                                                    start_mode: created.start_mode,
+                                                    entries: created.entries.clone(),
+                                                },
+                                            );
+                                            let task_id = created.task_id.as_str().to_owned();
+                                            let task = run_session
+                                                .task_state_projection()
+                                                .tasks
+                                                .get(&created.task_id)
+                                                .cloned();
+                                            match task {
+                                                Some(task) => {
+                                                    let _ = run_message_tx.send(
+                                                        WorkerMessage::TaskRunStarted {
+                                                            task_id: task_id.clone(),
+                                                            objective: task.objective.clone(),
+                                                        },
+                                                    );
+                                                    let result = run_admitted_task_to_root_terminal(
+                                                        &mut run_session,
+                                                        AdmittedTaskRunOrchestration {
+                                                            task_id: created.task_id,
+                                                            parent_session_ref:
+                                                                task.parent_session_ref,
+                                                            objective: task.objective,
+                                                            root_config: task_root_config,
+                                                            options,
+                                                            base_registry: task_base_registry,
+                                                            agent_supervisor:
+                                                                task_agent_supervisor,
+                                                            role_provider_builder:
+                                                                task_role_provider_builder.as_ref(),
+                                                            handler: &mut handler,
+                                                            cancellation_handle,
+                                                            tool_artifact_read_budget,
+                                                        },
+                                                        &mut approval_handler,
+                                                    )
+                                                    .await;
+                                                    RunTaskPayload::Task {
+                                                        task_id,
+                                                        queue_id: None,
+                                                        result,
+                                                    }
+                                                }
+                                                None => RunTaskPayload::Chat {
+                                                    result: Err(format!(
+                                                        "pending plan promotion created task {task_id} without durable task state"
+                                                    )),
+                                                    plan_mode,
+                                                    plan_review: false,
+                                                    queue_id: None,
+                                                    provider_logical_run_id: None,
+                                                    agent_result_continuation_thread_ids: Vec::new(),
+                                                },
+                                            }
+                                        }
+                                        Err(error) => RunTaskPayload::Chat {
+                                            result: Err(error),
+                                            plan_mode,
+                                            plan_review: false,
+                                            queue_id: None,
+                                            provider_logical_run_id: None,
+                                            agent_result_continuation_thread_ids: Vec::new(),
+                                        },
+                                    }
+                                }
+                                AgentRunDisposition::PendingPlanDecisionRequired(_action) => {
+                                    RunTaskPayload::Chat {
+                                        result: Ok(sigil_kernel::AgentRunResult {
+                                            final_text: "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned(),
+                                            tool_calls: output.result.tool_calls,
+                                            final_message_id: output.result.final_message_id,
+                                        }),
+                                        plan_mode,
+                                        plan_review: false,
+                                        queue_id: None,
+                                        provider_logical_run_id: Some(
+                                            provider_logical_run_id.clone(),
+                                        ),
+                                        agent_result_continuation_thread_ids: Vec::new(),
+                                    }
+                                }
                                 AgentRunDisposition::Interrupted => RunTaskPayload::Chat {
                                     result: Err(
                                         "run was interrupted before a final answer".to_owned()

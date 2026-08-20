@@ -277,10 +277,9 @@ fn live_tool_artifact_card_shows_truncation_and_bounded_actions() -> Result<()> 
     app.handle(RunEvent::ToolResult(result))?;
 
     let rendered = full_plain_timeline(&app);
-    assert!(rendered.contains("Saved output truncated"));
+    assert!(rendered.contains("Ctrl-O expand"));
     assert!(rendered.contains("64.0 KiB of 128.0 KiB"));
     assert!(rendered.contains("Alt-N next"));
-    assert!(rendered.contains("Ctrl-O toggle"));
     Ok(())
 }
 
@@ -387,12 +386,39 @@ fn unavailable_tool_artifact_keeps_auditable_summary_and_blocks_reads() -> Resul
 
     let rendered = full_plain_timeline(&app);
     assert!(rendered.contains("Full output unavailable (missing)"));
-    assert!(rendered.contains("saved summary remains auditable"));
+    assert!(rendered.contains("summary remains auditable"));
     assert!(!app.request_selected_tool_artifact_next_page());
     assert!(app.drain_pending_worker_commands().is_empty());
     assert_eq!(
         app.last_notice(),
         Some("full tool output is unavailable (missing); the saved summary remains auditable")
+    );
+    Ok(())
+}
+
+#[test]
+fn expired_tool_artifact_keeps_auditable_summary_and_blocks_reads() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.drain_pending_worker_commands();
+
+    app.handle_worker_message(WorkerMessage::ToolArtifactPageReadFailed {
+        request_id: 10,
+        artifact_ref: tool_artifact_ref(),
+        failure: ToolArtifactDisplayReadFailure::Unavailable(
+            sigil_kernel::ToolArtifactAvailability::Expired,
+        ),
+        entries: Vec::new(),
+    })?;
+
+    let rendered = full_plain_timeline(&app);
+    assert!(rendered.contains("Full output unavailable (expired)"));
+    assert!(rendered.contains("summary remains auditable"));
+    assert!(!app.request_selected_tool_artifact_next_page());
+    assert!(app.drain_pending_worker_commands().is_empty());
+    assert_eq!(
+        app.last_notice(),
+        Some("full tool output is unavailable (expired); the saved summary remains auditable")
     );
     Ok(())
 }
@@ -426,8 +452,7 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
         entries.clone(),
         "restored artifact",
     );
-    assert!(full_plain_timeline(&available_app).contains("Saved full output"));
-    assert!(full_plain_timeline(&available_app).contains("Ctrl-O toggle"));
+    assert!(full_plain_timeline(&available_app).contains("Ctrl-O full output"));
 
     std::fs::remove_dir_all(artifact_store.root().join("blobs"))?;
     let mut missing_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());

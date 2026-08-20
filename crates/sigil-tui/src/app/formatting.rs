@@ -58,6 +58,16 @@ pub(super) fn summarize_error(error: &str) -> String {
         .to_owned()
 }
 
+pub(super) fn summarize_terminal_reason(reason: &str, max_chars: usize) -> String {
+    let normalized = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let leaf = normalized
+        .rsplit_once(": ")
+        .map(|(_, leaf)| leaf)
+        .filter(|leaf| !leaf.trim().is_empty())
+        .unwrap_or(normalized.as_str());
+    truncate_session_view_text(leaf, max_chars)
+}
+
 fn strip_error_chain_prefix(line: &str) -> &str {
     if let Some((prefix, rest)) = line.split_once(':')
         && prefix.trim().chars().all(|char| char.is_ascii_digit())

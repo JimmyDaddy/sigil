@@ -50,9 +50,12 @@ use audit_log::{
     should_render_restored_tool_execution, unix_time_ms,
 };
 pub(super) use history::{current_focus_label, session_history_display_label, short_session_token};
+use history::{
+    discard_bootstrap_only_session_file, session_entries_have_resumable_activity,
+    session_history_title_from_log, session_id_from_path, session_log_has_resumable_activity,
+};
 #[cfg(test)]
 use history::{read_bounded_line, session_history_label};
-use history::{session_history_title_from_log, session_id_from_path};
 #[cfg(test)]
 use restore_projection::push_restored_reasoning_timeline_entry;
 use restore_projection::{
@@ -346,6 +349,10 @@ impl AppState {
         let Some(draft) = plans.latest_pending_plan().cloned() else {
             return;
         };
+        let last_run_failure = plans
+            .latest_decision(&draft.plan_id)
+            .filter(|decision| decision.decision == sigil_kernel::PlanDecision::TaskCreationFailed)
+            .and_then(|decision| decision.reason.clone());
         let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
             sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &self.workspace_root)
                 .ok()
@@ -359,6 +366,9 @@ impl AppState {
         match detail {
             Ok(detail) => {
                 self.set_pending_plan_approval_from_detail(&detail, current_snapshot.as_deref());
+                if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+                    pending.last_run_failure = last_run_failure;
+                }
                 match sigil_runtime::conversation_display::public_plan_review_from_entries(
                     &self.session_browser.current_entries,
                     current_snapshot.as_deref(),
@@ -405,6 +415,9 @@ impl AppState {
                 if !is_jsonl {
                     continue;
                 }
+                if !session_log_has_resumable_activity(&path) {
+                    continue;
+                }
                 let modified = entry
                     .metadata()
                     .and_then(|metadata| metadata.modified())
@@ -446,6 +459,57 @@ impl AppState {
             .position(|index| *index == current_index)
             .unwrap_or(0)
             .min(self.filtered_session_indices().len().saturating_sub(1));
+    }
+
+    pub(crate) fn discard_current_bootstrap_only_session(&self) -> bool {
+        let Ok(entries) = JsonlSessionStore::read_entries(&self.session_log_path) else {
+            return false;
+        };
+        if session_entries_have_resumable_activity(&entries) {
+            return false;
+        }
+
+        let current_holds_workspace_trust = entries.iter().rev().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision)) => {
+                Some(decision.trust)
+            }
+            _ => None,
+        }) == Some(sigil_kernel::WorkspaceTrust::Trusted);
+        if current_holds_workspace_trust && !self.another_session_holds_workspace_trust() {
+            return false;
+        }
+
+        discard_bootstrap_only_session_file(&self.session_log_path, &self.session_log_dir)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn current_session_has_resumable_activity(&self) -> bool {
+        session_entries_have_resumable_activity(&self.session_browser.current_entries)
+            || session_log_has_resumable_activity(&self.session_log_path)
+    }
+
+    fn another_session_holds_workspace_trust(&self) -> bool {
+        let Ok(workspace_id) = sigil_kernel::stable_workspace_id(&self.workspace_root) else {
+            return false;
+        };
+        let Ok(entries) = fs::read_dir(&self.session_log_dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            path != self.session_log_path
+                && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                && JsonlSessionStore::read_entries(path)
+                    .ok()
+                    .is_some_and(|entries| {
+                        entries.iter().rev().find_map(|entry| match entry {
+                            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(
+                                decision,
+                            )) if decision.workspace_id == workspace_id => Some(decision.trust),
+                            _ => None,
+                        }) == Some(sigil_kernel::WorkspaceTrust::Trusted)
+                    })
+        })
     }
 
     pub(super) fn refresh_memory_summary(&mut self) {
@@ -693,6 +757,7 @@ impl AppState {
                         &self.secret_redactor,
                     ));
                 }
+                SessionLogEntry::RuntimeContextSnapshotV2(_) => {}
                 SessionLogEntry::Control(control) => match control {
                     ControlEntry::Note { kind, data }
                         if kind == "reasoning_delta" || kind == "reasoning_trace" =>

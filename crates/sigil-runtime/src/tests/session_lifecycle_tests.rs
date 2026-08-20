@@ -8,10 +8,12 @@ use std::{
 use anyhow::{Context, Result};
 use serde_json::json;
 use sigil_kernel::{
-    AssistantMessageKind, ControlEntry, ConversationInputKind, ConversationInputPromotedEntry,
-    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputTarget,
-    ConversationQueueDurableProjection, DurableEventType, EventClass, ImageAttachment,
-    ImageMimeType, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, ToolCall,
+    AssistantMessageKind, ContextBodyRef, ContextInclusionReason, ContextItem, ContextSensitivity,
+    ContextSource, ContextTrustLevel, ControlEntry, ConversationInputKind,
+    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputTarget, ConversationQueueDurableProjection, DurableEventType, EventClass,
+    ImageAttachment, ImageMimeType, JsonlSessionStore, MemoryConfig, ModelMessage,
+    RuntimeContextCandidates, Session, SessionLogEntry, ToolCall,
     conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
@@ -58,6 +60,29 @@ fn finalized_session(path: &Path, prompt: &str) -> Result<()> {
         }),
     )?;
     Ok(())
+}
+
+fn lifecycle_internal_context_fixture() -> RuntimeContextCandidates {
+    let body = "export-internal context snapshot body";
+    let mut candidates = RuntimeContextCandidates::new();
+    candidates.items.push(ContextItem {
+        id: "lifecycle-context-fixture".to_owned(),
+        source: ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some("lifecycle-context-snapshot".to_owned()),
+        token_cost: sigil_kernel::estimate_context_token_cost(body),
+        score: Some(100.0),
+        score_breakdown: Vec::new(),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: ContextBodyRef::inline(body),
+    });
+    candidates
+        .snippets
+        .insert("lifecycle-context-fixture".to_owned(), body.to_owned());
+    candidates
 }
 
 #[cfg(unix)]
@@ -623,6 +648,46 @@ fn safe_session_export_keeps_image_metadata_without_process_local_bytes() -> Res
     assert_eq!(attachment.attachment_id, "image-1");
     assert!(!attachment.has_resolved_bytes());
     artifact.validate_digest()?;
+    Ok(())
+}
+
+#[test]
+fn safe_session_export_hides_provider_visible_context_v2_snapshots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-context-v2.jsonl");
+    let store = JsonlSessionStore::new(&source)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.ensure_identity_entry()?;
+    session.append_user_message(ModelMessage::user("inspect the export contract"))?;
+    session.build_request_with_transient_messages_and_context(
+        temp.path(),
+        &MemoryConfig::with_enabled(false),
+        Vec::new(),
+        None,
+        None,
+        None,
+        &[],
+        lifecycle_internal_context_fixture(),
+    )?;
+    session.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("done".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
+
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let output = service.export_session(&source, None, 1_234)?;
+    let text = fs::read_to_string(&output.path)?;
+    assert!(!text.contains("export-internal context snapshot body"));
+    let artifact: SessionExportV1 = serde_json::from_str(&text)?;
+    assert_eq!(artifact.payload.messages.len(), 2);
+    assert_eq!(
+        artifact.payload.messages[0].content.as_deref(),
+        Some("inspect the export contract")
+    );
     Ok(())
 }
 

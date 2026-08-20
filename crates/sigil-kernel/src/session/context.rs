@@ -1,6 +1,7 @@
 use super::*;
 
-pub(super) fn latest_user_context_query(
+pub(super) fn latest_user_context_query_from_projection(
+    projection: &SessionContextProjection,
     projected_messages: &[ModelMessage],
 ) -> Option<(usize, String)> {
     projected_messages
@@ -8,7 +9,19 @@ pub(super) fn latest_user_context_query(
         .enumerate()
         .rev()
         .find_map(|(index, message)| {
-            if !matches!(message.role, MessageRole::User) {
+            let projected_origin = projection
+                .retained_entries
+                .iter()
+                .find(|entry| entry.message.id == message.id)
+                .map(|entry| entry.origin);
+            let user_authored = projected_origin.map_or_else(
+                || {
+                    matches!(message.role, MessageRole::User)
+                        && !is_runtime_context_v2_message(message)
+                },
+                SessionProjectionOrigin::is_user_authored,
+            );
+            if !user_authored {
                 return None;
             }
             let content = message.content.as_deref()?.trim();
@@ -17,6 +30,7 @@ pub(super) fn latest_user_context_query(
 }
 
 pub(super) fn session_archive_from_projected_messages_with_external(
+    projection: &SessionContextProjection,
     projected_messages: &[ModelMessage],
     latest_user_index: usize,
     external_message_ids: &std::collections::BTreeSet<String>,
@@ -26,6 +40,13 @@ pub(super) fn session_archive_from_projected_messages_with_external(
         .take(latest_user_index)
         .enumerate()
         .flat_map(|(index, message)| {
+            let is_runtime_context_snapshot = projection.retained_entries.iter().any(|entry| {
+                entry.message.id == message.id
+                    && entry.origin == SessionProjectionOrigin::RuntimeContextSnapshotV2
+            });
+            if is_runtime_context_snapshot {
+                return Vec::new();
+            }
             session_archive_entries_from_message_with_external(
                 index,
                 message,
@@ -42,6 +63,9 @@ pub(super) fn session_archive_entries_from_message_with_external(
     message: &ModelMessage,
     external_untrusted: bool,
 ) -> Vec<SessionArchiveEntry> {
+    if is_runtime_context_v2_message(message) {
+        return Vec::new();
+    }
     let Some(content) = message.content.as_deref().map(str::trim) else {
         return Vec::new();
     };
@@ -199,17 +223,10 @@ pub(super) fn insert_task_memory_context_snippets(
     }
 }
 
-pub(super) fn render_runtime_context_v1_message(
+pub(super) fn render_runtime_context_v2_content(
     packed: &PackedContext,
     snippets: &BTreeMap<String, String>,
-) -> Result<Option<ModelMessage>> {
-    if packed.stable_prefix.is_empty()
-        && packed.dynamic_suffix.is_empty()
-        && packed.excluded.is_empty()
-    {
-        return Ok(None);
-    }
-
+) -> Result<String> {
     let included = packed
         .stable_prefix
         .iter()
@@ -222,10 +239,11 @@ pub(super) fn render_runtime_context_v1_message(
         .map(|item| runtime_context_item_json(item, snippets))
         .collect::<Result<Vec<_>>>()?;
     let payload = serde_json::json!({
-        "schema": RUNTIME_CONTEXT_V1_SCHEMA,
-        "placement": RUNTIME_CONTEXT_V1_PLACEMENT,
-        "selection_policy": RUNTIME_CONTEXT_V1_SELECTION_POLICY,
-        "note": RUNTIME_CONTEXT_V1_NOTE,
+        "schema": RUNTIME_CONTEXT_V2_SCHEMA,
+        "placement": RUNTIME_CONTEXT_V2_PLACEMENT,
+        "selection_policy": RUNTIME_CONTEXT_V2_SELECTION_POLICY,
+        "note": RUNTIME_CONTEXT_V2_NOTE,
+        "state": "active",
         "budget": {
             "max_tokens": packed.max_tokens,
             "used_tokens": packed.used_tokens,
@@ -234,19 +252,27 @@ pub(super) fn render_runtime_context_v1_message(
         "excluded": excluded,
     });
     let payload = serde_json::to_string_pretty(&payload)
-        .context("failed to serialize runtime context v1 payload")?;
-    let content = format!("{RUNTIME_CONTEXT_V1_HEADING}\n{payload}");
-    let id = stable_runtime_context_v1_message_id(&content);
-    Ok(Some(ModelMessage {
-        id,
-        role: MessageRole::System,
-        content: Some(content),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        assistant_kind: None,
-        image_attachments: Vec::new(),
-        tool_result_payload: None,
-    }))
+        .context("failed to serialize runtime context v2 payload")?;
+    Ok(format!("{RUNTIME_CONTEXT_V2_HEADING}\n{payload}"))
+}
+
+pub(super) fn render_runtime_context_v2_clear_content() -> Result<String> {
+    let payload = serde_json::json!({
+        "schema": RUNTIME_CONTEXT_V2_SCHEMA,
+        "placement": RUNTIME_CONTEXT_V2_PLACEMENT,
+        "selection_policy": RUNTIME_CONTEXT_V2_SELECTION_POLICY,
+        "note": RUNTIME_CONTEXT_V2_NOTE,
+        "state": "cleared",
+        "budget": {
+            "max_tokens": REQUEST_CONTEXT_V0_MAX_TOKENS,
+            "used_tokens": 0,
+        },
+        "included": [],
+        "excluded": [],
+    });
+    let payload = serde_json::to_string_pretty(&payload)
+        .context("failed to serialize cleared runtime context v2 payload")?;
+    Ok(format!("{RUNTIME_CONTEXT_V2_HEADING}\n{payload}"))
 }
 
 pub(super) fn summarize_runtime_context(packed: &PackedContext) -> PrefixRuntimeContextSummary {
@@ -286,7 +312,7 @@ pub(super) fn summarize_runtime_context(packed: &PackedContext) -> PrefixRuntime
         .collect();
 
     PrefixRuntimeContextSummary {
-        schema: RUNTIME_CONTEXT_V1_SCHEMA.to_owned(),
+        schema: RUNTIME_CONTEXT_V2_SCHEMA.to_owned(),
         max_tokens: packed.max_tokens,
         used_tokens: packed.used_tokens,
         included_count: packed
@@ -349,6 +375,158 @@ pub(super) fn renderable_runtime_context_snippet<'a>(
     Ok(Some(snippet.as_str()))
 }
 
-pub(super) fn stable_runtime_context_v1_message_id(content: &str) -> String {
-    format!("context:v1:{:x}", Sha256::digest(content.as_bytes()))
+pub(super) fn empty_runtime_context_v2_summary() -> PrefixRuntimeContextSummary {
+    PrefixRuntimeContextSummary {
+        schema: RUNTIME_CONTEXT_V2_SCHEMA.to_owned(),
+        max_tokens: REQUEST_CONTEXT_V0_MAX_TOKENS,
+        used_tokens: 0,
+        included_count: 0,
+        excluded_count: 0,
+        top_included: Vec::new(),
+        excluded_by_reason: Vec::new(),
+    }
+}
+
+pub(super) fn is_runtime_context_v2_message(message: &ModelMessage) -> bool {
+    message.id.starts_with("context:v2:")
+}
+
+pub(super) fn runtime_context_v2_state_from_message(
+    message: &ModelMessage,
+) -> Result<RuntimeContextSnapshotStateV2> {
+    if !is_runtime_context_v2_message(message) || message.role != MessageRole::User {
+        bail!("message is not a runtime context snapshot v2");
+    }
+    let content = message
+        .content
+        .as_deref()
+        .context("runtime context snapshot v2 message is missing content")?;
+    let payload = content
+        .strip_prefix(RUNTIME_CONTEXT_V2_HEADING)
+        .context("runtime context snapshot v2 message has an invalid heading")?
+        .trim();
+    let value: serde_json::Value = serde_json::from_str(payload)
+        .context("runtime context snapshot v2 payload is not valid JSON")?;
+    match value.get("state").and_then(serde_json::Value::as_str) {
+        Some("active") => Ok(RuntimeContextSnapshotStateV2::Active),
+        Some("cleared") => Ok(RuntimeContextSnapshotStateV2::Cleared),
+        _ => bail!("runtime context snapshot v2 payload has an invalid state"),
+    }
+}
+
+pub(super) fn stable_runtime_context_v2_message_id(
+    source_tail_message_id: Option<&str>,
+    content: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(source_tail_message_id.unwrap_or("<empty-tail>").as_bytes());
+    digest.update(b"\0");
+    digest.update(content.as_bytes());
+    format!("context:v2:{:x}", digest.finalize())
+}
+
+impl RuntimeContextSnapshotV2 {
+    pub(super) fn new(
+        state: RuntimeContextSnapshotStateV2,
+        content: String,
+        source_tail_message_id: Option<String>,
+    ) -> Self {
+        let canonical_content_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+        let message = ModelMessage {
+            id: stable_runtime_context_v2_message_id(source_tail_message_id.as_deref(), &content),
+            role: MessageRole::User,
+            content: Some(content),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            assistant_kind: None,
+            image_attachments: Vec::new(),
+            tool_result_payload: None,
+        };
+        Self {
+            schema_version: RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION,
+            state,
+            message,
+            canonical_content_sha256,
+            source_tail_message_id,
+        }
+    }
+
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.schema_version != RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION {
+            bail!(
+                "unsupported runtime context snapshot v2 schema {}",
+                self.schema_version
+            );
+        }
+        if self.message.role != MessageRole::User
+            || !self.message.tool_calls.is_empty()
+            || self.message.tool_call_id.is_some()
+            || self.message.assistant_kind.is_some()
+            || !self.message.image_attachments.is_empty()
+            || self.message.tool_result_payload.is_some()
+        {
+            bail!("runtime context snapshot v2 message has an invalid provider-visible shape");
+        }
+        let content = self
+            .message
+            .content
+            .as_deref()
+            .context("runtime context snapshot v2 message is missing content")?;
+        if content.len() > MAX_RUNTIME_CONTEXT_SNAPSHOT_V2_BYTES {
+            bail!(
+                "runtime context snapshot v2 exceeds {MAX_RUNTIME_CONTEXT_SNAPSHOT_V2_BYTES} bytes"
+            );
+        }
+        if !content.starts_with(RUNTIME_CONTEXT_V2_HEADING) {
+            bail!("runtime context snapshot v2 message has an invalid heading");
+        }
+        let observed_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+        if observed_hash != self.canonical_content_sha256 {
+            bail!("runtime context snapshot v2 content hash does not match its message");
+        }
+        let expected_id =
+            stable_runtime_context_v2_message_id(self.source_tail_message_id.as_deref(), content);
+        if self.message.id != expected_id {
+            bail!("runtime context snapshot v2 message id does not match its source tail");
+        }
+        let payload = content
+            .strip_prefix(RUNTIME_CONTEXT_V2_HEADING)
+            .context("runtime context snapshot v2 heading is malformed")?
+            .trim();
+        let value: serde_json::Value = serde_json::from_str(payload)
+            .context("runtime context snapshot v2 payload is not valid JSON")?;
+        let expected_state = match self.state {
+            RuntimeContextSnapshotStateV2::Active => "active",
+            RuntimeContextSnapshotStateV2::Cleared => "cleared",
+        };
+        if value.get("schema").and_then(serde_json::Value::as_str)
+            != Some(RUNTIME_CONTEXT_V2_SCHEMA)
+            || value.get("placement").and_then(serde_json::Value::as_str)
+                != Some(RUNTIME_CONTEXT_V2_PLACEMENT)
+            || value.get("state").and_then(serde_json::Value::as_str) != Some(expected_state)
+        {
+            bail!("runtime context snapshot v2 payload conflicts with its durable metadata");
+        }
+        Ok(())
+    }
+
+    pub(super) fn from_provider_message(
+        message: ModelMessage,
+        source_tail_message_id: Option<String>,
+    ) -> Result<Self> {
+        let state = runtime_context_v2_state_from_message(&message)?;
+        let content = message
+            .content
+            .as_deref()
+            .context("runtime context snapshot v2 message is missing content")?;
+        let snapshot = Self {
+            schema_version: RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION,
+            state,
+            canonical_content_sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
+            source_tail_message_id,
+            message,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
 }

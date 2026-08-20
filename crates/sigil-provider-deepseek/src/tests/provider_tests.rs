@@ -5,11 +5,24 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use futures::StreamExt;
+use serde::Deserialize;
 use sigil_kernel::{
-    ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderChunk,
-    ProviderRequestRejection, ReasoningStreamSupport, ToolAccess, ToolCall, ToolCategory,
-    ToolPreviewCapability, ToolSpec, provider_rate_limit_from_error,
+    AdaptiveTailPolicyV3, Agent, AgentRunInput, AgentRunOptions,
+    COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CacheLayoutMutationKind, CompactionConfig,
+    CompactionFoldPlan, CompactionInitiation, ContextBodyRef, ContextInclusionReason, ContextItem,
+    ContextSensitivity, ContextSource, ContextTrustLevel, ContinuationItemPriority,
+    ContinuationModelOutputItemV1, ContinuationModelOutputV1, ControlEntry, EffectiveTokenBudget,
+    FrozenProviderRequestMaterial, InputTokenEvidence, InteractionMode, JsonlSessionStore,
+    MemoryConfig, ModelMessage, ModelRequestTimeouts, NoopEventHandler,
+    PROVIDER_ERROR_BODY_LIMIT_BYTES, PermissionConfig, PortableSemanticCompactionRequest,
+    PortableTargetRequestMaterial, Provider, ProviderChunk, ProviderPhysicalAttemptProjection,
+    ProviderRequestRejection, ReasoningEffort, ReasoningStreamSupport, RequestFitProof,
+    RuntimeContextCandidates, Session, SessionLogEntry, TokenMeasurementBinding,
+    TokenMeasurementScope, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolMutationTracking, ToolOutputProjectionPolicy, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, VersionedProfileIdentity, provider_rate_limit_from_error,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -23,6 +36,62 @@ use crate::{
 };
 
 use super::DeepSeekProvider;
+
+struct RealCacheProbeTool;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedCacheUsageReplay {
+    schema_version: u16,
+    source: String,
+    responses: Vec<RecordedCacheUsageResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedCacheUsageResponse {
+    name: String,
+    sse: String,
+    expected_hit_tokens: u64,
+    expected_miss_tokens: u64,
+}
+
+#[async_trait]
+impl Tool for RealCacheProbeTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "cache_probe".to_owned(),
+            description: "Return the fixed cache-conformance probe value.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "cache_probe",
+            "CACHE-PROBE-OK",
+            ToolResultMeta::default(),
+        ))
+    }
+}
 
 fn deepseek_provider(config: crate::DeepSeekProviderConfig) -> Result<DeepSeekProvider> {
     crate::test_env::with_clean_provider_env(|| {
@@ -149,6 +218,459 @@ async fn real_provider_three_exact_prefix_turns_report_cache_hit_and_miss_usage(
 }
 
 #[tokio::test]
+#[ignore = "requires explicit real-provider opt-in, secret, and local cost admission"]
+async fn real_agent_tool_turn_user_turn_and_resume_preserve_deepseek_cache_prefix() -> Result<()> {
+    const CONSERVATIVE_REQUEST_COUNT: u64 = 6;
+    const CONSERVATIVE_INPUT_TOKENS_PER_REQUEST: u64 = 64_000;
+    const MAX_OUTPUT_TOKENS_PER_REQUEST: u64 = 128;
+    const REQUIRED_FLAG: &str = "SIGIL_REAL_PROVIDER_CACHE_CONFORMANCE";
+    const BUDGET_ENV: &str = "SIGIL_REAL_PROVIDER_MAX_COST_USD";
+    const MIN_HIT_RATIO_ENV: &str = "SIGIL_REAL_PROVIDER_MIN_CACHE_HIT_RATIO";
+
+    if env::var(REQUIRED_FLAG).as_deref() != Ok("1") {
+        anyhow::bail!(
+            "{REQUIRED_FLAG}=1 is required before this test may contact the real provider"
+        );
+    }
+    let api_key = env::var(crate::SIGIL_API_KEY_ENV)
+        .context("SIGIL_API_KEY is required for real cache conformance")?;
+    let max_cost_usd = env::var(BUDGET_ENV)
+        .context("SIGIL_REAL_PROVIDER_MAX_COST_USD is required")?
+        .parse::<f64>()
+        .context("real-provider cache budget must be a decimal USD value")?;
+    if !(max_cost_usd.is_finite() && 0.0 < max_cost_usd && max_cost_usd <= 1.0) {
+        anyhow::bail!("real-provider cache budget must be greater than zero and at most $1.00");
+    }
+    let min_hit_ratio = env::var(MIN_HIT_RATIO_ENV)
+        .unwrap_or_else(|_| "0.90".to_owned())
+        .parse::<f64>()
+        .context("real-provider minimum cache hit ratio must be a decimal")?;
+    if !(min_hit_ratio.is_finite() && 0.0 < min_hit_ratio && min_hit_ratio <= 1.0) {
+        anyhow::bail!("real-provider minimum cache hit ratio must be in (0, 1]");
+    }
+
+    let provider = DeepSeekProvider::new_exact(
+        crate::DeepSeekProviderConfig {
+            api_key: Some(api_key),
+            ..crate::DeepSeekProviderConfig::default_for_model("deepseek-v4-flash")
+        },
+        ModelRequestTimeouts {
+            request_timeout: Duration::from_secs(60),
+            stream_idle_timeout: Duration::from_secs(60),
+            stream_total_timeout: Some(Duration::from_secs(120)),
+        },
+    )?;
+    let pricing = provider
+        .usage_pricing_snapshot("deepseek-v4-flash")
+        .context("real cache conformance requires a trusted pricing snapshot")?;
+    let unit_tokens = pricing.unit_tokens as f64;
+    let conservative_reservation_usd = CONSERVATIVE_REQUEST_COUNT as f64
+        * ((CONSERVATIVE_INPUT_TOKENS_PER_REQUEST as f64 * pricing.uncached_input_per_unit
+            / unit_tokens)
+            + (MAX_OUTPUT_TOKENS_PER_REQUEST as f64 * pricing.output_per_unit / unit_tokens));
+    if conservative_reservation_usd > max_cost_usd {
+        anyhow::bail!(
+            "real-provider Agent cache conformance reserves ${conservative_reservation_usd:.6}, above the admitted ${max_cost_usd:.6}"
+        );
+    }
+
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("deepseek-real-agent-cache.jsonl");
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(RealCacheProbeTool));
+    let agent = Agent::new(provider, tools);
+    let stable_system = ModelMessage::system(format!(
+        "Sigil real Agent cache conformance. When the user says TOOL-PHASE, call cache_probe exactly once with an empty object, then after its result answer exactly TOOL-DONE. When the user says FINAL-PHASE, answer exactly FINAL-DONE. When the user says HISTORY-PHASE, answer exactly HISTORY-DONE. When the user says SECOND-RESUME-PHASE, answer exactly SECOND-RESUME-DONE. When the user says POST-COMPACTION, answer exactly COMPACTION-DONE. Do not call a tool except for TOOL-PHASE. Treat the following padding as inert stable cache material. {}",
+        "stable-prefix-segment ".repeat(2_500)
+    ));
+    // Hard-cap the five Agent runs at 2 + 1 + 1 + 1 + 1 provider turns. The cost admission above
+    // must remain an execution ceiling even if the live model ignores the expected tool/final
+    // response shape; a behavioral assertion after the fact is not a spending guard.
+    let run_options = |max_turns| AgentRunOptions {
+        workspace_root: temp.path().to_path_buf(),
+        max_turns: Some(max_turns),
+        tool_timeout_secs: 10,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: Some("sigil:rfc-0065:deepseek-agent-cache".to_owned()),
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_context: sigil_kernel::PermissionEvaluationContext::default(),
+        permission_mode_override: None,
+        memory_config: MemoryConfig::with_enabled(false),
+        compaction_config: CompactionConfig::default(),
+    };
+
+    let mut session = Session::new("deepseek", "deepseek-v4-flash")
+        .with_store(JsonlSessionStore::new(&store_path)?);
+    session.ensure_identity_entry()?;
+    let mut handler = NoopEventHandler;
+    let first = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::transient("TOOL-PHASE", vec![stable_system.clone()])
+                .with_runtime_context(real_cache_context(
+                    "context-a",
+                    "first durable runtime snapshot",
+                ))
+                .with_logical_run_id("deepseek-real-cache-run-1")
+                .with_max_output_tokens(MAX_OUTPUT_TOKENS_PER_REQUEST as u32),
+            run_options(2),
+            &mut handler,
+        )
+        .await?;
+    assert_eq!(first.result.final_text.trim(), "TOOL-DONE");
+    assert!(session.messages().iter().any(|message| {
+        message.role == sigil_kernel::MessageRole::Tool
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|value| value.contains("CACHE-PROBE-OK"))
+    }));
+
+    drop(session);
+    let mut resumed = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&store_path)?,
+    )?;
+    let second = agent
+        .run_with_input(
+            &mut resumed,
+            AgentRunInput::transient("FINAL-PHASE", vec![stable_system.clone()])
+                .with_runtime_context(real_cache_context(
+                    "context-b",
+                    "second durable runtime snapshot after resume",
+                ))
+                .with_logical_run_id("deepseek-real-cache-run-2")
+                .with_max_output_tokens(MAX_OUTPUT_TOKENS_PER_REQUEST as u32),
+            run_options(1),
+            &mut handler,
+        )
+        .await?;
+    assert_eq!(second.result.final_text.trim(), "FINAL-DONE");
+
+    let third = agent
+        .run_with_input(
+            &mut resumed,
+            AgentRunInput::transient("HISTORY-PHASE", vec![stable_system.clone()])
+                .with_runtime_context(real_cache_context(
+                    "context-c",
+                    "third durable runtime snapshot before compaction",
+                ))
+                .with_logical_run_id("deepseek-real-cache-run-3")
+                .with_max_output_tokens(MAX_OUTPUT_TOKENS_PER_REQUEST as u32),
+            run_options(1),
+            &mut handler,
+        )
+        .await?;
+    assert_eq!(third.result.final_text.trim(), "HISTORY-DONE");
+
+    drop(resumed);
+    let mut second_resume = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&store_path)?,
+    )?;
+    let fourth = agent
+        .run_with_input(
+            &mut second_resume,
+            AgentRunInput::transient("SECOND-RESUME-PHASE", vec![stable_system.clone()])
+                .with_runtime_context(real_cache_context(
+                    "context-d",
+                    "fourth durable runtime snapshot after a second resume",
+                ))
+                .with_logical_run_id("deepseek-real-cache-run-4")
+                .with_max_output_tokens(MAX_OUTPUT_TOKENS_PER_REQUEST as u32),
+            run_options(1),
+            &mut handler,
+        )
+        .await?;
+    assert_eq!(fourth.result.final_text.trim(), "SECOND-RESUME-DONE");
+
+    activate_real_cache_test_compaction(&mut second_resume, &store_path)?;
+    drop(second_resume);
+    let mut post_compaction = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&store_path)?,
+    )?;
+    let fifth = agent
+        .run_with_input(
+            &mut post_compaction,
+            AgentRunInput::transient("POST-COMPACTION", vec![stable_system.clone()])
+                .with_runtime_context(real_cache_context(
+                    "context-e",
+                    "first durable runtime snapshot after compaction",
+                ))
+                .with_logical_run_id("deepseek-real-cache-run-5")
+                .with_max_output_tokens(MAX_OUTPUT_TOKENS_PER_REQUEST as u32),
+            run_options(1),
+            &mut handler,
+        )
+        .await?;
+    assert_eq!(fifth.result.final_text.trim(), "COMPACTION-DONE");
+
+    let usage = post_compaction
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage)) => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        usage.len() == CONSERVATIVE_REQUEST_COUNT as usize,
+        "tool turn, two resumed runs, and the first post-compaction turn must consume the admitted six requests"
+    );
+    assert!(
+        usage[0].cache_miss_tokens > 0,
+        "cold Agent request must report cache miss tokens"
+    );
+    let within_tool_turn_ratio = cache_hit_ratio(usage[1])?;
+    let cross_turn_resume_ratio = cache_hit_ratio(usage[2])?;
+    let warm_pre_compaction_ratio = cache_hit_ratio(usage[3])?;
+    let second_resume_ratio = cache_hit_ratio(usage[4])?;
+    let cumulative_pre_compaction_ratio = aggregate_cache_hit_ratio(&usage[1..5])?;
+    let first_post_compaction_ratio = cache_hit_ratio(usage[5])?;
+    for (window, ratio) in [
+        ("within_tool_turn", within_tool_turn_ratio),
+        ("cross_turn_resume", cross_turn_resume_ratio),
+        ("warm_pre_compaction", warm_pre_compaction_ratio),
+        ("second_resume", second_resume_ratio),
+        ("cumulative_pre_compaction", cumulative_pre_compaction_ratio),
+    ] {
+        assert!(
+            ratio >= min_hit_ratio,
+            "{window} Agent cache hit ratio {ratio:.4} is below admitted threshold {min_hit_ratio:.4}"
+        );
+    }
+    assert!(
+        usage[5].cache_miss_tokens > 0,
+        "the first post-compaction request must report the rebuilt epoch's uncached input"
+    );
+    eprintln!(
+        "DeepSeek cache conformance: requests={CONSERVATIVE_REQUEST_COUNT}, reservation_usd={conservative_reservation_usd:.8}, pricing_snapshot={}, within_tool_turn={within_tool_turn_ratio:.4}, cross_turn_resume={cross_turn_resume_ratio:.4}, warm_pre_compaction={warm_pre_compaction_ratio:.4}, second_resume={second_resume_ratio:.4}, cumulative_pre_compaction={cumulative_pre_compaction_ratio:.4}, first_post_compaction={first_post_compaction_ratio:.4}",
+        pricing.snapshot_id,
+    );
+
+    let projection = ProviderPhysicalAttemptProjection::from_records(
+        &JsonlSessionStore::read_event_records(&store_path)?,
+    )?;
+    let attempts = [
+        "deepseek-real-cache-run-1",
+        "deepseek-real-cache-run-2",
+        "deepseek-real-cache-run-3",
+        "deepseek-real-cache-run-4",
+        "deepseek-real-cache-run-5",
+    ]
+    .into_iter()
+    .flat_map(|run_id| projection.attempts_for_logical_run_id(run_id))
+    .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), usage.len());
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt.entry.request_envelope.is_some())
+    );
+    for attempt in &attempts {
+        let envelope = attempt
+            .entry
+            .request_envelope
+            .as_ref()
+            .expect("real DeepSeek attempts must bind a request envelope");
+        let frontier = envelope
+            .source_frontier
+            .as_ref()
+            .context("real DeepSeek cache attempt omitted its durable reconstruction frontier")?;
+        let reconstructed = Session::reconstruct_from_provider_frontier(
+            envelope.provider_name.clone(),
+            envelope.model_name.clone(),
+            &store_path,
+            frontier,
+        )?;
+        let rebuilt = reconstructed.reconstruct_provider_request(
+            temp.path(),
+            &MemoryConfig::with_enabled(false),
+            vec![RealCacheProbeTool.spec()],
+            Some(MAX_OUTPUT_TOKENS_PER_REQUEST as u32),
+            Some(ReasoningEffort::Medium),
+            None,
+            Some("sigil:rfc-0065:deepseek-agent-cache".to_owned()),
+            std::slice::from_ref(&stable_system),
+        )?;
+        envelope.verify_reconstructed_request_at_frontier(&store_path, &rebuilt)?;
+    }
+    assert!(attempts[1..5].iter().all(|attempt| {
+        attempt
+            .entry
+            .cache_layout_proof
+            .as_ref()
+            .is_some_and(|proof| proof.mutation_from_previous.local_stable_prefix_preserved)
+    }));
+    let post_compaction_layout = attempts
+        .last()
+        .and_then(|attempt| attempt.entry.cache_layout_proof.as_ref())
+        .context("post-compaction provider attempt omitted cache layout proof")?;
+    assert_eq!(
+        post_compaction_layout.mutation_from_previous.kind,
+        CacheLayoutMutationKind::ConversationHistoryRewritten
+    );
+    assert!(
+        !post_compaction_layout
+            .mutation_from_previous
+            .local_stable_prefix_preserved
+    );
+    Ok(())
+}
+
+fn cache_hit_ratio(usage: &sigil_kernel::UsageStats) -> Result<f64> {
+    let observed = usage
+        .cache_hit_tokens
+        .saturating_add(usage.cache_miss_tokens);
+    anyhow::ensure!(observed > 0, "DeepSeek response omitted cache token counts");
+    Ok(usage.cache_hit_tokens as f64 / observed as f64)
+}
+
+fn aggregate_cache_hit_ratio(usage: &[&sigil_kernel::UsageStats]) -> Result<f64> {
+    let hits = usage
+        .iter()
+        .map(|usage| usage.cache_hit_tokens)
+        .sum::<u64>();
+    let misses = usage
+        .iter()
+        .map(|usage| usage.cache_miss_tokens)
+        .sum::<u64>();
+    anyhow::ensure!(hits.saturating_add(misses) > 0, "cache window is empty");
+    Ok(hits as f64 / hits.saturating_add(misses) as f64)
+}
+
+fn activate_real_cache_test_compaction(
+    session: &mut Session,
+    store_path: &std::path::Path,
+) -> Result<()> {
+    let store = JsonlSessionStore::new(store_path)?;
+    let records = store.read_event_records_writer()?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        AdaptiveTailPolicyV3 {
+            tail_target_min_tokens: 1,
+            tail_target_max_tokens: 1,
+            ..AdaptiveTailPolicyV3::default()
+        },
+        u64::MAX / 4,
+        None,
+    )?;
+    let source_event_id = plan
+        .folded_event_ids
+        .first()
+        .cloned()
+        .context("real cache fixture has no foldable history")?;
+    let preflight =
+        store.prepare_portable_semantic_compaction(PortableSemanticCompactionRequest {
+            attempt_id: "deepseek-real-cache-compaction-attempt".to_owned(),
+            compaction_id: "deepseek-real-cache-compaction".to_owned(),
+            initiation: CompactionInitiation::Manual,
+            base_projection_revision: "deepseek-real-cache-compaction-r1".to_owned(),
+            branch_id: None,
+            valid_for_snapshot: "deepseek-real-cache-snapshot-r1".to_owned(),
+            objective: Some(
+                "Preserve the cache-conformance objective across epoch rotation".to_owned(),
+            ),
+            language: "en".to_owned(),
+            plan,
+            model_output: ContinuationModelOutputV1 {
+                in_progress: vec![ContinuationModelOutputItemV1 {
+                    text: "Continue validating cache behavior after epoch rotation.".to_owned(),
+                    source_event_ids: vec![source_event_id],
+                    priority: ContinuationItemPriority::Critical,
+                }],
+                pending_actions: Vec::new(),
+                provider_continuity: Vec::new(),
+                model_notes: Vec::new(),
+            },
+            tool_output_projection_policy: ToolOutputProjectionPolicy::default(),
+            started_at_unix_ms: 10,
+            completed_at_unix_ms: 11,
+        })?;
+    let target_request = sigil_kernel::CompletionRequest {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        messages: preflight.candidate_messages().to_vec(),
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: Some(128),
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: Some("sigil:rfc-0065:deepseek-agent-cache".to_owned()),
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+        hosted_tools: Vec::new(),
+    };
+    let frozen = FrozenProviderRequestMaterial::freeze(session.session_scope_id(), target_request)?;
+    let profile = |id: &str| VersionedProfileIdentity::from_content(id, 1, id.as_bytes());
+    let binding = TokenMeasurementBinding {
+        schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        wire_profile: profile("deepseek-real-cache-wire"),
+        token_measurement_profile: profile("deepseek-real-cache-tokenizer"),
+        hosted_parity_profile: Some(profile("deepseek-real-cache-hosted-parity")),
+    };
+    let proof = RequestFitProof {
+        schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        input: InputTokenEvidence::Exact {
+            tokens: 10,
+            material_fingerprint: frozen.fingerprint().to_owned(),
+            measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+            binding: binding.clone(),
+            provider_model_snapshot: None,
+            provider_system_fingerprint: None,
+        },
+        budget: EffectiveTokenBudget {
+            schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+            budget_profile: profile("deepseek-real-cache-budget"),
+            context_window_tokens: 128_000,
+            requested_output_tokens: 128,
+            safety_buffer_tokens: 1_024,
+        },
+    };
+    let before_input = InputTokenEvidence::Exact {
+        tokens: 8_000,
+        material_fingerprint: frozen.fingerprint().to_owned(),
+        measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+        binding: binding.clone(),
+        provider_model_snapshot: None,
+        provider_system_fingerprint: None,
+    };
+    let target = PortableTargetRequestMaterial::new(frozen.clone(), binding, proof)
+        .with_portable_economics(&frozen, before_input)?;
+    store.execute_portable_semantic_compaction(preflight, target)?;
+    Ok(())
+}
+
+fn real_cache_context(id: &str, body: &str) -> RuntimeContextCandidates {
+    let mut context = RuntimeContextCandidates::new();
+    context.items.push(ContextItem {
+        id: id.to_owned(),
+        source: ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some(format!("revision-{id}")),
+        token_cost: sigil_kernel::estimate_context_token_cost(body),
+        score: Some(100.0),
+        score_breakdown: Vec::new(),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: ContextBodyRef::inline(body),
+    });
+    context.snippets.insert(id.to_owned(), body.to_owned());
+    context
+}
+
+#[tokio::test]
 async fn three_exact_prefix_requests_preserve_wire_prefix_and_map_hit_miss_usage() -> Result<()> {
     let requests = Arc::new(Mutex::new(VecDeque::new()));
     let response = |hit: u64, miss: u64| {
@@ -208,6 +730,75 @@ async fn three_exact_prefix_requests_preserve_wire_prefix_and_map_hit_miss_usage
         "same logical request must keep byte-identical DeepSeek wire content"
     );
     assert!(bodies[0].contains("stable-system-prefix"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn recorded_cache_usage_sse_replay_preserves_provider_mapping() -> Result<()> {
+    let fixture: RecordedCacheUsageReplay =
+        serde_json::from_str(include_str!("fixtures/cache_prefix_usage_replay.json"))?;
+    assert_eq!(fixture.schema_version, 1);
+    assert!(
+        fixture
+            .source
+            .starts_with("sanitized DeepSeek-compatible SSE capture")
+    );
+    assert_eq!(
+        fixture
+            .responses
+            .iter()
+            .map(|response| response.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cold", "warm_tool_turn", "warm_user_turn"]
+    );
+
+    let requests = Arc::new(Mutex::new(VecDeque::new()));
+    let responses = Arc::new(Mutex::new(VecDeque::from_iter(
+        fixture
+            .responses
+            .iter()
+            .map(|response| http_response(200, "text/event-stream", &response.sse)),
+    )));
+    let server = spawn_recording_server(Arc::clone(&requests), responses).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        api_key: Some("recorded-replay-key".to_owned()),
+        user_id_strategy: None,
+        ..crate::DeepSeekProviderConfig::default_for_model("deepseek-v4-flash")
+    })?;
+    let request = simple_chat_request("deepseek-v4-flash");
+
+    let mut observed = Vec::new();
+    for expected in &fixture.responses {
+        let mut stream = provider.stream(request.clone()).await?;
+        let mut usage = None;
+        while let Some(chunk) = stream.next().await {
+            if let ProviderChunk::Usage(value) = chunk? {
+                usage = Some(value);
+            }
+        }
+        let usage = usage
+            .with_context(|| format!("recorded replay {} omitted terminal usage", expected.name))?;
+        observed.push((usage.cache_hit_tokens, usage.cache_miss_tokens));
+    }
+    assert_eq!(
+        observed,
+        fixture
+            .responses
+            .iter()
+            .map(|response| (response.expected_hit_tokens, response.expected_miss_tokens))
+            .collect::<Vec<_>>()
+    );
+
+    let requests = requests.lock().expect("recorded replay requests poisoned");
+    assert_eq!(requests.len(), fixture.responses.len());
+    let bodies = requests
+        .iter()
+        .map(|request| request.split("\r\n\r\n").nth(1).unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(bodies.iter().all(|body| *body == bodies[0]));
     Ok(())
 }
 
@@ -1403,6 +1994,39 @@ async fn provider_surfaces_chat_and_completion_body_read_errors() -> Result<()> 
 }
 
 #[tokio::test]
+async fn messages_stream_surfaces_body_decode_failure_after_emitting_output() -> Result<()> {
+    let server = spawn_messages_stream_then_malformed_chunk_server().await?;
+    let response = reqwest::Client::new().get(server).send().await?;
+    let mut stream = super::messages_response_stream(
+        response,
+        "deepseek-v4-flash".to_owned(),
+        ModelRequestTimeouts {
+            request_timeout: Duration::from_secs(1),
+            stream_idle_timeout: Duration::from_secs(1),
+            stream_total_timeout: Some(Duration::from_secs(2)),
+        },
+        None,
+    );
+
+    let first = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("messages output should arrive before the malformed body tail")
+        .expect("messages stream should yield the first output")?;
+    assert!(matches!(first, ProviderChunk::TextDelta(text) if text == "partial"));
+
+    let error = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("malformed body tail should terminate promptly")
+        .expect("messages stream should yield a terminal error")
+        .expect_err("malformed body tail must not be treated as a clean EOF");
+    let message = error.to_string();
+    assert!(message.contains("deepseek messages stream read failed"));
+    assert!(message.contains("response_body_decode"));
+    assert!(message.contains("error decoding response body"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_surfaces_errors_from_unterminated_sse_frames() -> Result<()> {
     let chat_server = spawn_unterminated_sse_streaming_server("not-a-data-frame").await?;
     let provider = deepseek_provider(crate::DeepSeekProviderConfig {
@@ -1723,6 +2347,34 @@ async fn spawn_malformed_chunked_streaming_server() -> Result<String> {
         let _ = socket.read(&mut buffer).await;
         let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nZ\r\nbroken\r\n";
         let _ = socket.write_all(response.as_bytes()).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_messages_stream_then_malformed_chunk_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        let first = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
+        if socket.write_all(header.as_bytes()).await.is_err()
+            || socket
+                .write_all(format!("{:x}\r\n", first.len()).as_bytes())
+                .await
+                .is_err()
+            || socket.write_all(first.as_bytes()).await.is_err()
+            || socket.write_all(b"\r\n").await.is_err()
+        {
+            return;
+        }
+        let _ = socket.flush().await;
+        sleep(Duration::from_millis(50)).await;
+        let _ = socket.write_all(b"Z\r\nbroken\r\n").await;
     });
     Ok(format!("http://{}", address))
 }

@@ -1084,6 +1084,9 @@ fn seed_revision_decision(
         mode: Some(sigil_kernel::TaskStepMode::Write),
         isolation: Some(sigil_kernel::TaskIsolationMode::SequentialWorkspaceWrite),
         target_paths: vec!["src/coordinator.rs".to_owned()],
+        required_capabilities: Vec::new(),
+        deliverables: Vec::new(),
+        acceptance_criteria: Vec::new(),
         suggested_checks: Vec::new(),
         risk: None,
         notes: Vec::new(),
@@ -2082,6 +2085,9 @@ model = "deepseek-v4-flash"
         mode: Some(sigil_kernel::TaskStepMode::Write),
         isolation: Some(sigil_kernel::TaskIsolationMode::SequentialWorkspaceWrite),
         target_paths: vec!["src/coordinator.rs".to_owned()],
+        required_capabilities: Vec::new(),
+        deliverables: Vec::new(),
+        acceptance_criteria: Vec::new(),
         suggested_checks: Vec::new(),
         risk: None,
         notes: Vec::new(),
@@ -2182,6 +2188,78 @@ model = "deepseek-v4-flash"
             &stale,
         )
         .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_task_creation_is_durable_and_the_same_plan_can_retry() -> Result<()> {
+    let (mut session, request) = session_with_route_decision()?;
+    let action = sigil_kernel::StartPlanReviewAction {
+        decision_id: request.route_decision_id.clone().expect("decision id"),
+        plan_review_id: request.plan_review_id.clone(),
+        plan_id: request.plan_id.clone(),
+        source_turn: request.source_turn.clone(),
+    };
+    PlanReviewCoordinator::prepare_automatic_plan_review(&mut session, &action, None, 100)?;
+    let mut draft = draft_entry(&request);
+    draft.target_paths.clear();
+    PlanReviewCoordinator::commit_draft_from_child(&mut session, &draft, &request, 110)?;
+
+    let root_config: sigil_kernel::RootConfig = toml::from_str(
+        r#"
+config_version = 2
+
+[agent]
+connection = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let temp = tempfile::tempdir()?;
+    let mut create = crate::CreateTaskFromPlanRequest {
+        plan_id: request.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+        start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
+        permission_grant: Some(sigil_kernel::PlanApprovalPermission::WorkspaceEdits),
+    };
+    let error = PlanReviewCoordinator::create_task_from_plan(
+        &mut session,
+        &root_config,
+        temp.path(),
+        SessionRef::new_relative("session.jsonl")?,
+        &create,
+    )
+    .expect_err("a scoped edit grant needs concrete target paths");
+    assert!(error.to_string().contains("no concrete target paths"));
+
+    let projection = session.plan_artifact_projection();
+    let failure = projection
+        .latest_decision(&request.plan_id)
+        .expect("failure settlement");
+    assert_eq!(failure.decision, PlanDecision::TaskCreationFailed);
+    assert!(
+        failure
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no concrete target paths"))
+    );
+    assert_eq!(projection.latest_pending_plan(), Some(&draft));
+
+    create.permission_grant = None;
+    let retried = PlanReviewCoordinator::create_task_from_plan(
+        &mut session,
+        &root_config,
+        temp.path(),
+        SessionRef::new_relative("session.jsonl")?,
+        &create,
+    )?;
+    assert_eq!(retried.entry.plan_id, request.plan_id);
+    assert_eq!(
+        session
+            .plan_artifact_projection()
+            .latest_decision(&request.plan_id)
+            .map(|decision| decision.decision),
+        Some(PlanDecision::Accepted)
     );
     Ok(())
 }

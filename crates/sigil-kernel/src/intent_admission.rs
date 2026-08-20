@@ -1332,47 +1332,107 @@ pub fn append_task_intent_plan_admission(
     admission: &IntentPlanAdmissionV1,
     task_plan: TaskPlanEntry,
 ) -> Result<IntentAdmissionWriteOutcomeV1> {
+    append_task_intent_plan_admission_with_step_contracts(session, admission, task_plan, Vec::new())
+}
+
+/// Atomically appends Intent admission, the accepted task plan, and its V2 step contracts.
+///
+/// # Errors
+///
+/// Returns an error when a sidecar targets another plan or step, conflicts with durable state, or
+/// when the normal Intent admission checks fail.
+pub fn append_task_intent_plan_admission_with_step_contracts(
+    session: &mut Session,
+    admission: &IntentPlanAdmissionV1,
+    task_plan: TaskPlanEntry,
+    step_contracts: Vec<crate::TaskStepContractBoundEntryV2>,
+) -> Result<IntentAdmissionWriteOutcomeV1> {
     ensure_admission_matches_session(session, admission)?;
     if task_plan.status != TaskPlanStatus::Accepted {
         bail!("IntentPlan task admission requires an accepted TaskPlan");
     }
     validate_task_plan_graph_steps(&task_plan.steps)?;
     validate_task_plan_intent_refs(admission.plan(), &task_plan)?;
+    for contract in &step_contracts {
+        contract.validate()?;
+        if contract.task_id != task_plan.task_id
+            || contract.plan_version != task_plan.plan_version
+            || !task_plan
+                .steps
+                .iter()
+                .any(|step| step.step_id == contract.step_id)
+        {
+            bail!("IntentPlan step contract does not belong to the accepted TaskPlan");
+        }
+    }
     let binding = IntentTaskPlanBindingV1 {
         task_id: task_plan.task_id.as_str().to_owned(),
         task_plan_version: task_plan.plan_version,
     };
     let durable_events = admission.durable_events(Some(binding.clone()))?;
-    let task_entry = SessionLogEntry::Control(ControlEntry::TaskPlan(task_plan.clone()));
+    let contract_set_commit = (!step_contracts.is_empty())
+        .then(|| crate::TaskPlanContractSetCommittedV2::new(&task_plan, &step_contracts))
+        .transpose()?;
+    let mut task_entries = Vec::with_capacity(step_contracts.len().saturating_add(2));
+    task_entries.push(SessionLogEntry::Control(ControlEntry::TaskPlan(
+        task_plan.clone(),
+    )));
+    task_entries.extend(
+        step_contracts.iter().cloned().map(|contract| {
+            SessionLogEntry::Control(ControlEntry::TaskStepContractBoundV2(contract))
+        }),
+    );
+    if let Some(commit) = contract_set_commit.as_ref() {
+        task_entries.push(SessionLogEntry::Control(
+            ControlEntry::TaskPlanContractSetCommittedV2(commit.clone()),
+        ));
+    }
     let store = session
         .durable_store()
         .context("IntentPlan admission requires a durable session store")?;
     let predicate_admission = admission.clone();
     let predicate_binding = binding.clone();
     let predicate_task_plan = task_plan.clone();
+    let predicate_step_contracts = step_contracts.clone();
+    let predicate_contract_set_commit = contract_set_commit.clone();
     let appended = store
-        .append_events_and_session_entries_if(
-            durable_events,
-            std::slice::from_ref(&task_entry),
-            move |records| {
-                let projection = IntentStackProjectionV1::from_records(records)?;
-                if projection.is_exact_task_admission(&predicate_admission, &predicate_binding) {
-                    let existing = durable_task_plan(records, &predicate_binding)?
-                        .context("accepted IntentPlan is missing its durable TaskPlan")?;
-                    if existing != predicate_task_plan {
-                        bail!("durable TaskPlan conflicts with the accepted IntentPlan binding");
-                    }
-                    return Ok(false);
+        .append_events_and_session_entries_if(durable_events, &task_entries, move |records| {
+            let projection = IntentStackProjectionV1::from_records(records)?;
+            if projection.is_exact_task_admission(&predicate_admission, &predicate_binding) {
+                let existing = durable_task_plan(records, &predicate_binding)?
+                    .context("accepted IntentPlan is missing its durable TaskPlan")?;
+                if existing != predicate_task_plan {
+                    bail!("durable TaskPlan conflicts with the accepted IntentPlan binding");
                 }
-                if durable_task_plan(records, &predicate_binding)?.is_some() {
-                    bail!("TaskPlan version already exists without the requested IntentPlan");
+                let existing_contracts = durable_task_step_contracts(records, &predicate_binding)?;
+                if existing_contracts != predicate_step_contracts {
+                    bail!("durable TaskPlan conflicts with its V2 step contracts");
                 }
-                projection.validate_initial_append(&predicate_admission)
-            },
-        )?
+                if durable_task_contract_set_commit(records, &predicate_binding)?
+                    != predicate_contract_set_commit
+                {
+                    bail!("durable TaskPlan is missing its V2 contract-set commit");
+                }
+                return Ok(false);
+            }
+            if durable_task_plan(records, &predicate_binding)?.is_some() {
+                bail!("TaskPlan version already exists without the requested IntentPlan");
+            }
+            projection.validate_initial_append(&predicate_admission)
+        })?
         .is_some();
     if appended || !live_session_has_task_plan(session, &task_plan) {
-        session.record_durably_appended_control(ControlEntry::TaskPlan(task_plan));
+        let mut controls = Vec::with_capacity(step_contracts.len().saturating_add(2));
+        controls.push(ControlEntry::TaskPlan(task_plan));
+        controls.extend(
+            step_contracts
+                .into_iter()
+                .map(ControlEntry::TaskStepContractBoundV2),
+        );
+        if let Some(commit) = contract_set_commit {
+            controls.push(ControlEntry::TaskPlanContractSetCommittedV2(commit));
+        }
+        session.record_durably_appended_controls(controls);
     }
     Ok(IntentAdmissionWriteOutcomeV1 {
         appended,
@@ -1828,6 +1888,53 @@ fn durable_task_plan(
             bail!("durable stream contains conflicting TaskPlan entries for one version");
         }
         matching = Some(task_plan);
+    }
+    Ok(matching)
+}
+
+fn durable_task_step_contracts(
+    records: &[SessionStreamRecord],
+    binding: &IntentTaskPlanBindingV1,
+) -> Result<Vec<crate::TaskStepContractBoundEntryV2>> {
+    let mut contracts = Vec::new();
+    for record in records {
+        let Some(SessionLogEntry::Control(ControlEntry::TaskStepContractBoundV2(contract))) =
+            record.session_log_entry()?
+        else {
+            continue;
+        };
+        if contract.task_id.as_str() == binding.task_id
+            && contract.plan_version == binding.task_plan_version
+        {
+            contracts.push(contract);
+        }
+    }
+    Ok(contracts)
+}
+
+fn durable_task_contract_set_commit(
+    records: &[SessionStreamRecord],
+    binding: &IntentTaskPlanBindingV1,
+) -> Result<Option<crate::TaskPlanContractSetCommittedV2>> {
+    let mut matching = None;
+    for record in records {
+        let Some(SessionLogEntry::Control(ControlEntry::TaskPlanContractSetCommittedV2(commit))) =
+            record.session_log_entry()?
+        else {
+            continue;
+        };
+        if commit.task_id.as_str() != binding.task_id
+            || commit.plan_version != binding.task_plan_version
+        {
+            continue;
+        }
+        if matching
+            .as_ref()
+            .is_some_and(|existing: &crate::TaskPlanContractSetCommittedV2| existing != &commit)
+        {
+            bail!("durable stream contains conflicting V2 contract-set commits");
+        }
+        matching = Some(commit);
     }
     Ok(matching)
 }

@@ -392,6 +392,7 @@ impl ToolOutputPressureProjectionV1 {
             if let Some(entry) = session_entry_from_stored_event(record.stored_event())? {
                 match entry {
                     SessionLogEntry::User(_) => self.begin_turn(),
+                    SessionLogEntry::RuntimeContextSnapshotV2(_) => {}
                     SessionLogEntry::Assistant(message) => {
                         for call_id in message
                             .tool_calls

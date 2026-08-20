@@ -109,7 +109,22 @@ fn render_body(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, the
 
 fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'static>> {
     let detail = &pending.detail;
-    let mut lines = vec![heading("Summary", theme)];
+    let mut lines = Vec::new();
+    if let Some(error) = pending.last_run_failure.as_deref() {
+        lines.push(Line::from(Span::styled(
+            "Task could not start",
+            Style::default()
+                .fg(theme.palette.status_error)
+                .add_modifier(Modifier::BOLD),
+        )));
+        push_multiline(&mut lines, "", error);
+        lines.push(Line::from(Span::styled(
+            "The plan remains available. Correct the reported condition and run it again.",
+            styles::muted(&theme.palette),
+        )));
+        lines.push(Line::raw(String::new()));
+    }
+    lines.push(heading("Summary", theme));
     push_multiline(&mut lines, "", &detail.summary);
     lines.push(Line::raw(String::new()));
     lines.push(heading("Steps", theme));

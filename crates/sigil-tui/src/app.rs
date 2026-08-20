@@ -285,6 +285,7 @@ pub(crate) struct PendingPlanApproval {
     pub(crate) workspace_snapshot_id: Option<String>,
     pub(crate) stale: bool,
     pub(crate) stale_reason: Option<String>,
+    pub(crate) last_run_failure: Option<String>,
     pub(crate) allowed_actions: Vec<sigil_kernel::PublicPlanAction>,
     pub(crate) revision: Option<sigil_kernel::PublicPlanRevisionSummaryV1>,
     pub(crate) detail: sigil_kernel::PlanReviewDetailV1,
@@ -438,6 +439,9 @@ impl PendingPlanApproval {
                 isolation: None,
                 target_paths: target_paths.clone(),
                 suggested_checks: Vec::new(),
+                deliverables: Vec::new(),
+                acceptance_criteria: Vec::new(),
+                required_capabilities: Vec::new(),
                 risk: None,
                 notes: Vec::new(),
             })
@@ -457,6 +461,7 @@ impl PendingPlanApproval {
             workspace_snapshot_id: None,
             stale: false,
             stale_reason: None,
+            last_run_failure: None,
             allowed_actions: vec![
                 sigil_kernel::PublicPlanAction::Run,
                 sigil_kernel::PublicPlanAction::Save,
@@ -911,6 +916,11 @@ impl AppState {
         >,
     ) {
         *self.pending_worker_session_attachment.borrow_mut() = Some((session_log_path, attachment));
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn release_worker_session_attachment(&self) {
+        *self.pending_worker_session_attachment.borrow_mut() = None;
     }
 
     #[cfg_attr(test, allow(dead_code))]
@@ -1451,13 +1461,6 @@ impl AppState {
 
         if let Some(outcome) = self.handle_user_input_form_key_event(key) {
             return Ok(outcome);
-        }
-
-        if key.code == KeyCode::Esc && key.modifiers.is_empty() && self.runtime.is_busy {
-            self.modal_state = None;
-            self.last_notice = Some("cancellation requested".to_owned());
-            self.push_timeline(TimelineRole::Notice, "cancel requested");
-            return Ok(Some(AppAction::CancelRun));
         }
 
         if let Some(outcome) = self.handle_pending_plan_approval_key_event(key) {

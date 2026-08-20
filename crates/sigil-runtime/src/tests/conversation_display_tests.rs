@@ -5,11 +5,13 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use sigil_kernel::{
     AgentRole, ApprovalMode, AssistantMessageKind, CheckpointRestoreConflict,
-    CheckpointRestoreConflictReason, ControlEntry, ConversationForked, ConversationInputKind,
-    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
-    ConversationInputTarget, ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MessageRole,
-    ModelMessage, PermissionRisk, SecretRedactor, Session, SessionLogEntry, SessionRef,
+    CheckpointRestoreConflictReason, ContextBodyRef, ContextInclusionReason, ContextItem,
+    ContextSensitivity, ContextSource, ContextTrustLevel, ControlEntry, ConversationForked,
+    ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
+    ConversationInputQueuedEntry, ConversationInputTarget, ConversationRunFinalizedEntryV1,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
+    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, PermissionRisk,
+    RuntimeContextCandidates, SecretRedactor, Session, SessionLogEntry, SessionRef,
     SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent, TaskId, TaskIsolationMode,
     TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
     TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
@@ -38,6 +40,55 @@ fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> 
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let session = Session::new("provider", "model").with_store(store.clone());
     Ok((temp, store, session))
+}
+
+fn internal_context_fixture() -> RuntimeContextCandidates {
+    let body = "provider-only context snapshot body";
+    let mut candidates = RuntimeContextCandidates::new();
+    candidates.items.push(ContextItem {
+        id: "context-display-fixture".to_owned(),
+        source: ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some("context-display-snapshot".to_owned()),
+        token_cost: sigil_kernel::estimate_context_token_cost(body),
+        score: Some(100.0),
+        score_breakdown: Vec::new(),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: ContextBodyRef::inline(body),
+    });
+    candidates
+        .snippets
+        .insert("context-display-fixture".to_owned(), body.to_owned());
+    candidates
+}
+
+#[test]
+fn conversation_display_hides_provider_visible_context_v2_snapshots() -> Result<()> {
+    let (temp, store, mut session) = durable_session()?;
+    session.append_user_message(ModelMessage::user("inspect the display contract"))?;
+    session.build_request_with_transient_messages_and_context(
+        temp.path(),
+        &MemoryConfig::with_enabled(false),
+        Vec::new(),
+        None,
+        None,
+        None,
+        &[],
+        internal_context_fixture(),
+    )?;
+    session.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("done".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
+
+    let page = conversation_display_page(store.path(), session.session_scope_id(), None, 20, None)?;
+    assert_eq!(page.items.len(), 2);
+    assert!(!format!("{page:?}").contains("provider-only context snapshot body"));
+    Ok(())
 }
 
 fn approval_entry(
@@ -1645,6 +1696,9 @@ fn legacy_plan_review_fixture_entries() -> Result<(
                     mode: None,
                     isolation: None,
                     target_paths: vec!["crates/sigil-kernel/src/session".to_owned()],
+                    required_capabilities: Vec::new(),
+                    deliverables: Vec::new(),
+                    acceptance_criteria: Vec::new(),
                     suggested_checks: Vec::new(),
                     risk: Some("medium".to_owned()),
                     notes: vec!["fixture content is redacted".to_owned()],

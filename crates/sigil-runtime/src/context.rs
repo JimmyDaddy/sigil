@@ -69,7 +69,7 @@ pub struct WarmLspContextProvider {
     snapshot: Option<LspContextSnapshot>,
 }
 
-/// Runtime-owned Context V1 resolver bound to the code-intelligence service used by local tools.
+/// Runtime-owned Context V2 resolver bound to the code-intelligence service used by local tools.
 ///
 /// Resolution reads only the existing warm LSP cache. It never starts a server or issues a new LSP
 /// request; a miss falls back to the bounded request-local RepoMap.
@@ -593,11 +593,11 @@ fn mcp_resource_media_type_allowed(media_type: Option<&str>) -> bool {
         )
 }
 
-/// Builds bounded repository-file Context V1 candidates from a user query.
+/// Builds bounded repository-file Context V2 candidates from a user query.
 ///
 /// This is intentionally conservative: it never leaves the workspace root, avoids common generated
 /// and local-development directories, and emits excluded metadata instead of reading secret-like
-/// files. It is a production wiring point for Context V1, not a persistent repo index.
+/// files. It is a production wiring point for Context V2, not a persistent repo index.
 ///
 /// # Errors
 ///
@@ -639,10 +639,7 @@ pub fn context_candidates_from_repo_query(
         if !terms.is_empty() {
             collect_lexical_file_candidates(&workspace_root, &terms, &mut candidates);
         }
-        if !terms.is_empty()
-            || query_has_source_intent(query)
-            || !explicit_code_query_terms(query).is_empty()
-        {
+        if !terms.is_empty() || !explicit_code_query_terms(query).is_empty() {
             collect_source_symbol_candidates(&workspace_root, query, &terms, &mut candidates);
         }
     }
@@ -973,9 +970,6 @@ fn lsp_context_unavailable_candidates(kind: &str, reason: &str) -> RuntimeContex
 
 #[derive(Debug, Clone)]
 struct LspContextQueryProfile {
-    source_intent: bool,
-    diagnostic_intent: bool,
-    reference_intent: bool,
     lexical_terms: BTreeSet<String>,
     symbol_terms: BTreeSet<String>,
 }
@@ -984,24 +978,7 @@ impl LspContextQueryProfile {
     fn from_query(query: &str) -> Self {
         let lexical_terms = lexical_query_terms(query);
         let source_profile = SourceQueryProfile::from_query(query, &lexical_terms);
-        let lower = query.to_lowercase();
         Self {
-            source_intent: source_profile.source_intent,
-            diagnostic_intent: contains_any(
-                &lower,
-                &[
-                    "diagnostic",
-                    "diagnostics",
-                    "error",
-                    "warning",
-                    "报错",
-                    "诊断",
-                ],
-            ),
-            reference_intent: contains_any(
-                &lower,
-                &["reference", "references", "usage", "usages", "调用", "引用"],
-            ),
             lexical_terms: source_profile.lexical_terms,
             symbol_terms: source_profile.symbol_terms,
         }
@@ -1065,14 +1042,6 @@ fn lsp_symbol_score(
         }
     }
 
-    if profile.source_intent && !score_breakdown.is_empty() {
-        push_score_component(
-            &mut score_breakdown,
-            ContextScoreComponentKind::RetrievalScore,
-            8.0,
-        );
-    }
-
     let score = score_from_breakdown(&score_breakdown);
     (score >= 10.0).then_some(LspContextScore {
         score,
@@ -1084,22 +1053,10 @@ fn lsp_diagnostic_score(
     diagnostic: &CodeDiagnostic,
     profile: &LspContextQueryProfile,
 ) -> Option<LspContextScore> {
-    if !profile.diagnostic_intent && !profile.source_intent {
-        return None;
-    }
-
     let path = diagnostic.path.to_lowercase();
     let message = diagnostic.message.to_lowercase();
     let severity = diagnostic.severity.to_ascii_lowercase();
     let mut score_breakdown = Vec::new();
-
-    if profile.diagnostic_intent {
-        push_score_component(
-            &mut score_breakdown,
-            ContextScoreComponentKind::RetrievalScore,
-            18.0,
-        );
-    }
     for term in profile
         .lexical_terms
         .iter()
@@ -1122,7 +1079,7 @@ fn lsp_diagnostic_score(
     }
 
     let score = score_from_breakdown(&score_breakdown);
-    (score >= 18.0).then_some(LspContextScore {
+    (score >= 10.0).then_some(LspContextScore {
         score,
         score_breakdown,
     })
@@ -1132,10 +1089,6 @@ fn lsp_reference_score(
     location: &CodeLocation,
     profile: &LspContextQueryProfile,
 ) -> Option<LspContextScore> {
-    if !profile.reference_intent && !profile.source_intent && profile.symbol_terms.is_empty() {
-        return None;
-    }
-
     let path = location.path.to_lowercase();
     let preview = location
         .preview
@@ -1144,13 +1097,6 @@ fn lsp_reference_score(
         .to_lowercase();
     let mut score_breakdown = Vec::new();
 
-    if profile.reference_intent {
-        push_score_component(
-            &mut score_breakdown,
-            ContextScoreComponentKind::RetrievalScore,
-            16.0,
-        );
-    }
     for term in profile
         .lexical_terms
         .iter()
@@ -1173,7 +1119,7 @@ fn lsp_reference_score(
     }
 
     let score = score_from_breakdown(&score_breakdown);
-    (score >= 16.0).then_some(LspContextScore {
+    (score >= 14.0).then_some(LspContextScore {
         score,
         score_breakdown,
     })
@@ -1410,7 +1356,7 @@ fn lexical_file_score(
         path_score,
     );
 
-    if path_score == 0.0 && !looks_like_text_file(relative) {
+    if path_score == 0.0 || !looks_like_text_file(relative) {
         return None;
     }
 
@@ -1435,14 +1381,12 @@ fn lexical_file_score(
 
 #[derive(Debug, Clone)]
 struct SourceQueryProfile {
-    source_intent: bool,
     lexical_terms: BTreeSet<String>,
     symbol_terms: BTreeSet<String>,
 }
 
 impl SourceQueryProfile {
     fn from_query(query: &str, lexical_terms: &BTreeSet<String>) -> Self {
-        let mut source_intent = query_has_source_intent(query);
         let mut source_terms = BTreeSet::new();
         let mut symbol_terms = BTreeSet::new();
 
@@ -1459,85 +1403,63 @@ impl SourceQueryProfile {
 
         for term in lexical_terms {
             match source_query_term_role(term) {
-                SourceQueryTermRole::SourceIntentHint => {
-                    source_intent = true;
-                }
                 SourceQueryTermRole::SymbolLike => {
                     for variant in source_term_variants(term) {
                         symbol_terms.insert(variant.clone());
                         source_terms.insert(variant);
                     }
                 }
-                SourceQueryTermRole::PathLike | SourceQueryTermRole::LexicalHint => {
+                SourceQueryTermRole::PathLike | SourceQueryTermRole::Lexical => {
                     source_terms.insert(term.clone());
                 }
-                SourceQueryTermRole::NaturalLanguage => {}
             }
         }
 
         for token in source_query_tokens(query) {
             match source_query_term_role(&token) {
-                SourceQueryTermRole::SourceIntentHint => {
-                    source_intent = true;
-                }
                 SourceQueryTermRole::SymbolLike | SourceQueryTermRole::PathLike => {
                     for variant in source_term_variants(&token) {
                         symbol_terms.insert(variant.clone());
                         source_terms.insert(variant);
                     }
                 }
-                SourceQueryTermRole::LexicalHint => {
+                SourceQueryTermRole::Lexical => {
                     source_terms.insert(token.to_lowercase());
                 }
-                SourceQueryTermRole::NaturalLanguage => {}
             }
         }
 
         Self {
-            source_intent,
             lexical_terms: source_terms,
             symbol_terms,
         }
     }
 
     fn should_scan_sources(&self) -> bool {
-        self.source_intent || !self.symbol_terms.is_empty()
+        !self.lexical_terms.is_empty() || !self.symbol_terms.is_empty()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceQueryTermRole {
-    SourceIntentHint,
     SymbolLike,
     PathLike,
-    LexicalHint,
-    NaturalLanguage,
+    Lexical,
 }
 
 fn source_query_term_role(term: &str) -> SourceQueryTermRole {
     let trimmed = term.trim_matches(|ch: char| matches!(ch, '`' | '"' | '\''));
     if trimmed.is_empty() {
-        return SourceQueryTermRole::NaturalLanguage;
+        return SourceQueryTermRole::Lexical;
     }
 
-    let lower = trimmed.to_lowercase();
     if is_path_like_query_term(trimmed) {
         return SourceQueryTermRole::PathLike;
-    }
-    if is_source_intent_hint(&lower) {
-        return SourceQueryTermRole::SourceIntentHint;
-    }
-    if is_natural_language_query_term(&lower) {
-        return SourceQueryTermRole::NaturalLanguage;
     }
     if is_code_like_query_token(trimmed) {
         return SourceQueryTermRole::SymbolLike;
     }
-    if lower.chars().count() >= 2 {
-        return SourceQueryTermRole::LexicalHint;
-    }
-
-    SourceQueryTermRole::NaturalLanguage
+    SourceQueryTermRole::Lexical
 }
 
 #[derive(Debug, Clone)]
@@ -1563,14 +1485,9 @@ fn source_symbol_file_score(
         .unwrap_or_default();
     let index_text = source_file.indexed_text.to_lowercase();
     let mut score_breakdown = Vec::new();
-    if profile.source_intent {
-        push_score_component(
-            &mut score_breakdown,
-            ContextScoreComponentKind::SourcePath,
-            28.0,
-        );
-    }
     let mut matched_symbol = false;
+    let mut matched_lexical_path = false;
+    let mut lexical_content_matches = 0_u32;
     let mut snippet_terms = BTreeSet::new();
     let mut symbol_range = None;
     let symbols = repo_map
@@ -1639,16 +1556,21 @@ fn source_symbol_file_score(
                 ContextScoreComponentKind::SourcePath,
                 18.0,
             );
+            matched_lexical_path = true;
             snippet_terms.insert(term.clone());
         }
         if index_text.contains(term) {
-            push_score_component(
-                &mut score_breakdown,
-                ContextScoreComponentKind::RetrievalScore,
-                4.0,
-            );
+            lexical_content_matches = lexical_content_matches.saturating_add(1);
             snippet_terms.insert(term.clone());
         }
+    }
+
+    if matched_symbol || matched_lexical_path {
+        push_score_component(
+            &mut score_breakdown,
+            ContextScoreComponentKind::RetrievalScore,
+            lexical_content_matches as f32 * 4.0,
+        );
     }
 
     if relative.components().any(|component| {
@@ -1755,32 +1677,6 @@ fn darwin_file_flags_are_dataless(flags: u32) -> bool {
     flags & DARWIN_SF_DATALESS != 0
 }
 
-fn query_has_source_intent(query: &str) -> bool {
-    let lower = query.to_lowercase();
-    contains_any(
-        &lower,
-        &[
-            "rust",
-            "source",
-            "source file",
-            "源码",
-            "源码文件",
-            "函数",
-            "trait",
-            "function",
-            "definition",
-            "defined",
-            "module",
-            "模块",
-            "runner",
-            "handoff",
-            "surface",
-            "在哪个",
-            "定义在哪",
-        ],
-    )
-}
-
 fn source_query_tokens(query: &str) -> impl Iterator<Item = String> {
     unicode_query_terms(query, false).into_iter()
 }
@@ -1820,66 +1716,8 @@ fn collect_explicit_query_term(segment: &str, terms: &mut BTreeSet<String>) {
 fn is_code_like_query_token(token: &str) -> bool {
     token.contains('_')
         || token.contains('-')
-        || token.chars().any(char::is_uppercase) && token.chars().any(char::is_lowercase)
-}
-
-fn is_source_intent_hint(term: &str) -> bool {
-    matches!(
-        term,
-        "rust"
-            | "source"
-            | "source-file"
-            | "repo-file"
-            | "file"
-            | "files"
-            | "implementation"
-            | "implementations"
-            | "implements"
-            | "defined"
-            | "definition"
-            | "function"
-            | "functions"
-            | "trait"
-            | "traits"
-            | "module"
-            | "modules"
-    )
-}
-
-fn is_natural_language_query_term(term: &str) -> bool {
-    matches!(
-        term,
-        "which"
-            | "where"
-            | "what"
-            | "who"
-            | "when"
-            | "why"
-            | "how"
-            | "only"
-            | "output"
-            | "answer"
-            | "provided"
-            | "automatic"
-            | "system"
-            | "most"
-            | "likely"
-            | "please"
-            | "based"
-            | "using"
-            | "without"
-            | "with"
-            | "from"
-            | "into"
-            | "this"
-            | "that"
-            | "the"
-            | "and"
-            | "for"
-            | "are"
-            | "you"
-            | "not"
-    )
+        || !token.is_ascii()
+        || token.chars().skip(1).any(char::is_uppercase) && token.chars().any(char::is_lowercase)
 }
 
 fn is_path_like_query_term(term: &str) -> bool {
@@ -1932,10 +1770,6 @@ fn camel_to_snake(token: &str) -> String {
     out
 }
 
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
 fn explicit_query_paths(query: &str) -> impl Iterator<Item = PathBuf> + '_ {
     query
         .split(|ch: char| !is_query_path_char(ch))
@@ -1970,7 +1804,7 @@ fn lexical_query_terms(query: &str) -> BTreeSet<String> {
                 source_query_term_role(term),
                 SourceQueryTermRole::SymbolLike
                     | SourceQueryTermRole::PathLike
-                    | SourceQueryTermRole::LexicalHint
+                    | SourceQueryTermRole::Lexical
             )
         })
         .collect()

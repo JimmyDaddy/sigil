@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fmt,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
@@ -33,22 +34,26 @@ use crate::{
         PermissionEvaluationContext, PermissionPolicyChain, ToolApprovalSessionGrantFacet,
         tool_approval_session_grant_availability_for_plan,
     },
-    permission_plan::ToolPermissionPlanV2,
+    permission_plan::{ToolPermissionEffect, ToolPermissionPlanV2},
     provider::{ModelMessage, Provider, ToolCall},
     session::{
         ControlEntry, Session, SessionLogEntry, ToolApprovalAuditAction,
         ToolApprovalTerminalStatusV2, ToolApprovalUserDecision, ToolExecutionStatus,
     },
     task::{
-        TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceAssessmentContext,
-        TaskId, TaskParticipantAttemptId, TaskPlanStatus, TaskPlanUpdateContext, TaskRunStatus,
-        TaskStepId, task_guidance_apply_tool_spec, task_plan_update_tool_spec_for_worktree,
+        TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
+        TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD,
+        TaskGuidanceAssessmentContext, TaskId, TaskParticipantAttemptId, TaskPlanStatus,
+        TaskPlanUpdateContext, TaskRunStatus, TaskStepCheckpointV2, TaskStepId,
+        task_guidance_apply_tool_spec, task_plan_update_tool_spec_for_worktree,
     },
     task_handoff::{
         CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
-        ConversationTurnRef, REQUEST_TASK_PLANNING_TOOL_NAME, TaskContinuationHandoffBinding,
-        TaskHandoffId, TaskPlanningHandoffBinding, continue_existing_task_tool_spec,
-        continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
+        ConversationTurnRef, KEEP_PENDING_PLAN_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
+        RUN_PENDING_PLAN_TOOL_NAME, TaskContinuationHandoffBinding, TaskHandoffId,
+        TaskPlanningHandoffBinding, continue_existing_task_tool_spec,
+        continue_without_task_planning_tool_spec, keep_pending_plan_tool_spec,
+        request_task_planning_tool_spec, run_pending_plan_tool_spec,
     },
     task_orchestrator::{
         task_participant_finalization_prompt_contract_material,
@@ -56,8 +61,9 @@ use crate::{
         task_planner_system_prompt_contract_material,
     },
     tool::{
-        PreparedToolCall, ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
-        ToolProgressSink, ToolRegistry, ToolResult, ToolSpec, ToolSubject,
+        PreparedToolCall, ToolAccess, ToolCategory, ToolConcurrencyClass, ToolContext,
+        ToolErrorKind, ToolMutationTracking, ToolProgressEvent, ToolProgressSink, ToolRegistry,
+        ToolResult, ToolSpec, ToolSubject,
     },
 };
 
@@ -113,7 +119,9 @@ use task_handoff::{
     append_tool_ignored_after_routing_decision, append_tool_ignored_after_task_handoff,
     append_tool_rejected_during_task_routing, continue_existing_task_call_is_accepted,
     continue_without_task_planning_call_is_accepted, handle_continue_existing_task_call,
-    handle_continue_without_task_planning_call, handle_task_planning_request_call,
+    handle_continue_without_task_planning_call, handle_keep_pending_plan_call,
+    handle_run_pending_plan_call, handle_task_planning_request_call,
+    keep_pending_plan_call_is_accepted, run_pending_plan_call_is_accepted,
     task_planning_request_call_is_accepted,
 };
 use task_plan::{
@@ -150,14 +158,14 @@ const MAX_FINAL_ANSWER_BLOCKER_RETRIES: usize = 3;
 
 struct RoutingMicroturnEventFilter<'a, H> {
     inner: &'a mut H,
-    suppress_narrative: bool,
+    suppress_internal_activity: bool,
 }
 
 impl<'a, H> RoutingMicroturnEventFilter<'a, H> {
-    fn new(inner: &'a mut H, suppress_narrative: bool) -> Self {
+    fn new(inner: &'a mut H, suppress_internal_activity: bool) -> Self {
         Self {
             inner,
-            suppress_narrative,
+            suppress_internal_activity,
         }
     }
 }
@@ -167,14 +175,29 @@ where
     H: EventHandler,
 {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
-        if self.suppress_narrative
-            && matches!(
-                event,
+        let suppress = self.suppress_internal_activity
+            && match &event {
                 RunEvent::TextDelta(_)
-                    | RunEvent::ReasoningDelta(_)
-                    | RunEvent::AssistantMessage(_)
-            )
-        {
+                | RunEvent::ReasoningDelta(_)
+                | RunEvent::AssistantMessage(_)
+                | RunEvent::ToolCallArgsDelta { .. } => true,
+                RunEvent::ToolCallStarted(call) | RunEvent::ToolCallCompleted(call) => {
+                    !is_writable_memory_route_tool(&call.name)
+                }
+                RunEvent::ToolApprovalRequested { call, .. } => {
+                    !is_writable_memory_route_tool(&call.name)
+                }
+                RunEvent::ToolProgress(progress) => {
+                    !is_writable_memory_route_tool(&progress.tool_name)
+                }
+                RunEvent::ToolResult(result) => !is_writable_memory_route_tool(&result.tool_name),
+                RunEvent::ToolApprovalResolved { .. }
+                | RunEvent::Usage(_)
+                | RunEvent::ContinuationState(_)
+                | RunEvent::Control(_)
+                | RunEvent::Notice(_) => false,
+            };
+        if suppress {
             return Ok(());
         }
         self.inner.handle(event)
@@ -201,6 +224,8 @@ struct ChannelToolProgressSink {
     sender: mpsc::UnboundedSender<ToolProgressEvent>,
 }
 
+const MAX_PARALLEL_READ_ONLY_TOOL_BODIES: usize = 4;
+
 impl ToolProgressSink for ChannelToolProgressSink {
     fn emit(&self, event: ToolProgressEvent) -> Result<()> {
         self.sender
@@ -209,15 +234,16 @@ impl ToolProgressSink for ChannelToolProgressSink {
     }
 }
 
-async fn execute_after_started_audit_with_progress(
+async fn execute_resolved_after_started_audit_with_progress(
     tools: &ToolRegistry,
+    invocation: &crate::tool::ResolvedToolInvocation,
     ctx: ToolContext,
     call: ToolCall,
     handler: &mut (impl EventHandler + Send),
 ) -> Result<ToolResult> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let ctx = ctx.with_progress_sink(Arc::new(ChannelToolProgressSink { sender }));
-    let execution = tools.execute_after_started_audit(ctx, call);
+    let execution = invocation.execute_after_started_audit(tools, ctx, call);
     tokio::pin!(execution);
 
     loop {
@@ -318,9 +344,25 @@ pub enum AgentRunDisposition {
     PlanReviewDraftSubmitted(PlanReviewDraftSubmittedAction),
     StartDurableTask(StartDurableTaskAction),
     ContinueDurableTask(Box<ContinueDurableTaskAction>),
+    RunPendingPlan(RunPendingPlanAction),
+    PendingPlanDecisionRequired(PendingPlanDecisionRequiredAction),
     TaskPlanAccepted,
     Interrupted,
     Blocked,
+}
+
+/// Host-bound execution decision for the exact draft-ready Plan selected before dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunPendingPlanAction {
+    pub plan_id: PlanId,
+    pub plan_hash: String,
+    pub source_turn: ConversationTurnRef,
+}
+
+/// Host-bound negative decision that preserves a pending Plan without starting ordinary work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPlanDecisionRequiredAction {
+    pub plan_id: PlanId,
 }
 
 /// Stable action emitted after a PlanReview route decision is accepted.
@@ -363,10 +405,31 @@ pub struct ContinueDurableTaskAction {
     pub task_status: TaskRunStatus,
     pub plan_status: Option<TaskPlanStatus>,
     pub route_contract_fingerprint: String,
-    /// Exact source prompt retained only in process memory for Task guidance review.
+    /// Model-selected, host-validated continuation operation. The host never derives it from a
+    /// localized or reconstructed natural-language prompt.
+    pub control: TaskContinuationControl,
+    /// Exact source prompt retained only in process memory for Task guidance review. A pure
+    /// resume may keep recovered audit material here, but `control` remains authoritative.
     pub guidance: crate::SecretString,
     /// Durable safe receipt that the adapter revalidates before dispatch.
     pub guidance_receipt: crate::TaskContinuationSelectedEntry,
+}
+
+/// Model-selected, host-validated semantic control carried by a durable continuation action.
+///
+/// The routing tool supplies this typed choice. Host code must never recover it by matching the
+/// user's localized natural-language prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskContinuationControl {
+    ResumeTask,
+    ApplyTaskGuidance(String),
+}
+
+impl ContinueDurableTaskAction {
+    #[must_use]
+    pub fn control(&self) -> TaskContinuationControl {
+        self.control.clone()
+    }
 }
 
 /// Input contract for one agent run.
@@ -858,6 +921,18 @@ impl AgentRunInput {
         self
     }
 
+    /// Returns the exact host-bound logical run identity before this input is consumed.
+    #[must_use]
+    pub fn logical_run_id(&self) -> Option<&str> {
+        self.logical_run_id.as_deref()
+    }
+
+    /// Returns the inherited root cancellation capability for child-admission binding.
+    #[must_use]
+    pub fn cancellation_handle(&self) -> Option<RunCancellationHandle> {
+        self.cancellation.clone()
+    }
+
     /// Binds host-owned user-input requests to the concrete agent thread that emitted them.
     #[must_use]
     pub fn with_source_thread_id(mut self, source_thread_id: crate::AgentThreadId) -> Self {
@@ -984,10 +1059,11 @@ fn validate_initial_frozen_plan_review_routing_request(
         frozen_request,
         &binding.source_turn,
         &binding.objective,
-        route_surface_tool_specs_for_context(
+        route_surface_tool_specs_for_bound_context(
             route_capability,
             writable_memory_routing,
             task_continuation_available,
+            binding.pending_plan.is_some(),
         ),
         options,
         max_output_tokens,
@@ -1073,6 +1149,12 @@ fn validate_initial_frozen_routing_request(
         runtime_context,
         &[],
     )?;
+    // The frozen source turn may carry an exact process-local overlay while the durable routing
+    // binding intentionally carries only its safe projection. Once that one source message has
+    // been normalized above, its derived materialization bit must be normalized as well; all
+    // other overlays remain covered by the independently rebuilt expected request.
+    normalized_request.deterministic_materialization =
+        expected_request.deterministic_materialization;
     normalize_routing_system_message_id(&mut expected_request)?;
     let normalized_material =
         FrozenProviderRequestMaterial::freeze(session.session_scope_id(), normalized_request)?;
@@ -1127,6 +1209,25 @@ pub fn route_surface_tool_specs_for_context(
     writable_memory: bool,
     task_continuation_available: bool,
 ) -> Vec<ToolSpec> {
+    route_surface_tool_specs_for_bound_context(
+        capability,
+        writable_memory,
+        task_continuation_available,
+        false,
+    )
+}
+
+/// Frozen automatic-routing surface including an exact pending-Plan decision boundary.
+#[must_use]
+pub fn route_surface_tool_specs_for_bound_context(
+    capability: AutomaticRouteCapability,
+    writable_memory: bool,
+    task_continuation_available: bool,
+    pending_plan_available: bool,
+) -> Vec<ToolSpec> {
+    if pending_plan_available && capability.routes_automatically() {
+        return vec![run_pending_plan_tool_spec(), keep_pending_plan_tool_spec()];
+    }
     let mut specs = route_surface_tool_specs(capability);
     if task_continuation_available && capability.routes_automatically() {
         specs.push(continue_existing_task_tool_spec());
@@ -1256,21 +1357,20 @@ async fn promote_pending_follow_up<H>(
     session: &mut Session,
     logical_run_id: &str,
     handler: &mut H,
-) -> Result<bool>
+) -> Result<Option<RuntimeContextCandidates>>
 where
     H: EventHandler + Send,
 {
-    if provider
+    if let Some(promoted) = provider
         .promote_next_pending_input(session, logical_run_id)
         .await?
-        .is_some()
     {
         handler.handle(RunEvent::Notice(
             "queued follow-up injected at a safe point".to_owned(),
         ))?;
-        return Ok(true);
+        return Ok(Some(promoted.runtime_context));
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Records the durable chat route decision for a routing microturn whose free text was delivered
@@ -1387,6 +1487,7 @@ pub enum AgentRunTerminalReason {
     MaxTurns,
     DelegationUnsatisfied,
     FinalAnswerBlocked,
+    RepairReplanRequired,
     TaskRoutingUnsatisfied,
     RoutingFreeTextFallback,
     AwaitingUserInput,
@@ -1400,7 +1501,10 @@ impl AgentRunTerminalReason {
     pub fn blocks_successful_completion(self) -> bool {
         matches!(
             self,
-            Self::DelegationUnsatisfied | Self::FinalAnswerBlocked | Self::TaskRoutingUnsatisfied
+            Self::DelegationUnsatisfied
+                | Self::FinalAnswerBlocked
+                | Self::RepairReplanRequired
+                | Self::TaskRoutingUnsatisfied
         )
     }
 
@@ -1410,6 +1514,7 @@ impl AgentRunTerminalReason {
             Self::MaxTurns => "max_turns",
             Self::DelegationUnsatisfied => "delegation_unsatisfied",
             Self::FinalAnswerBlocked => "final_answer_blocked",
+            Self::RepairReplanRequired => "repair_replan_required",
             Self::TaskRoutingUnsatisfied => "task_routing_unsatisfied",
             Self::RoutingFreeTextFallback => "routing_free_text_fallback",
             Self::AwaitingUserInput => "awaiting_user_input",
@@ -1629,17 +1734,37 @@ pub trait AgentHostedTurnPreparer: Send + Sync {
 /// Runtime hook consulted at safe turn boundaries while a conversation run is active.
 ///
 /// The host durably promotes the next queued follow-up, appends its user message to the
-/// session, and returns the prompt text. The kernel then continues the same run with that
-/// message as the next user turn instead of interrupting or finalizing.
+/// session, and resolves runtime context for that exact prompt. The kernel then continues the
+/// same run with the promoted message and fresh context instead of interrupting or finalizing.
 #[async_trait]
 pub trait PendingConversationInputProvider: Send + Sync {
-    /// Durably promotes the next queued follow-up for this logical run and returns its
-    /// prompt text, or `None` when no follow-up is ready to inject.
+    /// Durably promotes the next queued follow-up for this logical run and returns its prompt plus
+    /// freshly resolved runtime context, or `None` when no follow-up is ready to inject.
     async fn promote_next_pending_input(
         &self,
         session: &mut Session,
         logical_run_id: &str,
-    ) -> Result<Option<String>>;
+    ) -> Result<Option<PromotedConversationInput>>;
+}
+
+/// One durably promoted follow-up together with context resolved for that exact prompt.
+#[derive(Clone)]
+pub struct PromotedConversationInput {
+    pub prompt: String,
+    pub runtime_context: RuntimeContextCandidates,
+}
+
+impl fmt::Debug for PromotedConversationInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PromotedConversationInput")
+            .field("prompt", &"[redacted]")
+            .field(
+                "runtime_context_item_count",
+                &self.runtime_context.items.len(),
+            )
+            .finish()
+    }
 }
 
 /// Provider-backed agent loop with a registered tool surface.
@@ -1788,6 +1913,7 @@ where
             approval_handler,
             None,
         )
+        .boxed()
         .await
     }
 
@@ -1818,6 +1944,7 @@ where
             approval_handler,
             Some(agent_delegate),
         )
+        .boxed()
         .await
     }
 
@@ -1849,6 +1976,7 @@ where
             approval_handler,
             None,
         )
+        .boxed()
         .await
     }
 
@@ -1881,6 +2009,7 @@ where
             approval_handler,
             Some(agent_delegate),
         )
+        .boxed()
         .await
     }
 
@@ -1925,7 +2054,7 @@ where
             persisted_user_message_id,
             persisted_image_attachments,
             mut transient_context,
-            runtime_context,
+            mut runtime_context,
             task_plan_update,
             plan_review_draft,
             plan_review_submit_only,
@@ -2047,8 +2176,11 @@ where
             }
             Some(AgentRunPurpose::PlanReview(_)) => None,
         };
-        let is_task_participant =
-            matches!(purpose.as_ref(), Some(AgentRunPurpose::TaskParticipant(_)));
+        let task_participant_context = purpose.as_ref().and_then(|purpose| match purpose {
+            AgentRunPurpose::TaskParticipant(context) => Some(context.clone()),
+            _ => None,
+        });
+        let is_task_participant = task_participant_context.is_some();
         if tools
             .spec_for(crate::REQUEST_USER_INPUT_TOOL_NAME)
             .is_some()
@@ -2063,6 +2195,9 @@ where
                 REQUEST_TASK_PLANNING_TOOL_NAME,
                 REQUEST_PLAN_REVIEW_TOOL_NAME,
                 CONTINUE_EXISTING_TASK_TOOL_NAME,
+                CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+                RUN_PENDING_PLAN_TOOL_NAME,
+                KEEP_PENDING_PLAN_TOOL_NAME,
             ] {
                 if tools.spec_for(reserved).is_some() {
                     return Err(anyhow!(
@@ -2122,6 +2257,9 @@ where
         }
         if writable_memory_routing {
             validate_writable_memory_route_registry(tools)?;
+        }
+        if let Some(frozen_request) = initial_frozen_provider_request.as_ref() {
+            session.ensure_frozen_request_runtime_context_v2(frozen_request)?;
         }
         if let (Some(binding), Some(frozen_request)) = (
             task_handoff_binding.as_ref(),
@@ -2334,6 +2472,10 @@ where
         let mut participant_finalization_pending = false;
         let mut participant_finalization_prompt_injected = false;
         let mut participant_finalization_dispatched = false;
+        let mut latest_task_step_checkpoint =
+            task_participant_context.as_ref().and_then(|context| {
+                latest_task_step_checkpoint_for_attempt(session.entries(), &context.attempt_id)
+            });
         let tool_artifact_read_budget = tool_artifact_read_budget.unwrap_or_default();
 
         let mut model_turns = 0usize;
@@ -2438,7 +2580,7 @@ where
                 && !task_routing_decision_pending
                 && matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_)))
                 && let Some(provider) = pending_input_provider.as_ref()
-                && promote_pending_follow_up(
+                && let Some(follow_up_context) = promote_pending_follow_up(
                     provider.as_ref(),
                     &mut *session,
                     &logical_run_id,
@@ -2446,6 +2588,7 @@ where
                 )
                 .await?
             {
+                runtime_context = follow_up_context;
                 continue;
             }
 
@@ -2454,10 +2597,13 @@ where
             let mut tool_specs = if participant_finalization_turn {
                 Vec::new()
             } else if task_routing_decision_pending {
-                route_surface_tool_specs_for_context(
+                route_surface_tool_specs_for_bound_context(
                     route_capability,
                     writable_memory_routing,
                     task_continuation_binding.is_some(),
+                    plan_review_binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.pending_plan.is_some()),
                 )
             } else {
                 tools
@@ -2735,7 +2881,7 @@ where
                 total_tool_calls += completed_calls.len();
                 let tool_preamble_overlay = append_tool_preamble_message(
                     session,
-                    &mut RoutingMicroturnEventFilter::new(handler, false),
+                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
                     tools,
                     &assistant_text,
                     &completed_calls,
@@ -2795,18 +2941,38 @@ where
                             submit_plan_draft_call_is_accepted(context, call)
                         })
                     });
+                let pending_plan_bound = plan_review_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.pending_plan.is_some());
+                let accepted_run_pending_plan_in_batch = task_routing_decision_pending
+                    && pending_plan_bound
+                    && completed_calls
+                        .iter()
+                        .any(run_pending_plan_call_is_accepted);
+                let accepted_keep_pending_plan_in_batch = task_routing_decision_pending
+                    && pending_plan_bound
+                    && !accepted_run_pending_plan_in_batch
+                    && completed_calls
+                        .iter()
+                        .any(keep_pending_plan_call_is_accepted);
                 let accepted_task_continuation_in_batch = task_routing_decision_pending
+                    && !accepted_run_pending_plan_in_batch
+                    && !accepted_keep_pending_plan_in_batch
                     && task_continuation_binding.is_some()
                     && completed_calls
                         .iter()
                         .any(continue_existing_task_call_is_accepted);
                 let accepted_task_handoff_in_batch = task_routing_decision_pending
+                    && !accepted_run_pending_plan_in_batch
+                    && !accepted_keep_pending_plan_in_batch
                     && !accepted_task_continuation_in_batch
                     && task_handoff_binding.is_some()
                     && completed_calls
                         .iter()
                         .any(task_planning_request_call_is_accepted);
                 let accepted_plan_review_in_batch = task_routing_decision_pending
+                    && !accepted_run_pending_plan_in_batch
+                    && !accepted_keep_pending_plan_in_batch
                     && !accepted_task_handoff_in_batch
                     && plan_review_binding.is_some()
                     && completed_calls.iter().any(|call| {
@@ -2815,6 +2981,8 @@ where
                             .is_some_and(|binding| plan_review_call_is_accepted(binding, call))
                     });
                 let accepted_direct_conversation_in_batch = task_routing_decision_pending
+                    && !accepted_run_pending_plan_in_batch
+                    && !accepted_keep_pending_plan_in_batch
                     && !accepted_task_handoff_in_batch
                     && !accepted_plan_review_in_batch
                     && completed_calls
@@ -2842,17 +3010,65 @@ where
                 let mut accepted_task_handoff = None;
                 let mut accepted_task_continuation = None;
                 let mut accepted_plan_review = None;
+                let mut accepted_run_pending_plan = None;
+                let mut accepted_keep_pending_plan = None;
                 let mut accepted_direct_conversation = false;
                 let mut accepted_task_guidance = false;
                 let mut accepted_user_input = None;
                 let mut assistant_batch_results: Vec<(crate::ToolCall, ToolResult)> = Vec::new();
+                let mut ordinary_tool_calls = Vec::new();
                 let mut execution_calls = completed_calls;
                 if task_routing_decision_pending && writable_memory_routing {
                     // A route decision hands this turn to another runtime immediately after the
                     // batch settles. Execute approved memory writes first even when the provider
                     // emitted the route call first, so a crash during handoff cannot durably
                     // record the route while silently losing the user's explicit memory intent.
-                    execution_calls.sort_by_key(|call| !is_writable_memory_route_tool(&call.name));
+                    let (memory_calls, remaining_calls): (Vec<_>, Vec<_>) = execution_calls
+                        .into_iter()
+                        .partition(|call| is_writable_memory_route_tool(&call.name));
+                    execution_calls = remaining_calls;
+                    let memory_calls = memory_calls
+                        .into_iter()
+                        .map(|call| {
+                            let safe_call = crate::project_tool_call_for_persistence(call.clone())?
+                                .durable_call;
+                            Ok((call, safe_call))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let memory_context = ToolCallProcessingContext {
+                        session,
+                        handler,
+                        tools,
+                        options: &options,
+                        permission_policy: &permission_policy,
+                        tool_ctx: tool_ctx.clone(),
+                        cancellation: cancellation.clone(),
+                        root_logical_run_id: &logical_run_id,
+                        agent_delegation_run_context: agent_delegation_run_context.as_ref(),
+                        agent_delegate: &mut agent_delegate,
+                        approval_handler,
+                        outcome: &mut outcome,
+                        satisfied_agent_tool_calls: &mut satisfied_agent_tool_calls,
+                        transient_context: &mut transient_context,
+                        web_task_tree_budget: web_task_tree_budget.clone(),
+                        tool_artifact_read_budget: tool_artifact_read_budget.clone(),
+                        assistant_batch_results: &mut assistant_batch_results,
+                    };
+                    if let Err(error) = process_tool_call_batch(memory_context, memory_calls).await
+                    {
+                        if let Some(delegate) = agent_delegate.as_deref_mut()
+                            && let Err(cleanup_error) = delegate.abort_join_dependencies(
+                                session,
+                                handler,
+                                "parent memory tool result failed before routing handoff",
+                            )
+                        {
+                            return Err(error.context(format!(
+                                "host join cleanup also failed: {cleanup_error:#}"
+                            )));
+                        }
+                        return Err(error);
+                    }
                 }
                 for call in execution_calls {
                     let safe_call =
@@ -2881,6 +3097,20 @@ where
                             || accepted_user_input.is_some())
                     {
                         append_tool_ignored_after_user_input_request(
+                            session,
+                            &mut outcome,
+                            &call,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
+                    if (accepted_run_pending_plan_in_batch || accepted_keep_pending_plan_in_batch)
+                        && ((call.name != RUN_PENDING_PLAN_TOOL_NAME
+                            || accepted_run_pending_plan.is_some())
+                            && (call.name != KEEP_PENDING_PLAN_TOOL_NAME
+                                || accepted_keep_pending_plan.is_some()))
+                    {
+                        append_tool_ignored_after_task_handoff(
                             session,
                             &mut outcome,
                             &call,
@@ -2969,6 +3199,62 @@ where
                         )?;
                         continue;
                     }
+                    if call.name == RUN_PENDING_PLAN_TOOL_NAME {
+                        if !task_routing_decision_pending {
+                            append_tool_rejected_during_task_routing(
+                                session,
+                                &mut outcome,
+                                &call,
+                                &mut assistant_batch_results,
+                            )?;
+                            continue;
+                        }
+                        let Some(binding) = plan_review_binding.as_ref() else {
+                            append_tool_rejected_during_task_routing(
+                                session,
+                                &mut outcome,
+                                &call,
+                                &mut assistant_batch_results,
+                            )?;
+                            continue;
+                        };
+                        accepted_run_pending_plan = handle_run_pending_plan_call(
+                            session,
+                            &mut outcome,
+                            &call,
+                            binding,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
+                    if call.name == KEEP_PENDING_PLAN_TOOL_NAME {
+                        if !task_routing_decision_pending {
+                            append_tool_rejected_during_task_routing(
+                                session,
+                                &mut outcome,
+                                &call,
+                                &mut assistant_batch_results,
+                            )?;
+                            continue;
+                        }
+                        let Some(binding) = plan_review_binding.as_ref() else {
+                            append_tool_rejected_during_task_routing(
+                                session,
+                                &mut outcome,
+                                &call,
+                                &mut assistant_batch_results,
+                            )?;
+                            continue;
+                        };
+                        accepted_keep_pending_plan = handle_keep_pending_plan_call(
+                            session,
+                            &mut outcome,
+                            &call,
+                            binding,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
                     if call.name == CONTINUE_EXISTING_TASK_TOOL_NAME {
                         if !task_routing_decision_pending {
                             let mut result = ToolResult::error(
@@ -3043,6 +3329,7 @@ where
                             session,
                             &mut outcome,
                             &call,
+                            !pending_plan_bound,
                             &mut assistant_batch_results,
                         )?;
                         accepted_direct_conversation = accepted_direct_conversation || accepted;
@@ -3311,40 +3598,41 @@ where
                         accepted_task_guidance = accepted_task_guidance || accepted;
                         continue;
                     }
-                    let tool_call_context = ToolCallProcessingContext {
-                        session,
-                        handler,
-                        tools,
-                        options: &options,
-                        permission_policy: &permission_policy,
-                        tool_ctx: tool_ctx.clone(),
-                        cancellation: cancellation.clone(),
-                        root_logical_run_id: &logical_run_id,
-                        agent_delegation_run_context: agent_delegation_run_context.as_ref(),
-                        agent_delegate: &mut agent_delegate,
-                        approval_handler,
-                        outcome: &mut outcome,
-                        satisfied_agent_tool_calls: &mut satisfied_agent_tool_calls,
-                        transient_context: &mut transient_context,
-                        web_task_tree_budget: web_task_tree_budget.clone(),
-                        tool_artifact_read_budget: tool_artifact_read_budget.clone(),
-                        assistant_batch_results: &mut assistant_batch_results,
-                    };
-                    if let Err(error) = process_tool_call(tool_call_context, call, safe_call).await
+                    ordinary_tool_calls.push((call, safe_call));
+                }
+                let tool_call_context = ToolCallProcessingContext {
+                    session,
+                    handler,
+                    tools,
+                    options: &options,
+                    permission_policy: &permission_policy,
+                    tool_ctx: tool_ctx.clone(),
+                    cancellation: cancellation.clone(),
+                    root_logical_run_id: &logical_run_id,
+                    agent_delegation_run_context: agent_delegation_run_context.as_ref(),
+                    agent_delegate: &mut agent_delegate,
+                    approval_handler,
+                    outcome: &mut outcome,
+                    satisfied_agent_tool_calls: &mut satisfied_agent_tool_calls,
+                    transient_context: &mut transient_context,
+                    web_task_tree_budget: web_task_tree_budget.clone(),
+                    tool_artifact_read_budget: tool_artifact_read_budget.clone(),
+                    assistant_batch_results: &mut assistant_batch_results,
+                };
+                if let Err(error) =
+                    process_tool_call_batch(tool_call_context, ordinary_tool_calls).await
+                {
+                    if let Some(delegate) = agent_delegate.as_deref_mut()
+                        && let Err(cleanup_error) = delegate.abort_join_dependencies(
+                            session,
+                            handler,
+                            "parent tool result failed before host join settle",
+                        )
                     {
-                        if let Some(delegate) = agent_delegate.as_deref_mut()
-                            && let Err(cleanup_error) = delegate.abort_join_dependencies(
-                                session,
-                                handler,
-                                "parent tool result failed before host join settle",
-                            )
-                        {
-                            return Err(error.context(format!(
-                                "host join cleanup also failed: {cleanup_error:#}"
-                            )));
-                        }
-                        return Err(error);
+                        return Err(error
+                            .context(format!("host join cleanup also failed: {cleanup_error:#}")));
                     }
+                    return Err(error);
                 }
                 if is_task_participant {
                     if outcome.changed_files.len() > changed_files_before_batch {
@@ -3372,13 +3660,25 @@ where
                         .copied()
                         .unwrap_or(usize::MAX)
                 });
+                let task_step_checkpoint = task_participant_context
+                    .as_ref()
+                    .map(|context| {
+                        build_task_step_checkpoint(
+                            context,
+                            model_turns,
+                            &assistant_batch_results,
+                            &outcome.changed_files,
+                            latest_task_step_checkpoint.as_ref(),
+                        )
+                    })
+                    .transpose()?;
                 // RFC-0062 11.2/11.5: settle the whole assistant tool-call batch with the
                 // deterministic two-phase preview allocator before the next provider request.
                 // A settlement failure keeps the same cleanup contract as a per-tool emit
                 // failure: join dependencies are aborted before the error propagates.
                 if let Err(error) = emit_tool_result_batch(
                     session,
-                    &mut RoutingMicroturnEventFilter::new(handler, false),
+                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
                     &mut outcome,
                     std::mem::take(&mut assistant_batch_results),
                 ) {
@@ -3393,6 +3693,20 @@ where
                             .context(format!("host join cleanup also failed: {cleanup_error:#}")));
                     }
                     return Err(error);
+                }
+                if let Some(checkpoint) = task_step_checkpoint {
+                    session
+                        .append_control(ControlEntry::TaskStepCheckpointV2(checkpoint.clone()))?;
+                    if checkpoint.no_progress_count >= TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD
+                        && !participant_finalization_dispatched
+                    {
+                        participant_finalization_pending = true;
+                        handler.handle(RunEvent::Notice(
+                            "Repeated task-step analysis reached the same durable frontier; requesting a bounded finalization result."
+                                .to_owned(),
+                        ))?;
+                    }
+                    latest_task_step_checkpoint = Some(checkpoint);
                 }
                 if let Some(request) = accepted_user_input {
                     outcome.terminal_reason = AgentRunTerminalReason::AwaitingUserInput;
@@ -3427,6 +3741,32 @@ where
                         },
                         outcome,
                         disposition: AgentRunDisposition::StartDurableTask(action),
+                    });
+                }
+                if let Some(action) = accepted_run_pending_plan {
+                    outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;
+                    outcome.tool_calls = total_tool_calls;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::RunPendingPlan(action),
+                    });
+                }
+                if let Some(action) = accepted_keep_pending_plan {
+                    outcome.terminal_reason = AgentRunTerminalReason::PlanReviewHandoff;
+                    outcome.tool_calls = total_tool_calls;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::PendingPlanDecisionRequired(action),
                     });
                 }
                 if let Some(action) = accepted_task_continuation {
@@ -3501,10 +3841,6 @@ where
                 } else if task_routing_decision_pending {
                     if !task_routing_retry_used {
                         task_routing_retry_used = true;
-                        handler.handle(RunEvent::Notice(
-                            "routing decision was invalid; retrying the typed routing microturn"
-                                .to_owned(),
-                        ))?;
                         transient_context.push(ModelMessage::system(
                             conversation_route_routing_contract_material(),
                         ));
@@ -3512,10 +3848,6 @@ where
                         // The model twice failed to produce a typed routing decision. Degrade to
                         // an ordinary conversation instead of blocking: the user message is
                         // answered by the same run under the direct-conversation contract.
-                        handler.handle(RunEvent::Notice(
-                            "routing decision was not produced; continuing as an ordinary conversation"
-                                .to_owned(),
-                        ))?;
                         record_fallback_chat_route_decision(session, handler, purpose.as_ref())?;
                         task_routing_decision_pending = false;
                         transient_context.push(ModelMessage::system(
@@ -3612,10 +3944,6 @@ where
             if task_routing_decision_pending {
                 if !task_routing_retry_used {
                     task_routing_retry_used = true;
-                    handler.handle(RunEvent::Notice(
-                        "routing microturn returned free text; retrying with a typed decision"
-                            .to_owned(),
-                    ))?;
                     transient_context.push(ModelMessage::system(
                         conversation_route_routing_contract_material(),
                     ));
@@ -3624,10 +3952,6 @@ where
                 // The model twice failed to produce a typed routing decision. Degrade to an
                 // ordinary conversation instead of blocking: the user message is answered by
                 // the same run under the direct-conversation contract.
-                handler.handle(RunEvent::Notice(
-                    "routing decision was not produced; continuing as an ordinary conversation"
-                        .to_owned(),
-                ))?;
                 record_fallback_chat_route_decision(session, handler, purpose.as_ref())?;
                 task_routing_decision_pending = false;
                 transient_context.push(ModelMessage::system(
@@ -3734,14 +4058,15 @@ where
             final_answer_blocker_prompt = None;
             if participant_finalization_dispatched && assistant_text.trim().is_empty() {
                 handler.handle(RunEvent::Notice(
-                    "task participant finalization returned no bounded result".to_owned(),
+                    "task participant made no semantic progress after bounded finalization; repair or replan is required"
+                        .to_owned(),
                 ))?;
-                outcome.terminal_reason = AgentRunTerminalReason::MaxTurns;
+                outcome.terminal_reason = AgentRunTerminalReason::RepairReplanRequired;
                 outcome.tool_calls = total_tool_calls;
                 claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
                 append_run_lifecycle_events(
                     session,
-                    "interrupted",
+                    "blocked",
                     outcome.terminal_reason,
                     None,
                     total_tool_calls,
@@ -3753,7 +4078,7 @@ where
                         final_message_id: None,
                     },
                     outcome,
-                    disposition: AgentRunDisposition::Interrupted,
+                    disposition: AgentRunDisposition::Blocked,
                 });
             }
             // Final-answer gate: a queued follow-up keeps the run alive instead of finalizing.
@@ -3762,7 +4087,7 @@ where
             if !task_routing_decision_pending
                 && matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_)))
                 && let Some(provider) = pending_input_provider.as_ref()
-                && promote_pending_follow_up(
+                && let Some(follow_up_context) = promote_pending_follow_up(
                     provider.as_ref(),
                     &mut *session,
                     &logical_run_id,
@@ -3770,6 +4095,7 @@ where
                 )
                 .await?
             {
+                runtime_context = follow_up_context;
                 if !assistant_text.trim().is_empty() {
                     let exact_message = ModelMessage::assistant_with_kind(
                         Some(assistant_text),
@@ -3849,6 +4175,8 @@ where
 struct AuthorizedToolCall {
     call: ToolCall,
     execution_spec: Option<ToolSpec>,
+    resolved_invocation: Option<crate::tool::ResolvedToolInvocation>,
+    unresolved_error: Option<String>,
     /// Subjects resolved directly from the tool at authorization time. Prepared tools may replace
     /// these with artifact-exact subjects for policy evaluation, but execution must still prove
     /// that the live canonical targets have not drifted in the meantime.
@@ -3860,6 +4188,121 @@ struct AuthorizedToolCall {
     prepared_tool_call: Option<PreparedToolCall>,
     explicit_network_approval: bool,
     explicit_user_approval: bool,
+    /// Keeps the root run non-quiescent from successful authorization until the body settles.
+    _tool_effect: Option<RunEffectGuard>,
+}
+
+fn latest_task_step_checkpoint_for_attempt(
+    entries: &[SessionLogEntry],
+    attempt_id: &TaskParticipantAttemptId,
+) -> Option<TaskStepCheckpointV2> {
+    entries.iter().rev().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::TaskStepCheckpointV2(checkpoint))
+            if &checkpoint.attempt_id == attempt_id =>
+        {
+            Some(checkpoint.clone())
+        }
+        _ => None,
+    })
+}
+
+fn build_task_step_checkpoint(
+    context: &TaskParticipantContext,
+    model_turn: usize,
+    results: &[(ToolCall, ToolResult)],
+    changed_files: &[String],
+    previous: Option<&TaskStepCheckpointV2>,
+) -> Result<TaskStepCheckpointV2> {
+    let call_material = results
+        .iter()
+        .map(|(call, _)| {
+            let args: Value = serde_json::from_str(&call.args_json)
+                .map_err(|error| anyhow!("task checkpoint tool arguments are invalid: {error}"))?;
+            // Progress is about the semantic work lane, not a rewritten shell spelling. Keep
+            // process-observation commands normalized so cosmetic command rewrites cannot evade
+            // the guard. Artifact reads are different: the opaque source plus its page/search
+            // selector are a host-owned cursor, and advancing that cursor is genuine progress.
+            let progress_args = if matches!(
+                call.name.as_str(),
+                "bash" | "terminal_start" | "terminal_input"
+            ) {
+                serde_json::json!({"kind": "bounded_observation"})
+            } else {
+                crate::canonicalize_cache_stable_json(&args)?
+            };
+            Ok(serde_json::json!({
+                "tool": call.name,
+                "args": progress_args,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let semantic_call_hash = format!(
+        "sha256:{}",
+        crate::sha256_hex(&crate::event::canonical_json_bytes(&serde_json::json!({
+            "calls": call_material,
+        }))?)
+    );
+
+    let result_material = results
+        .iter()
+        .map(|(_, result)| {
+            let mut result_changed_files = result.metadata.changed_files.clone();
+            result_changed_files.sort();
+            result_changed_files.dedup();
+            // Only the digest is durable. Including model-visible content and bounded receipt
+            // facts lets pagination, changed command output, and newly discovered matches advance
+            // the frontier without persisting raw tool output in the checkpoint.
+            let model_content_hash = format!(
+                "sha256:{}",
+                crate::sha256_hex(result.to_model_content().as_bytes())
+            );
+            serde_json::json!({
+                "tool": result.tool_name,
+                "status": result.status,
+                "changed_files": result_changed_files,
+                "exit_code": result.metadata.exit_code,
+                "model_content_hash": model_content_hash,
+                "returned_bytes": result.metadata.returned_bytes,
+                "returned_lines": result.metadata.returned_lines,
+                "returned_matches": result.metadata.returned_matches,
+                "returned_entries": result.metadata.returned_entries,
+                "total_bytes": result.metadata.total_bytes,
+                "total_lines": result.metadata.total_lines,
+                "total_matches": result.metadata.total_matches,
+                "total_entries": result.metadata.total_entries,
+                "truncated": result.metadata.truncated,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut durable_changed_files = changed_files.to_vec();
+    durable_changed_files.sort();
+    durable_changed_files.dedup();
+    let result_frontier_hash = format!(
+        "sha256:{}",
+        crate::sha256_hex(&crate::event::canonical_json_bytes(&serde_json::json!({
+            "results": result_material,
+            "changed_files": durable_changed_files,
+        }))?)
+    );
+    let model_turn =
+        u32::try_from(model_turn).map_err(|_| anyhow!("task checkpoint model turn exceeds u32"))?;
+    let mut checkpoint = TaskStepCheckpointV2 {
+        schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+        task_id: context.task_id.clone(),
+        plan_version: context.plan_version,
+        step_id: context.step_id.clone(),
+        attempt_id: context.attempt_id.clone(),
+        model_turn,
+        semantic_call_hash,
+        result_frontier_hash,
+        no_progress_count: 0,
+    };
+    if checkpoint.repeated_frontier(previous) {
+        checkpoint.no_progress_count =
+            previous.map_or(1, |previous| previous.no_progress_count.saturating_add(1));
+    }
+    checkpoint.validate()?;
+    Ok(checkpoint)
 }
 
 struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
@@ -3884,11 +4327,500 @@ struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
     assistant_batch_results: &'run mut Vec<(crate::ToolCall, ToolResult)>,
 }
 
-async fn process_tool_call<H, A>(
-    context: ToolCallProcessingContext<'_, '_, '_, H, A>,
+impl<'run, 'policy, 'delegate, H, A> ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
+    fn reborrow<'borrow>(
+        &'borrow mut self,
+    ) -> ToolCallProcessingContext<'borrow, 'policy, 'delegate, H, A>
+    where
+        'run: 'borrow,
+    {
+        ToolCallProcessingContext {
+            session: &mut *self.session,
+            handler: &mut *self.handler,
+            tools: self.tools,
+            options: self.options,
+            permission_policy: self.permission_policy,
+            tool_ctx: self.tool_ctx.clone(),
+            cancellation: self.cancellation.clone(),
+            root_logical_run_id: self.root_logical_run_id,
+            agent_delegation_run_context: self.agent_delegation_run_context,
+            agent_delegate: &mut *self.agent_delegate,
+            approval_handler: &mut *self.approval_handler,
+            outcome: &mut *self.outcome,
+            satisfied_agent_tool_calls: &mut *self.satisfied_agent_tool_calls,
+            transient_context: &mut *self.transient_context,
+            web_task_tree_budget: self.web_task_tree_budget.clone(),
+            tool_artifact_read_budget: self.tool_artifact_read_budget.clone(),
+            assistant_batch_results: &mut *self.assistant_batch_results,
+        }
+    }
+}
+
+async fn process_tool_call_batch<H, A>(
+    mut context: ToolCallProcessingContext<'_, '_, '_, H, A>,
+    calls: Vec<(ToolCall, ToolCall)>,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let mut parallel_lane = Vec::new();
+    for (call, safe_call) in calls {
+        let Some(authorized) = authorize_tool_call(&mut context, call, safe_call).await? else {
+            continue;
+        };
+        if authorized_tool_call_can_run_parallel(&context, &authorized)? {
+            parallel_lane.push(authorized);
+            continue;
+        }
+        execute_parallel_tool_lane(&mut context, std::mem::take(&mut parallel_lane)).await?;
+        execute_authorized_tool_call(context.reborrow(), authorized).await?;
+    }
+    execute_parallel_tool_lane(&mut context, parallel_lane).await
+}
+
+fn authorized_tool_call_can_run_parallel<H, A>(
+    context: &ToolCallProcessingContext<'_, '_, '_, H, A>,
+    authorized: &AuthorizedToolCall,
+) -> Result<bool> {
+    let (Some(spec), Some(invocation), Some(plan)) = (
+        authorized.execution_spec.as_ref(),
+        authorized.resolved_invocation.as_ref(),
+        authorized.permission_plan.as_ref(),
+    ) else {
+        return Ok(false);
+    };
+    let statically_safe = invocation.contract.concurrency_class
+        == ToolConcurrencyClass::ParallelReadOnly
+        && invocation.contract.mutation_tracking == ToolMutationTracking::None
+        && spec.access == ToolAccess::Read
+        && spec.category != ToolCategory::Agent
+        && authorized.prepared_tool_call.is_none()
+        && plan.access == ToolAccess::Read
+        && plan.analysis.is_complete()
+        && !plan.containment.persistent_process
+        && plan.effects.iter().all(|effect| {
+            matches!(
+                effect,
+                ToolPermissionEffect::FileRead | ToolPermissionEffect::NetworkRead
+            )
+        });
+    if !statically_safe {
+        return Ok(false);
+    }
+    Ok(invocation
+        .execution_mutation_profile(&context.tool_ctx, &authorized.call.id)?
+        .is_none())
+}
+
+struct ParallelToolExecutionReady {
+    authorized: AuthorizedToolCall,
+    execution_started: Instant,
+    execution_tool_ctx: ToolContext,
+}
+
+struct ParallelToolExecutionOutcome {
+    ordinal: usize,
+    ready: ParallelToolExecutionReady,
+    result: ToolResult,
+}
+
+enum ParallelToolLaneSettlement {
+    Executed(Box<ParallelToolExecutionOutcome>),
+    Unstarted(Box<ParallelToolExecutionUnstarted>),
+}
+
+struct ParallelToolExecutionUnstarted {
+    authorized: AuthorizedToolCall,
+    status: ToolExecutionStatus,
+    result: ToolResult,
+}
+
+enum ParallelToolPreparation {
+    Ready {
+        execution_started: Instant,
+        execution_tool_ctx: ToolContext,
+    },
+    Unstarted {
+        status: ToolExecutionStatus,
+        result: ToolResult,
+    },
+}
+
+async fn execute_parallel_tool_body(
+    ordinal: usize,
+    ready: ParallelToolExecutionReady,
+    tools: ToolRegistry,
+    progress_sender: mpsc::UnboundedSender<ToolProgressEvent>,
+) -> ParallelToolExecutionOutcome {
+    let invocation = ready
+        .authorized
+        .resolved_invocation
+        .as_ref()
+        .expect("parallel tools retain an exact registered invocation")
+        .clone();
+    let call = ready.authorized.call.clone();
+    let execution_tool_ctx = ready
+        .execution_tool_ctx
+        .clone()
+        .with_progress_sink(Arc::new(ChannelToolProgressSink {
+            sender: progress_sender,
+        }));
+    let result = match invocation
+        .execute_after_started_audit(&tools, execution_tool_ctx, call.clone())
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => ToolResult::error(
+            call.id,
+            call.name,
+            ToolErrorKind::Internal,
+            error.to_string(),
+        ),
+    };
+    ParallelToolExecutionOutcome {
+        ordinal,
+        ready,
+        result,
+    }
+}
+
+async fn execute_parallel_tool_lane<H, A>(
+    context: &mut ToolCallProcessingContext<'_, '_, '_, H, A>,
+    lane: Vec<AuthorizedToolCall>,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    if lane.is_empty() {
+        return Ok(());
+    }
+    let mut queued = lane.into_iter().enumerate().collect::<VecDeque<_>>();
+    let mut pending = FuturesUnordered::new();
+    let mut completed = BTreeMap::new();
+    let mut first_error = None;
+    let mut stop_launching = false;
+    let (progress_sender, mut progress_receiver) = mpsc::unbounded_channel();
+
+    loop {
+        while !stop_launching && pending.len() < MAX_PARALLEL_READ_ONLY_TOOL_BODIES {
+            let Some((ordinal, authorized)) = queued.pop_front() else {
+                break;
+            };
+            if context
+                .cancellation
+                .as_ref()
+                .is_some_and(RunCancellationHandle::is_cancel_requested)
+            {
+                let result = ToolResult::error(
+                    authorized.call.id.clone(),
+                    authorized.call.name.clone(),
+                    ToolErrorKind::Interrupted,
+                    "root run cancelled before parallel tool execution",
+                );
+                completed.insert(
+                    ordinal,
+                    ParallelToolLaneSettlement::Unstarted(Box::new(
+                        ParallelToolExecutionUnstarted {
+                            authorized,
+                            status: ToolExecutionStatus::Interrupted,
+                            result,
+                        },
+                    )),
+                );
+                continue;
+            }
+            match prepare_parallel_tool_execution(context, &authorized) {
+                Ok(ParallelToolPreparation::Ready {
+                    execution_started,
+                    execution_tool_ctx,
+                }) => {
+                    let ready = ParallelToolExecutionReady {
+                        authorized,
+                        execution_started,
+                        execution_tool_ctx,
+                    };
+                    pending.push(execute_parallel_tool_body(
+                        ordinal,
+                        ready,
+                        context.tools.clone(),
+                        progress_sender.clone(),
+                    ));
+                }
+                Ok(ParallelToolPreparation::Unstarted { status, result }) => {
+                    completed.insert(
+                        ordinal,
+                        ParallelToolLaneSettlement::Unstarted(Box::new(
+                            ParallelToolExecutionUnstarted {
+                                authorized,
+                                status,
+                                result,
+                            },
+                        )),
+                    );
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    stop_launching = true;
+                    let result = ToolResult::error(
+                        authorized.call.id.clone(),
+                        authorized.call.name.clone(),
+                        ToolErrorKind::Interrupted,
+                        "parallel tool scheduling stopped after a settlement failure",
+                    );
+                    completed.insert(
+                        ordinal,
+                        ParallelToolLaneSettlement::Unstarted(Box::new(
+                            ParallelToolExecutionUnstarted {
+                                authorized,
+                                status: ToolExecutionStatus::Interrupted,
+                                result,
+                            },
+                        )),
+                    );
+                }
+            }
+        }
+
+        if stop_launching {
+            while let Some((ordinal, authorized)) = queued.pop_front() {
+                let result = ToolResult::error(
+                    authorized.call.id.clone(),
+                    authorized.call.name.clone(),
+                    ToolErrorKind::Interrupted,
+                    "parallel tool scheduling stopped before launch",
+                );
+                completed.insert(
+                    ordinal,
+                    ParallelToolLaneSettlement::Unstarted(Box::new(
+                        ParallelToolExecutionUnstarted {
+                            authorized,
+                            status: ToolExecutionStatus::Interrupted,
+                            result,
+                        },
+                    )),
+                );
+            }
+        }
+
+        if pending.is_empty() {
+            if queued.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        tokio::select! {
+            Some(outcome) = pending.next() => {
+                completed.insert(
+                    outcome.ordinal,
+                    ParallelToolLaneSettlement::Executed(Box::new(outcome)),
+                );
+            }
+            Some(progress) = progress_receiver.recv() => {
+                if let Err(error) = context.handler.handle(RunEvent::ToolProgress(progress)) {
+                    stop_launching = true;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+    }
+    drop(progress_sender);
+    while let Ok(progress) = progress_receiver.try_recv() {
+        if let Err(error) = context.handler.handle(RunEvent::ToolProgress(progress))
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+
+    for (_, settlement) in completed {
+        let settled = match settlement {
+            ParallelToolLaneSettlement::Executed(outcome) => {
+                let outcome = *outcome;
+                let ParallelToolExecutionReady {
+                    authorized,
+                    execution_started,
+                    ..
+                } = outcome.ready;
+                let AuthorizedToolCall {
+                    call,
+                    execution_subjects,
+                    _tool_effect,
+                    ..
+                } = authorized;
+                commit_tool_execution(
+                    context,
+                    call,
+                    execution_subjects,
+                    execution_started,
+                    false,
+                    None,
+                    outcome.result,
+                )
+            }
+            ParallelToolLaneSettlement::Unstarted(settlement) => {
+                let ParallelToolExecutionUnstarted {
+                    authorized,
+                    status,
+                    result,
+                } = *settlement;
+                settle_unstarted_tool_result(context, authorized, status, result)
+            }
+        };
+        if let Err(error) = settled
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn prepare_parallel_tool_execution<H, A>(
+    context: &mut ToolCallProcessingContext<'_, '_, '_, H, A>,
+    authorized: &AuthorizedToolCall,
+) -> Result<ParallelToolPreparation>
+where
+    H: EventHandler,
+{
+    let invocation = authorized
+        .resolved_invocation
+        .as_ref()
+        .expect("parallel tools retain an exact registered invocation");
+    let spec = authorized
+        .execution_spec
+        .as_ref()
+        .expect("parallel tools retain an execution spec");
+    if !context.tools.invocation_generation_is_current(invocation) {
+        let result = ToolResult::error(
+            authorized.call.id.clone(),
+            authorized.call.name.clone(),
+            ToolErrorKind::StalePreparedMutation,
+            "registered tool generation changed after authorization; approval must be repeated",
+        );
+        return Ok(ParallelToolPreparation::Unstarted {
+            status: ToolExecutionStatus::Failed,
+            result,
+        });
+    }
+
+    let current_plan = invocation.permission_plan(&context.tool_ctx, &authorized.call, None)?;
+    let current_subject_zones = context
+        .permission_policy
+        .decide_plan(spec, &current_plan)?
+        .subject_zones;
+    let bound_plan = authorized
+        .permission_plan
+        .as_ref()
+        .expect("parallel tools retain their authorization plan");
+    if current_plan.subjects != authorized.resolved_subjects
+        || current_subject_zones != authorized.resolved_subject_zones
+        || current_plan.plan_hash != bound_plan.plan_hash
+    {
+        let result = ToolResult::error(
+            authorized.call.id.clone(),
+            authorized.call.name.clone(),
+            ToolErrorKind::StalePreparedMutation,
+            "tool permission plan changed after authorization; approval must be repeated",
+        );
+        return Ok(ParallelToolPreparation::Unstarted {
+            status: ToolExecutionStatus::Failed,
+            result,
+        });
+    }
+
+    append_tool_execution_started_audit(
+        context.session,
+        context.handler,
+        &authorized.call,
+        &authorized.execution_subjects,
+        Some(&current_plan),
+        authorized.approval_identity.as_ref(),
+        None,
+        None,
+    )?;
+    let execution_tool_ctx = context
+        .tool_ctx
+        .clone()
+        .with_network_authorization(
+            context.options.permission_context.network_policy,
+            authorized.explicit_network_approval,
+        )
+        .with_approved_subjects(authorized.execution_subjects.clone())
+        .with_prepared_permission_plan(current_plan);
+    Ok(ParallelToolPreparation::Ready {
+        execution_started: Instant::now(),
+        execution_tool_ctx,
+    })
+}
+
+fn settle_unstarted_tool_result<H, A>(
+    context: &mut ToolCallProcessingContext<'_, '_, '_, H, A>,
+    authorized: AuthorizedToolCall,
+    status: ToolExecutionStatus,
+    mut result: ToolResult,
+) -> Result<()>
+where
+    H: EventHandler,
+{
+    attach_tool_call_context(
+        &mut result,
+        &authorized.call,
+        &authorized.execution_subjects,
+    );
+    append_tool_execution_audit(
+        context.session,
+        &authorized.call,
+        &authorized.execution_subjects,
+        status,
+        None,
+        Some(&result),
+    )?;
+    record_tool_run_outcome(context.outcome, &result);
+    context
+        .assistant_batch_results
+        .push((authorized.call, result));
+    Ok(())
+}
+
+fn settle_unresolved_tool_interruption(
+    session: &mut Session,
+    outcome: &mut AgentRunOutcome,
+    call: ToolCall,
+    reason: &str,
+    assistant_batch_results: &mut Vec<(ToolCall, ToolResult)>,
+) -> Result<()> {
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::Interrupted,
+        reason,
+    );
+    attach_tool_call_context(&mut result, &call, &[]);
+    append_tool_execution_audit(
+        session,
+        &call,
+        &[],
+        ToolExecutionStatus::Interrupted,
+        None,
+        Some(&result),
+    )?;
+    record_tool_run_outcome(outcome, &result);
+    assistant_batch_results.push((call, result));
+    Ok(())
+}
+
+async fn authorize_tool_call<H, A>(
+    context: &mut ToolCallProcessingContext<'_, '_, '_, H, A>,
     mut call: ToolCall,
     safe_call: ToolCall,
-) -> Result<()>
+) -> Result<Option<AuthorizedToolCall>>
 where
     H: EventHandler + Send,
     A: ApprovalHandler + Send,
@@ -3902,28 +4834,61 @@ where
         tool_ctx,
         cancellation,
         root_logical_run_id,
-        agent_delegation_run_context,
-        agent_delegate,
         approval_handler,
         outcome,
-        satisfied_agent_tool_calls,
-        transient_context,
-        web_task_tree_budget,
-        tool_artifact_read_budget,
         assistant_batch_results,
+        ..
     } = context;
+    let handler = &mut **handler;
     let mut explicit_network_approval = false;
     let mut explicit_user_approval = false;
-    let _tool_effect = begin_run_effect(cancellation.as_ref(), RunEffectKind::Tool)?;
+    if cancellation
+        .as_ref()
+        .is_some_and(|handle| handle.is_cancel_requested())
+    {
+        settle_unresolved_tool_interruption(
+            session,
+            outcome,
+            call,
+            "root run cancelled before tool authorization",
+            assistant_batch_results,
+        )?;
+        return Ok(None);
+    }
+    let tool_effect = match begin_run_effect(cancellation.as_ref(), RunEffectKind::Tool) {
+        Ok(effect) => effect,
+        Err(_error)
+            if cancellation
+                .as_ref()
+                .is_some_and(|handle| handle.is_cancel_requested()) =>
+        {
+            settle_unresolved_tool_interruption(
+                session,
+                outcome,
+                call,
+                "root run cancelled while admitting tool authorization",
+                assistant_batch_results,
+            )?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     let mut execution_subjects = Vec::new();
     let mut resolved_subjects = Vec::new();
     let mut resolved_subject_zones = Vec::new();
     let mut execution_permission_plan = None;
     let mut execution_approval_identity = None;
     let mut prepared_tool_call = None;
-    let execution_spec = tools.spec_for(&call.name);
-    if let Some(spec) = execution_spec.as_ref() {
-        let preparation_draft = match tools.prepare(tool_ctx.clone(), call.clone()).await {
+    let (resolved_invocation, unresolved_error) = match tools.resolve_invocation(&call.name) {
+        Ok(invocation) => (Some(invocation), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let execution_spec = resolved_invocation
+        .as_ref()
+        .map(|invocation| invocation.contract.spec.clone());
+    if let (Some(spec), Some(invocation)) = (execution_spec.as_ref(), resolved_invocation.as_ref())
+    {
+        let preparation_draft = match invocation.prepare(tool_ctx.clone(), call.clone()).await {
             Ok(preparation) => preparation,
             Err(error) => {
                 append_invalid_tool_input_result(
@@ -3934,27 +4899,26 @@ where
                     error,
                     assistant_batch_results,
                 )?;
-                return Ok(());
+                return Ok(None);
             }
         };
         let prepared_subjects = preparation_draft.as_ref().map(|draft| draft.subjects());
-        let permission_plan =
-            match tools.permission_plan_with_subjects(&tool_ctx, &call, prepared_subjects) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    append_invalid_tool_input_result(
-                        session,
-                        outcome,
-                        &call,
-                        prepared_subjects.unwrap_or_default(),
-                        error,
-                        assistant_batch_results,
-                    )?;
-                    return Ok(());
-                }
-            };
+        let permission_plan = match invocation.permission_plan(tool_ctx, &call, prepared_subjects) {
+            Ok(plan) => plan,
+            Err(error) => {
+                append_invalid_tool_input_result(
+                    session,
+                    outcome,
+                    &call,
+                    prepared_subjects.unwrap_or_default(),
+                    error,
+                    assistant_batch_results,
+                )?;
+                return Ok(None);
+            }
+        };
         let resolved_permission_plan = if prepared_subjects.is_some() {
-            Some(match tools.permission_plan(&tool_ctx, &call) {
+            Some(match invocation.permission_plan(tool_ctx, &call, None) {
                 Ok(plan) => plan,
                 Err(error) => {
                     append_invalid_tool_input_result(
@@ -3965,7 +4929,7 @@ where
                         error,
                         assistant_batch_results,
                     )?;
-                    return Ok(());
+                    return Ok(None);
                 }
             })
         } else {
@@ -4068,7 +5032,7 @@ where
         let preview_capture = capture_tool_preview_for_decision(
             session,
             handler,
-            tools,
+            invocation,
             tool_ctx.clone(),
             &call,
             spec,
@@ -4093,7 +5057,7 @@ where
                 );
                 attach_tool_call_context(&mut result, &call, &decision.subjects);
                 assistant_batch_results.push((call.clone(), result));
-                return Ok(());
+                return Ok(None);
             }
             ApprovalMode::Ask => {
                 let approval_identity = approval_identity
@@ -4270,7 +5234,7 @@ where
                     );
                     attach_tool_call_context(&mut result, &call, &decision.subjects);
                     assistant_batch_results.push((call.clone(), result));
-                    return Ok(());
+                    return Ok(None);
                 }
                 let approval_is_explicit_network_user_action = approval_is_explicit_user_action
                     && decision.network_effect.is_some()
@@ -4334,7 +5298,7 @@ where
                             );
                             attach_tool_call_context(&mut result, &call, &decision.subjects);
                             assistant_batch_results.push((call.clone(), result));
-                            return Ok(());
+                            return Ok(None);
                         }
                         explicit_user_approval = approval_is_explicit_user_action;
                         explicit_network_approval = approval_is_explicit_network_user_action;
@@ -4400,12 +5364,13 @@ where
                             );
                             attach_tool_call_context(&mut result, &call, &decision.subjects);
                             assistant_batch_results.push((call.clone(), result));
-                            return Ok(());
+                            return Ok(None);
                         }
                         let mut approved_call = call.clone();
                         approved_call.args_json = args_json;
                         let reevaluate_approved_call = || -> Result<_> {
-                            let approved_plan = tools.permission_plan(&tool_ctx, &approved_call)?;
+                            let approved_plan =
+                                invocation.permission_plan(tool_ctx, &approved_call, None)?;
                             if approved_plan.plan_hash != permission_plan.plan_hash {
                                 return Err(anyhow!(
                                     "approval-time argument changes altered the permission plan"
@@ -4457,7 +5422,7 @@ where
                                     error,
                                     assistant_batch_results,
                                 )?;
-                                return Ok(());
+                                return Ok(None);
                             }
                         };
                         if approved_decision != decision {
@@ -4493,7 +5458,7 @@ where
                                 &approved_decision.subjects,
                             );
                             assistant_batch_results.push((call.clone(), result));
-                            return Ok(());
+                            return Ok(None);
                         }
                         execution_permission_plan = Some(approved_plan);
                         call = approved_call;
@@ -4552,7 +5517,7 @@ where
                         );
                         attach_tool_call_context(&mut result, &call, &decision.subjects);
                         assistant_batch_results.push((call.clone(), result));
-                        return Ok(());
+                        return Ok(None);
                     }
                     ToolApproval::Expired { reason } => {
                         append_tool_approval_route_terminal(
@@ -4569,7 +5534,7 @@ where
                             reason,
                             assistant_batch_results,
                         )?;
-                        return Ok(());
+                        return Ok(None);
                     }
                     ToolApproval::Cancelled { reason } => {
                         append_tool_approval_route_terminal(
@@ -4586,7 +5551,7 @@ where
                             reason,
                             assistant_batch_results,
                         )?;
-                        return Ok(());
+                        return Ok(None);
                     }
                     ToolApproval::Stale { reason } => {
                         append_tool_approval_route_terminal(
@@ -4603,7 +5568,7 @@ where
                             reason,
                             assistant_batch_results,
                         )?;
-                        return Ok(());
+                        return Ok(None);
                     }
                 }
             }
@@ -4637,10 +5602,10 @@ where
                     ToolResult::error(call.id.clone(), call.name.clone(), error_kind, reason);
                 attach_tool_call_context(&mut result, &call, &decision.subjects);
                 assistant_batch_results.push((call.clone(), result));
-                return Ok(());
+                return Ok(None);
             }
         }
-        let egress_audit = match tools.egress_audit(&tool_ctx, &call) {
+        let egress_audit = match invocation.egress_audit(tool_ctx, &call) {
             Ok(audit) => audit,
             Err(error) => {
                 append_invalid_tool_input_result(
@@ -4651,7 +5616,7 @@ where
                     error,
                     assistant_batch_results,
                 )?;
-                return Ok(());
+                return Ok(None);
             }
         };
         if let Some(egress_audit) = egress_audit {
@@ -4664,6 +5629,8 @@ where
     let authorized = AuthorizedToolCall {
         call,
         execution_spec,
+        resolved_invocation,
+        unresolved_error,
         resolved_subjects,
         resolved_subject_zones,
         execution_subjects,
@@ -4672,31 +5639,9 @@ where
         prepared_tool_call,
         explicit_network_approval,
         explicit_user_approval,
+        _tool_effect: tool_effect,
     };
-    execute_authorized_tool_call(
-        ToolCallProcessingContext {
-            session,
-            handler,
-            tools,
-            options,
-            permission_policy,
-            tool_ctx,
-            cancellation,
-            root_logical_run_id,
-            agent_delegation_run_context,
-            agent_delegate,
-            approval_handler,
-            outcome,
-            satisfied_agent_tool_calls,
-            transient_context,
-            web_task_tree_budget,
-            tool_artifact_read_budget,
-            assistant_batch_results,
-        },
-        authorized,
-    )
-    .await?;
-    Ok(())
+    Ok(Some(authorized))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4773,6 +5718,8 @@ where
     let AuthorizedToolCall {
         call,
         execution_spec,
+        resolved_invocation,
+        unresolved_error,
         resolved_subjects,
         resolved_subject_zones,
         execution_subjects,
@@ -4781,17 +5728,34 @@ where
         prepared_tool_call,
         explicit_network_approval,
         explicit_user_approval,
+        _tool_effect,
     } = authorized;
     let tool_is_agent_category = execution_spec
         .as_ref()
         .is_some_and(|spec| spec.category == ToolCategory::Agent);
-    let execution_mutation_profile = execution_spec
+    let execution_mutation_profile = resolved_invocation
         .as_ref()
-        .map(|_| tools.execution_mutation_profile(&tool_ctx, &call))
+        .map(|invocation| invocation.execution_mutation_profile(&tool_ctx, &call.id))
         .transpose()?
         .flatten();
     let current_permission_plan = if let Some(spec) = execution_spec.as_ref() {
-        let current_resolved = tools.permission_plan(&tool_ctx, &call)?;
+        let Some(invocation) = resolved_invocation.as_ref() else {
+            return Err(anyhow!(
+                "authorized tool call lost its resolved tool generation"
+            ));
+        };
+        if !tools.invocation_generation_is_current(invocation) {
+            let mut result = ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::StalePreparedMutation,
+                "registered tool generation changed after authorization; approval must be repeated",
+            );
+            attach_tool_call_context(&mut result, &call, &execution_subjects);
+            assistant_batch_results.push((call.clone(), result));
+            return Ok(());
+        }
+        let current_resolved = invocation.permission_plan(&tool_ctx, &call, None)?;
         let current_resolved_subject_zones = permission_policy
             .decide_plan(spec, &current_resolved)?
             .subject_zones;
@@ -4814,7 +5778,7 @@ where
             return Ok(());
         }
         let current = if prepared_tool_call.is_some() {
-            tools.permission_plan_with_subjects(&tool_ctx, &call, Some(&execution_subjects))?
+            invocation.permission_plan(&tool_ctx, &call, Some(&execution_subjects))?
         } else {
             current_resolved
         };
@@ -4899,7 +5863,7 @@ where
     if let Some(plan) = current_permission_plan.clone() {
         execution_tool_ctx = execution_tool_ctx.with_prepared_permission_plan(plan);
     }
-    let mut result = if let Some(prepared) = prepared_tool_call {
+    let result = if let Some(prepared) = prepared_tool_call {
         let (current_policy_fingerprint, current_approval_identity) = prepared_current_authority
             .as_ref()
             .expect("prepared tools must retain their approval authority");
@@ -4942,8 +5906,11 @@ where
                 delegate.set_agent_tool_authorization(None, false);
                 match result {
                     Ok(Some(result)) => result,
-                    Ok(None) => match execute_after_started_audit_with_progress(
+                    Ok(None) => match execute_resolved_after_started_audit_with_progress(
                         tools,
+                        resolved_invocation
+                            .as_ref()
+                            .expect("registered agent tools retain a resolved invocation"),
                         execution_tool_ctx.clone(),
                         call.clone(),
                         handler,
@@ -4966,53 +5933,110 @@ where
                     ),
                 }
             }
-            None => match execute_after_started_audit_with_progress(
-                tools,
-                execution_tool_ctx,
-                call.clone(),
-                handler,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => ToolResult::error(
+            None => match resolved_invocation.as_ref() {
+                Some(invocation) => match execute_resolved_after_started_audit_with_progress(
+                    tools,
+                    invocation,
+                    execution_tool_ctx,
+                    call.clone(),
+                    handler,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        error.to_string(),
+                    ),
+                },
+                None => ToolResult::error(
                     call.id.clone(),
                     call.name.clone(),
                     ToolErrorKind::Internal,
-                    error.to_string(),
+                    unresolved_error.unwrap_or_else(|| format!("unknown tool {}", call.name)),
                 ),
             },
         }
     };
-    if let Some(binding) = prepared_audit_binding.as_ref() {
+    commit_tool_execution(
+        &mut ToolCallProcessingContext {
+            session,
+            handler,
+            tools,
+            options,
+            permission_policy,
+            tool_ctx,
+            cancellation,
+            root_logical_run_id,
+            agent_delegation_run_context,
+            agent_delegate,
+            approval_handler,
+            outcome,
+            satisfied_agent_tool_calls,
+            transient_context,
+            web_task_tree_budget,
+            tool_artifact_read_budget,
+            assistant_batch_results,
+        },
+        call,
+        execution_subjects,
+        execution_started,
+        tool_is_agent_category,
+        prepared_audit_binding.as_ref(),
+        result,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_tool_execution<H, A>(
+    context: &mut ToolCallProcessingContext<'_, '_, '_, H, A>,
+    call: ToolCall,
+    execution_subjects: Vec<ToolSubject>,
+    execution_started: Instant,
+    tool_is_agent_category: bool,
+    prepared_audit_binding: Option<&crate::PreparedToolAuditBinding>,
+    mut result: ToolResult,
+) -> Result<()>
+where
+    H: EventHandler,
+{
+    if let Some(binding) = prepared_audit_binding {
         attach_prepared_tool_audit_binding(&mut result, binding)?;
     }
     attach_tool_call_context(&mut result, &call, &execution_subjects);
-    let duration_ms = Some(duration_ms(execution_started));
     let status = if result.is_error() {
         ToolExecutionStatus::Failed
     } else {
         ToolExecutionStatus::Completed
     };
     append_tool_execution_audit(
-        session,
+        context.session,
         &call,
         &execution_subjects,
         status,
-        duration_ms,
+        Some(duration_ms(execution_started)),
         Some(&result),
     )?;
-    append_tool_control_entries_from_result(session, handler, &mut result)?;
-    if let Some(entry) = append_terminal_task_control_from_result(session, handler, &result)? {
-        reconcile_terminal_task_mutation_from_start(session, &options.workspace_root, &entry)?;
+    append_tool_control_entries_from_result(context.session, context.handler, &mut result)?;
+    if let Some(entry) =
+        append_terminal_task_control_from_result(context.session, context.handler, &result)?
+    {
+        reconcile_terminal_task_mutation_from_start(
+            context.session,
+            &context.options.workspace_root,
+            &entry,
+        )?;
     }
-    record_tool_run_outcome(outcome, &result);
+    record_tool_run_outcome(context.outcome, &result);
     if tool_is_agent_category && agent_tool_result_satisfies_delegation(&result) {
-        *satisfied_agent_tool_calls = (*satisfied_agent_tool_calls).saturating_add(1);
+        *context.satisfied_agent_tool_calls =
+            (*context.satisfied_agent_tool_calls).saturating_add(1);
     }
     let tool_transient_context = std::mem::take(&mut result.transient_context);
-    assistant_batch_results.push((call.clone(), result));
-    transient_context.extend(tool_transient_context);
+    context.assistant_batch_results.push((call, result));
+    context.transient_context.extend(tool_transient_context);
     Ok(())
 }
 

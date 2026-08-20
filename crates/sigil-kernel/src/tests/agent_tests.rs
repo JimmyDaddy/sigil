@@ -24,15 +24,17 @@ use crate::{
     AgentRole, AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode,
     AssistantMessageKind, AutoApproveHandler, AutomaticRouteCapability, BackgroundTaskHandle,
     BackgroundTaskStatus, CONTINUE_EXISTING_TASK_TOOL_NAME,
-    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, CompactionConfig, CompletionRequest, ControlEntry,
-    ConversationInputQueueId, ConversationPurposeContext, ConversationRoute,
+    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, CompactionConfig, CompletionRequest, ContextBodyRef,
+    ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
+    ControlEntry, ConversationInputQueueId, ConversationPurposeContext, ConversationRoute,
     ConversationRouteReason, ConversationTurnRef, DurableEventType, EventHandler,
     ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel, ExternalSourceRecord,
     FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
     ModelMessage, MutationEventRecorder, PermissionConfig, PermissionDecision, PlanApprovalExpiry,
     PlanApprovalPermission, PlanApprovalScope, PlanId, PlanPermissionGrantedEntry,
-    PlanReviewHandoffBinding, PlanReviewPurposeContext, PreparedToolExecution, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
+    PlanReviewHandoffBinding, PlanReviewPurposeContext, PreparedToolExecution,
+    PromotedConversationInput, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContinuationState, ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, REQUEST_PLAN_REVIEW_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
     REQUEST_USER_INPUT_TOOL_NAME, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
@@ -46,12 +48,12 @@ use crate::{
     TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus,
     Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
     ToolApprovalUserDecision, ToolArtifactReadOutcome, ToolArtifactReadRecordedV1,
-    ToolArtifactRefV1, ToolArtifactSelectorV1, ToolCall, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
-    ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
-    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
-    VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    ToolArtifactRefV1, ToolArtifactSelectorV1, ToolCall, ToolCategory, ToolConcurrencyClass,
+    ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus,
+    ToolMutationTracking, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
+    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
+    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
     conversation_route_decision_id_for_source, conversation_route_routing_contract_material,
     direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_review,
     plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
@@ -64,7 +66,7 @@ use super::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
     PendingConversationInputProvider, TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT,
-    emit_tool_result,
+    build_task_step_checkpoint, emit_tool_result,
 };
 
 /// Host-shaped plan review binding for routing tests; identity is derived from the source turn.
@@ -84,6 +86,7 @@ fn test_plan_review_handoff_binding(
         objective: objective.to_owned(),
         policy_snapshot_hash: plan_review_policy_snapshot_hash(),
         route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
+        pending_plan: None,
         requested_at_ms: 42,
         decided_at_ms: 43,
     }
@@ -786,6 +789,11 @@ struct PostMutationReadLoopProvider {
     calls: Arc<AtomicUsize>,
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
+struct RepeatedReadLoopProvider {
+    calls: Arc<AtomicUsize>,
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+    finalization_text: Option<String>,
+}
 
 #[async_trait]
 impl Provider for ToolSideEffectProvider {
@@ -1178,8 +1186,78 @@ impl Provider for PostMutationReadLoopProvider {
     }
 }
 
+#[async_trait]
+impl Provider for RepeatedReadLoopProvider {
+    fn name(&self) -> &str {
+        "mock-repeated-read-loop"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let tools_disabled = request.tools.is_empty();
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        if tools_disabled {
+            let mut chunks = Vec::new();
+            if let Some(text) = self.finalization_text.as_deref() {
+                if !text.is_empty() {
+                    chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
+                }
+            } else {
+                chunks.push(Ok(ProviderChunk::TextDelta(
+                    "bounded result after repeated analysis".to_owned(),
+                )));
+            }
+            chunks.push(Ok(ProviderChunk::Done));
+            return Ok(Box::pin(stream::iter(chunks)));
+        }
+        let call_id = format!("call-repeated-read-{call_index}");
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: call_id.clone(),
+                name: "echo".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: call_id.clone(),
+                delta: r#"{"value":"same semantic read"}"#.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: call_id,
+                name: "echo".to_owned(),
+                args_json: r#"{"value":"same semantic read"}"#.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
 struct EchoTool;
 struct ProgressEchoTool;
+#[derive(Default)]
+struct ToolSchedulerProbe {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    events: Mutex<Vec<String>>,
+}
+
+struct ScheduledReadTool {
+    name: String,
+    delay: Duration,
+    parallel: bool,
+    mutation_tracking: ToolMutationTracking,
+    fail: bool,
+    probe: Arc<ToolSchedulerProbe>,
+}
+
 struct ForegroundTerminalTool {
     completed: Arc<AtomicBool>,
 }
@@ -1255,6 +1333,72 @@ impl Tool for EchoTool {
             call_id,
             "echo",
             args["value"].as_str().unwrap_or_default(),
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for ScheduledReadTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: self.name.clone(),
+            description: "scheduler test read".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        self.mutation_tracking
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        if self.parallel {
+            ToolConcurrencyClass::ParallelReadOnly
+        } else {
+            ToolConcurrencyClass::Exclusive
+        }
+    }
+
+    fn permission_plan(
+        &self,
+        _ctx: &ToolContext,
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        declared_test_permission_plan(self, args, Vec::new(), None)
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        let active = self.probe.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.probe.peak.fetch_max(active, Ordering::SeqCst);
+        self.probe
+            .events
+            .lock()
+            .expect("scheduler events lock should not be poisoned")
+            .push(format!("start:{}", self.name));
+        tokio::time::sleep(self.delay).await;
+        self.probe
+            .events
+            .lock()
+            .expect("scheduler events lock should not be poisoned")
+            .push(format!("end:{}", self.name));
+        self.probe.active.fetch_sub(1, Ordering::SeqCst);
+        if self.fail {
+            anyhow::bail!("scheduled read failed")
+        }
+        Ok(ToolResult::ok(
+            call_id,
+            self.name.clone(),
+            self.name.clone(),
             ToolResultMeta::default(),
         ))
     }
@@ -5688,7 +5832,7 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
         SessionLogEntry::ToolResultV3(result) => {
             result.initial_model_view.preview == "loaded transient skill body"
         }
-        SessionLogEntry::Control(_) => false,
+        SessionLogEntry::RuntimeContextSnapshotV2(_) | SessionLogEntry::Control(_) => false,
     }));
     Ok(())
 }
@@ -6000,7 +6144,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
                     }),
                 },
             )));
-    let mut handler = crate::event::NoopEventHandler;
+    let mut handler = RecordingEventHandler::default();
 
     agent
         .run_with_input(
@@ -6069,6 +6213,32 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
             == Some(direct_conversation_continuation_prompt_contract_material())
     }));
     assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(handler.events.iter().all(|event| {
+        !matches!(
+            event,
+            RunEvent::ToolCallStarted(call)
+                | RunEvent::ToolCallCompleted(call)
+                if matches!(
+                    call.id.as_str(),
+                    "call-routing-side-effect" | "call-continue-routing"
+                )
+        ) && !matches!(
+            event,
+            RunEvent::ToolResult(result)
+                if matches!(
+                    result.call_id.as_str(),
+                    "call-routing-side-effect" | "call-continue-routing"
+                )
+        ) && !matches!(
+            event,
+            RunEvent::Notice(message) if message.contains("routing")
+        )
+    }));
+    assert!(
+        settled_tool_results(&session)
+            .iter()
+            .any(|(call_id, _)| call_id == "call-routing-side-effect")
+    );
     Ok(())
 }
 
@@ -6404,11 +6574,15 @@ async fn task_participant_forces_toolless_finalization_after_post_mutation_read_
     );
     assert_eq!(
         output.result.tool_calls,
-        TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT + 1
+        crate::TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD as usize + 2
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT + 2
+        crate::TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD as usize + 3
+    );
+    assert!(
+        output.result.tool_calls < TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT + 1,
+        "semantic no-progress finalization should preempt the coarser post-mutation read tail"
     );
     let requests = captured
         .lock()
@@ -6423,6 +6597,278 @@ async fn task_participant_forces_toolless_finalization_after_post_mutation_read_
         requests[..requests.len() - 1]
             .iter()
             .all(|request| !request.tools.is_empty())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_participant_forces_toolless_finalization_after_repeated_semantic_frontier()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        RepeatedReadLoopProvider {
+            calls: Arc::clone(&calls),
+            captured: Arc::clone(&captured),
+            finalization_text: None,
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-repeated-read-loop", "mock-model").with_store(store);
+    let attempt_id = TaskParticipantAttemptId::new("participant-repeated-frontier-1")?;
+    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+        "Inspect the accepted step and return a bounded result.",
+    )])
+    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+        task_id: TaskId::new("task-repeated-frontier")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("read-step")?,
+        attempt_id: attempt_id.clone(),
+    }));
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: temp.path().to_path_buf(),
+                max_turns: Some(20),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.result.final_text,
+        "bounded result after repeated analysis"
+    );
+    assert_eq!(output.result.tool_calls, 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    let checkpoints = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskStepCheckpointV2(checkpoint))
+                if checkpoint.attempt_id == attempt_id =>
+            {
+                Some(checkpoint.no_progress_count)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints, vec![0, 1, 2]);
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    let final_request = requests.last().expect("finalization request");
+    assert!(final_request.tools.is_empty());
+    assert!(final_request.messages.iter().any(|message| {
+        message.content.as_deref() == Some(task_participant_finalization_prompt_contract_material())
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_checkpoint_treats_artifact_pagination_and_changed_output_as_progress() -> Result<()> {
+    let context = TaskParticipantContext {
+        task_id: TaskId::new("task-artifact-pagination")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("read-artifact")?,
+        attempt_id: TaskParticipantAttemptId::new("participant-artifact-pagination-1")?,
+    };
+    let artifact_ref = ToolArtifactRefV1 {
+        artifact_id: "ta1_0123456789abcdef0123456789abcdef".to_owned(),
+    };
+    artifact_ref.validate()?;
+    let first_call = ToolCall {
+        id: "page-1".to_owned(),
+        name: "read_tool_artifact".to_owned(),
+        args_json: json!({
+            "artifact_ref": artifact_ref,
+            "selector": {"kind": "line_page", "start_line": 1, "max_lines": 200}
+        })
+        .to_string(),
+    };
+    let second_call = ToolCall {
+        id: "page-2".to_owned(),
+        name: "read_tool_artifact".to_owned(),
+        args_json: json!({
+            "artifact_ref": ToolArtifactRefV1 {
+                artifact_id: "ta1_0123456789abcdef0123456789abcdef".to_owned(),
+            },
+            "selector": {"kind": "line_page", "start_line": 201, "max_lines": 200}
+        })
+        .to_string(),
+    };
+    let first_result = ToolResult::ok(
+        "page-1",
+        "read_tool_artifact",
+        "lines 1 through 200",
+        ToolResultMeta {
+            returned_lines: Some(200),
+            total_lines: Some(400),
+            truncated: true,
+            ..ToolResultMeta::default()
+        },
+    );
+    let second_result = ToolResult::ok(
+        "page-2",
+        "read_tool_artifact",
+        "lines 201 through 400",
+        ToolResultMeta {
+            returned_lines: Some(200),
+            total_lines: Some(400),
+            ..ToolResultMeta::default()
+        },
+    );
+
+    let first = build_task_step_checkpoint(&context, 1, &[(first_call, first_result)], &[], None)?;
+    let second = build_task_step_checkpoint(
+        &context,
+        2,
+        &[(second_call, second_result)],
+        &[],
+        Some(&first),
+    )?;
+
+    assert_ne!(first.semantic_call_hash, second.semantic_call_hash);
+    assert_ne!(first.result_frontier_hash, second.result_frontier_hash);
+    assert_eq!(second.no_progress_count, 0);
+    Ok(())
+}
+
+#[test]
+fn task_checkpoint_detects_repeated_bounded_observation_only_when_output_is_unchanged() -> Result<()>
+{
+    let context = TaskParticipantContext {
+        task_id: TaskId::new("task-bounded-observation")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("inspect")?,
+        attempt_id: TaskParticipantAttemptId::new("participant-bounded-observation-1")?,
+    };
+    let checkpoint = |turn, command: &str, output: &str, previous| {
+        let result = ToolResult::ok(
+            format!("call-{turn}"),
+            "bash",
+            output,
+            ToolResultMeta::default(),
+        );
+        build_task_step_checkpoint(
+            &context,
+            turn,
+            &[(
+                &ToolCall {
+                    id: format!("call-{turn}"),
+                    name: "bash".to_owned(),
+                    args_json: json!({"command": command}).to_string(),
+                },
+                &result,
+            )]
+            .into_iter()
+            .map(|(call, result)| (call.clone(), result.clone()))
+            .collect::<Vec<_>>(),
+            &[],
+            previous,
+        )
+    };
+
+    let first = checkpoint(1, "git status", "clean", None)?;
+    let cosmetic_rewrite = checkpoint(2, "git status --short", "clean", Some(&first))?;
+    assert_eq!(cosmetic_rewrite.no_progress_count, 1);
+    let changed_output = checkpoint(
+        3,
+        "git status --short",
+        "M crates/sigil-kernel/src/agent.rs",
+        Some(&cosmetic_rewrite),
+    )?;
+    assert_eq!(changed_output.no_progress_count, 0);
+    assert_ne!(
+        cosmetic_rewrite.result_frontier_hash,
+        changed_output.result_frontier_hash
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_participant_enters_repair_replan_after_empty_finalization() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        RepeatedReadLoopProvider {
+            calls: Arc::clone(&calls),
+            captured: Arc::clone(&captured),
+            finalization_text: Some(String::new()),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-empty-finalization", "mock-model").with_store(store);
+    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+        "Inspect the accepted step and return a bounded result.",
+    )])
+    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+        task_id: TaskId::new("task-empty-finalization")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("read-step")?,
+        attempt_id: TaskParticipantAttemptId::new("participant-empty-finalization-1")?,
+    }));
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: temp.path().to_path_buf(),
+                max_turns: Some(20),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "");
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::RepairReplanRequired
+    );
+    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        crate::TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD as usize + 2
+    );
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert!(
+        requests
+            .last()
+            .is_some_and(|request| request.tools.is_empty())
     );
     Ok(())
 }
@@ -6578,6 +7024,30 @@ async fn automatic_task_routing_degrades_to_ordinary_conversation_after_two_unty
         message.role == MessageRole::Assistant && message.content.as_deref() == Some("final answer")
     }));
     assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(handler.events.iter().all(|event| {
+        !matches!(
+            event,
+            RunEvent::ToolCallStarted(call)
+                | RunEvent::ToolCallCompleted(call)
+                if call.id == "call-invalid-routing-tool"
+        ) && !matches!(
+            event,
+            RunEvent::ToolResult(result) if result.call_id == "call-invalid-routing-tool"
+        ) && !matches!(
+            event,
+            RunEvent::Notice(message) if message.contains("routing")
+        )
+    }));
+    assert!(
+        settled_tool_results(&session)
+            .iter()
+            .any(|(call_id, preview)| {
+                call_id == "call-invalid-routing-tool"
+                    && preview.contains(
+                        "ordinary tools are not available during the typed task-routing microturn",
+                    )
+            })
+    );
     assert!(
         session.entries().iter().any(|entry| matches!(
             entry,
@@ -6687,6 +7157,7 @@ async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_
 
 struct QueuedFollowUpTextProvider {
     calls: Arc<AtomicUsize>,
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
 
 #[async_trait]
@@ -6704,8 +7175,12 @@ impl Provider for QueuedFollowUpTextProvider {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.captured
+            .lock()
+            .expect("captured request lock should not be poisoned")
+            .push(request);
         let turn = self.calls.fetch_add(1, Ordering::SeqCst);
         let text = if turn == 0 {
             "first answer"
@@ -6729,12 +7204,34 @@ impl PendingConversationInputProvider for OneShotPendingInputProvider {
         &self,
         session: &mut Session,
         _logical_run_id: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<PromotedConversationInput>> {
         if self.remaining.fetch_sub(1, Ordering::SeqCst) != 1 {
             return Ok(None);
         }
         session.append_user_message(ModelMessage::user("queued follow-up"))?;
-        Ok(Some("queued follow-up".to_owned()))
+        let body = "context resolved for the queued follow-up";
+        let mut runtime_context = RuntimeContextCandidates::new();
+        runtime_context.items.push(ContextItem {
+            id: "queued-follow-up-context".to_owned(),
+            source: ContextSource::RepositoryFile,
+            source_event_id: None,
+            trust_level: ContextTrustLevel::UntrustedRepositoryData,
+            sensitivity: ContextSensitivity::Repository,
+            egress_decision: None,
+            repo_revision: Some("queued-follow-up-snapshot".to_owned()),
+            token_cost: crate::estimate_context_token_cost(body),
+            score: Some(100.0),
+            score_breakdown: Vec::new(),
+            inclusion_reason: ContextInclusionReason::RetrievalHit,
+            body_ref: ContextBodyRef::inline(body),
+        });
+        runtime_context
+            .snippets
+            .insert("queued-follow-up-context".to_owned(), body.to_owned());
+        Ok(Some(PromotedConversationInput {
+            prompt: "queued follow-up".to_owned(),
+            runtime_context,
+        }))
     }
 }
 
@@ -6742,9 +7239,11 @@ impl PendingConversationInputProvider for OneShotPendingInputProvider {
 async fn queued_follow_up_is_injected_at_the_final_answer_gate_without_interrupting() -> Result<()>
 {
     let calls = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
         QueuedFollowUpTextProvider {
             calls: Arc::clone(&calls),
+            captured: Arc::clone(&captured),
         },
         ToolRegistry::new(),
     );
@@ -6803,6 +7302,17 @@ async fn queued_follow_up_is_injected_at_the_final_answer_gate_without_interrupt
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
     assert_eq!(output.result.final_text, "answer to the follow-up");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let captured = captured
+        .lock()
+        .expect("captured request lock should not be poisoned");
+    assert_eq!(captured.len(), 2);
+    assert!(
+        !format!("{:?}", captured[0].messages)
+            .contains("context resolved for the queued follow-up")
+    );
+    assert!(
+        format!("{:?}", captured[1].messages).contains("context resolved for the queued follow-up")
+    );
     let messages = session.messages();
     assert!(messages.iter().any(|message| {
         message.role == MessageRole::User && message.content.as_deref() == Some("queued follow-up")
@@ -7368,6 +7878,7 @@ fn exact_natural_language_reentry_reuses_pending_selection_without_forking() -> 
             task_status: TaskRunStatus::Paused,
             plan_status: Some(TaskPlanStatus::Accepted),
             route_contract_fingerprint: old_route_fingerprint.clone(),
+            control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
             prompt_hash: projected.prompt_hash.clone(),
             exact_prompt_required: projected.exact_prompt_required,
             guidance: projected.safe_prompt.clone(),
@@ -7405,7 +7916,7 @@ fn exact_natural_language_reentry_reuses_pending_selection_without_forking() -> 
             let call = ToolCall {
                 id: call_id.to_owned(),
                 name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
-                args_json: r#"{"reason":"continue_current_task"}"#.to_owned(),
+                args_json: r#"{"reason":"continue_current_task","action":"apply_current_request_as_guidance"}"#.to_owned(),
             };
             let mut handler = RecordingEventHandler::default();
             let mut outcome = AgentRunOutcome::default();
@@ -8222,6 +8733,17 @@ async fn chat_decision_records_route_decision_without_effect_authority() -> Resu
     assert!(handler.events.iter().all(|event| {
         !matches!(event, RunEvent::TextDelta(delta) if delta == "internal routing narrative")
     }));
+    assert!(handler.events.iter().all(|event| {
+        !matches!(
+            event,
+            RunEvent::ToolCallStarted(call)
+                | RunEvent::ToolCallCompleted(call)
+                if call.id == "call-chat-decision"
+        ) && !matches!(
+            event,
+            RunEvent::ToolResult(result) if result.call_id == "call-chat-decision"
+        )
+    }));
     Ok(())
 }
 
@@ -8577,7 +9099,8 @@ impl Provider for TaskContinuationProvider {
         &self,
         _request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let continuation_args = r#"{"reason":"continue_current_task"}"#;
+        let continuation_args =
+            r#"{"reason":"continue_current_task","action":"apply_current_request_as_guidance"}"#;
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::ToolCallStart {
                 id: "call-side-effect-before-continuation".to_owned(),
@@ -10331,6 +10854,7 @@ struct ContextWindowRejectedBeforeGeneration;
 struct ContextWindowErrorProvider;
 struct ContextWindowErrorAfterOutputProvider;
 struct ContextWindowErrorAfterGeneratedTextProvider;
+struct TypedProtocolViolationProvider;
 
 #[derive(Debug, thiserror::Error)]
 #[error("transport connect failed before request dispatch")]
@@ -10464,6 +10988,26 @@ impl Provider for ContextWindowErrorAfterGeneratedTextProvider {
             Ok(ProviderChunk::TextDelta("partial output".to_owned())),
             Err(ContextWindowRejectedBeforeGeneration.into()),
         ])))
+    }
+}
+
+#[async_trait]
+impl Provider for TypedProtocolViolationProvider {
+    fn name(&self) -> &str {
+        "mock-typed-protocol-violation"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter(vec![Err(
+            crate::ProviderProtocolViolation::UnstructuredToolInvocation.into(),
+        )])))
     }
 }
 
@@ -11443,6 +11987,56 @@ async fn agent_never_marks_a_rejection_after_observed_generation_as_pre_generati
             ..
         }) if durable_output_event_ids.is_empty() && durable_side_effect_event_ids.is_empty()
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_provider_protocol_violation_is_durable_post_output_evidence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let agent = Agent::new(TypedProtocolViolationProvider, ToolRegistry::new());
+    let mut session = Session::new("mock-typed-protocol-violation", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let error = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("typed protocol violation must fail the current physical attempt");
+    assert_eq!(
+        error.downcast_ref::<crate::ProviderProtocolViolation>(),
+        Some(&crate::ProviderProtocolViolation::UnstructuredToolInvocation)
+    );
+
+    let projection = session.provider_physical_attempt_projection()?;
+    let terminal = projection
+        .attempts()
+        .into_iter()
+        .next()
+        .and_then(|attempt| attempt.terminal.as_ref())
+        .expect("physical attempt terminal");
+    assert_eq!(
+        terminal.outcome,
+        ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
+    );
+    assert!(terminal.durable_side_effect_event_ids.is_empty());
     Ok(())
 }
 
@@ -12426,6 +13020,11 @@ struct ScriptedTurnToolProvider {
     turns: Mutex<std::collections::VecDeque<Vec<(String, String, String)>>>,
 }
 
+struct CacheConformanceProvider {
+    calls: AtomicUsize,
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
 impl ScriptedTurnToolProvider {
     fn new(turns: Vec<Vec<(String, String, String)>>) -> Self {
         Self {
@@ -12478,6 +13077,97 @@ impl Provider for ScriptedTurnToolProvider {
         chunks.push(Ok(ProviderChunk::Done));
         Ok(Box::pin(stream::iter(chunks)))
     }
+}
+
+#[async_trait]
+impl Provider for CacheConformanceProvider {
+    fn name(&self) -> &str {
+        "mock-cache-conformance"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.captured
+            .lock()
+            .expect("cache conformance capture lock should not be poisoned")
+            .push(request);
+        let ordinal = self.calls.fetch_add(1, Ordering::SeqCst);
+        if ordinal == 0 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "cache-tool-call".to_owned(),
+                    name: "echo".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "cache-tool-call".to_owned(),
+                    delta: r#"{"value":"cache-stable tool result"}"#.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "cache-tool-call".to_owned(),
+                    name: "echo".to_owned(),
+                    args_json: r#"{"value":"cache-stable tool result"}"#.to_owned(),
+                })),
+                Ok(ProviderChunk::ContinuationState(
+                    crate::ProviderContinuationState {
+                        provider_name: "mock-cache-conformance".to_owned(),
+                        state_kind: "cache-replay".to_owned(),
+                        message_id: None,
+                        opaque_blob: serde_json::json!({"stable": "durable-state"}),
+                    },
+                )),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(format!(
+                "cache conformance answer {ordinal}"
+            ))),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+fn cache_conformance_context(id: &str, body: &str) -> RuntimeContextCandidates {
+    let mut runtime_context = RuntimeContextCandidates::new();
+    runtime_context.items.push(ContextItem {
+        id: id.to_owned(),
+        source: ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some(format!("revision-{id}")),
+        token_cost: crate::estimate_context_token_cost(body),
+        score: Some(100.0),
+        score_breakdown: Vec::new(),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: ContextBodyRef::inline(body),
+    });
+    runtime_context
+        .snippets
+        .insert(id.to_owned(), body.to_owned());
+    runtime_context
+}
+
+fn assert_cache_stable_tail_extension(previous: &CompletionRequest, next: &CompletionRequest) {
+    assert_eq!(previous.provider_name, next.provider_name);
+    assert_eq!(previous.model_name, next.model_name);
+    assert_eq!(
+        serde_json::to_value(&previous.tools).expect("serialize previous tools"),
+        serde_json::to_value(&next.tools).expect("serialize next tools")
+    );
+    assert!(next.messages.len() > previous.messages.len());
+    assert_eq!(
+        serde_json::to_value(&previous.messages).expect("serialize previous messages"),
+        serde_json::to_value(&next.messages[..previous.messages.len()])
+            .expect("serialize next message prefix")
+    );
 }
 
 fn scripted_run_options(max_turns: usize) -> AgentRunOptions {
@@ -12554,6 +13244,616 @@ fn assert_single_settled_result(session: &Session, call_id: &str, preview_contai
         "preview {:?} must contain {preview_contains:?}",
         matching[0].1
     );
+}
+
+#[tokio::test]
+async fn production_agent_requests_preserve_cache_prefix_across_tool_turn_user_turn_and_resume()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("cache-conformance.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    let cache_tool = Arc::new(ScheduledReadTool {
+        name: "echo".to_owned(),
+        delay: Duration::ZERO,
+        parallel: true,
+        mutation_tracking: ToolMutationTracking::None,
+        fail: false,
+        probe: Arc::new(ToolSchedulerProbe::default()),
+    });
+    let reconstruction_tools = vec![cache_tool.spec()];
+    registry.register(cache_tool);
+    let agent = Agent::new(
+        CacheConformanceProvider {
+            calls: AtomicUsize::new(0),
+            captured: Arc::clone(&captured),
+        },
+        registry,
+    );
+    let mut session =
+        Session::new("mock-cache-conformance", "mock-model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let mut handler = RecordingEventHandler::default();
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("inspect the first state")
+                .with_logical_run_id("cache-run-1")
+                .with_runtime_context(cache_conformance_context(
+                    "context-a",
+                    "stable repository context A",
+                )),
+            scripted_run_options(4),
+            &mut handler,
+        )
+        .await?;
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("inspect the second state")
+                .with_logical_run_id("cache-run-2")
+                .with_runtime_context(cache_conformance_context(
+                    "context-b",
+                    "new repository context B",
+                )),
+            scripted_run_options(2),
+            &mut handler,
+        )
+        .await?;
+
+    drop(session);
+    let mut resumed = Session::load_from_store(
+        "mock-cache-conformance",
+        "mock-model",
+        JsonlSessionStore::new(&store_path)?,
+    )?;
+    agent
+        .run_with_input(
+            &mut resumed,
+            AgentRunInput::user("inspect after resume")
+                .with_logical_run_id("cache-run-3")
+                .with_runtime_context(cache_conformance_context(
+                    "context-c",
+                    "resumed repository context C",
+                )),
+            scripted_run_options(2),
+            &mut handler,
+        )
+        .await?;
+    let requests = captured
+        .lock()
+        .expect("cache conformance capture lock should not be poisoned")
+        .clone();
+    assert_eq!(requests.len(), 4);
+    for pair in requests.windows(2) {
+        assert_cache_stable_tail_extension(&pair[0], &pair[1]);
+    }
+
+    let projection = ProviderPhysicalAttemptProjection::from_records(
+        &JsonlSessionStore::read_event_records(&store_path)?,
+    )?;
+    let attempts = ["cache-run-1", "cache-run-2", "cache-run-3"]
+        .into_iter()
+        .flat_map(|run_id| projection.attempts_for_logical_run_id(run_id))
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 4);
+    for (index, attempt) in attempts.iter().enumerate() {
+        let envelope = attempt
+            .entry
+            .request_envelope
+            .as_ref()
+            .expect("production attempt must bind a request envelope");
+        assert!(envelope.source_frontier.is_some());
+        let rebuilt =
+            reconstruct_cache_conformance_request(&store_path, envelope, &reconstruction_tools)?;
+        assert_eq!(
+            serde_json::to_value(&rebuilt)?,
+            serde_json::to_value(&requests[index])?
+        );
+        envelope.verify_reconstructed_request_at_frontier(&store_path, &rebuilt)?;
+        if index == 0 {
+            let mut tampered = envelope.clone();
+            let frontier = tampered
+                .source_frontier
+                .as_mut()
+                .expect("the production attempt must bind a durable source frontier");
+            frontier.durable_end_offset = frontier.durable_end_offset.saturating_sub(1);
+            assert!(
+                tampered
+                    .verify_reconstructed_request_at_frontier(&store_path, &rebuilt)
+                    .is_err(),
+                "a byte offset inside the terminal JSONL record must fail closed"
+            );
+        }
+        if index > 0 {
+            let mutation = &attempt
+                .entry
+                .cache_layout_proof
+                .as_ref()
+                .expect("cache layout proof")
+                .mutation_from_previous;
+            assert_eq!(
+                mutation.kind,
+                crate::CacheLayoutMutationKind::ConversationTailAppended
+            );
+            assert!(mutation.local_stable_prefix_preserved);
+        }
+    }
+    activate_cache_conformance_compaction(&resumed, &store_path)?;
+    drop(resumed);
+    let mut compacted = Session::load_from_store(
+        "mock-cache-conformance",
+        "mock-model",
+        JsonlSessionStore::new(&store_path)?,
+    )?;
+    agent
+        .run_with_input(
+            &mut compacted,
+            AgentRunInput::user("inspect after compaction")
+                .with_logical_run_id("cache-run-4")
+                .with_runtime_context(cache_conformance_context(
+                    "context-d",
+                    "rebuilt repository context D",
+                )),
+            scripted_run_options(2),
+            &mut handler,
+        )
+        .await?;
+    let requests = captured
+        .lock()
+        .expect("cache conformance capture lock should not be poisoned");
+    assert_eq!(requests.len(), 5);
+    assert_ne!(
+        serde_json::to_value(&requests[3].messages)?,
+        serde_json::to_value(
+            &requests[4].messages[..requests[3].messages.len().min(requests[4].messages.len())]
+        )?,
+        "the first request in a compacted epoch must not masquerade as an append-only extension"
+    );
+    let projection = ProviderPhysicalAttemptProjection::from_records(
+        &JsonlSessionStore::read_event_records(&store_path)?,
+    )?;
+    let post_attempt = projection
+        .attempts_for_logical_run_id("cache-run-4")
+        .into_iter()
+        .next()
+        .expect("post-compaction run must have one provider attempt");
+    let envelope = post_attempt
+        .entry
+        .request_envelope
+        .as_ref()
+        .expect("post-compaction attempt must bind a request envelope");
+    let rebuilt =
+        reconstruct_cache_conformance_request(&store_path, envelope, &reconstruction_tools)?;
+    assert_eq!(
+        serde_json::to_value(&rebuilt)?,
+        serde_json::to_value(&requests[4])?
+    );
+    envelope.verify_reconstructed_request_at_frontier(&store_path, &rebuilt)?;
+    let mutation = &post_attempt
+        .entry
+        .cache_layout_proof
+        .as_ref()
+        .expect("post-compaction attempt must bind cache layout proof")
+        .mutation_from_previous;
+    assert_eq!(
+        mutation.kind,
+        crate::CacheLayoutMutationKind::ConversationHistoryRewritten
+    );
+    assert!(!mutation.local_stable_prefix_preserved);
+    Ok(())
+}
+
+fn reconstruct_cache_conformance_request(
+    store_path: &std::path::Path,
+    envelope: &crate::ProviderRequestEnvelopeV1,
+    reconstruction_tools: &[crate::ToolSpec],
+) -> Result<CompletionRequest> {
+    let frontier = envelope
+        .source_frontier
+        .as_ref()
+        .expect("production cache envelope must have a durable frontier");
+    let reconstructed = Session::reconstruct_from_provider_frontier(
+        envelope.provider_name.clone(),
+        envelope.model_name.clone(),
+        store_path,
+        frontier,
+    )?;
+    reconstructed.reconstruct_provider_request(
+        &std::env::temp_dir(),
+        &MemoryConfig::with_enabled(false),
+        reconstruction_tools.to_vec(),
+        None,
+        Some(ReasoningEffort::Medium),
+        None,
+        None,
+        &[],
+    )
+}
+
+fn activate_cache_conformance_compaction(
+    session: &Session,
+    store_path: &std::path::Path,
+) -> Result<()> {
+    let store = JsonlSessionStore::new(store_path)?;
+    let records = store.read_event_records_writer()?;
+    let plan = crate::CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        crate::AdaptiveTailPolicyV3 {
+            tail_target_min_tokens: 1,
+            tail_target_max_tokens: 1,
+            ..crate::AdaptiveTailPolicyV3::default()
+        },
+        u64::MAX / 4,
+        None,
+    )?;
+    let source_event_id = plan
+        .folded_event_ids
+        .first()
+        .cloned()
+        .expect("cache conformance fixture must have foldable history");
+    let preflight =
+        store.prepare_portable_semantic_compaction(crate::PortableSemanticCompactionRequest {
+            attempt_id: "cache-conformance-compaction-attempt".to_owned(),
+            compaction_id: "cache-conformance-compaction".to_owned(),
+            initiation: crate::CompactionInitiation::Manual,
+            base_projection_revision: "cache-conformance-compaction-r1".to_owned(),
+            branch_id: None,
+            valid_for_snapshot: "cache-conformance-snapshot-r1".to_owned(),
+            objective: Some("Preserve cache conformance across epoch rotation".to_owned()),
+            language: "en".to_owned(),
+            plan,
+            model_output: crate::ContinuationModelOutputV1 {
+                in_progress: vec![crate::ContinuationModelOutputItemV1 {
+                    text: "Continue validating cache behavior after epoch rotation.".to_owned(),
+                    source_event_ids: vec![source_event_id],
+                    priority: crate::ContinuationItemPriority::Critical,
+                }],
+                pending_actions: Vec::new(),
+                provider_continuity: Vec::new(),
+                model_notes: Vec::new(),
+            },
+            tool_output_projection_policy: crate::ToolOutputProjectionPolicy::default(),
+            started_at_unix_ms: 10,
+            completed_at_unix_ms: 11,
+        })?;
+    let frozen = FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        CompletionRequest {
+            provider_name: "mock-cache-conformance".to_owned(),
+            model_name: "mock-model".to_owned(),
+            messages: preflight.candidate_messages().to_vec(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(128),
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let profile = |id: &str| crate::VersionedProfileIdentity::from_content(id, 1, id.as_bytes());
+    let binding = crate::TokenMeasurementBinding {
+        schema_version: crate::COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        provider_name: "mock-cache-conformance".to_owned(),
+        model_name: "mock-model".to_owned(),
+        wire_profile: profile("cache-conformance-wire"),
+        token_measurement_profile: profile("cache-conformance-tokenizer"),
+        hosted_parity_profile: Some(profile("cache-conformance-hosted-parity")),
+    };
+    let proof = crate::RequestFitProof {
+        schema_version: crate::COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        input: crate::InputTokenEvidence::Exact {
+            tokens: 10,
+            material_fingerprint: frozen.fingerprint().to_owned(),
+            measurement_scope: crate::TokenMeasurementScope::RenderedTargetInput,
+            binding: binding.clone(),
+            provider_model_snapshot: None,
+            provider_system_fingerprint: None,
+        },
+        budget: crate::EffectiveTokenBudget {
+            schema_version: crate::COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+            budget_profile: profile("cache-conformance-budget"),
+            context_window_tokens: 128_000,
+            requested_output_tokens: 128,
+            safety_buffer_tokens: 1_024,
+        },
+    };
+    let before_input = crate::InputTokenEvidence::Exact {
+        tokens: 8_000,
+        material_fingerprint: frozen.fingerprint().to_owned(),
+        measurement_scope: crate::TokenMeasurementScope::RenderedTargetInput,
+        binding: binding.clone(),
+        provider_model_snapshot: None,
+        provider_system_fingerprint: None,
+    };
+    let target = crate::PortableTargetRequestMaterial::new(frozen.clone(), binding, proof)
+        .with_portable_economics(&frozen, before_input)?;
+    store.execute_portable_semantic_compaction(preflight, target)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn parallel_read_only_tool_lane_is_bounded_and_commits_in_declaration_order() -> Result<()> {
+    let probe = Arc::new(ToolSchedulerProbe::default());
+    let mut registry = ToolRegistry::new();
+    let calls = (0..6)
+        .map(|index| {
+            let name = format!("scheduled_read_{index}");
+            registry.register(Arc::new(ScheduledReadTool {
+                name: name.clone(),
+                delay: Duration::from_millis(if index == 0 { 80 } else { 20 }),
+                parallel: true,
+                mutation_tracking: ToolMutationTracking::None,
+                fail: false,
+                probe: Arc::clone(&probe),
+            }));
+            (format!("call-{index}"), name, "{}".to_owned())
+        })
+        .collect::<Vec<_>>();
+    let agent = Agent::new(ScriptedTurnToolProvider::new(vec![calls]), registry);
+    let mut session = Session::new("mock-parallel-read-lane", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("inspect six independent files"),
+            scripted_run_options(3),
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(probe.peak.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        settled_tool_results(&session)
+            .into_iter()
+            .map(|(call_id, _)| call_id)
+            .collect::<Vec<_>>(),
+        (0..6)
+            .map(|index| format!("call-{index}"))
+            .collect::<Vec<_>>()
+    );
+    let terminal_audit_order = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.status != ToolExecutionStatus::Started =>
+            {
+                Some(execution.call_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_audit_order,
+        (0..6)
+            .map(|index| format!("call-{index}"))
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn parallel_tool_body_failure_does_not_cancel_siblings() -> Result<()> {
+    let probe = Arc::new(ToolSchedulerProbe::default());
+    let mut registry = ToolRegistry::new();
+    for (index, name) in ["read_ok_left", "read_fails", "read_ok_right"]
+        .into_iter()
+        .enumerate()
+    {
+        registry.register(Arc::new(ScheduledReadTool {
+            name: name.to_owned(),
+            delay: Duration::from_millis(if index == 1 { 10 } else { 35 }),
+            parallel: true,
+            mutation_tracking: ToolMutationTracking::None,
+            fail: index == 1,
+            probe: Arc::clone(&probe),
+        }));
+    }
+    let calls = ["read_ok_left", "read_fails", "read_ok_right"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| (format!("failure-{index}"), name.to_owned(), "{}".to_owned()))
+        .collect::<Vec<_>>();
+    let agent = Agent::new(ScriptedTurnToolProvider::new(vec![calls]), registry);
+    let mut session = Session::new("mock-parallel-body-failure", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("run independent reads when one fails"),
+            scripted_run_options(3),
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(probe.peak.load(Ordering::SeqCst), 3);
+    let events = probe
+        .events
+        .lock()
+        .expect("scheduler events lock should not be poisoned");
+    assert!(events.iter().any(|event| event == "end:read_ok_left"));
+    assert!(events.iter().any(|event| event == "end:read_ok_right"));
+    assert_eq!(settled_tool_results(&session).len(), 3);
+    assert!(output.outcome.tool_errors.iter().any(|error| {
+        error.kind == ToolErrorKind::Internal && error.message.contains("scheduled read failed")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn parallel_opt_in_with_unknown_mutation_tracking_remains_exclusive() -> Result<()> {
+    let probe = Arc::new(ToolSchedulerProbe::default());
+    let mut registry = ToolRegistry::new();
+    for name in ["unsafe_parallel_a", "unsafe_parallel_b"] {
+        registry.register(Arc::new(ScheduledReadTool {
+            name: name.to_owned(),
+            delay: Duration::from_millis(25),
+            parallel: true,
+            mutation_tracking: ToolMutationTracking::Unknown,
+            fail: false,
+            probe: Arc::clone(&probe),
+        }));
+    }
+    let calls = ["unsafe_parallel_a", "unsafe_parallel_b"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| (format!("unsafe-{index}"), name.to_owned(), "{}".to_owned()))
+        .collect::<Vec<_>>();
+    let agent = Agent::new(ScriptedTurnToolProvider::new(vec![calls]), registry);
+    let mut session = Session::new("mock-unsafe-parallel-opt-in", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("run conservatively classified reads"),
+            scripted_run_options(3),
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(probe.peak.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn parallel_tool_cancellation_drains_active_bodies_and_starts_no_queued_body() -> Result<()> {
+    let probe = Arc::new(ToolSchedulerProbe::default());
+    let mut registry = ToolRegistry::new();
+    let calls = (0..6)
+        .map(|index| {
+            let name = format!("cancelled_read_{index}");
+            registry.register(Arc::new(ScheduledReadTool {
+                name: name.clone(),
+                delay: Duration::from_millis(80),
+                parallel: true,
+                mutation_tracking: ToolMutationTracking::None,
+                fail: false,
+                probe: Arc::clone(&probe),
+            }));
+            (format!("cancelled-call-{index}"), name, "{}".to_owned())
+        })
+        .collect::<Vec<_>>();
+    let agent = Agent::new(ScriptedTurnToolProvider::new(vec![calls]), registry);
+    let mut session = Session::new("mock-parallel-cancellation", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let cancellation_owner = RunCancellationOwner::new();
+    let input = AgentRunInput::user("cancel a bounded read batch")
+        .with_cancellation(cancellation_owner.handle());
+    {
+        let run = agent.run_with_input(&mut session, input, scripted_run_options(3), &mut handler);
+        tokio::pin!(run);
+        tokio::select! {
+            result = &mut run => panic!("run ended before the parallel lane filled: {result:#?}"),
+            () = async {
+                while probe.active.load(Ordering::SeqCst) < 4 {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        assert!(cancellation_owner.request_cancel());
+        let _ = run.await;
+    }
+
+    let starts = probe
+        .events
+        .lock()
+        .expect("scheduler events lock should not be poisoned")
+        .iter()
+        .filter(|event| event.starts_with("start:"))
+        .count();
+    assert_eq!(
+        starts, 4,
+        "queued calls must never start after cancellation"
+    );
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+    assert!(cancellation_owner.is_quiescent());
+    let interrupted = session
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                    if execution.status == ToolExecutionStatus::Interrupted
+            )
+        })
+        .count();
+    assert_eq!(interrupted, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn exclusive_tool_is_a_barrier_between_parallel_read_lanes() -> Result<()> {
+    let probe = Arc::new(ToolSchedulerProbe::default());
+    let mut registry = ToolRegistry::new();
+    for (name, delay, parallel) in [
+        ("read_left_a", 60, true),
+        ("read_left_b", 40, true),
+        ("read_barrier", 15, false),
+        ("read_right", 10, true),
+    ] {
+        registry.register(Arc::new(ScheduledReadTool {
+            name: name.to_owned(),
+            delay: Duration::from_millis(delay),
+            parallel,
+            mutation_tracking: ToolMutationTracking::None,
+            fail: false,
+            probe: Arc::clone(&probe),
+        }));
+    }
+    let calls = ["read_left_a", "read_left_b", "read_barrier", "read_right"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            (
+                format!("barrier-call-{index}"),
+                name.to_owned(),
+                "{}".to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let agent = Agent::new(ScriptedTurnToolProvider::new(vec![calls]), registry);
+    let mut session = Session::new("mock-exclusive-read-barrier", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("exercise the tool scheduling barrier"),
+            scripted_run_options(3),
+            &mut handler,
+        )
+        .await?;
+
+    let events = probe
+        .events
+        .lock()
+        .expect("scheduler events lock should not be poisoned")
+        .clone();
+    let position = |needle: &str| {
+        events
+            .iter()
+            .position(|event| event == needle)
+            .unwrap_or_else(|| panic!("missing scheduler event {needle}: {events:?}"))
+    };
+    assert!(position("end:read_left_a") < position("start:read_barrier"));
+    assert!(position("end:read_left_b") < position("start:read_barrier"));
+    assert!(position("end:read_barrier") < position("start:read_right"));
+    assert_eq!(probe.peak.load(Ordering::SeqCst), 2);
+    Ok(())
 }
 
 #[tokio::test]
@@ -12673,8 +13973,8 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
     assert_single_settled_result(&session, "call-plan-review", "not available for this run");
     assert_eq!(
         tool_result_event_count(&handler, "call-plan-review"),
-        1,
-        "routing microturn keeps the rejected result visible on the model surface"
+        0,
+        "routing correction remains durable and model-visible without leaking into product events"
     );
     let decisions = session
         .entries()
@@ -12875,10 +14175,10 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
     ));
     assert_single_settled_result(&session, "call-plan-review", "accepted");
     assert_single_settled_result(&session, "call-extra", "ignored");
-    // The routing microturn keeps the model surface live: each call settles exactly one
-    // ToolResult event so the user can see the routing activity.
-    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
-    assert_eq!(tool_result_event_count(&handler, "call-extra"), 1);
+    // Both calls still settle durably for provider correctness, while the internal routing batch
+    // stays out of product events. The Task / Plan Review runtime owns positive user feedback.
+    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 0);
+    assert_eq!(tool_result_event_count(&handler, "call-extra"), 0);
     assert!(session.entries().iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))

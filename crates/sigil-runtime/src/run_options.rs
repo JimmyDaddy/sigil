@@ -279,6 +279,7 @@ fn read_only_role_tool_scope() -> ToolRegistryScope {
             "ls",
             "glob",
             "grep",
+            "vcs_inspect",
             "code_symbols",
             "code_workspace_symbols",
             "code_definition",

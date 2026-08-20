@@ -850,6 +850,99 @@ fn doctor_session_stream_check_summarizes_valid_streams() -> Result<()> {
 }
 
 #[test]
+fn doctor_runtime_invariant_check_reports_closed_empty_surface() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let store = JsonlSessionStore::new(session_dir.join("session-1.jsonl"))?;
+    store.append_event(
+        DurableEventType::DiagnosticRecorded,
+        EventClass::Critical,
+        serde_json::json!({ "message": "ok" }),
+    )?;
+    let mut report = DoctorReport::default();
+
+    check_cache_runtime_invariants(&mut report, &session_dir);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:runtime_invariants"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("provider_attempts=0")
+            && check.message.contains("open_tool_executions=0")
+    }));
+    Ok(())
+}
+
+#[test]
+fn doctor_runtime_invariant_check_reports_malformed_tool_call_result_closure() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let store = JsonlSessionStore::new(session_dir.join("session-1.jsonl"))?;
+    store.append(&SessionLogEntry::Assistant(
+        ModelMessage::assistant_with_kind(
+            Some("tool calls".to_owned()),
+            vec![
+                sigil_kernel::ToolCall {
+                    id: "call-unclosed".to_owned(),
+                    name: "read_file".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+                sigil_kernel::ToolCall {
+                    id: "call-duplicate".to_owned(),
+                    name: "read_file".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+                sigil_kernel::ToolCall {
+                    id: "call-duplicate".to_owned(),
+                    name: "read_file".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+                sigil_kernel::ToolCall {
+                    id: "call-name-mismatch".to_owned(),
+                    name: "read_file".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+            ],
+            sigil_kernel::AssistantMessageKind::ToolPreamble,
+        ),
+    ))?;
+    let append_result = |call_id: &str, tool_name: &str| -> Result<()> {
+        let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+            &sigil_kernel::ToolResult::ok(
+                call_id,
+                tool_name,
+                "ok",
+                sigil_kernel::ToolResultMeta::default(),
+            ),
+            None,
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )?;
+        store.append(&SessionLogEntry::ToolResultV3(recorded))
+    };
+    append_result("call-duplicate", "read_file")?;
+    append_result("call-duplicate", "read_file")?;
+    append_result("call-name-mismatch", "ls")?;
+    append_result("call-orphan", "read_file")?;
+    let mut report = DoctorReport::default();
+
+    check_cache_runtime_invariants(&mut report, &session_dir);
+
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.name == "session:runtime_invariants")
+        .expect("runtime invariant check should be present");
+    assert_eq!(check.status, DoctorStatus::Warn);
+    assert!(check.message.contains("unclosed_tool_calls=1"));
+    assert!(check.message.contains("orphan_tool_results=2"));
+    assert!(check.message.contains("duplicate_tool_call_ids=1"));
+    assert!(check.message.contains("duplicate_tool_result_ids=1"));
+    assert!(check.message.contains("mismatched_tool_result_names=1"));
+    Ok(())
+}
+
+#[test]
 fn doctor_session_stream_check_handles_empty_non_directory_and_scan_limit() -> Result<()> {
     let temp = tempdir()?;
     let session_dir = temp.path().join("sessions");

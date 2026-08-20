@@ -554,10 +554,10 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {
             verification: None,
-            title: "Task task_1".to_owned(),
+            title: "Improve task status display".to_owned(),
             detail: "running · v1 · 1/2 done".to_owned(),
             route_diagnostics: vec![
-                "subagent-read×2 → deepseek/deepseek-v4-pro · active 2/4".to_owned(),
+                "subagent-read×2 → deepseek/deepseek-v4-pro · 2 model requests running · concurrency limit 4".to_owned(),
             ],
             completion_progress: vec![
                 "read batch v1 · 1/2 arrived · commits follow request order".to_owned(),
@@ -592,10 +592,10 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
         .collect::<String>();
     assert!(rendered.contains("visible tail"));
     assert!(rendered.contains("Thinking..."));
-    assert!(rendered.contains("Task task_1"));
+    assert!(rendered.contains("Improve task status display"));
     assert!(rendered.contains("running · v1 · 1/2 done"));
     assert!(rendered.contains("Route subagent-read×2"));
-    assert!(rendered.contains("active 2/4"));
+    assert!(rendered.contains("2 model requests running"));
     assert!(rendered.contains("Batch read batch v1"));
     assert!(rendered.contains("arrival #1"));
     assert!(rendered.contains("commit #2"));

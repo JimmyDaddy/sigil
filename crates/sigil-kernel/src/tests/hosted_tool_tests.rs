@@ -137,6 +137,42 @@ fn hosted_tool_request_fingerprint_binds_authorization_kind_and_limits() {
 }
 
 #[test]
+fn hosted_tool_semantic_declaration_excludes_authorization_and_canonicalizes_limits() {
+    let first = HostedToolRequest::new(
+        "authorization-turn-1",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            allowed_domains: vec!["b.example.com".to_owned(), "a.example.com".to_owned()],
+            ..HostedToolLimits::default()
+        },
+    )
+    .expect("first request should validate");
+    let next = HostedToolRequest::new(
+        "authorization-turn-2",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            allowed_domains: vec!["a.example.com".to_owned(), "b.example.com".to_owned()],
+            ..HostedToolLimits::default()
+        },
+    )
+    .expect("next request should validate");
+
+    let first = first
+        .semantic_declaration()
+        .expect("first declaration should validate");
+    let next = next
+        .semantic_declaration()
+        .expect("next declaration should validate");
+
+    assert_eq!(first, next);
+    first.validate().expect("semantic declaration is valid");
+    let serialized = serde_json::to_string(&first).expect("declaration should serialize");
+    assert!(!serialized.contains("authorization-turn"));
+    assert!(!serialized.contains("request_fingerprint"));
+    assert!(serialized.contains("web_search"));
+}
+
+#[test]
 fn hosted_tool_limits_reject_hostile_ambiguous_and_oversize_domains() {
     for domain in [
         "https://example.com",

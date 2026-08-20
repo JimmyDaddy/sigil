@@ -27,6 +27,9 @@ impl AgentSupervisor {
         session: &mut Session,
         handler: &mut H,
         route: &AgentUserInputRouteEntryV1,
+        objective: &str,
+        invocation_grant: &sigil_kernel::AgentInvocationGrant,
+        delegation_admission: &sigil_kernel::AgentDelegationAdmissionEntry,
     ) -> Result<AgentTaskChildThread>
     where
         H: EventHandler + Send + ?Sized,
@@ -61,6 +64,25 @@ impl AgentSupervisor {
             .run_context
             .as_ref()
             .context("suspended task planner thread lost its run context")?;
+        if delegation_admission.thread_id != route.source_thread_id
+            || delegation_admission.profile_id != route.profile_id
+            || delegation_admission.invocation_mode != AgentInvocationMode::Foreground
+            || delegation_admission.invocation_source != AgentInvocationSource::Task
+            || delegation_admission.objective_hash
+                != hash_text(&sigil_kernel::safe_persistence_text(objective))
+        {
+            bail!("resumed task planner admission is not bound to its durable route");
+        }
+        let durable_grant = invocation_grant.durable_record()?;
+        if delegation_admission.invocation_grant.as_ref() != Some(&durable_grant)
+            || durable_grant.profile_id != route.profile_id
+            || durable_grant.role != AgentRole::Planner
+            || durable_grant.tool_contract_fingerprint
+                != delegation_admission.tool_contract_fingerprint
+            || durable_grant.authority != delegation_admission.authority
+        {
+            bail!("resumed task planner grant is not bound to its admission evidence");
+        }
         let attempt_id = AgentRunAttemptId::new(format!(
             "attempt_{}",
             short_digest(&hash_text(&format!(
@@ -81,6 +103,14 @@ impl AgentSupervisor {
             None,
         )
         .map_err(anyhow::Error::msg)?;
+        if let Err(error) = append_control(
+            session,
+            handler,
+            ControlEntry::AgentDelegationAdmitted(delegation_admission.clone()),
+        ) {
+            self.release_thread(&route.source_thread_id);
+            return Err(error);
+        }
         if let Err(error) = append_thread_running_and_attempt(
             session,
             handler,
@@ -246,12 +276,37 @@ impl AgentSupervisor {
             provider_background_handle_ref: None,
         };
 
+        if start.delegation_admission.thread_id != thread_id
+            || start.delegation_admission.profile_id != profile_id
+            || start.delegation_admission.invocation_mode != start.invocation_mode
+            || start.delegation_admission.invocation_source != start.invocation_source
+            || start.delegation_admission.objective_hash
+                != hash_text(&sigil_kernel::safe_persistence_text(&start.objective))
+        {
+            bail!("task child delegation admission is not bound to the requested invocation");
+        }
+        let durable_grant = start.invocation_grant.durable_record()?;
+        if start.delegation_admission.invocation_grant.as_ref() != Some(&durable_grant)
+            || durable_grant.profile_id != profile_id
+            || durable_grant.role != start.role
+            || durable_grant.tool_contract_fingerprint
+                != start.delegation_admission.tool_contract_fingerprint
+            || durable_grant.authority != start.delegation_admission.authority
+        {
+            bail!("task child invocation grant is not bound to its durable admission evidence");
+        }
+
         append_control(
             session,
             handler,
             ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
                 snapshot: snapshot.clone(),
             }),
+        )?;
+        append_control(
+            session,
+            handler,
+            ControlEntry::AgentDelegationAdmitted(start.delegation_admission.clone()),
         )?;
         append_control(
             session,

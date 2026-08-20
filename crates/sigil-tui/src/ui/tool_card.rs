@@ -26,7 +26,10 @@ use super::{
     },
     status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
     syntax_highlight::highlight_code_to_spans_with_theme,
-    text::{terminal_cell_width, truncate_inline_text, wrap_display_width},
+    text::{
+        terminal_cell_width, truncate_display_width, truncate_inline_text,
+        truncate_middle_display_width, wrap_display_width,
+    },
     theme::ThemePalette,
 };
 
@@ -103,7 +106,8 @@ pub(crate) fn render_tool_entry_lines(
     if let Some(artifact_line) = tool_artifact_status_line(&summary, palette) {
         lines.push(artifact_line);
     }
-    if tool_has_preview(&summary) {
+    let result_frame = if tool_has_preview(&summary) {
+        let result_start_index = lines.len();
         if expanded {
             let body = render_tool_expanded_preview_body_with_palette(
                 &summary,
@@ -131,9 +135,13 @@ pub(crate) fn render_tool_entry_lines(
                 palette,
             ));
         }
-    }
+        Some((result_start_index, tool_result_presentation(&summary)))
+    } else {
+        None
+    };
     tool_card_frame_lines(
         lines,
+        result_frame,
         selected,
         options.max_content_width,
         activity_marker_style,
@@ -198,15 +206,15 @@ fn tool_artifact_status_line(
     let artifact = summary.artifact.as_ref()?;
     let (label, color) = if artifact.availability == "available" {
         let size = format_tool_artifact_bytes(artifact.persisted_bytes);
-        let action = if artifact.has_more {
-            " · Alt-N next · Ctrl-O toggle"
+        let next_action = if artifact.has_more {
+            " · Alt-N next"
         } else {
-            " · Ctrl-O toggle"
+            ""
         };
         if artifact.persisted_bytes < artifact.observed_bytes {
             (
                 format!(
-                    "Saved output truncated · {} of {}{action}",
+                    "Ctrl-O expand · {} of {} saved{next_action}",
                     size,
                     format_tool_artifact_bytes(artifact.observed_bytes)
                 ),
@@ -214,14 +222,14 @@ fn tool_artifact_status_line(
             )
         } else {
             (
-                format!("Saved full output · {size}{action}"),
+                format!("Ctrl-O full output · {size}{next_action}"),
                 palette.accent_info,
             )
         }
     } else {
         (
             format!(
-                "Full output unavailable ({}) · saved summary remains auditable",
+                "Full output unavailable ({}) · summary remains auditable",
                 artifact.availability.replace('_', " ")
             ),
             palette.accent_warning,
@@ -247,8 +255,11 @@ fn format_tool_artifact_bytes(bytes: u64) -> String {
 
 #[derive(Clone, Default)]
 struct ToolCardMetadata {
+    duration_ms: Option<u64>,
     exit_code: Option<i64>,
-    stdout_bytes: Option<u64>,
+    returned_lines: Option<u64>,
+    total_lines: Option<u64>,
+    read_offset: Option<u64>,
     stderr_bytes: Option<u64>,
     changed_files: Vec<String>,
     call_summary: Option<String>,
@@ -454,6 +465,42 @@ enum ToolPreviewKind {
     Code,
     #[default]
     Text,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolResultPresentation {
+    SearchMatches,
+    CodeExcerpt,
+    TerminalOutput,
+    FileTree,
+    UnifiedDiff,
+    StructuredData,
+    Document,
+    PlainText,
+}
+
+fn tool_result_presentation(summary: &ToolCardRender) -> ToolResultPresentation {
+    if tool_name_matches(&summary.tool_name, "grep") {
+        return ToolResultPresentation::SearchMatches;
+    }
+    if tool_name_matches(&summary.tool_name, "bash") || terminal_task_tool(summary) {
+        return ToolResultPresentation::TerminalOutput;
+    }
+    if summary.diff.is_some() {
+        return ToolResultPresentation::UnifiedDiff;
+    }
+    if tool_name_matches(&summary.tool_name, "ls") || tool_name_matches(&summary.tool_name, "glob")
+    {
+        return ToolResultPresentation::FileTree;
+    }
+    match summary.preview_kind {
+        ToolPreviewKind::Code if tool_name_matches(&summary.tool_name, "read_file") => {
+            ToolResultPresentation::CodeExcerpt
+        }
+        ToolPreviewKind::Markdown => ToolResultPresentation::Document,
+        ToolPreviewKind::Json => ToolResultPresentation::StructuredData,
+        ToolPreviewKind::Code | ToolPreviewKind::Text => ToolResultPresentation::PlainText,
+    }
 }
 
 impl ToolPreviewKind {

@@ -4,13 +4,16 @@ use serde_json::json;
 use crate::{
     CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
     ContinueDurableTaskAction, ControlEntry, ConversationTurnRef, EventHandler,
-    REQUEST_TASK_PLANNING_TOOL_NAME, RecoverableTaskGuidanceReviewAuthority, RunEvent, Session,
+    KEEP_PENDING_PLAN_TOOL_NAME, PendingPlanDecisionRequiredAction, PlanReviewAttemptStatus,
+    PlanReviewHandoffBinding, REQUEST_TASK_PLANNING_TOOL_NAME, RUN_PENDING_PLAN_TOOL_NAME,
+    RecoverableTaskGuidanceReviewAuthority, RunEvent, RunPendingPlanAction, Session,
     SessionLogEntry, StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
     TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffRequestedEntry,
     TaskHandoffResolvedEntry, TaskPlanningHandoffBinding, TaskRunCancellationScopeBoundEntry,
     TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, ToolCall, ToolErrorKind,
     ToolExecutionStatus, ToolResult, ToolResultMeta, task_planning_reason_codes,
     validate_continue_existing_task_call, validate_continue_without_task_planning_call,
+    validate_keep_pending_plan_call, validate_run_pending_plan_call,
 };
 
 use super::{
@@ -31,6 +34,159 @@ pub(super) fn continue_without_task_planning_call_is_accepted(call: &ToolCall) -
 pub(super) fn continue_existing_task_call_is_accepted(call: &ToolCall) -> bool {
     call.name == CONTINUE_EXISTING_TASK_TOOL_NAME
         && validate_continue_existing_task_call(call).is_ok()
+}
+
+pub(super) fn run_pending_plan_call_is_accepted(call: &ToolCall) -> bool {
+    call.name == RUN_PENDING_PLAN_TOOL_NAME && validate_run_pending_plan_call(call).is_ok()
+}
+
+pub(super) fn keep_pending_plan_call_is_accepted(call: &ToolCall) -> bool {
+    call.name == KEEP_PENDING_PLAN_TOOL_NAME && validate_keep_pending_plan_call(call).is_ok()
+}
+
+pub(super) fn handle_run_pending_plan_call(
+    session: &mut Session,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+    binding: &PlanReviewHandoffBinding,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<Option<RunPendingPlanAction>> {
+    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
+    if let Err(error) = validate_run_pending_plan_call(call) {
+        return reject_pending_plan_decision(
+            session,
+            outcome,
+            call,
+            assistant_batch_results,
+            &error.to_string(),
+        );
+    }
+    let pending = validate_pending_plan_binding(session, binding)?;
+    let result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        "pending plan execution accepted; the host will create and run a durable Task",
+        ToolResultMeta {
+            details: json!({"status": "accepted"}),
+            ..ToolResultMeta::default()
+        },
+    );
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Completed,
+        None,
+        Some(&result),
+    )?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(Some(RunPendingPlanAction {
+        plan_id: pending.plan_id.clone(),
+        plan_hash: pending.plan_hash.clone(),
+        source_turn: binding.source_turn.clone(),
+    }))
+}
+
+pub(super) fn handle_keep_pending_plan_call(
+    session: &mut Session,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+    binding: &PlanReviewHandoffBinding,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<Option<PendingPlanDecisionRequiredAction>> {
+    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
+    if let Err(error) = validate_keep_pending_plan_call(call) {
+        return reject_pending_plan_decision(
+            session,
+            outcome,
+            call,
+            assistant_batch_results,
+            &error.to_string(),
+        );
+    }
+    let pending = validate_pending_plan_binding(session, binding)?;
+    let result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        "pending plan preserved; explicit execution authorization is still required",
+        ToolResultMeta {
+            details: json!({"status": "pending"}),
+            ..ToolResultMeta::default()
+        },
+    );
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Completed,
+        None,
+        Some(&result),
+    )?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(Some(PendingPlanDecisionRequiredAction {
+        plan_id: pending.plan_id.clone(),
+    }))
+}
+
+fn reject_pending_plan_decision<T>(
+    session: &mut Session,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+    message: &str,
+) -> Result<Option<T>> {
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::InvalidInput,
+        message,
+    );
+    attach_tool_call_context(&mut result, call, &[]);
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Failed,
+        None,
+        Some(&result),
+    )?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(None)
+}
+
+fn validate_pending_plan_binding<'a>(
+    session: &Session,
+    binding: &'a PlanReviewHandoffBinding,
+) -> Result<&'a crate::PendingPlanHandoffBinding> {
+    binding.validate_shape()?;
+    if binding.source_turn.session_scope_id != session.session_scope_id() {
+        bail!("pending plan decision belongs to another session");
+    }
+    if source_turn_objective(session, &binding.source_turn).is_none() {
+        bail!("pending plan decision source turn is no longer present");
+    }
+    let pending = binding
+        .pending_plan
+        .as_ref()
+        .ok_or_else(|| anyhow!("no pending plan was bound before provider dispatch"))?;
+    let artifacts = session.plan_artifact_projection();
+    let latest = artifacts
+        .latest_pending_plan()
+        .ok_or_else(|| anyhow!("the bound pending plan is no longer actionable"))?;
+    if latest.plan_id != pending.plan_id || latest.plan_hash != pending.plan_hash {
+        bail!("pending plan changed after routing was frozen");
+    }
+    let reviews = crate::PlanReviewProjection::from_entries(session.entries());
+    if !reviews.conflicts.is_empty() {
+        bail!("pending plan review projection contains conflicting durable facts");
+    }
+    let attempt = reviews
+        .attempt_for_plan(&pending.plan_id)
+        .ok_or_else(|| anyhow!("pending plan is not bound to a review attempt"))?;
+    if attempt.status != PlanReviewAttemptStatus::DraftReady {
+        bail!("pending plan review is not draft-ready");
+    }
+    Ok(pending)
 }
 
 pub(super) fn handle_continue_existing_task_call<H>(
@@ -75,12 +231,15 @@ where
     {
         bail!("task continuation exact guidance drifted from its host binding");
     }
-    match crate::recoverable_task_guidance(
+    let continuation_kind = crate::continue_existing_task_control_kind(call)?;
+    let is_resume = continuation_kind == crate::TaskContinuationControlKind::ResumeTask;
+    let recoverable_guidance = crate::recoverable_task_guidance(
         session,
         &binding.task_id,
-        Some(binding.exact_guidance.expose_secret()),
-    ) {
-        Ok(Some(_)) => {
+        (!is_resume).then_some(binding.exact_guidance.expose_secret()),
+    );
+    match recoverable_guidance {
+        Ok(Some(_)) if !is_resume => {
             return reject_task_continuation_recovery(
                 session,
                 outcome,
@@ -90,6 +249,7 @@ where
             );
         }
         Ok(None) => {}
+        Ok(Some(_)) => {}
         Err(error) => {
             return reject_task_continuation_recovery(
                 session,
@@ -105,7 +265,7 @@ where
     let recovered_selection = match crate::recoverable_task_guidance_review(
         session,
         &binding.task_id,
-        Some(binding.exact_guidance.expose_secret()),
+        (!is_resume).then_some(binding.exact_guidance.expose_secret()),
     ) {
         Ok(Some(review)) => match review.authority {
             RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selected) => {
@@ -144,6 +304,7 @@ where
                 task_status: binding.task_status,
                 plan_status: binding.plan_status,
                 route_contract_fingerprint: binding.route_contract_fingerprint.clone(),
+                control: continuation_kind,
                 prompt_hash: binding.prompt_hash.clone(),
                 exact_prompt_required: binding.exact_prompt_required,
                 guidance: binding.safe_guidance.clone(),
@@ -152,6 +313,17 @@ where
             binding.exact_guidance.expose_secret().to_owned(),
         )
     });
+    if selected.control != continuation_kind
+        && selected.control != crate::TaskContinuationControlKind::LegacyUnspecified
+    {
+        return reject_task_continuation_recovery(
+            session,
+            outcome,
+            call,
+            assistant_batch_results,
+            "Task continuation action conflicts with the unfinished durable selection",
+        );
+    }
     let existing = session.entries().iter().find_map(|entry| match entry {
         SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(entry))
             if entry.source_turn == selected.source_turn =>
@@ -248,6 +420,15 @@ where
         Some(&result),
     )?;
     record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    let mut guidance_receipt = selected.clone();
+    if is_resume
+        && guidance_receipt.control == crate::TaskContinuationControlKind::LegacyUnspecified
+    {
+        // Legacy durable receipts predate the typed action. The current model call supplies the
+        // missing enum; keep the durable receipt immutable and carry the typed upgrade only in
+        // this host-validated process-local action.
+        guidance_receipt.control = crate::TaskContinuationControlKind::ResumeTask;
+    }
     Ok(Some(ContinueDurableTaskAction {
         task_id: selected.task_id.clone(),
         source_turn: selected.source_turn.clone(),
@@ -255,8 +436,13 @@ where
         task_status: selected.task_status,
         plan_status: selected.plan_status,
         route_contract_fingerprint: selected.route_contract_fingerprint.clone(),
+        control: if is_resume {
+            crate::TaskContinuationControl::ResumeTask
+        } else {
+            crate::TaskContinuationControl::ApplyTaskGuidance(action_guidance.clone())
+        },
         guidance: crate::SecretString::new(action_guidance),
-        guidance_receipt: selected,
+        guidance_receipt,
     }))
 }
 
@@ -290,6 +476,7 @@ pub(super) fn handle_continue_without_task_planning_call(
     session: &mut Session,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
+    ordinary_conversation_allowed: bool,
     assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<bool> {
     append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
@@ -299,6 +486,25 @@ pub(super) fn handle_continue_without_task_planning_call(
             call.name.clone(),
             ToolErrorKind::InvalidInput,
             error.to_string(),
+        );
+        attach_tool_call_context(&mut result, call, &[]);
+        append_tool_execution_audit(
+            session,
+            call,
+            &[],
+            ToolExecutionStatus::Failed,
+            None,
+            Some(&result),
+        )?;
+        record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+        return Ok(false);
+    }
+    if !ordinary_conversation_allowed {
+        let mut result = ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::InvalidInput,
+            "a pending plan requires an explicit run, revise, save, or reject decision before ordinary conversation can continue",
         );
         attach_tool_call_context(&mut result, call, &[]);
         append_tool_execution_audit(

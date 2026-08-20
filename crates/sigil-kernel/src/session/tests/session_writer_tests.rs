@@ -685,6 +685,41 @@ fn session_writer_reconciliation_reports_prewrite_failure_as_confirmed_absent() 
 }
 
 #[test]
+fn session_writer_releases_shared_reserve_and_retries_storage_exhaustion() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let reserve = temp.path().join(SESSION_EMERGENCY_RESERVE_NAME);
+    assert_eq!(
+        fs::metadata(&reserve)?.len(),
+        SESSION_EMERGENCY_RESERVE_BYTES
+    );
+
+    store.inject_writer_fault(SessionWriterFault::DiskSpaceExhaustedBeforeWrite)?;
+    let receipt = store.append_and_sync(linked_audit_record(
+        "record-storage-retry",
+        "event-storage-retry",
+        "event-storage-retry",
+        None,
+    )?)?;
+
+    assert_eq!(receipt.records()[0].event_id(), "event-storage-retry");
+    assert_eq!(
+        fs::metadata(&reserve)?.len(),
+        SESSION_EMERGENCY_RESERVE_BYTES
+    );
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert!(records.iter().any(|record| {
+        matches!(
+            record,
+            SessionStreamRecord::Stored(event)
+                if event.event_id == "event-storage-retry"
+                    && event.event_kind() == Some(DurableEventType::MutationPrepared)
+        )
+    }));
+    Ok(())
+}
+
+#[test]
 fn session_writer_reconciliation_reports_unreadable_stream_as_indeterminate() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");

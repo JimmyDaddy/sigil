@@ -57,6 +57,46 @@ fn applied(start: &StoredEvent) -> CompactionAppliedV2 {
 }
 
 #[test]
+fn hidden_context_v2_clear_is_reemitted_after_a_new_compaction_tail() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let user = ModelMessage::user("original turn");
+    let user_id = user.id.clone();
+    session.append_user_message(user)?;
+    let original = RuntimeContextSnapshotV2::new(
+        RuntimeContextSnapshotStateV2::Cleared,
+        render_runtime_context_v2_clear_content()?,
+        Some(user_id),
+    );
+    let original_id = original.message.id.clone();
+    session.append(SessionLogEntry::RuntimeContextSnapshotV2(original))?;
+
+    let checkpoint = ModelMessage::user("compacted task state");
+    let checkpoint_id = checkpoint.id.clone();
+    let mut candidate_projection = session.context_projection();
+    candidate_projection.retained_entries = vec![SessionProjectionEntry {
+        message: checkpoint.clone(),
+        origin: SessionProjectionOrigin::ContinuationCheckpoint,
+        source_event_id: None,
+    }];
+    let resolution = session.build_runtime_context_v2_resolution(
+        &candidate_projection,
+        &[checkpoint],
+        RuntimeContextCandidates::default(),
+    )?;
+    let reemitted = resolution
+        .staged_snapshot
+        .expect("a hidden clear snapshot must be rebound after compaction");
+
+    assert_eq!(reemitted.state, RuntimeContextSnapshotStateV2::Cleared);
+    assert_eq!(
+        reemitted.source_tail_message_id.as_deref(),
+        Some(checkpoint_id.as_str())
+    );
+    assert_ne!(reemitted.message.id, original_id);
+    Ok(())
+}
+
+#[test]
 fn v2_context_projection_preserves_raw_messages_until_applied_then_uses_v2_boundary() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
@@ -150,9 +190,16 @@ fn v2_context_projection_preserves_raw_messages_until_applied_then_uses_v2_bound
     let request_contents = request
         .messages
         .iter()
+        .filter(|message| !message.id.starts_with("context:v2:"))
         .map(|message| message.content.as_deref())
         .collect::<Vec<_>>();
     assert!(request_contents.ends_with(&[Some("first"), Some("second"), Some("third")]));
+    assert!(
+        request
+            .messages
+            .last()
+            .is_some_and(|message| message.id.starts_with("context:v2:"))
+    );
     Ok(())
 }
 
@@ -405,6 +452,8 @@ fn task_memory_snapshot_relation_is_metadata_only() {
         checkpoint: None,
         retained_entries: vec![SessionProjectionEntry {
             message: ModelMessage::user("first"),
+            origin: SessionProjectionOrigin::ProcessLocalCandidate,
+            source_event_id: None,
         }],
         trust_projection: ContextTrustProjection::default(),
     }

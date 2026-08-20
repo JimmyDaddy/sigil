@@ -23,7 +23,7 @@ use sigil_kernel::{
 
 use super::{
     AppMouseOutcome, BACKGROUND_TASK_WAKE_INTERVAL, ExternalLaunchPlatform, ExternalLaunchTarget,
-    InitialSessionTarget, SPINNER_FRAME_MILLIS, WorkerRuntime, apply_key_action,
+    InitialSessionTarget, SPINNER_FRAME_MILLIS, TuiPanicHookGuard, WorkerRuntime, apply_key_action,
     apply_mouse_outcome, build_initial_app, drain_worker_messages, enter_terminal_presentation,
     external_launch_plan, finalize_terminal_presentation, flush_pending_worker_commands,
     leave_terminal_presentation, mouse_layout_snapshot, next_mouse_capture_action,
@@ -79,6 +79,46 @@ fn test_config() -> RootConfig {
     }
 }
 
+#[test]
+fn background_panic_is_forwarded_without_restoring_the_owner_terminal() -> Result<()> {
+    const CHILD_ENV: &str = "SIGIL_TUI_BACKGROUND_PANIC_HOOK_CHILD";
+    const TEST_NAME: &str =
+        "launcher::tests::background_panic_is_forwarded_without_restoring_the_owner_terminal";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "panic-hook subprocess failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+
+    let restore_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let restore_count_for_hook = std::sync::Arc::clone(&restore_count);
+    let (guard, mut reports) = TuiPanicHookGuard::install_with_restore(move || {
+        restore_count_for_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let panicked = std::thread::Builder::new()
+        .name("panic-regression-worker".to_owned())
+        .spawn(|| panic!("UTF-8 background panic 到"))?;
+    assert!(panicked.join().is_err());
+    assert_eq!(
+        restore_count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a background panic must not restore terminal state owned by the launcher thread"
+    );
+    let report = reports.try_recv()?;
+    assert!(report.contains("panic-regression-worker"));
+    assert!(report.contains("UTF-8 background panic 到"));
+    guard.restore();
+    Ok(())
+}
+
 fn test_config_for_workspace(workspace_root: &Path) -> RootConfig {
     RootConfig {
         config_version: 2,
@@ -118,6 +158,9 @@ fn v2_test_config(default_connection: &str) -> RootConfig {
 fn tui_exit_resume_hint_includes_session_id_and_resume_command() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_id = "abc123".to_owned();
+    app.session_browser
+        .current_entries
+        .push(SessionLogEntry::User(ModelMessage::user("hello")));
 
     let hint = render_tui_exit_resume_hint(&app, None);
 
@@ -196,6 +239,9 @@ fn wake_deadline_only_polls_while_runtime_work_is_active() {
 fn tui_exit_resume_hint_preserves_explicit_config_path() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_id = "abc123".to_owned();
+    app.session_browser
+        .current_entries
+        .push(SessionLogEntry::User(ModelMessage::user("hello")));
 
     let hint = render_tui_exit_resume_hint(&app, Some(Path::new("configs/my config.toml")));
 
@@ -203,6 +249,20 @@ fn tui_exit_resume_hint_preserves_explicit_config_path() {
         hint,
         "Sigil session: abc123\nResume with: sigil --config 'configs/my config.toml' resume abc123\n"
     );
+}
+
+#[test]
+fn tui_exit_resume_hint_is_empty_for_bootstrap_only_session() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_browser
+        .current_entries
+        .push(SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
+        }));
+
+    assert_eq!(render_tui_exit_resume_hint(&app, None), "");
 }
 
 #[test]

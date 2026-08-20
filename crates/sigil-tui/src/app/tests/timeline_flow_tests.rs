@@ -2587,7 +2587,7 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
 
     assert_eq!(
         app.context_usage_line(),
-        "ctx: 9% · prompt 90.4K / 1.0M provider · soft at 700.0K"
+        "ctx: 9% · cache=0% · prompt 90.4K / 1.0M provider · soft at 700.0K"
     );
     assert_eq!(app.runtime.compaction_status, "ready");
     assert!(app.footer_status_line().contains("tok 90.4K"));
@@ -2615,7 +2615,7 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
     }))?;
     assert_eq!(
         fallback_app.context_usage_line(),
-        "ctx: 50% · prompt 64.0K / 128.0K fallback · soft at 89.6K"
+        "ctx: 50% · cache=0% · prompt 64.0K / 128.0K fallback · soft at 89.6K"
     );
     Ok(())
 }
@@ -2839,21 +2839,23 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
 }
 
 #[test]
-fn busy_escape_requests_cancel_without_discarding_composer_text() -> Result<()> {
+fn busy_escape_returns_from_history_without_cancelling_the_run() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.runtime.is_busy = true;
+    app.active_pane = PaneFocus::Activity;
     app.composer.input = "keep draft".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
-    assert!(matches!(action, Some(AppAction::CancelRun)));
+    assert!(action.is_none());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.composer.input, "keep draft");
-    assert_eq!(app.last_notice(), Some("cancellation requested"));
+    assert_ne!(app.last_notice(), Some("cancellation requested"));
     assert!(
-        app.timeline
-            .iter()
-            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "cancel requested")
+        app.timeline.iter().all(|entry| {
+            entry.role != TimelineRole::Notice || entry.text != "cancel requested"
+        })
     );
     Ok(())
 }
@@ -2897,7 +2899,7 @@ fn app_status_helpers_cover_empty_balance_context_and_session_title() {
     assert_eq!(app.balance_sidebar_line(), "balance: checking");
     assert_eq!(
         app.context_usage_line(),
-        "ctx: 0% · prompt 1.2K / 1.0M provider · soft at 700.0K"
+        "ctx: 0% · cache=0% · prompt 1.2K / 1.0M provider · soft at 700.0K"
     );
     let policy = app.compaction_policy_line();
     assert!(policy.starts_with("policy: "));

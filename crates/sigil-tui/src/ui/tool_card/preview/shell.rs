@@ -14,39 +14,16 @@ pub(in crate::ui::tool_card) fn render_bash_preview_with_palette(
     accent: Color,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let section = bash_preview_section_label(summary);
-    let subtitle = match (&summary.summary, summary.metadata.exit_code) {
-        (Some(summary), Some(code)) => format!("exit {code} · {summary}"),
-        (Some(summary), None) => summary.clone(),
-        (None, Some(code)) => format!("exit {code}"),
-        (None, None) => "terminal tail".to_owned(),
-    };
-    let mut lines = vec![timeline_section_line_with_palette(
-        accent,
-        section,
-        palette.accent_warning,
-        vec![Span::styled(
-            subtitle,
-            Style::default().fg(palette.text_muted),
-        )],
-        palette,
-    )];
     if summary.preview_lines.is_empty() {
-        lines.push(timeline_content_line(
+        return vec![timeline_content_line(
             accent,
             vec![Span::styled(
-                "(no output)".to_owned(),
+                "— No output",
                 Style::default().fg(palette.text_muted),
             )],
-        ));
-    } else {
-        lines.extend(render_code_preview_lines_with_palette(
-            accent,
-            &summary.preview_lines,
-            palette.markdown_code_bg,
-            palette,
-        ));
+        )];
     }
+    let mut lines = render_terminal_output_lines(summary, accent, palette);
     lines.extend(render_tool_hidden_tail(
         accent,
         summary.hidden_lines,
@@ -72,31 +49,81 @@ pub(in crate::ui::tool_card) fn render_bash_command_section_with_palette(
         max_content_width.saturating_sub(4).max(1)
     };
     let command_lines = wrap_display_width(&command, command_width);
-    let mut lines = vec![timeline_section_line_with_palette(
-        accent,
-        "command",
-        palette.accent_info,
-        Vec::new(),
-        palette,
-    )];
-    lines.extend(render_code_preview_lines_with_palette(
-        accent,
-        &command_lines,
-        palette.markdown_code_bg,
-        palette,
-    ));
+    let mut lines = command_lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let marker = if index == 0 { "› " } else { "  " };
+            timeline_content_line(
+                accent,
+                vec![
+                    Span::styled(
+                        marker,
+                        Style::default()
+                            .fg(palette.accent_info)
+                            .bg(palette.markdown_code_bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        line,
+                        Style::default()
+                            .fg(palette.markdown_code_fg)
+                            .bg(palette.markdown_code_bg),
+                    ),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some(policy) = summary
+        .metadata
+        .execution_network_policy
+        .as_deref()
+        .filter(|policy| *policy != "unknown")
+    {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                format!("network: {}", execution_network_display_label(policy)),
+                Style::default().fg(palette.text_muted),
+            )],
+        ));
+    }
     lines
 }
-pub(in crate::ui::tool_card) fn bash_preview_section_label(
+
+pub(in crate::ui::tool_card) fn render_terminal_output_lines(
     summary: &ToolCardRender,
-) -> &'static str {
-    if summary.is_error {
-        if summary.metadata.stderr_bytes.unwrap_or(0) > 0 {
-            return "stderr";
-        }
-        if summary.metadata.stdout_bytes.unwrap_or(0) > 0 {
-            return "stdout";
-        }
-    }
-    "output"
+    accent: Color,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let stderr = summary.is_error && summary.metadata.stderr_bytes.unwrap_or(0) > 0;
+    let (marker, marker_color) = if stderr {
+        ("! ", palette.accent_danger)
+    } else {
+        ("│ ", palette.text_muted)
+    };
+    summary
+        .preview_lines
+        .iter()
+        .map(|line| {
+            timeline_content_line(
+                accent,
+                vec![
+                    Span::styled(
+                        marker,
+                        Style::default()
+                            .fg(marker_color)
+                            .bg(palette.markdown_code_bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        line.clone(),
+                        Style::default()
+                            .fg(palette.markdown_code_fg)
+                            .bg(palette.markdown_code_bg),
+                    ),
+                ],
+            )
+        })
+        .collect()
 }

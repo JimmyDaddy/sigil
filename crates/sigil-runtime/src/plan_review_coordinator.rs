@@ -13,8 +13,8 @@ use sigil_kernel::{
     PlanReviewTerminalReason, PlanSourceRef, PlanTaskStartMode, ProviderPhysicalAttemptOutcome,
     RunEvent, Session, SessionLogEntry, SessionRef, StartPlanReviewAction,
     TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    admit_suggested_decomposition, append_task_intent_plan_admission, bind_task_plan_intents,
-    build_workspace_snapshot, plan_review_attempt_id_for_review,
+    admit_suggested_decomposition, append_task_intent_plan_admission_with_step_contracts,
+    bind_task_plan_intents, build_workspace_snapshot, plan_review_attempt_id_for_review,
     plan_review_attempt_id_for_revision_ordinal, plan_review_child_session_ref,
     plan_review_finalizer_session_ref, plan_review_id_for_explicit_command,
     plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
@@ -532,6 +532,8 @@ impl PlanReviewCoordinator {
                         }
                         AgentRunDisposition::StartDurableTask(_)
                         | AgentRunDisposition::ContinueDurableTask(_)
+                        | AgentRunDisposition::RunPendingPlan(_)
+                        | AgentRunDisposition::PendingPlanDecisionRequired(_)
                         | AgentRunDisposition::TaskPlanAccepted => {
                             return complete_plan_review_run(
                                 &cancellation,
@@ -702,6 +704,8 @@ impl PlanReviewCoordinator {
                 ),
                 AgentRunDisposition::StartDurableTask(_)
                 | AgentRunDisposition::ContinueDurableTask(_)
+                | AgentRunDisposition::RunPendingPlan(_)
+                | AgentRunDisposition::PendingPlanDecisionRequired(_)
                 | AgentRunDisposition::TaskPlanAccepted => PlanReviewRunOutcome::Failed(
                     "plan review finalization attempted an out-of-scope handoff".to_owned(),
                 ),
@@ -1542,8 +1546,11 @@ impl PlanReviewCoordinator {
             bail!("plan {} already created a task", plan_id.as_str());
         }
         if let Some(existing) = projection.latest_decision(&plan_id) {
-            if existing.decision == PlanDecision::RevisionFailed {
-                // The revision never started; the original plan remains actionable.
+            if matches!(
+                existing.decision,
+                PlanDecision::RevisionFailed | PlanDecision::TaskCreationFailed
+            ) {
+                // The preceding host action never started; the original plan remains actionable.
             } else {
                 bail!(
                     "plan {} already has decision {}",
@@ -1633,6 +1640,35 @@ impl PlanReviewCoordinator {
         parent_session_ref: SessionRef,
         request: &CreateTaskFromPlanRequest,
     ) -> Result<CreatedTaskFromPlan> {
+        let result = Self::create_task_from_plan_inner(
+            session,
+            root_config,
+            workspace_root,
+            parent_session_ref,
+            request,
+        );
+        if let Err(error) = &result
+            && let Err(record_error) = Self::record_task_creation_failure(
+                session,
+                request,
+                &format!("{error:#}"),
+                now_ms(),
+            )
+        {
+            return Err(anyhow!(
+                "{error:#}; failed to record task creation failure: {record_error:#}"
+            ));
+        }
+        result
+    }
+
+    fn create_task_from_plan_inner(
+        session: &mut Session,
+        root_config: &RootConfig,
+        workspace_root: &Path,
+        parent_session_ref: SessionRef,
+        request: &CreateTaskFromPlanRequest,
+    ) -> Result<CreatedTaskFromPlan> {
         let plan_id = PlanId::new(request.plan_id.clone())
             .map_err(|error| anyhow!("invalid plan id for task creation: {error}"))?;
         let projection = session.plan_artifact_projection();
@@ -1700,8 +1736,9 @@ impl PlanReviewCoordinator {
         } else {
             None
         };
-        let (task_plan, step_mapping, intent_admission) = match promoted {
+        let (task_plan, step_contracts, step_mapping, intent_admission) = match promoted {
             Some(promotion) => {
+                let step_contracts = promotion.step_contracts;
                 let mut task_plan = promotion.task_plan;
                 let intent_admission = match draft.intent_proposal.as_ref() {
                     Some(proposal) => {
@@ -1749,9 +1786,14 @@ impl PlanReviewCoordinator {
                         None
                     }
                 };
-                (Some(task_plan), promotion.step_mapping, intent_admission)
+                (
+                    Some(task_plan),
+                    step_contracts,
+                    promotion.step_mapping,
+                    intent_admission,
+                )
             }
-            None => (None, Vec::new(), None),
+            None => (None, Vec::new(), Vec::new(), None),
         };
         let existing_accepted_plan = session
             .task_state_projection()
@@ -1886,25 +1928,79 @@ impl PlanReviewCoordinator {
                 .get(&task_id)
                 .and_then(|task| task.plans.get(&task_plan.plan_version))
                 .cloned();
-            match existing_plan {
+            let plan_already_exists = match existing_plan {
                 Some(existing)
                     if existing.plan_version == task_plan.plan_version
                         && existing.status == task_plan.status
                         && existing.steps == task_plan.steps
-                        && existing.reason == task_plan.reason => {}
+                        && existing.reason == task_plan.reason =>
+                {
+                    true
+                }
                 Some(_) => {
                     bail!(
                         "plan {} task-plan prefix conflicts with direct promotion",
                         plan_id.as_str()
                     );
                 }
-                None if intent_admission.is_none() => {
-                    session.append_control(ControlEntry::TaskPlan(task_plan.clone()))?
-                }
-                None => {}
-            }
+                None => false,
+            };
             if let Some(admission) = intent_admission.as_ref() {
-                append_task_intent_plan_admission(session, admission, task_plan)?;
+                append_task_intent_plan_admission_with_step_contracts(
+                    session,
+                    admission,
+                    task_plan.clone(),
+                    step_contracts.clone(),
+                )?;
+            } else if !plan_already_exists {
+                let mut controls = Vec::with_capacity(step_contracts.len().saturating_add(2));
+                controls.push(ControlEntry::TaskPlan(task_plan.clone()));
+                controls.extend(
+                    step_contracts
+                        .iter()
+                        .cloned()
+                        .map(ControlEntry::TaskStepContractBoundV2),
+                );
+                controls.push(ControlEntry::TaskPlanContractSetCommittedV2(
+                    sigil_kernel::TaskPlanContractSetCommittedV2::new(&task_plan, &step_contracts)?,
+                ));
+                session.append_controls(controls)?;
+            } else {
+                let task_projection = session.task_state_projection();
+                let existing_contracts = task_projection
+                    .tasks
+                    .get(&task_id)
+                    .and_then(|task| task.plans.get(&task_plan.plan_version))
+                    .map(|plan| &plan.step_contracts)
+                    .context("directly promoted task plan disappeared during contract replay")?;
+                let mut missing = Vec::new();
+                for step_contract in &step_contracts {
+                    match existing_contracts.get(&step_contract.step_id) {
+                        Some(contract) if contract == &step_contract.contract => {}
+                        Some(_) => bail!(
+                            "plan {} task-step contract conflicts with direct promotion",
+                            plan_id.as_str()
+                        ),
+                        None => missing
+                            .push(ControlEntry::TaskStepContractBoundV2(step_contract.clone())),
+                    }
+                }
+                let committed = task_projection
+                    .tasks
+                    .get(&task_id)
+                    .and_then(|task| task.plans.get(&task_plan.plan_version))
+                    .is_some_and(|plan| plan.contract_set_committed_v2);
+                if !committed {
+                    missing.push(ControlEntry::TaskPlanContractSetCommittedV2(
+                        sigil_kernel::TaskPlanContractSetCommittedV2::new(
+                            &task_plan,
+                            &step_contracts,
+                        )?,
+                    ));
+                }
+                if !missing.is_empty() {
+                    session.append_controls(missing)?;
+                }
             }
         }
 
@@ -1990,6 +2086,62 @@ impl PlanReviewCoordinator {
         })
     }
 
+    /// Records a failed Run action without consuming the immutable plan.
+    ///
+    /// Invalid ids, stale hashes and already-created tasks do not acquire new durable authority,
+    /// so they remain ordinary request errors. Exact pending plans receive a bounded system
+    /// settlement that survives reload and permits a later retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact pending plan exists but its failure settlement conflicts
+    /// with durable decision state or cannot be appended.
+    pub fn record_task_creation_failure(
+        session: &mut Session,
+        request: &CreateTaskFromPlanRequest,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<Option<PlanDecisionRecordedEntry>> {
+        let Ok(plan_id) = PlanId::new(request.plan_id.clone()) else {
+            return Ok(None);
+        };
+        let projection = session.plan_artifact_projection();
+        let Some(draft) = projection.plans.get(&plan_id) else {
+            return Ok(None);
+        };
+        if draft.plan_hash != request.expected_plan_hash
+            || projection.task_created_for_plan(&plan_id)
+        {
+            return Ok(None);
+        }
+        let safe_reason = safe_persistence_text(reason);
+        let reason = safe_reason.chars().take(512).collect::<String>();
+        if let Some(existing) = projection.latest_decision(&plan_id) {
+            match existing.decision {
+                PlanDecision::TaskCreationFailed if existing.reason.as_deref() == Some(&reason) => {
+                    return Ok(Some(existing.clone()));
+                }
+                PlanDecision::SavedOnly
+                | PlanDecision::RevisionFailed
+                | PlanDecision::TaskCreationFailed => {}
+                PlanDecision::Accepted
+                | PlanDecision::Rejected
+                | PlanDecision::RevisionRequested
+                | PlanDecision::RevisionSucceeded => return Ok(None),
+            }
+        }
+        let entry = PlanDecisionRecordedEntry {
+            plan_id,
+            plan_hash: draft.plan_hash.clone(),
+            decision: PlanDecision::TaskCreationFailed,
+            decided_by: PlanDecisionActor::System,
+            decided_at_ms: now_ms,
+            reason: Some(reason),
+        };
+        session.append_control(ControlEntry::PlanDecisionRecorded(entry.clone()))?;
+        Ok(Some(entry))
+    }
+
     /// Discards a plan durably.
     ///
     /// # Errors
@@ -2032,7 +2184,9 @@ impl PlanReviewCoordinator {
         }
         if let Some(decision) = projection.latest_decision(&plan_id) {
             match decision.decision {
-                PlanDecision::SavedOnly | PlanDecision::RevisionFailed => {}
+                PlanDecision::SavedOnly
+                | PlanDecision::RevisionFailed
+                | PlanDecision::TaskCreationFailed => {}
                 _ => bail!(
                     "plan {} already has decision {}",
                     plan_id.as_str(),

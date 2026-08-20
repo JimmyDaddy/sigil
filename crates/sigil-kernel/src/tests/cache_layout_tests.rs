@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+use super::CacheLayoutProofV2;
+
 use crate::{
     CacheLayoutMutationKind, CacheLayoutProofV1, CompletionRequest, HostedToolKind,
     HostedToolLimits, HostedToolRequest, MessageRole, ModelMessage, ReasoningEffort, ToolAccess,
@@ -180,5 +182,79 @@ fn hosted_tool_removal_is_a_tool_schema_break_not_dynamic_state() -> Result<()> 
         CacheLayoutMutationKind::ToolSchemaChanged
     );
     assert!(!summary.mutation_from_previous.local_stable_prefix_preserved);
+    Ok(())
+}
+
+#[test]
+fn cache_layout_v2_ignores_per_turn_hosted_authorization_identity() -> Result<()> {
+    let limits = HostedToolLimits {
+        max_uses: Some(3),
+        allowed_domains: vec!["docs.example.com/reference".to_owned()],
+        blocked_domains: Vec::new(),
+    };
+    let mut first_request = request();
+    first_request.hosted_tools.push(HostedToolRequest::new(
+        "authorization-turn-1",
+        HostedToolKind::WebSearch,
+        limits.clone(),
+    )?);
+    let first = CacheLayoutProofV2::from_request(&first_request, None)?;
+
+    let mut next_request = first_request.clone();
+    next_request.hosted_tools = vec![HostedToolRequest::new(
+        "authorization-turn-2",
+        HostedToolKind::WebSearch,
+        limits,
+    )?];
+    let next = CacheLayoutProofV2::from_request(&next_request, Some(&first))?;
+
+    first.validate()?;
+    next.validate()?;
+    assert_eq!(first.tool_schema_hash, next.tool_schema_hash);
+    assert_eq!(first.layout_hash, next.layout_hash);
+    assert_eq!(
+        next.mutation_from_previous.kind,
+        CacheLayoutMutationKind::Identical
+    );
+
+    let legacy_first = CacheLayoutProofV1::from_request(&first_request, None)?;
+    let legacy_next = CacheLayoutProofV1::from_request(&next_request, Some(&legacy_first))?;
+    assert_eq!(
+        legacy_next.mutation_from_previous.kind,
+        CacheLayoutMutationKind::ToolSchemaChanged
+    );
+    Ok(())
+}
+
+#[test]
+fn cache_layout_v2_detects_provider_visible_hosted_schema_changes() -> Result<()> {
+    let mut baseline_request = request();
+    baseline_request.hosted_tools.push(HostedToolRequest::new(
+        "authorization-1",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            max_uses: Some(2),
+            ..HostedToolLimits::default()
+        },
+    )?);
+    let baseline = CacheLayoutProofV2::from_request(&baseline_request, None)?;
+
+    let mut changed_request = baseline_request;
+    changed_request.hosted_tools = vec![HostedToolRequest::new(
+        "authorization-2",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            max_uses: Some(4),
+            ..HostedToolLimits::default()
+        },
+    )?];
+    let changed = CacheLayoutProofV2::from_request(&changed_request, Some(&baseline))?;
+
+    assert_ne!(baseline.tool_schema_hash, changed.tool_schema_hash);
+    assert_eq!(
+        changed.mutation_from_previous.kind,
+        CacheLayoutMutationKind::ToolSchemaChanged
+    );
+    assert!(!changed.mutation_from_previous.local_stable_prefix_preserved);
     Ok(())
 }

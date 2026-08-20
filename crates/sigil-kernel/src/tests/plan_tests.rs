@@ -247,6 +247,103 @@ fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
 }
 
 #[test]
+fn sigil_plan_v2_rejects_verify_as_a_participant_step() {
+    let error = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Compile the workspace",
+  "steps": [{
+    "step_id": "verify",
+    "title": "Run tests",
+    "role": "executor",
+    "depends_on": [],
+    "mode": "verify",
+    "isolation": "shared_read_only"
+  }],
+  "target_paths": ["Cargo.toml"]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )
+    .expect_err("verification must be system-owned, not a participant step");
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot create verify participant steps")
+    );
+}
+
+#[test]
+fn sigil_plan_v2_rejects_verification_run_as_participant_capability() {
+    let error = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Inspect before trusted verification",
+  "steps": [{
+    "step_id": "inspect",
+    "title": "Inspect Cargo",
+    "role": "executor",
+    "depends_on": [],
+    "mode": "read",
+    "isolation": "shared_read_only",
+    "required_capabilities": ["verification_run"],
+    "suggested_checks": ["cargo check"]
+  }],
+  "target_paths": ["Cargo.toml"]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )
+    .expect_err("provider text must not delegate host-owned verification");
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot delegate verification_run")
+    );
+}
+
+#[test]
+fn direct_plan_promotion_rejects_legacy_verify_participant_steps() -> Result<()> {
+    let mut draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Inspect Cargo",
+  "steps": [{
+    "step_id": "inspect",
+    "title": "Inspect Cargo",
+    "role": "executor",
+    "depends_on": [],
+    "mode": "read",
+    "isolation": "shared_read_only",
+    "target_paths": ["Cargo.toml"]
+  }],
+  "target_paths": ["Cargo.toml"]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("read plan should create a draft");
+    draft.steps[0].mode = Some(TaskStepMode::Verify);
+
+    let error = task_plan_from_plan_draft(&draft, TaskId::new("task_legacy_verify")?, 1)
+        .expect_err("legacy verify steps must not become impossible participants");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot promote verify participant steps")
+    );
+    Ok(())
+}
+
+#[test]
 fn sigil_plan_v2_carries_digest_bound_intent_proposal_without_runtime_authority() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
@@ -365,12 +462,10 @@ fn sigil_plan_v2_accepts_single_string_notes_and_acceptance() -> Result<()> {
 
     assert_eq!(draft.notes, vec!["Plan mode only; no files were modified."]);
     assert_eq!(draft.steps[0].step_id, "fix-readme-typo");
+    assert_eq!(draft.steps[0].notes, vec!["One token replacement."]);
     assert_eq!(
-        draft.steps[0].notes,
-        vec![
-            "One token replacement.",
-            "acceptance: README.md contains the corrected marker.",
-        ]
+        draft.steps[0].acceptance_criteria,
+        vec!["README.md contains the corrected marker."]
     );
     Ok(())
 }
@@ -394,7 +489,7 @@ fn sigil_plan_v2_block_creates_structured_executable_plan() -> Result<()> {
     {
       "step_id": "verify-readme",
       "title": "Verify README.md wording",
-      "mode": "verify",
+      "mode": "read",
       "target_paths": ["README.md"]
     }
   ],
@@ -565,6 +660,66 @@ fn plan_review_rejects_oversized_summary_instead_of_truncating_detail() -> Resul
     .expect_err("oversized summaries must fail closed");
 
     assert!(error.to_string().contains("2048-byte"));
+    Ok(())
+}
+
+#[test]
+fn plan_display_name_is_bounded_before_draft_commit_and_during_legacy_promotion() -> Result<()> {
+    let oversized = "提交 code-intel / mcp / provider-deepseek / tools-builtin";
+    let args = json!({
+        "schema_version": 2,
+        "summary": "Commit support crates",
+        "steps": [{
+            "step_id": "commit-support",
+            "title": "Commit the support crates as one coherent batch",
+            "display_name": oversized,
+            "role": "executor",
+            "mode": "write",
+            "isolation": "sequential_workspace_write",
+            "target_paths": ["crates"]
+        }],
+        "target_paths": ["crates"],
+        "suggested_checks": []
+    });
+    let mut draft = submit_plan_draft_entry(
+        &serde_json::to_string(&args)?,
+        PlanId::new("bounded-display-name")?,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("typed plan");
+
+    let committed = draft.steps[0]
+        .display_name
+        .as_deref()
+        .expect("display name");
+    assert_eq!(
+        committed.chars().count(),
+        crate::TASK_AGENT_DISPLAY_NAME_MAX_CHARS
+    );
+    assert!(committed.ends_with('…'));
+    let promotion = task_plan_from_plan_draft(&draft, TaskId::new("task_bounded")?, 1)?
+        .expect("bounded draft promotes");
+    assert_eq!(
+        promotion.task_plan.steps[0].display_name.as_deref(),
+        Some(committed)
+    );
+
+    // A previously persisted V2 draft may still carry the old unbounded representation. It must
+    // remain executable after an upgrade because this field is presentation-only.
+    draft.steps[0].display_name = Some(oversized.to_owned());
+    let legacy = task_plan_from_plan_draft(&draft, TaskId::new("task_legacy")?, 1)?
+        .expect("legacy draft promotes");
+    let legacy_name = legacy.task_plan.steps[0]
+        .display_name
+        .as_deref()
+        .expect("legacy display name");
+    assert_eq!(
+        legacy_name.chars().count(),
+        crate::TASK_AGENT_DISPLAY_NAME_MAX_CHARS
+    );
+    assert!(legacy_name.ends_with('…'));
     Ok(())
 }
 #[test]

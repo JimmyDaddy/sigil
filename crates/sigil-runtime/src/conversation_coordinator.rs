@@ -5,18 +5,20 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ContinueDurableTaskAction,
     ControlEntry, ConversationPurposeContext, ConversationTurnRef, MessageRole, ModelMessage,
-    PlanReviewHandoffBinding, RecoverableTaskGuidanceReviewAuthority, Session, SessionLogEntry,
-    SessionRef, StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
-    TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
-    TaskId, TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanStatus,
-    TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepStatus, WriteLeaseReleaseStatus, WriteLeaseReleased,
+    PendingPlanHandoffBinding, PlanReviewAttemptStatus, PlanReviewHandoffBinding,
+    RecoverableTaskGuidanceReviewAuthority, Session, SessionLogEntry, SessionRef,
+    StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationControl,
+    TaskContinuationHandoffBinding, TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry,
+    TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
+    TaskPlanStatus, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepStatus, WriteLeaseReleaseStatus, WriteLeaseReleased,
     conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
     conversation_route_routing_contract_material, durable_task_cancellation_requested,
     plan_review_attempt_id_for_review, plan_review_id_for_source, plan_review_plan_id_for_attempt,
     plan_review_policy_snapshot_hash, reconcile_task_final_answer_prefix,
-    recoverable_task_guidance_review, route_surface_tool_specs_for_context,
-    route_surface_tool_specs_with_memory, safe_persistence_text, task_planner_logical_run_id,
+    reconcile_task_step_projections, recoverable_task_guidance_review,
+    route_surface_tool_specs_for_bound_context, route_surface_tool_specs_with_memory,
+    safe_persistence_text, task_planner_logical_run_id,
 };
 
 const TASK_HANDOFF_ID_DOMAIN: &str = "sigil-task-handoff-v1";
@@ -123,10 +125,11 @@ impl ConversationCoordinator {
         session: &Session,
         capability: AutomaticRouteCapability,
     ) -> Vec<sigil_kernel::ToolSpec> {
-        route_surface_tool_specs_for_context(
+        route_surface_tool_specs_for_bound_context(
             capability,
             self.writable_memory_routing,
             task_continuation_candidate(session, None).is_some(),
+            draft_ready_pending_plan(session).is_some(),
         )
     }
 
@@ -197,6 +200,7 @@ impl ConversationCoordinator {
         session: &Session,
         capability: AutomaticRouteCapability,
         continuation: Option<&TaskContinuationCandidate>,
+        pending_plan: Option<&PendingPlanHandoffBinding>,
     ) -> String {
         let mut host_facts = self
             .orchestration_route_guard
@@ -241,12 +245,19 @@ impl ConversationCoordinator {
                 ),
             ]);
         }
+        if let Some(pending_plan) = pending_plan {
+            host_facts.extend([
+                ("pending_plan_id", pending_plan.plan_id.as_str()),
+                ("pending_plan_hash", pending_plan.plan_hash.as_str()),
+            ]);
+        }
         conversation_route_contract_fingerprint(
             conversation_route_routing_contract_material(),
-            &route_surface_tool_specs_for_context(
+            &route_surface_tool_specs_for_bound_context(
                 capability,
                 self.writable_memory_routing,
                 continuation.is_some(),
+                pending_plan.is_some(),
             ),
             capability,
             &host_facts,
@@ -302,11 +313,15 @@ impl ConversationCoordinator {
         let task_continuation_candidate = routes_automatically
             .then(|| task_continuation_candidate(session, Some(&source_turn.message_id)))
             .flatten();
+        let pending_plan = routes_automatically
+            .then(|| draft_ready_pending_plan(session))
+            .flatten();
         let route_contract_fingerprint = if routes_automatically {
             Some(self.route_contract_fingerprint(
                 session,
                 capability,
                 task_continuation_candidate.as_ref(),
+                pending_plan.as_ref(),
             ))
         } else {
             None
@@ -587,6 +602,7 @@ impl ConversationCoordinator {
                 interrupt_task_after_durable_cancellation(session, &task_id)?;
                 continue;
             }
+            reconcile_committed_planner_attempts(session, &task_id)?;
             let task = session
                 .task_state_projection()
                 .tasks
@@ -640,6 +656,17 @@ impl ConversationCoordinator {
             })
             .map(|task| task.task_id.clone())
             .collect::<Vec<_>>();
+        // Reproject stale blocked step facts before deciding whether a continuation can resume.
+        // This is an append-only repair through the kernel task writer, not a JSONL rewrite.
+        let reprojection_task_ids = session
+            .task_state_projection()
+            .tasks
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for task_id in reprojection_task_ids {
+            reconcile_task_step_projections(session, &task_id)?;
+        }
         for task_id in repairable_task_ids {
             reconcile_task_final_answer_prefix(session, &task_id)?;
         }
@@ -757,6 +784,7 @@ impl ConversationCoordinator {
             objective,
             policy_snapshot_hash: plan_review_policy_snapshot_hash(),
             route_contract_fingerprint,
+            pending_plan: draft_ready_pending_plan(session),
             requested_at_ms: existing.map_or(now_ms, |decision| decision.decided_at_ms),
             decided_at_ms: existing.map_or(now_ms, |decision| decision.decided_at_ms),
         })
@@ -789,7 +817,13 @@ pub fn validate_task_continuation_action(
     let selected = selected.ok_or_else(|| {
         anyhow!("Task continuation action is missing its durable selection receipt")
     })?;
-    if selected != &action.guidance_receipt
+    let legacy_receipt_upgrade =
+        selected.control == sigil_kernel::TaskContinuationControlKind::LegacyUnspecified && {
+            let mut upgraded = selected.clone();
+            upgraded.control = action.guidance_receipt.control;
+            upgraded == action.guidance_receipt
+        };
+    if (selected != &action.guidance_receipt && !legacy_receipt_upgrade)
         || selected.task_id != action.task_id
         || selected.plan_version != action.plan_version
         || selected.task_status != action.task_status
@@ -798,11 +832,18 @@ pub fn validate_task_continuation_action(
     {
         bail!("Task continuation action conflicts with its durable selection receipt");
     }
+    let action_is_resume = matches!(action.control(), TaskContinuationControl::ResumeTask);
+    let receipt_is_resume =
+        action.guidance_receipt.control == sigil_kernel::TaskContinuationControlKind::ResumeTask;
+    if action_is_resume != receipt_is_resume {
+        bail!("Task continuation control conflicts with its durable selection receipt");
+    }
     let prompt =
         sigil_kernel::project_conversation_prompt_for_persistence(action.guidance.expose_secret());
-    if prompt.prompt_hash != selected.prompt_hash
-        || prompt.safe_prompt != selected.guidance
-        || prompt.exact_prompt_required != selected.exact_prompt_required
+    if !action_is_resume
+        && (prompt.prompt_hash != selected.prompt_hash
+            || prompt.safe_prompt != selected.guidance
+            || prompt.exact_prompt_required != selected.exact_prompt_required)
     {
         bail!("Task continuation exact guidance no longer matches its durable receipt");
     }
@@ -822,7 +863,7 @@ pub fn validate_task_continuation_action(
     let pending_selection_matches = recoverable_task_guidance_review(
         session,
         &action.task_id,
-        Some(action.guidance.expose_secret()),
+        (!action_is_resume).then_some(action.guidance.expose_secret()),
     )?
     .is_some_and(|review| {
         matches!(
@@ -1030,6 +1071,23 @@ fn source_from_direct_input(input: &AgentRunInput) -> Result<ConversationSourceT
     })
 }
 
+fn draft_ready_pending_plan(session: &Session) -> Option<PendingPlanHandoffBinding> {
+    let artifacts = session.plan_artifact_projection();
+    let draft = artifacts.latest_pending_plan()?;
+    let reviews = sigil_kernel::PlanReviewProjection::from_entries(session.entries());
+    if !reviews.conflicts.is_empty()
+        || reviews
+            .attempt_for_plan(&draft.plan_id)
+            .is_none_or(|attempt| attempt.status != PlanReviewAttemptStatus::DraftReady)
+    {
+        return None;
+    }
+    Some(PendingPlanHandoffBinding {
+        plan_id: draft.plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+    })
+}
+
 fn task_continuation_candidate(
     session: &Session,
     source_message_id: Option<&str>,
@@ -1150,6 +1208,45 @@ fn task_planner_dispatch_seen(session: &Session, task_id: &TaskId) -> Result<boo
     Ok(!attempts
         .attempts_for_logical_run_id(&task_planner_logical_run_id(task_id))
         .is_empty())
+}
+
+/// Closes a planner attempt left `Started` when the parent plan commit survived but the child
+/// completion record did not. The plan batch is the authoritative recovery boundary: it is
+/// written before the runtime records child completion, so a matching accepted plan proves the
+/// planner result is already durable and can be resumed without re-running the planner.
+fn reconcile_committed_planner_attempts(session: &mut Session, task_id: &TaskId) -> Result<usize> {
+    let projection = session.task_state_projection();
+    let Some(task) = projection.tasks.get(task_id) else {
+        return Ok(0);
+    };
+    let Some(plan_version) = task.latest_plan_version else {
+        return Ok(0);
+    };
+    let Some(plan) = task.plans.get(&plan_version) else {
+        return Ok(0);
+    };
+    let plan_is_recoverable = plan.status == TaskPlanStatus::Accepted
+        && (plan.step_contracts.is_empty() || plan.contract_set_committed_v2);
+    if !plan_is_recoverable {
+        return Ok(0);
+    }
+    let attempts = task
+        .participant_attempts
+        .values()
+        .filter(|attempt| {
+            attempt.purpose == TaskParticipantPurpose::Planner
+                && attempt.status == TaskParticipantAttemptStatus::Started
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for mut attempt in attempts.iter().cloned() {
+        attempt.status = TaskParticipantAttemptStatus::Completed;
+        attempt.reason = Some(format!(
+            "recovered accepted task plan v{plan_version} after parent plan commit"
+        ));
+        session.append_control(ControlEntry::TaskParticipantAttempt(attempt))?;
+    }
+    Ok(attempts.len())
 }
 
 fn pause_uncertain_task(

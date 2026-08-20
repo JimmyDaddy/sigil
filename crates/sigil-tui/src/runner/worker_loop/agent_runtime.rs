@@ -854,6 +854,12 @@ pub(in crate::runner) fn agent_result_continuation_run_result(
         AgentRunDisposition::ContinueDurableTask(_) => {
             Err("agent result continuation cannot continue a durable task".to_owned())
         }
+        AgentRunDisposition::RunPendingPlan(_) => {
+            Err("agent result continuation cannot execute a pending plan".to_owned())
+        }
+        AgentRunDisposition::PendingPlanDecisionRequired(_) => {
+            Err("agent result continuation cannot decide a pending plan".to_owned())
+        }
         AgentRunDisposition::StartPlanReview(_) => {
             Err("agent result continuation cannot start a plan review".to_owned())
         }
@@ -889,6 +895,7 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     root_config: &RootConfig,
     base_registry: &ToolRegistry,
     options: &AgentRunOptions,
+    context_resolver: &sigil_runtime::RequestContextResolver,
     background_runs: &sigil_runtime::AgentToolBackgroundRuns,
     current_session: &mut Option<Session>,
     task_result_tx: &WorkerEventPayloadSender<RunTaskResult>,
@@ -1004,6 +1011,7 @@ where
     *next_run_id = (*next_run_id).saturating_add(1);
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
+    let pending_input_provider = DurableQueuePendingInputProvider::new(context_resolver.clone());
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -1012,7 +1020,7 @@ where
             let input = AgentRunInput::without_persisted_user_message(background_ready_context)
                 .with_runtime_context(runtime_context)
                 .with_initial_frozen_provider_request(frozen_request)
-                .with_pending_input_provider(Arc::new(DurableQueuePendingInputProvider))
+                .with_pending_input_provider(Arc::new(pending_input_provider))
                 .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
             let input = conversation_coordinator
                 .enforce_orchestration_route_kill_switch(&mut run_session, current_unix_time_ms())
@@ -1165,6 +1173,100 @@ where
                                     agent_result_continuation_thread_ids: Vec::new(),
                                 }
                             }
+                        }
+                    }
+                    AgentRunDisposition::RunPendingPlan(action) => {
+                        let created = sigil_runtime::PlanReviewCoordinator::create_task_from_plan(
+                            &mut run_session,
+                            &task_root_config,
+                            &options.workspace_root,
+                            parent_session_ref.clone(),
+                            &sigil_runtime::CreateTaskFromPlanRequest {
+                                plan_id: action.plan_id.as_str().to_owned(),
+                                expected_plan_hash: action.plan_hash,
+                                start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+                                permission_grant: None,
+                            },
+                        )
+                        .map_err(|error| format!("failed to execute the selected pending plan: {error:#}"));
+                        match created {
+                            Ok(created) => {
+                                let _ = run_message_tx.send(WorkerMessage::TaskCreatedFromPlan {
+                                    entry: created.entry.clone(),
+                                    start_mode: created.start_mode,
+                                    entries: created.entries.clone(),
+                                });
+                                let task_id = created.task_id.as_str().to_owned();
+                                let task = run_session
+                                    .task_state_projection()
+                                    .tasks
+                                    .get(&created.task_id)
+                                    .cloned();
+                                match task {
+                                    Some(task) => {
+                                        let _ = run_message_tx.send(WorkerMessage::TaskRunStarted {
+                                            task_id: task_id.clone(),
+                                            objective: task.objective.clone(),
+                                        });
+                                        let result = run_admitted_task_to_root_terminal(
+                                            &mut run_session,
+                                            AdmittedTaskRunOrchestration {
+                                                task_id: created.task_id,
+                                                parent_session_ref: task.parent_session_ref,
+                                                objective: task.objective,
+                                                root_config: task_root_config,
+                                                options,
+                                                base_registry: task_base_registry,
+                                                agent_supervisor: task_agent_supervisor,
+                                                role_provider_builder:
+                                                    role_provider_builder.as_ref(),
+                                                handler: &mut handler,
+                                                cancellation_handle,
+                                                tool_artifact_read_budget,
+                                            },
+                                            &mut approval_handler,
+                                        )
+                                        .await;
+                                        RunTaskPayload::Task {
+                                            task_id,
+                                            queue_id: Some(queue_id.clone()),
+                                            result,
+                                        }
+                                    }
+                                    None => RunTaskPayload::Chat {
+                                        result: Err(format!(
+                                            "pending plan promotion created task {task_id} without durable task state"
+                                        )),
+                                        plan_mode: false,
+                                        plan_review: false,
+                                        queue_id: Some(queue_id.clone()),
+                                        provider_logical_run_id: None,
+                                        agent_result_continuation_thread_ids: Vec::new(),
+                                    },
+                                }
+                            }
+                            Err(error) => RunTaskPayload::Chat {
+                                result: Err(error),
+                                plan_mode: false,
+                                plan_review: false,
+                                queue_id: Some(queue_id.clone()),
+                                provider_logical_run_id: None,
+                                agent_result_continuation_thread_ids: Vec::new(),
+                            },
+                        }
+                    }
+                    AgentRunDisposition::PendingPlanDecisionRequired(_action) => {
+                        RunTaskPayload::Chat {
+                            result: Ok(sigil_kernel::AgentRunResult {
+                                final_text: "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned(),
+                                tool_calls: output.result.tool_calls,
+                                final_message_id: output.result.final_message_id,
+                            }),
+                            plan_mode: false,
+                            plan_review: false,
+                            queue_id: Some(queue_id.clone()),
+                            provider_logical_run_id: None,
+                            agent_result_continuation_thread_ids: Vec::new(),
                         }
                     }
                     AgentRunDisposition::Interrupted => RunTaskPayload::Chat {
@@ -1453,7 +1555,9 @@ pub(in crate::runner) async fn chat_agent_run_input_with_repo_context(
     };
     input
         .with_runtime_context(runtime_context)
-        .with_pending_input_provider(Arc::new(DurableQueuePendingInputProvider))
+        .with_pending_input_provider(Arc::new(DurableQueuePendingInputProvider::new(
+            context_resolver.clone(),
+        )))
 }
 
 pub(in crate::runner) fn append_mcp_elicitation_audits(

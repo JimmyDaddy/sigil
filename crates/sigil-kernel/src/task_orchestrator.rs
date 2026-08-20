@@ -42,9 +42,10 @@ use crate::{
         TaskParticipantResultEntry, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
         TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
         TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRunEntry, TaskRunProjection,
-        TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
-        bounded_task_participant_summary, task_final_message_id, task_participant_attempt_id,
-        task_participant_logical_run_id, task_participant_session_ref,
+        TaskRunStatus, TaskStepContractBoundEntryV2, TaskStepContractV2, TaskStepEntry, TaskStepId,
+        TaskStepMode, TaskStepSpec, TaskStepStatus, bounded_task_participant_summary,
+        task_final_message_id, task_participant_attempt_id, task_participant_logical_run_id,
+        task_participant_session_ref,
     },
     verification::PolicyHash,
     verification::{
@@ -84,8 +85,10 @@ pub use changeset_only::{
 pub use child_session::TaskChildSessionRunner;
 pub use runner::{
     RecoverableTaskGuidance, RecoverableTaskGuidanceReview, RecoverableTaskGuidanceReviewAuthority,
-    SequentialTaskOrchestrator, reconcile_task_final_answer_prefix, recoverable_task_guidance,
+    SequentialTaskOrchestrator, commit_task_planner_output, reconcile_completed_step,
+    reconcile_task_final_answer_prefix, reconcile_task_step_projections, recoverable_task_guidance,
     recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
+    retry_blocked_step,
 };
 #[cfg(test)]
 use runner::{
@@ -97,10 +100,11 @@ pub use types::{
     TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
     TaskChildSessionBatchFuture, TaskChildSessionBatchPreparation, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskIntegrationProposal, TaskIntegrationRunOutput,
-    TaskIntegrationRunRequest, TaskParticipantRetryError, TaskPlannerSessionAwaitingUserInput,
-    TaskPlannerSessionResumeRequest, TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput,
-    TaskPlannerSessionRunRequest, TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest,
-    TaskVerificationRerunOutput, TaskVerificationRerunRequest, task_participant_input_hash,
+    TaskIntegrationRunRequest, TaskParticipantRetryError, TaskParticipantRetryRouteDriftError,
+    TaskPlannerSessionAwaitingUserInput, TaskPlannerSessionResumeRequest,
+    TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
+    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, TaskVerificationRerunOutput,
+    TaskVerificationRerunRequest, task_participant_input_hash,
 };
 
 use changeset_only::{
@@ -111,10 +115,12 @@ use evidence::{
     changed_files_mutation_evidence, durable_mutation_replay_failed_evidence,
     durable_workspace_mutation_evidence,
 };
+#[cfg(test)]
+use prompts::subagent_step_prompt;
 use prompts::{
-    executor_step_prompt, normalize_task_guidance, planner_prompt, subagent_step_prompt,
-    task_continue_reason, task_guidance_assessment_prompt, task_step_dependency_result_context,
-    task_synthesis_prompt,
+    executor_step_prompt_with_contract, normalize_task_guidance, planner_prompt,
+    subagent_step_prompt_with_contract, task_continue_reason, task_guidance_assessment_prompt,
+    task_step_dependency_result_context, task_synthesis_prompt,
 };
 pub use prompts::{
     task_participant_finalization_prompt_contract_material,
@@ -138,15 +144,15 @@ mod task_orchestrator_child_session_test_support;
 use scheduler::{
     DEFAULT_TASK_READ_ONLY_CONCURRENCY, append_cancelled_dependent_steps, cancels_dependent_steps,
     latest_executable_plan, run_status_from_step_status, runnable_steps_for_continue,
-    step_reason_from_output, step_status_after_readiness, step_status_from_outcome,
-    step_terminal_reason, task_status_from_step_status,
-};
-use shared::{
-    append_task_control, append_task_control_with_event, append_task_controls, append_task_run,
-    append_task_step,
+    step_reason_after_readiness, step_reason_from_output, step_status_after_readiness,
+    step_status_from_outcome, step_terminal_reason, task_status_from_step_status,
 };
 #[cfg(test)]
-use shared::{hash_text, route_id_for_call};
+use shared::route_id_for_call;
+use shared::{
+    append_task_control, append_task_control_with_event, append_task_controls, append_task_run,
+    append_task_step, hash_text,
+};
 #[cfg(test)]
 use task_orchestrator_child_session_test_support::{
     TestAgentTaskChildSessionRunner, child_status_from_output,

@@ -12,7 +12,7 @@ use crate::{
     },
     tool::{
         PreparedToolCall, ToolContext, ToolDiffBudget, ToolPreview, ToolPreviewCapability,
-        ToolPreviewSnapshot, ToolRegistry, ToolSpec,
+        ToolPreviewSnapshot, ToolSpec,
     },
 };
 
@@ -126,7 +126,7 @@ pub(super) fn pending_interactive_approval_identity(call_id: &str) -> String {
 pub(super) async fn capture_tool_preview_for_decision<H>(
     session: &mut Session,
     handler: &mut H,
-    tools: &ToolRegistry,
+    invocation: &crate::tool::ResolvedToolInvocation,
     tool_ctx: ToolContext,
     call: &ToolCall,
     spec: &ToolSpec,
@@ -157,7 +157,7 @@ where
     } else if has_external_subject(&decision.subjects) {
         Some(external_directory_preview(&call.name, &decision.subjects))
     } else {
-        match tools.preview(tool_ctx, call.clone()).await {
+        match invocation.preview(tool_ctx, call.clone()).await {
             Ok(preview) => preview,
             Err(error) => {
                 let error = error.to_string();

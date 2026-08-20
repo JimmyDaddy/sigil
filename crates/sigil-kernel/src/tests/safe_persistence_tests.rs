@@ -515,6 +515,46 @@ fn cross_stream_boundary_leaves_non_merged_and_clean_streams_unchanged() {
 }
 
 #[test]
+fn cross_stream_token_bounds_are_unicode_safe() {
+    assert_eq!(
+        last_non_whitespace_token_bounds("prefix\u{3000}中文"),
+        Some(("prefix\u{3000}".len(), "prefix\u{3000}中文".len()))
+    );
+    assert_eq!(
+        last_non_whitespace_token_bounds("emoji 🙂\n"),
+        Some(("emoji ".len(), "emoji 🙂".len()))
+    );
+    assert_eq!(
+        previous_non_whitespace_token("--token\u{3000}[redacted]", "--token\u{3000}".len()),
+        Some("--token")
+    );
+}
+
+#[test]
+fn cross_stream_boundary_accepts_cjk_and_emoji_at_stream_edges() {
+    let cases = [
+        ("RFC 内容到\n", ""),
+        ("RFC 内容到", ""),
+        ("emoji 🙂", ""),
+        ("前缀到", "达"),
+        ("前缀\u{3000}中文", "stderr"),
+    ];
+    for (stdout, stderr) in cases {
+        let (safe_stdout, safe_stderr) = redact_cross_stream_pair(stdout, stderr);
+        assert_eq!(
+            safe_stdout,
+            safe_persistence_text(stdout),
+            "stdout {stdout:?}"
+        );
+        assert_eq!(
+            safe_stderr,
+            safe_persistence_text(stderr),
+            "stderr {stderr:?}"
+        );
+    }
+}
+
+#[test]
 fn cross_stream_boundary_absorbs_carry_value_fragments_like_the_full_text_scan() {
     // The per-stream pass consumed `redact_next` on the last stdout token; the value continues
     // into the first stderr token and must be absorbed into the same `[redacted]` replacement,

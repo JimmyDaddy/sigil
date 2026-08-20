@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use std::{fmt, path::Path};
+use std::{
+    fmt,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -656,6 +660,10 @@ pub enum DelegationAuthority {
         plan_version: u32,
         step_id: crate::TaskStepId,
     },
+    TaskOrchestrator {
+        task_id: crate::TaskId,
+        phase: TaskOrchestratorPhase,
+    },
     ModelProactive,
     SystemRecovery,
 }
@@ -675,6 +683,20 @@ pub enum AgentInvocationGrantSource {
         plan_version: u32,
         step_id: crate::TaskStepId,
     },
+    TaskOrchestrator {
+        task_id: crate::TaskId,
+        phase: TaskOrchestratorPhase,
+    },
+}
+
+/// Host-owned internal task phase that may start a bounded child before or after executable
+/// step admission. This is separate from accepted-plan authority and cannot be model-authored.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOrchestratorPhase {
+    Planner,
+    PlannerDiscovery,
+    Synthesis,
 }
 
 /// Root-run facts from which the host may mint a concrete child invocation grant.
@@ -739,6 +761,11 @@ impl fmt::Debug for AgentInvocationGrantBinding {
 pub struct AgentInvocationGrant {
     binding: AgentInvocationGrantBinding,
     fingerprint: String,
+    workspace_frontier: Arc<Mutex<AgentInvocationWorkspaceFrontier>>,
+}
+
+struct AgentInvocationWorkspaceFrontier {
+    current_snapshot_id: crate::WorkspaceSnapshotId,
 }
 
 impl fmt::Debug for AgentInvocationGrant {
@@ -786,9 +813,13 @@ impl AgentInvocationGrant {
         hasher.update(b"sigil-agent-invocation-grant-v1\0");
         hasher.update(minting_secret.as_bytes());
         hasher.update(encoded);
+        let workspace_frontier = Arc::new(Mutex::new(AgentInvocationWorkspaceFrontier {
+            current_snapshot_id: binding.workspace_snapshot_id.clone(),
+        }));
         Ok(Self {
             binding,
             fingerprint: format!("sha256:{:x}", hasher.finalize()),
+            workspace_frontier,
         })
     }
 
@@ -834,6 +865,8 @@ impl AgentInvocationGrant {
         if now_ms >= self.binding.expires_at_ms {
             bail!("agent invocation grant expired");
         }
+        let workspace_snapshot_matches =
+            self.workspace_frontier_snapshot_id()? == *workspace_snapshot_id;
         if &self.binding.source != source
             || &self.binding.authority != authority
             || self.binding.root_logical_run_id != root_logical_run_id
@@ -841,7 +874,7 @@ impl AgentInvocationGrant {
             || self.binding.role != role
             || self.binding.isolation != isolation
             || self.binding.tool_contract_fingerprint != tool_contract_fingerprint
-            || &self.binding.workspace_snapshot_id != workspace_snapshot_id
+            || !workspace_snapshot_matches
             || self.binding.root_cancellation_scope_id != root_cancellation_scope_id
         {
             bail!("agent invocation grant binding changed before child admission");
@@ -868,13 +901,54 @@ impl AgentInvocationGrant {
         if self.binding.tool_contract_fingerprint != tool_contract_fingerprint {
             bail!("agent invocation tool contracts changed after grant minting");
         }
-        if &self.binding.workspace_snapshot_id != workspace_snapshot_id {
-            bail!("agent invocation workspace snapshot changed after grant minting");
+        if self.workspace_frontier_snapshot_id()? != *workspace_snapshot_id {
+            bail!("agent invocation workspace changed outside its audited mutation frontier");
         }
         if self.binding.root_cancellation_scope_id != root_cancellation_scope_id {
             bail!("agent invocation cancellation scope changed after grant minting");
         }
         Ok(())
+    }
+
+    /// Advances a writable invocation to the workspace state produced by one authorized tool.
+    ///
+    /// The initial binding remains immutable audit evidence. This process-local frontier may move
+    /// only after the tool's mutation evidence has been settled, and only when no other writer
+    /// changed the frontier between the pre-effect validation and the post-effect snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for read-only invocations, concurrent frontier drift, or poisoned state.
+    pub(crate) fn advance_workspace_frontier(
+        &self,
+        observed_before: &crate::WorkspaceSnapshotId,
+        observed_after: crate::WorkspaceSnapshotId,
+    ) -> Result<()> {
+        let mut frontier = self
+            .workspace_frontier
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent invocation workspace frontier is unavailable"))?;
+        if frontier.current_snapshot_id != *observed_before {
+            bail!("agent invocation workspace frontier changed during tool execution");
+        }
+        if frontier.current_snapshot_id == observed_after {
+            return Ok(());
+        }
+        if matches!(
+            self.binding.isolation,
+            crate::TaskIsolationMode::SharedReadOnly
+        ) {
+            bail!("read-only agent invocation changed the workspace");
+        }
+        frontier.current_snapshot_id = observed_after;
+        Ok(())
+    }
+
+    fn workspace_frontier_snapshot_id(&self) -> Result<crate::WorkspaceSnapshotId> {
+        self.workspace_frontier
+            .lock()
+            .map(|frontier| frontier.current_snapshot_id.clone())
+            .map_err(|_| anyhow::anyhow!("agent invocation workspace frontier is unavailable"))
     }
 
     /// Produces the safe, non-executable durable audit projection.
@@ -998,6 +1072,13 @@ fn validate_invocation_grant_binding(
         ) if task_id == authority_task_id
             && plan_version == authority_plan_version
             && step_id == authority_step_id => {}
+        (
+            AgentInvocationGrantSource::TaskOrchestrator { task_id, phase },
+            DelegationAuthority::TaskOrchestrator {
+                task_id: authority_task_id,
+                phase: authority_phase,
+            },
+        ) if task_id == authority_task_id && phase == authority_phase => {}
         _ => bail!("agent invocation grant source and authority do not match"),
     }
     Ok(())
@@ -1049,6 +1130,10 @@ pub enum DelegationAuthorityRecord {
         plan_version: u32,
         step_id: crate::TaskStepId,
     },
+    TaskOrchestrator {
+        task_id: crate::TaskId,
+        phase: TaskOrchestratorPhase,
+    },
     ModelProactive,
     SystemRecovery,
 }
@@ -1065,6 +1150,10 @@ impl From<&DelegationAuthority> for DelegationAuthorityRecord {
                 task_id: task_id.clone(),
                 plan_version: *plan_version,
                 step_id: step_id.clone(),
+            },
+            DelegationAuthority::TaskOrchestrator { task_id, phase } => Self::TaskOrchestrator {
+                task_id: task_id.clone(),
+                phase: *phase,
             },
             DelegationAuthority::ModelProactive => Self::ModelProactive,
             DelegationAuthority::SystemRecovery => Self::SystemRecovery,

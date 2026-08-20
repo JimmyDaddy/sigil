@@ -330,8 +330,20 @@ pub struct PlanReviewHandoffBinding {
     pub objective: String,
     pub policy_snapshot_hash: String,
     pub route_contract_fingerprint: String,
+    /// Exact draft-ready Plan that owns this routing boundary, when one exists. The model sees
+    /// only typed run/keep decisions and never receives either identity field as tool input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_plan: Option<PendingPlanHandoffBinding>,
     pub requested_at_ms: u64,
     pub decided_at_ms: u64,
+}
+
+/// Host-owned identity for the exact draft-ready Plan awaiting a semantic execution decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PendingPlanHandoffBinding {
+    pub plan_id: PlanId,
+    pub plan_hash: String,
 }
 
 impl PlanReviewHandoffBinding {
@@ -341,6 +353,13 @@ impl PlanReviewHandoffBinding {
         }
         if self.route_contract_fingerprint.is_empty() {
             bail!("plan review handoff binding requires a route contract fingerprint");
+        }
+        if self
+            .pending_plan
+            .as_ref()
+            .is_some_and(|pending| pending.plan_hash.trim().is_empty())
+        {
+            bail!("pending plan handoff binding requires a plan hash");
         }
         Ok(())
     }
@@ -618,12 +637,16 @@ pub fn submit_plan_draft_tool_spec() -> ToolSpec {
                         "properties": {
                             "step_id": {"type": "string"},
                             "title": {"type": "string"},
-                            "display_name": {"type": "string"},
+                            "display_name": {
+                                "type": "string",
+                                "maxLength": crate::TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
+                                "description": "Optional short presentation-only step name. Longer execution detail belongs in title or detail."
+                            },
                             "detail": {"type": "string"},
                             "role": {"type": "string", "enum": ["planner", "executor", "subagent_read", "subagent_write"]},
                             "depends_on": {"type": "array", "items": {"type": "string"}},
                             "intent_aliases": {"type": "array", "items": {"type": "string"}},
-                            "mode": {"type": "string", "enum": ["read", "write", "review", "verify"]},
+                            "mode": {"type": "string", "enum": ["read", "write", "review"]},
                             "isolation": {"type": "string", "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"]},
                             "target_paths": {"type": "array", "items": {"type": "string"}},
                             "suggested_checks": {"type": "array", "items": {"oneOf": [
@@ -703,6 +726,8 @@ pub fn conversation_route_routing_contract_material() -> &'static str {
     r#"You are the semantic conversation router for the current user turn. This is a routing-only microturn: do not answer the user, do not inspect the workspace, and do not use ordinary tools.
 
 Classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned plans, tasks, or commits. Judge the structure of the requested outcome, not its estimated effort or the number of files that may need to be read. Call exactly one of the routing tools advertised in this request and then stop.
+
+When run_pending_plan and keep_pending_plan are advertised, an exact draft-ready Plan already owns this decision boundary. Call run_pending_plan only when the user's current request semantically authorizes executing that Plan. Call keep_pending_plan for an unrelated, ambiguous, revise, save, reject, or otherwise non-execution request. Never infer authorization from the presence of words such as continue, run, or execute alone; evaluate the whole request. The host owns the Plan identity and will revalidate it after the call.
 
 When remember_user_preference or remember_project_fact is also advertised and the same user turn explicitly intends a stable preference or project convention to persist beyond this session, call the appropriate remember tool in the same response in addition to the one routing decision. Memory intent is semantic: do not infer it merely from a word or from an ordinary instruction. The remember call still requires host preview and approval, and it must not replace the routing decision.
 

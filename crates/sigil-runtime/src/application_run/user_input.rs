@@ -403,6 +403,8 @@ pub async fn prepare_application_user_input_decision(
             .map_err(ApplicationRunPrepareError::execution)?;
         let ApplicationTaskExecutionRuntime {
             root_config,
+            workspace_root: _,
+            parent_session_ref: _,
             options,
             base_registry,
             agent_supervisor,
@@ -604,6 +606,9 @@ pub async fn prepare_application_user_input_decision(
         .resolve(&preview.request.prompt)
         .await
         .unwrap_or_default();
+    let pending_input_provider = crate::pending_input::DurableQueuePendingInputProvider::new(
+        surface.context_resolver.clone(),
+    );
     let continuation_logical_run_id = sigil_kernel::user_input_continuation_logical_run_id(
         &request.identity,
         &request.request_hash,
@@ -619,9 +624,7 @@ pub async fn prepare_application_user_input_decision(
         )
         .with_initial_provider_physical_attempt_id(physical_attempt_id.clone())
         .with_cancellation(cancellation_handle.clone())
-        .with_pending_input_provider(Arc::new(
-            crate::pending_input::DurableQueuePendingInputProvider,
-        ));
+        .with_pending_input_provider(Arc::new(pending_input_provider));
     let parent_session_ref = SessionRef::new_relative(
         session_path
             .file_name()

@@ -132,7 +132,7 @@ pub enum LspContextSnapshotStatus {
     },
 }
 
-/// Bounded, request-local repository source map for Context V1 candidate selection.
+/// Bounded, request-local repository source map for Context V2 candidate selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoMapLite {
     /// Best-effort revision identity for the scanned workspace.

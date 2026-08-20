@@ -53,10 +53,10 @@ use super::{
     append_integration_run_output, child_status_from_output, decode_changeset_only_child_output,
     durable_workspace_mutation_evidence, latest_relevant_successful_verification_sequence,
     participant_result_entry, planner_prompt, reconcile_task_final_answer_prefix,
-    record_isolated_child_output, relevant_verification_receipts, rerun_task_verification_check,
-    route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
-    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
-    subagent_step_prompt, task_guidance_review_settlement_controls,
+    reconcile_task_step_projections, record_isolated_child_output, relevant_verification_receipts,
+    rerun_task_verification_check, route_id_for_call, run_status_from_step_status,
+    run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
+    step_terminal_reason, subagent_step_prompt, task_guidance_review_settlement_controls,
     task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
     task_planner_system_prompt_contract_material, task_status_from_step_status,
     task_step_auto_run_policy, task_step_default_policy, task_step_dependency_result_context,
@@ -653,6 +653,7 @@ impl TaskChildSessionRunner for RetryingPlannerSynthesisChildRunner {
                     )?],
                     reason: None,
                 },
+                step_contracts: Vec::new(),
                 guidance_applied: None,
                 child_session_ref: request.child_session_ref,
             },
@@ -757,6 +758,7 @@ impl TaskChildSessionRunner for AlwaysRateLimitedControlChildRunner {
                     )?],
                     reason: None,
                 },
+                step_contracts: Vec::new(),
                 guidance_applied: None,
                 child_session_ref: request.child_session_ref,
             },
@@ -901,6 +903,7 @@ impl TaskChildSessionRunner for SuspendingPlannerChildRunner {
                     )?],
                     reason: None,
                 },
+                step_contracts: Vec::new(),
                 guidance_applied: None,
                 child_session_ref: request.child_session_ref,
             },
@@ -1119,6 +1122,8 @@ fn task_role_system_prompts_bind_planning_and_participant_capabilities() {
     assert!(participant.contains("exactly one accepted durable task-plan step"));
     assert!(participant.contains("Use only tool names explicitly advertised"));
     assert!(participant.contains("never /workspace"));
+    assert!(participant.contains("must be discovered with list, glob, or grep before read_file"));
+    assert!(participant.contains("instead of trying another guessed path"));
     assert!(participant.contains("authoritative handoff"));
     assert!(participant.contains("report that limitation without guessing"));
 }
@@ -1142,7 +1147,7 @@ fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files(
 
     let context = task_step_dependency_result_context(&session, &task_id, 1, &downstream)?
         .expect("dependent step should receive a host-owned handoff");
-    assert!(context.contains("Direct dependency results supplied by the host"));
+    assert!(context.contains("Typed dependency handoff supplied by the host"));
     assert!(context.contains("Inspect parser [inspect_parser]"));
     assert!(context.contains("owned normalized String from src/parser.rs"));
     assert!(context.contains("do not search for or invent result files"));
@@ -2289,7 +2294,7 @@ fn integration_output_appends_the_exact_runtime_promotion_preview() -> Result<()
 }
 
 #[tokio::test]
-async fn read_step_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
+async fn read_step_recovery_exhaustion_pauses_without_cancelling_dependents() -> Result<()> {
     let calls = Arc::new(AtomicUsize::new(0));
     let orchestrator =
         SequentialTaskOrchestrator::new_with_child_runner(AlwaysRateLimitedReadChildRunner {
@@ -2308,6 +2313,17 @@ async fn read_step_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
         mode: Some(TaskStepMode::Read),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     };
+    let dependent = TaskStepSpec {
+        step_id: TaskStepId::new("summarize")?,
+        title: "Summarize after inspection".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+        depends_on: vec![step.step_id.clone()],
+        intent_refs: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
     let mut session = Session::new("fixture", "model");
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -2322,13 +2338,57 @@ async fn read_step_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
         task_id: task_id.clone(),
         plan_version: 1,
         status: TaskPlanStatus::Accepted,
-        steps: vec![step.clone()],
+        steps: vec![step.clone(), dependent.clone()],
         reason: None,
     }))?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
     let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: parent_session_ref.clone(),
+                objective: "stop retry storm".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("task was projected");
+    assert_eq!(
+        task.participant_attempts_for(TaskParticipantPurpose::Step, Some(1), Some(&step.step_id))
+            .len(),
+        3
+    );
+    assert_eq!(task.participant_retry_schedules.len(), 2);
+    assert_eq!(
+        task.steps
+            .get(&(1, step.step_id.clone()))
+            .map(|step| step.status),
+        Some(TaskStepStatus::Blocked)
+    );
+    assert!(
+        task.steps
+            .get(&(1, dependent.step_id.clone()))
+            .is_none_or(|step| step.status == TaskStepStatus::Pending),
+        "a recoverable blocker must not terminally cancel dependent work"
+    );
+
+    let resumed_calls = Arc::new(AtomicUsize::new(1));
+    let resumed = SequentialTaskOrchestrator::new_with_child_runner(RetryingReadChildRunner {
+        calls: Arc::clone(&resumed_calls),
+    });
+    let resumed_output = resumed
         .continue_run(
             &mut session,
             SequentialTaskRequest {
@@ -2345,16 +2405,28 @@ async fn read_step_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
         )
         .await?;
 
-    assert_eq!(output.status, TaskRunStatus::Failed);
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    let projection = session.task_state_projection();
-    let task = projection.tasks.get(&task_id).expect("task was projected");
+    assert_eq!(resumed_output.status, TaskRunStatus::Completed);
+    assert_eq!(resumed_calls.load(Ordering::SeqCst), 3);
+    let resumed_projection = session.task_state_projection();
+    let resumed_task = resumed_projection
+        .tasks
+        .get(&task_id)
+        .expect("resumed task projection");
+    assert_eq!(resumed_task.status, TaskRunStatus::Completed);
     assert_eq!(
-        task.participant_attempts_for(TaskParticipantPurpose::Step, Some(1), Some(&step.step_id))
-            .len(),
-        3
+        resumed_task
+            .steps
+            .get(&(1, step.step_id.clone()))
+            .map(|step| step.status),
+        Some(TaskStepStatus::Completed)
     );
-    assert_eq!(task.participant_retry_schedules.len(), 2);
+    assert_eq!(
+        resumed_task
+            .steps
+            .get(&(1, dependent.step_id.clone()))
+            .map(|step| step.status),
+        Some(TaskStepStatus::Completed)
+    );
     Ok(())
 }
 
@@ -2876,7 +2948,7 @@ impl Tool for RecoverableErrorTool {
         Ok(ToolResult::error(
             call_id,
             "recoverable_error",
-            crate::ToolErrorKind::InvalidInput,
+            crate::ToolErrorKind::PermissionDenied,
             "bad path",
         ))
     }
@@ -3434,8 +3506,8 @@ fn final_answer_recovery_never_overrides_a_cancelled_task() -> Result<()> {
     }))?;
 
     assert!(reconcile_task_final_answer_prefix(&mut session, &task_id).is_err());
-    let task = session
-        .task_state_projection()
+    let projection = session.task_state_projection();
+    let task = projection
         .tasks
         .get(&task_id)
         .cloned()
@@ -3956,6 +4028,7 @@ async fn conversation_continuation_guidance_replans_v1_to_v2() -> Result<()> {
             "conversation_guidance_run_1",
         )?,
         route_contract_fingerprint: "sha256:conversation-guidance-route".to_owned(),
+        control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: projected.prompt_hash,
         exact_prompt_required: projected.exact_prompt_required,
         guidance: projected.safe_prompt,
@@ -4047,6 +4120,7 @@ fn pending_guidance_review_rejects_a_second_typed_selection_after_reload() -> Re
                     format!("pending-guidance-selection-run-{ordinal}"),
                 )?,
                 route_contract_fingerprint: format!("sha256:pending-guidance-selection-{ordinal}"),
+                control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
                 prompt_hash: projected.prompt_hash.clone(),
                 exact_prompt_required: projected.exact_prompt_required,
                 guidance: projected.safe_prompt.clone(),
@@ -4099,6 +4173,7 @@ fn pending_selection_survives_controlled_uncertain_attempt_pause_after_reload() 
             "pending-selection-controlled-pause-run",
         )?,
         route_contract_fingerprint: "sha256:pending-selection-controlled-pause".to_owned(),
+        control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: projected.prompt_hash,
         exact_prompt_required: projected.exact_prompt_required,
         guidance: projected.safe_prompt,
@@ -4193,6 +4268,7 @@ async fn recovered_guidance_decision_without_materialization_requires_reentry() 
         plan_status: Some(TaskPlanStatus::Accepted),
         source_turn: source_turn.clone(),
         route_contract_fingerprint: route_contract_fingerprint.clone(),
+        control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: projected.prompt_hash,
         exact_prompt_required: projected.exact_prompt_required,
         guidance: projected.safe_prompt,
@@ -4425,7 +4501,7 @@ async fn crashed_safe_guidance_settlement_recovers_into_plain_continue_once() ->
 }
 
 #[tokio::test]
-async fn recovered_exact_guidance_requires_matching_reentry_and_keeps_target_scope() -> Result<()> {
+async fn recovered_exact_guidance_uses_safe_projection_and_keeps_target_scope() -> Result<()> {
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let orchestrator = test_orchestrator(
         boxed_agent(FailingProvider, ToolRegistry::new()),
@@ -4457,6 +4533,7 @@ async fn recovered_exact_guidance_requires_matching_reentry_and_keeps_target_sco
     let guidance = "第二步检查 https://example.com/private?token=raw-guidance-secret";
     let projected = project_conversation_prompt_for_persistence(guidance);
     assert!(projected.exact_prompt_required);
+    let safe_guidance = projected.safe_prompt.clone();
     let applied = TaskGuidanceAppliedEntry {
         queue_id: ConversationInputQueueId::new("queue_exact_reentry")?,
         task_id: TaskId::new("task_1")?,
@@ -4486,7 +4563,7 @@ async fn recovered_exact_guidance_requires_matching_reentry_and_keeps_target_sco
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
 
-    let error = orchestrator
+    let output = orchestrator
         .continue_run(
             &mut session,
             request.clone(),
@@ -4494,27 +4571,6 @@ async fn recovered_exact_guidance_requires_matching_reentry_and_keeps_target_sco
             options(),
             options(),
             None,
-            &mut handler,
-            &mut approval_handler,
-        )
-        .await
-        .expect_err("exact guidance must not be reconstructed from its safe projection");
-    assert!(error.to_string().contains("requires exact prompt material"));
-    assert!(
-        executor_requests
-            .lock()
-            .expect("executor request lock should not be poisoned")
-            .is_empty()
-    );
-
-    let output = orchestrator
-        .continue_run(
-            &mut session,
-            request,
-            options(),
-            options(),
-            options(),
-            Some(guidance.to_owned()),
             &mut handler,
             &mut approval_handler,
         )
@@ -4538,7 +4594,8 @@ async fn recovered_exact_guidance_requires_matching_reentry_and_keeps_target_sco
     assert!(prompts[0].contains("Step: step_1"));
     assert!(!prompts[0].contains(guidance));
     assert!(prompts[1].contains("Step: step_2"));
-    assert!(prompts[1].contains(guidance));
+    assert!(prompts[1].contains(&safe_guidance));
+    assert!(!prompts[1].contains(guidance));
     Ok(())
 }
 
@@ -5756,7 +5813,7 @@ async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::Executor,
-                depends_on: Vec::new(),
+                depends_on: vec![TaskStepId::new("step_1")?],
                 intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Read),
                 isolation: Some(TaskIsolationMode::SharedReadOnly),
@@ -5814,6 +5871,242 @@ async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
                     })
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn blocked_step_is_reprojected_from_completed_participant_evidence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("planner", "model", store)?;
+    let task_id = TaskId::new("task_step_reprojection")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let step_1 = read_executor_step("audit-change-set", "audit change set", Vec::new())?;
+    let step_2 = read_executor_step(
+        "batch-kernel",
+        "continue kernel batch",
+        vec![step_1.step_id.clone()],
+    )?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "repair a projected task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("recovered after interruption".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step_1.clone(), step_2],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step_1.step_id.clone(),
+        role: step_1.role,
+        status: TaskStepStatus::Blocked,
+        title: Some(step_1.title.clone()),
+        summary: None,
+        reason: Some("stale historical permission denial".to_owned()),
+    }))?;
+
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_1.step_id),
+        1,
+    )?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let attempt = TaskParticipantAttemptEntry {
+        attempt_id: attempt_id.clone(),
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 1,
+        plan_version: Some(1),
+        step_id: Some(step_1.step_id.clone()),
+        role: step_1.role,
+        child_session_ref: child_session_ref.clone(),
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+    let mut result = participant_result_entry(
+        &attempt,
+        "complete audit result",
+        None,
+        Vec::new(),
+        Vec::new(),
+        vec!["verification:complete-audit".to_owned()],
+    )?;
+    result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
+    session.append_control(ControlEntry::TaskParticipantResult(result))?;
+    let mut completed_attempt = attempt;
+    completed_attempt.status = TaskParticipantAttemptStatus::Completed;
+    session.append_control(ControlEntry::TaskParticipantAttempt(completed_attempt))?;
+
+    assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 1);
+    assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 0);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("reprojected task");
+    assert_eq!(
+        task.steps
+            .get(&(1, step_1.step_id.clone()))
+            .map(|step| step.status),
+        Some(TaskStepStatus::Completed)
+    );
+    let graph = task
+        .plans
+        .get(&1)
+        .and_then(|plan| plan.graph.as_ref())
+        .expect("accepted plan graph");
+    assert_eq!(
+        graph
+            .ready_steps(&task.steps)
+            .into_iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["batch-kernel"]
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_blocked_step_with_final_answer_and_nonblocking_readiness_is_reprojected() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("planner", "model", store)?;
+    let task_id = TaskId::new("task_legacy_blocked_reprojection")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let step_1 = read_executor_step("audit-change-set", "audit change set", Vec::new())?;
+    let step_2 = read_executor_step(
+        "batch-kernel",
+        "continue kernel batch",
+        vec![step_1.step_id.clone()],
+    )?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref,
+        objective: "repair a legacy blocked task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("step audit-change-set blocked".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step_1.clone(), step_2],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step_1.step_id.clone(),
+        role: step_1.role,
+        status: TaskStepStatus::Blocked,
+        title: Some(step_1.title.clone()),
+        summary: None,
+        reason: Some("tool artifact selector exceeds its bounded policy".to_owned()),
+    }))?;
+    let step_scope =
+        EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step_1.step_id.as_str()));
+    session.append_control(ControlEntry::ReadinessEvaluated(
+        crate::ReadinessEvaluatedEntry {
+            scope: step_scope,
+            evaluation: crate::ReadinessEvaluation {
+                run_status: crate::RunStatus::Blocked,
+                verification_verdict: VerificationVerdict::NotApplicable,
+                visible_state: VisibleCompletionState::NeedsUser,
+                reasons: vec![crate::ReadinessReason::NoVerificationRequired],
+                required_actions: Vec::new(),
+            },
+            policy_hash: None,
+            workspace_snapshot_id: None,
+        },
+    ))?;
+
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_1.step_id),
+        1,
+    )?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let attempt = TaskParticipantAttemptEntry {
+        attempt_id: attempt_id.clone(),
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 1,
+        plan_version: Some(1),
+        step_id: Some(step_1.step_id.clone()),
+        role: step_1.role,
+        child_session_ref: child_session_ref.clone(),
+        status: TaskParticipantAttemptStatus::Blocked,
+        reason: Some("tool artifact selector exceeds its bounded policy".to_owned()),
+    };
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+    let final_text = "complete audit result with all acceptance checks satisfied";
+    let mut result = participant_result_entry(
+        &attempt,
+        final_text,
+        Some(AgentFinalAnswerRef {
+            session_ref: child_session_ref,
+            message_id: "final-answer".to_owned(),
+            content_hash: super::hash_text(final_text),
+            char_count: final_text.chars().count(),
+        }),
+        vec![crate::AgentArtifactRef {
+            kind: "final_report".to_owned(),
+            path: "attempt.final.md".to_owned(),
+            hash: None,
+        }],
+        Vec::new(),
+        Vec::new(),
+    )?;
+    result.terminal_status = Some(TaskParticipantAttemptStatus::Blocked);
+    session.append_control(ControlEntry::TaskParticipantResult(result))?;
+
+    assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 1);
+    assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 0);
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("reprojected task");
+    assert_eq!(
+        task.steps
+            .get(&(1, step_1.step_id.clone()))
+            .map(|step| step.status),
+        Some(TaskStepStatus::Completed)
+    );
+    let verification = session.verification_state_projection();
+    let readiness = verification
+        .latest_readiness(&EvidenceScope::Step(format!(
+            "{}:{}",
+            task_id.as_str(),
+            step_1.step_id.as_str()
+        )))
+        .expect("reprojected readiness");
+    assert_eq!(readiness.evaluation.run_status, crate::RunStatus::Completed);
+    assert_eq!(
+        readiness.evaluation.visible_state,
+        VisibleCompletionState::Completed
+    );
+    let graph = task
+        .plans
+        .get(&1)
+        .and_then(|plan| plan.graph.as_ref())
+        .expect("accepted plan graph");
+    assert_eq!(
+        graph
+            .ready_steps(&task.steps)
+            .into_iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["batch-kernel"]
+    );
     Ok(())
 }
 
@@ -7170,6 +7463,10 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
         TaskStepStatus::Failed
     );
     assert_eq!(
+        step_status_from_outcome(&output(crate::AgentRunOutcome::default())),
+        TaskStepStatus::Blocked
+    );
+    assert_eq!(
         step_status_from_outcome(&recovered_output(crate::AgentRunOutcome {
             tool_errors: vec![crate::ToolError {
                 kind: crate::ToolErrorKind::InvalidInput,
@@ -7192,7 +7489,7 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
             }],
             ..crate::AgentRunOutcome::default()
         })),
-        TaskStepStatus::Blocked
+        TaskStepStatus::Completed
     );
     assert_eq!(
         step_status_from_outcome(&output(crate::AgentRunOutcome {
@@ -7293,6 +7590,101 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
         "call-1",
     )?;
     assert!(route.as_str().starts_with("route_"));
+    Ok(())
+}
+
+#[test]
+fn planner_parent_plan_commit_is_atomic_and_idempotent() -> Result<()> {
+    let task_id = TaskId::new("task_planner_commit")?;
+    let request = SequentialTaskRequest {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect planner recovery".to_owned(),
+    };
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    let step = read_executor_step("inspect", "Inspect planner recovery", Vec::new())?;
+    let plan = TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: Some("test planner commit".to_owned()),
+    };
+    let contract = crate::TaskStepContractV2 {
+        schema_version: crate::TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+        target_paths: vec!["crates/sigil-kernel".to_owned()],
+        required_capabilities: vec![crate::TaskCapabilityV2::WorkspaceRead],
+        deliverables: vec!["recovery evidence".to_owned()],
+        acceptance_criteria: vec!["parent plan is durable".to_owned()],
+        check_spec_refs: Vec::new(),
+        risk: None,
+        notes: Vec::new(),
+    };
+    let output = crate::TaskPlannerSessionRunOutput {
+        attempt_id: attempt_id.clone(),
+        accepted_plan: plan.clone(),
+        step_contracts: vec![crate::TaskStepContractBoundEntryV2 {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step.step_id.clone(),
+            contract: contract.clone(),
+        }],
+        guidance_applied: None,
+        child_session_ref: child_session_ref.clone(),
+    };
+    let mut session = Session::new("planner", "model");
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: request.parent_session_ref.clone(),
+            objective: request.objective.clone(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }),
+        ControlEntry::TaskParticipantAttempt(TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Planner,
+            ordinal: 1,
+            plan_version: None,
+            step_id: None,
+            role: crate::AgentRole::Planner,
+            child_session_ref: child_session_ref.clone(),
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        }),
+    ])?;
+    let mut handler = RecordingEventHandler::default();
+
+    assert!(crate::commit_task_planner_output(
+        &mut session,
+        &mut handler,
+        &request,
+        &attempt_id,
+        &child_session_ref,
+        &output,
+    )?);
+    let projected = session.task_state_projection();
+    let committed = projected
+        .tasks
+        .get(&task_id)
+        .and_then(|task| task.plans.get(&1))
+        .expect("accepted planner output is committed in the parent");
+    assert!(committed.contract_set_committed_v2);
+    assert_eq!(committed.step_contracts.get(&step.step_id), Some(&contract));
+    let entry_count = session.entries().len();
+    assert!(!crate::commit_task_planner_output(
+        &mut session,
+        &mut handler,
+        &request,
+        &attempt_id,
+        &child_session_ref,
+        &output,
+    )?);
+    assert_eq!(session.entries().len(), entry_count);
     Ok(())
 }
 

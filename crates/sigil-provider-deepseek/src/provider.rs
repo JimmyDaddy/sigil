@@ -458,7 +458,8 @@ fn messages_response_stream(
                     }
                     Ok(Some(Err(error))) => {
                         return Err(anyhow::anyhow!(
-                            "deepseek messages stream read failed: {error}"
+                            "deepseek messages stream read failed [{}]: {error}",
+                            response_body_stream_error_kind(&error)
                         ));
                     }
                     Ok(None) => {
@@ -484,6 +485,18 @@ fn messages_response_stream(
             }
         },
     ))
+}
+
+fn response_body_stream_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "response_body_timeout"
+    } else if error.is_decode() {
+        "response_body_decode"
+    } else if error.is_body() {
+        "response_body_read"
+    } else {
+        "transport"
+    }
 }
 
 fn parse_messages_envelope(

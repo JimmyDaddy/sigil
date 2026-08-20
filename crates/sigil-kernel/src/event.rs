@@ -167,6 +167,7 @@ macro_rules! durable_event_types {
 durable_event_types! {
     UserMessageRecorded => ("user_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
     AssistantMessageRecorded => ("assistant_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
+    RuntimeContextSnapshotRecordedV2 => ("runtime_context_snapshot_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecordedV3 => ("tool_result_recorded_v3", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecordedV2 => ("tool_result_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
@@ -487,7 +488,7 @@ pub enum TypedStoredEventDecode {
 
 #[derive(Debug, Clone)]
 pub enum TypedDomainEvent {
-    ProviderPhysicalAttemptStarted(ProviderPhysicalAttemptStartedEntry),
+    ProviderPhysicalAttemptStarted(Box<ProviderPhysicalAttemptStartedEntry>),
     ProviderPhysicalAttemptTerminal(ProviderPhysicalAttemptTerminalEntry),
     ProviderContinuationObserved(ProviderContinuationObservedEntry),
     ProviderContinuationPayloadLifecycleRecorded(ProviderContinuationPayloadLifecycleEntry),
@@ -567,7 +568,7 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         DurableEventType::ProviderPhysicalAttemptStarted => {
             let entry: ProviderPhysicalAttemptStartedEntry = decode_event_payload(&event)?;
             entry.validate_shape()?;
-            TypedDomainEvent::ProviderPhysicalAttemptStarted(entry)
+            TypedDomainEvent::ProviderPhysicalAttemptStarted(Box::new(entry))
         }
         DurableEventType::ProviderPhysicalAttemptTerminal => {
             let entry: ProviderPhysicalAttemptTerminalEntry = decode_event_payload(&event)?;
@@ -773,11 +774,14 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 | ControlEntry::TaskRunCancellationScopeBound(_)
                 | ControlEntry::TaskRunTargetSelected(_)
                 | ControlEntry::TaskPlan(_)
+                | ControlEntry::TaskStepContractBoundV2(_)
+                | ControlEntry::TaskPlanContractSetCommittedV2(_)
                 | ControlEntry::TaskGuidanceMaterialized(_)
                 | ControlEntry::TaskStep(_)
                 | ControlEntry::TaskParticipantAttempt(_)
                 | ControlEntry::TaskParticipantRetryScheduled(_)
                 | ControlEntry::TaskParticipantResult(_)
+                | ControlEntry::TaskStepCheckpointV2(_)
                 | ControlEntry::TaskFinalAnswerCommitted(_) => {
                     TypedDomainEvent::TaskStatusChanged(control)
                 }
@@ -1058,6 +1062,7 @@ fn maybe_decode_control_entry(event: &StoredEvent) -> Result<Option<ControlEntry
         SessionLogEntry::Control(control) => Ok(Some(control)),
         SessionLogEntry::User(_)
         | SessionLogEntry::Assistant(_)
+        | SessionLogEntry::RuntimeContextSnapshotV2(_)
         | SessionLogEntry::ToolResultV3(_) => Ok(None),
     }
 }
@@ -1725,12 +1730,15 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskRunCancellationScopeBound(_) => "task_run_cancellation_scope_bound",
         ControlEntry::TaskRunTargetSelected(_) => "task_run_target_selected",
         ControlEntry::TaskPlan(_) => "task_plan",
+        ControlEntry::TaskStepContractBoundV2(_) => "task_step_contract_bound_v2",
+        ControlEntry::TaskPlanContractSetCommittedV2(_) => "task_plan_contract_set_committed_v2",
         ControlEntry::TaskGuidanceApplied(_) => "task_guidance_applied",
         ControlEntry::TaskGuidanceMaterialized(_) => "task_guidance_materialized",
         ControlEntry::TaskStep(_) => "task_step",
         ControlEntry::TaskParticipantAttempt(_) => "task_participant_attempt",
         ControlEntry::TaskParticipantRetryScheduled(_) => "task_participant_retry_scheduled",
         ControlEntry::TaskParticipantResult(_) => "task_participant_result",
+        ControlEntry::TaskStepCheckpointV2(_) => "task_step_checkpoint_v2",
         ControlEntry::TaskFinalAnswerCommitted(_) => "task_final_answer_committed",
         ControlEntry::OrchestrationRouteDisabled(_) => "orchestration_route_disabled",
         ControlEntry::TaskChildSession(_) => "task_child_session",

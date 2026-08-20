@@ -1601,6 +1601,7 @@ fn apply_session_entry_to_session_list(
         SessionLogEntry::Assistant(_) => {
             projection.assistant_message_count += 1;
         }
+        SessionLogEntry::RuntimeContextSnapshotV2(_) => {}
         SessionLogEntry::ToolResultV3(_) => {
             projection.tool_result_count += 1;
         }

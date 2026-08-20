@@ -88,7 +88,22 @@ impl AppState {
     }
 
     pub(crate) fn task_sidebar_lines(&self) -> Vec<String> {
-        let mut lines = self.session_view_cache().task_sidebar_lines.clone();
+        let cache = self.session_view_cache();
+        let close_settled_task = self.runtime.active_task.is_none()
+            && cache
+                .task_strip_view
+                .as_ref()
+                .is_some_and(settled_task_projection_can_close);
+        let mut lines = if close_settled_task {
+            cache
+                .task_sidebar_lines
+                .iter()
+                .filter(|line| line.starts_with("terminal"))
+                .cloned()
+                .collect()
+        } else {
+            cache.task_sidebar_lines.clone()
+        };
         lines.extend(super::task_sidebar::task_provider_route_sidebar_lines(
             &self.runtime.task_provider_route_diagnostics,
         ));
@@ -100,20 +115,29 @@ impl AppState {
 
     pub(crate) fn task_strip_view(&self) -> Option<super::task_sidebar::TaskStripView> {
         let durable = self.session_view_cache().task_strip_view.clone();
+        if self.runtime.active_task.is_none()
+            && durable
+                .as_ref()
+                .is_some_and(settled_task_projection_can_close)
+        {
+            return None;
+        }
         let mut view = match (durable, self.runtime.active_task.as_ref()) {
-            (Some(view), Some(task)) if view.title == format!("Task {}", task.task_id) => view,
-            (Some(view), None) => view,
-            (_, Some(task)) => super::task_sidebar::TaskStripView {
-                title: format!("Task {}", task.task_id),
-                detail: "running · awaiting durable projection".to_owned(),
-                verification: None,
-                rows: vec![super::task_sidebar::TaskStripRow {
-                    kind: crate::ui::StatusKind::Running,
-                    label: task.objective.clone(),
-                    detail: "running".to_owned(),
-                    active: true,
-                }],
-            },
+            (Some(view), _) => view,
+            (None, Some(task)) => {
+                let title = sigil_kernel::task_semantic_title(&task.objective);
+                super::task_sidebar::TaskStripView {
+                    title: title.clone(),
+                    detail: "starting · loading plan steps".to_owned(),
+                    verification: None,
+                    rows: vec![super::task_sidebar::TaskStripRow {
+                        kind: crate::ui::StatusKind::Running,
+                        label: title,
+                        detail: "starting".to_owned(),
+                        active: true,
+                    }],
+                }
+            }
             (None, None) => return None,
         };
         if let Some(verification) = view.verification.as_mut()
@@ -265,4 +289,12 @@ impl AppState {
         }
         Some("compact: inspect V2 plan with /compact".to_owned())
     }
+}
+
+fn settled_task_projection_can_close(view: &super::task_sidebar::TaskStripView) -> bool {
+    view.verification.is_none()
+        && matches!(
+            view.detail.split('·').next().map(str::trim),
+            Some("completed" | "cancelled")
+        )
 }
