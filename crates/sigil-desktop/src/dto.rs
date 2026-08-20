@@ -1314,10 +1314,24 @@ pub struct DesktopRunContextView {
     pub context_window_tokens: Option<u32>,
     #[serde(default)]
     pub last_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_usage: Option<DesktopApplicationCacheUsage>,
     pub context_window_source: DesktopContextWindowSource,
     pub extension_catalog: DesktopApplicationExtensionCatalog,
     #[serde(default)]
     pub route_recovery: Option<DesktopSessionRouteRecoveryView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApplicationCacheUsage {
+    pub cache_read_tokens: u64,
+    pub cache_miss_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    pub last_layout_mutation: Option<String>,
+    pub provider_miss_without_local_mutation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

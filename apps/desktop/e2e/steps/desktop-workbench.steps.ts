@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 
 import { Given, Then, When } from "@wdio/cucumber-framework";
@@ -458,6 +458,166 @@ Then("the custom workspace agent executes with its profile instructions", async 
       timeoutMsg: "the custom workspace agent did not execute its profile instructions",
     },
   );
+});
+
+When("I read a large workspace artifact from Desktop", async () => {
+  const composer = await $("#desktop-prompt");
+  await composer.setValue(desktopProviderCanaries.artifactPrompt);
+  await browser.keys("Enter");
+});
+
+Then("Desktop pages the canonical saved tool output", async () => {
+  const savedOutput = await $('[aria-label="Read file saved output"]');
+  await savedOutput.waitForDisplayed({
+    timeout: 30_000,
+    timeoutMsg: "the real runtime did not expose the large read_file artifact",
+  });
+  const view = await savedOutput.$("button=View saved output");
+  await view.waitForEnabled();
+  await view.click();
+  const page = await savedOutput.$('[aria-label="read_file saved output page"]');
+  await page.waitUntil(
+    async () => (await page.getText()).includes("DESKTOP_E2E_ARTIFACT_PAGE_ONE"),
+    { timeout: 20_000, timeoutMsg: "the first canonical artifact page was not rendered" },
+  );
+  const next = await savedOutput.$("button=Next page");
+  await next.waitForEnabled();
+  await next.click();
+  await page.waitUntil(
+    async () => (await page.getText()).includes("DESKTOP_E2E_ARTIFACT_PAGE_TWO"),
+    { timeout: 20_000, timeoutMsg: "the second canonical artifact page was not rendered" },
+  );
+  const timeline = await $(".timeline");
+  await timeline.waitUntil(
+    async () => (await timeline.getText()).includes(desktopProviderCanaries.artifactFinal),
+    { timeout: 30_000, timeoutMsg: "the artifact-backed run did not reach terminal output" },
+  );
+  const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
+  assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
+  const durableSource = readFileSync(
+    resolve(runtimeRoot, "workspace", "desktop-e2e-large-output.txt"),
+    "utf8",
+  );
+  assert.ok(durableSource.includes("DESKTOP_E2E_ARTIFACT_PAGE_ONE"));
+  assert.ok(durableSource.includes("DESKTOP_E2E_ARTIFACT_PAGE_TWO"));
+});
+
+When("I reload Desktop after the saved output settles", async () => {
+  await browser.refresh();
+  await $(".app-shell").waitForDisplayed({ timeout: 20_000 });
+});
+
+Then("Desktop restores the artifact-backed tool card", async () => {
+  const workspace = await $(".workspace-switcher");
+  await workspace.waitUntil(
+    async () => (await workspace.getText()).includes("desktop-e2e-workspace"),
+    { timeout: 20_000, timeoutMsg: "Desktop did not restore the artifact workspace" },
+  );
+  const savedOutput = await $('[aria-label="Read file saved output"]');
+  await savedOutput.waitForDisplayed({
+    timeout: 30_000,
+    timeoutMsg: "Desktop did not restore the artifact-backed tool card",
+  });
+  const view = await savedOutput.$("button=View saved output");
+  await view.waitForEnabled();
+  await view.click();
+  await savedOutput.$('[aria-label="read_file saved output page"]').waitUntil(
+    async function () {
+      return (await this.getText()).includes("DESKTOP_E2E_ARTIFACT_PAGE_ONE");
+    },
+    { timeout: 20_000, timeoutMsg: "the restored card could not reread its durable artifact" },
+  );
+});
+
+When("the saved artifact body becomes unavailable outside Desktop", async () => {
+  const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
+  assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
+  const artifactBlob = filesUnder(resolve(runtimeRoot, "state"))
+    .filter((path) => path.endsWith(".blob"))
+    .find((path) => readFileSync(path, "utf8").includes("DESKTOP_E2E_ARTIFACT_PAGE_ONE"));
+  assert.ok(artifactBlob, "the canonical large-output artifact blob was not found");
+  unlinkSync(artifactBlob);
+  assert.equal(existsSync(artifactBlob), false, "the external artifact removal did not settle");
+  await browser.refresh();
+  await $(".app-shell").waitForDisplayed({ timeout: 20_000 });
+});
+
+Then("Desktop disables artifact retrieval while retaining the auditable card", async () => {
+  const savedOutput = await $('[aria-label="Read file saved output"]');
+  assert.equal(await savedOutput.isExisting(), false, "a missing artifact still exposed retrieval controls");
+  const card = await $(".tool-card*=DESKTOP_E2E_ARTIFACT_PAGE_ONE");
+  await card.waitForDisplayed({
+    timeout: 30_000,
+    timeoutMsg: "Desktop discarded the bounded tool summary after the artifact became unavailable",
+  });
+  assert.ok(
+    (await card.getText()).includes("The complete saved output is no longer available."),
+    "Desktop did not explain that the saved output is unavailable",
+  );
+});
+
+When("I run a failing artifact-backed shell command", async () => {
+  const composer = await $("#desktop-prompt");
+  await composer.setValue(desktopProviderCanaries.shellErrorPrompt);
+  await browser.keys("Enter");
+  await $(".approval-dock").waitForDisplayed({
+    timeout: 30_000,
+    timeoutMsg: "the failing shell command did not reach the real approval boundary",
+  });
+});
+
+Then("Desktop preserves the failing shell result and pages its stderr artifact", async () => {
+  const timeline = await $(".timeline");
+  await timeline.waitUntil(
+    async () => (await timeline.getText()).includes(desktopProviderCanaries.shellErrorFinal),
+    { timeout: 30_000, timeoutMsg: "the agent loop did not remain usable after the shell failure" },
+  );
+  let artifactCardEvidence: {
+    card: { clicked: boolean; text: string } | null;
+    cardsSummary: Array<{ ariaLabel: string | null; hasArtifact: boolean; text: string }>;
+  } | undefined;
+  await browser.waitUntil(async () => {
+    artifactCardEvidence = await browser.execute((canary) => {
+      const cards = Array.from(document.querySelectorAll<HTMLElement>(".tool-card"));
+      const card = cards.find((candidate) =>
+        candidate.textContent?.includes(canary)
+        && candidate.querySelector(".tool-artifact-retrieval") !== null
+      );
+      const cardsSummary = cards.map((candidate) => ({
+        ariaLabel: candidate.getAttribute("aria-label"),
+        hasArtifact: candidate.querySelector(".tool-artifact-retrieval") !== null,
+        text: (candidate.textContent ?? "").slice(0, 300),
+      }));
+      if (card === undefined) return { card: null, cardsSummary };
+      const view = Array.from(card.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.includes("View saved output"));
+      view?.click();
+      return {
+        card: {
+          clicked: view !== undefined,
+          text: card.textContent ?? "",
+        },
+        cardsSummary,
+      };
+    }, desktopProviderCanaries.shellErrorOutput);
+    return artifactCardEvidence.card !== null;
+  }, {
+    timeout: 30_000,
+    timeoutMsg: "the failed shell card never received its durable artifact projection",
+  });
+  assert.ok(artifactCardEvidence);
+  const artifactCard = artifactCardEvidence.card;
+  assert.ok(
+    artifactCard,
+    `the failed real shell command did not expose its saved stderr artifact: ${JSON.stringify(artifactCardEvidence.cardsSummary)}`,
+  );
+  assert.equal(artifactCard.clicked, true, "the saved stderr retrieval action was unavailable");
+  const page = await $('[aria-label="bash saved output page"]');
+  await page.waitUntil(
+    async () => (await page.getText()).includes(desktopProviderCanaries.shellErrorOutput),
+    { timeout: 20_000, timeoutMsg: "the canonical stderr artifact omitted its failure canary" },
+  );
+  assert.match(artifactCard.text, /failed|error|exit code 7/i);
 });
 
 When("I start a persistent terminal task from Desktop", async () => {

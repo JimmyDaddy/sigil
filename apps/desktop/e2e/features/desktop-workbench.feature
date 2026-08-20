@@ -27,6 +27,25 @@ Feature: Desktop workbench remains usable
     And I invoke the custom workspace agent
     Then the custom workspace agent executes with its profile instructions
 
+  @artifact
+  Scenario: Page and restore a durable large tool artifact
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I read a large workspace artifact from Desktop
+    Then Desktop pages the canonical saved tool output
+    When I reload Desktop after the saved output settles
+    Then Desktop restores the artifact-backed tool card
+    When the saved artifact body becomes unavailable outside Desktop
+    Then Desktop disables artifact retrieval while retaining the auditable card
+
+  @artifact-error
+  Scenario: Preserve a failing shell result and its large stderr artifact
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I run a failing artifact-backed shell command
+    And I approve the pending command
+    Then Desktop preserves the failing shell result and pages its stderr artifact
+
   Scenario: Keep a persistent terminal task live after foreground completion
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation

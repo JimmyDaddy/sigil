@@ -1660,10 +1660,24 @@ pub(crate) struct DesktopRunContext {
     pub(crate) context_window_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_usage: Option<DesktopCacheUsage>,
     pub(crate) context_window_source: &'static str,
     pub(crate) extension_catalog: DesktopExtensionCatalog,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) route_recovery: Option<DesktopSessionRouteRecoverySummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCacheUsage {
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_miss_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_write_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_layout_mutation: Option<String>,
+    pub(crate) provider_miss_without_local_mutation: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3328,6 +3342,13 @@ impl From<DesktopRunContextView> for DesktopRunContext {
             reasoning_effort_binding: value.reasoning_effort_binding,
             context_window_tokens: value.context_window_tokens,
             last_prompt_tokens: value.last_prompt_tokens,
+            cache_usage: value.cache_usage.map(|usage| DesktopCacheUsage {
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_miss_tokens: usage.cache_miss_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                last_layout_mutation: usage.last_layout_mutation,
+                provider_miss_without_local_mutation: usage.provider_miss_without_local_mutation,
+            }),
             context_window_source: match value.context_window_source {
                 DesktopContextWindowSource::Connection => "connection",
                 DesktopContextWindowSource::Provider => "provider",

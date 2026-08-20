@@ -23,6 +23,11 @@ const DURABLE_USER_INPUT_CARD_PROMPT = "Choose the compatibility boundary before
 const DURABLE_USER_INPUT_QUESTION = "Which compatibility target must this change preserve?";
 const DURABLE_USER_INPUT_OPTION = "Legacy sessions";
 const DURABLE_USER_INPUT_FINAL_CANARY = "DESKTOP_E2E_DURABLE_USER_INPUT_DONE";
+const ARTIFACT_PROMPT = "DESKTOP_E2E_LARGE_TOOL_ARTIFACT";
+const ARTIFACT_FINAL_CANARY = "DESKTOP_E2E_LARGE_TOOL_ARTIFACT_DONE";
+const SHELL_ERROR_PROMPT = "DESKTOP_E2E_LARGE_SHELL_ERROR";
+const SHELL_ERROR_OUTPUT_CANARY = "DESKTOP_E2E_SHELL_ERROR_OUTPUT";
+const SHELL_ERROR_FINAL_CANARY = "DESKTOP_E2E_LARGE_SHELL_ERROR_DONE";
 const DURABLE_USER_INPUT_ARGS = JSON.stringify({
   prompt: DURABLE_USER_INPUT_CARD_PROMPT,
   questions: [{
@@ -156,6 +161,42 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       ) {
         recordRequest("title");
         sendText(response, TITLE_CANARY);
+      } else if (
+        toolNames.has("bash")
+        && requestText.includes(SHELL_ERROR_PROMPT)
+        && lastMessage?.role === "tool"
+        && typeof lastMessage.content === "string"
+        && lastMessage.content.includes("ordinary conversation routing accepted")
+      ) {
+        recordRequest("large_shell_error_run");
+        sendNamedToolCall(
+          response,
+          "desktop-e2e-large-shell-error",
+          "bash",
+          JSON.stringify({
+            command: `python3 -c 'import sys; sys.stderr.write("${SHELL_ERROR_OUTPUT_CANARY}\\n" + "e" * 34000); sys.exit(7)'`,
+          }),
+        );
+      } else if (lastMessage?.role === "tool" && requestText.includes(SHELL_ERROR_PROMPT)) {
+        recordRequest("large_shell_error_final");
+        sendText(response, SHELL_ERROR_FINAL_CANARY);
+      } else if (
+        toolNames.has("read_file")
+        && requestText.includes(ARTIFACT_PROMPT)
+        && lastMessage?.role === "tool"
+        && typeof lastMessage.content === "string"
+        && lastMessage.content.includes("ordinary conversation routing accepted")
+      ) {
+        recordRequest("large_tool_artifact_read");
+        sendNamedToolCall(
+          response,
+          "desktop-e2e-large-artifact-read",
+          "read_file",
+          JSON.stringify({ path: "desktop-e2e-large-output.txt" }),
+        );
+      } else if (lastMessage?.role === "tool" && requestText.includes(ARTIFACT_PROMPT)) {
+        recordRequest("large_tool_artifact_final");
+        sendText(response, ARTIFACT_FINAL_CANARY);
       } else if (
         toolNames.has("request_user_input")
         && typeof lastUserText === "string"
@@ -399,6 +440,8 @@ function sendJson(response: ServerResponse, payload: object, status = 200): void
 }
 
 export const desktopProviderCanaries = {
+  artifactFinal: ARTIFACT_FINAL_CANARY,
+  artifactPrompt: ARTIFACT_PROMPT,
   approvalCallId: APPROVAL_CALL_ID,
   initialRun: INITIAL_RUN_CANARY,
   agentRun: AGENT_RUN_CANARY,
@@ -414,6 +457,9 @@ export const desktopProviderCanaries = {
   planRun: PLAN_RUN_CANARY,
   queuedPrompt: QUEUED_PROMPT,
   queuedRun: QUEUED_RUN_CANARY,
+  shellErrorFinal: SHELL_ERROR_FINAL_CANARY,
+  shellErrorOutput: SHELL_ERROR_OUTPUT_CANARY,
+  shellErrorPrompt: SHELL_ERROR_PROMPT,
   skillRun: SKILL_RUN_CANARY,
   terminalLifecycleFinal: TERMINAL_LIFECYCLE_FINAL_CANARY,
   terminalLifecyclePrompt: TERMINAL_LIFECYCLE_PROMPT,

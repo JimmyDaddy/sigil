@@ -1217,9 +1217,26 @@ export interface RunContext {
   reasoningEffortBinding?: string;
   contextWindowTokens?: number;
   lastPromptTokens?: number;
+  cacheUsage?: CacheUsageView;
   contextWindowSource: "connection" | "provider" | "config" | "unavailable";
   extensionCatalog: ExtensionCatalog;
   routeRecovery?: SessionRouteRecoveryView;
+}
+
+export interface CacheUsageView {
+  cacheReadTokens: number;
+  cacheMissTokens: number;
+  cacheWriteTokens?: number;
+  lastLayoutMutation?:
+    | "first_observation"
+    | "identical"
+    | "route_changed"
+    | "system_changed"
+    | "tool_schema_changed"
+    | "conversation_history_rewritten"
+    | "conversation_tail_appended"
+    | "dynamic_state_only";
+  providerMissWithoutLocalMutation: boolean;
 }
 
 export interface SessionRouteRecoveryView {

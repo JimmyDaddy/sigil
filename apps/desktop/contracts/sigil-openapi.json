@@ -332,6 +332,52 @@
         ],
         "type": "object"
       },
+      "ApplicationCacheUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_miss_tokens": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "cache_write_tokens": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_layout_mutation": {
+            "enum": [
+              "first_observation",
+              "identical",
+              "route_changed",
+              "system_changed",
+              "tool_schema_changed",
+              "conversation_history_rewritten",
+              "conversation_tail_appended",
+              "dynamic_state_only",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_miss_without_local_mutation": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cache_read_tokens",
+          "cache_miss_tokens",
+          "provider_miss_without_local_mutation"
+        ],
+        "type": "object"
+      },
       "ApplicationClientAction": {
         "enum": [
           "preview_compaction",
@@ -6364,6 +6410,16 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "cache_usage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApplicationCacheUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "context_window_source": {
             "enum": [

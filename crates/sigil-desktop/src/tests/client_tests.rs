@@ -176,6 +176,13 @@ fn run_context_decodes_exact_typed_server_contract() {
         "reasoning_effort_binding": "effort-binding",
         "context_window_tokens": 1_000_000,
         "last_prompt_tokens": 42_000,
+        "cache_usage": {
+            "cache_read_tokens": 36_000,
+            "cache_miss_tokens": 6_000,
+            "cache_write_tokens": 1_024,
+            "last_layout_mutation": "conversation_tail_appended",
+            "provider_miss_without_local_mutation": false
+        },
         "context_window_source": "provider",
         "extension_catalog": {
             "commands": [{
@@ -199,6 +206,13 @@ fn run_context_decodes_exact_typed_server_contract() {
     assert_eq!(context.model_ref.model_id, "deepseek-v4-flash");
     assert_eq!(context.model_name, "deepseek-v4-flash");
     assert_eq!(context.last_prompt_tokens, Some(42_000));
+    assert_eq!(
+        context
+            .cache_usage
+            .as_ref()
+            .map(|usage| usage.cache_read_tokens),
+        Some(36_000)
+    );
     assert_eq!(context.available_reasoning_efforts.len(), 4);
     assert_eq!(context.model_options.len(), 2);
     assert_eq!(

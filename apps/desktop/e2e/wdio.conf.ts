@@ -84,6 +84,11 @@ writeFileSync(
   "utf8",
 );
 writeFileSync(
+  join(workspaceRoot, "desktop-e2e-large-output.txt"),
+  `DESKTOP_E2E_ARTIFACT_PAGE_ONE\n${"a".repeat(17_000)}\nDESKTOP_E2E_ARTIFACT_PAGE_TWO\n${"b".repeat(17_000)}\n`,
+  "utf8",
+);
+writeFileSync(
   join(workspaceRoot, ".sigil", "skills", "desktop-e2e-skill", "SKILL.md"),
   `---
 id: desktop-e2e-skill

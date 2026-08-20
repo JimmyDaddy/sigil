@@ -60,6 +60,13 @@ const context: RunContext = {
   reasoningEffortBinding: "effort-binding",
   contextWindowTokens: 1_000_000,
   lastPromptTokens: 1_000,
+  cacheUsage: {
+    cacheReadTokens: 900,
+    cacheMissTokens: 100,
+    cacheWriteTokens: 25,
+    lastLayoutMutation: "conversation_tail_appended",
+    providerMissWithoutLocalMutation: false,
+  },
   contextWindowSource: "provider",
   extensionCatalog: {
     commands: [
@@ -359,6 +366,40 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
+  it("shows provider-neutral cache usage beside context pressure", async () => {
+    renderComposer();
+
+    const cache = screen.getByLabelText("Prompt cache hit ratio 90%");
+    expect(cache.textContent).toBe("Cache 90%");
+    const tooltipAnchor = cache.closest(".sg-tooltip-anchor");
+    expect(tooltipAnchor).not.toBeNull();
+    fireEvent.pointerEnter(tooltipAnchor!);
+    expect((await screen.findByRole("tooltip")).textContent).toContain(
+      "Cache read 900 · miss 100 · write 25 · layout conversation_tail_appended",
+    );
+  });
+
+  it("explains a provider-side miss when the local stable prefix did not change", async () => {
+    renderComposer({
+      runContext: {
+        ...context,
+        cacheUsage: {
+          ...context.cacheUsage!,
+          providerMissWithoutLocalMutation: true,
+        },
+      },
+    });
+
+    const cache = screen.getByLabelText("Prompt cache hit ratio 90%");
+    expect(cache.classList.contains("cache-warning")).toBe(true);
+    const tooltipAnchor = cache.closest(".sg-tooltip-anchor");
+    expect(tooltipAnchor).not.toBeNull();
+    fireEvent.pointerEnter(tooltipAnchor!);
+    expect((await screen.findByRole("tooltip")).textContent).toContain(
+      "Provider reported a cache miss although the local stable prefix did not change",
+    );
+  });
+
   it("keeps callable unverified models selectable without an unactionable warning", async () => {
     const onModelChange = vi.fn();
     const unverifiedContext: RunContext = {

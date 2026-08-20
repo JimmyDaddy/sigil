@@ -536,6 +536,7 @@
 .context-usage { display: inline-flex; height: 30px; align-items: center; gap: 6px; padding: 0 7px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-subtle); font: 600 10px/1 ui-monospace, "SFMono-Regular", monospace; }
 .context-track { display: block; width: 34px; height: 4px; overflow: hidden; border-radius: var(--sg-sys-radius-full); background: var(--sg-sys-color-outline); }
 .context-track > span { display: block; width: var(--context-used); height: 100%; border-radius: inherit; background: var(--sg-sys-color-primary); }
+.cache-usage.cache-warning { color: var(--sg-sys-color-error); }
 .context-unavailable { white-space: nowrap; }
 .composer-submit { flex: 0 0 auto; width: 34px; min-width: 34px; min-height: 34px; border-radius: 11px; }
 .composer-stop { border-color: var(--sg-sys-color-error); color: var(--sg-sys-color-on-error-container); background: var(--sg-sys-color-error-container); }

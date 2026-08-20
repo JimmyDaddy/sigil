@@ -3164,6 +3164,21 @@ pub fn http_openapi_document() -> Value {
                         "reasoning_effort_binding": { "type": ["string", "null"] }
                     }
                 },
+                "ApplicationCacheUsage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["cache_read_tokens", "cache_miss_tokens", "provider_miss_without_local_mutation"],
+                    "properties": {
+                        "cache_read_tokens": { "type": "integer", "format": "uint64" },
+                        "cache_miss_tokens": { "type": "integer", "format": "uint64" },
+                        "cache_write_tokens": { "type": ["integer", "null"], "format": "uint64" },
+                        "last_layout_mutation": {
+                            "type": ["string", "null"],
+                            "enum": ["first_observation", "identical", "route_changed", "system_changed", "tool_schema_changed", "conversation_history_rewritten", "conversation_tail_appended", "dynamic_state_only", null]
+                        },
+                        "provider_miss_without_local_mutation": { "type": "boolean" }
+                    }
+                },
                 "RunContextView": {
                     "type": "object",
                     "additionalProperties": false,
@@ -3195,6 +3210,7 @@ pub fn http_openapi_document() -> Value {
                         "reasoning_effort_binding": { "type": ["string", "null"] },
                         "context_window_tokens": { "type": ["integer", "null"], "format": "uint32" },
                         "last_prompt_tokens": { "type": ["integer", "null"], "format": "uint64" },
+                        "cache_usage": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationCacheUsage" }, { "type": "null" }] },
                         "context_window_source": { "type": "string", "enum": ["connection", "provider", "config", "unavailable"] },
                         "extension_catalog": { "$ref": "#/components/schemas/ApplicationExtensionCatalog" },
                         "route_recovery": { "oneOf": [{ "$ref": "#/components/schemas/SessionRouteRecoveryView" }, { "type": "null" }] }

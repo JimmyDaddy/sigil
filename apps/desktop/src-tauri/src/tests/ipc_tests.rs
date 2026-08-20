@@ -48,6 +48,12 @@ fn run_context_projects_agent_name_from_existing_invocation_token() {
         "available_reasoning_efforts": ["max"],
         "default_reasoning_effort": "max",
         "reasoning_effort_binding": "effort-binding",
+        "cache_usage": {
+            "cache_read_tokens": 900,
+            "cache_miss_tokens": 100,
+            "last_layout_mutation": "conversation_tail_appended",
+            "provider_miss_without_local_mutation": false
+        },
         "context_window_source": "provider",
         "extension_catalog": {
             "commands": [],
@@ -69,6 +75,13 @@ fn run_context_projects_agent_name_from_existing_invocation_token() {
 
     let projected = DesktopRunContext::from(native);
     assert_eq!(projected.extension_catalog.agents[0].name, "正典提升员");
+    assert_eq!(
+        projected
+            .cache_usage
+            .as_ref()
+            .map(|usage| usage.cache_read_tokens),
+        Some(900)
+    );
 }
 
 #[test]

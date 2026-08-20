@@ -2201,6 +2201,9 @@ pub struct HttpRunContextView {
     /// Prompt tokens from the latest durable provider usage snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_tokens: Option<u64>,
+    /// Provider-neutral cumulative cache telemetry and latest layout diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_usage: Option<HttpApplicationCacheUsage>,
     /// Source used to resolve `context_window_tokens`.
     pub context_window_source: HttpContextWindowSource,
     /// Bounded command, skill, and agent metadata for this workspace and session.
@@ -2208,6 +2211,18 @@ pub struct HttpRunContextView {
     /// Exact-bound route recovery state while transcript/catalog reads remain available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_recovery: Option<HttpSessionRouteRecoveryView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpApplicationCacheUsage {
+    pub cache_read_tokens: u64,
+    pub cache_miss_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_layout_mutation: Option<String>,
+    pub provider_miss_without_local_mutation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

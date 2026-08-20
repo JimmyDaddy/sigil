@@ -766,6 +766,30 @@ describe("desktop coding-agent components", () => {
     });
   });
 
+  it("keeps an expired artifact summary auditable without offering retrieval", () => {
+    const readArtifact = vi.fn();
+    render(
+      <ToolCard
+        tool={{
+          key: "expired-saved-tool",
+          toolName: "shell",
+          text: "bounded durable summary",
+          status: "succeeded",
+          artifactRef: `ta1_${"d".repeat(32)}`,
+          artifactAvailability: "expired",
+          artifactHasMore: true,
+          artifactPersistedBytes: 32,
+        }}
+        onReadArtifact={readArtifact}
+      />,
+    );
+
+    expect(screen.getByText("bounded durable summary")).toBeTruthy();
+    expect(screen.getByText("The complete saved output is no longer available.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "View saved output" })).toBeNull();
+    expect(readArtifact).not.toHaveBeenCalled();
+  });
+
   it("fully shows short streaming tool output", () => {
     render(
       <ToolCard tool={{ key: "short-streaming-tool", toolName: "bash", text: "still working", status: "running" }} />,

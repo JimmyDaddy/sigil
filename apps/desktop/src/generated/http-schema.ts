@@ -2348,6 +2348,17 @@ export interface components {
             unavailable_reason?: string | null;
             user_invocable: boolean;
         };
+        ApplicationCacheUsage: {
+            /** Format: uint64 */
+            cache_miss_tokens: number;
+            /** Format: uint64 */
+            cache_read_tokens: number;
+            /** Format: uint64 */
+            cache_write_tokens?: number | null;
+            /** @enum {string|null} */
+            last_layout_mutation?: "first_observation" | "identical" | "route_changed" | "system_changed" | "tool_schema_changed" | "conversation_history_rewritten" | "conversation_tail_appended" | "dynamic_state_only" | null;
+            provider_miss_without_local_mutation: boolean;
+        };
         /** @enum {string} */
         ApplicationClientAction: "preview_compaction" | "open_intent_stack" | "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench" | "open_settings" | "open_support";
         ApplicationCommandCatalogEntry: {
@@ -3634,6 +3645,7 @@ export interface components {
         RunContextView: {
             available_permission_modes: components["schemas"]["PermissionMode"][];
             available_reasoning_efforts: components["schemas"]["ReasoningEffort"][];
+            cache_usage?: components["schemas"]["ApplicationCacheUsage"] | null;
             /** @enum {string} */
             context_window_source: "connection" | "provider" | "config" | "unavailable";
             /** Format: uint32 */

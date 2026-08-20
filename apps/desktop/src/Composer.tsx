@@ -570,6 +570,7 @@ export function Composer({
               </div>
             ) : null}
             <ContextUsage context={runContext} loading={runContextBusy} />
+            <CacheUsage context={runContext} loading={runContextBusy} />
           </div>
           <div className="composer-actions">
             <Popover
@@ -826,6 +827,38 @@ function ContextUsage({ context, loading }: { context?: RunContext; loading: boo
       >
         <span className="context-track" aria-hidden="true"><span /></span>
         <span>{percentLabel}%</span>
+      </span>
+    </Tooltip>
+  );
+}
+
+function CacheUsage({ context, loading }: { context?: RunContext; loading: boolean }) {
+  const { t } = useLocale();
+  const usage = context?.cacheUsage;
+  if (loading || usage === undefined) return null;
+  const observed = usage.cacheReadTokens + usage.cacheMissTokens;
+  if (observed === 0) return null;
+  const ratio = usage.cacheReadTokens / observed;
+  const percent = ratio * 100;
+  const percentLabel = percent < 1 ? percent.toFixed(1) : Math.round(percent).toString();
+  const write = usage.cacheWriteTokens === undefined ? "—" : formatTokens(usage.cacheWriteTokens);
+  const mutation = usage.lastLayoutMutation ?? "—";
+  const tokenDetails = t("cacheTokens", {
+    read: formatTokens(usage.cacheReadTokens),
+    miss: formatTokens(usage.cacheMissTokens),
+    write,
+    mutation,
+  });
+  const diagnostic = usage.providerMissWithoutLocalMutation
+    ? `${tokenDetails} · ${t("cacheProviderMissDiagnostic")}`
+    : tokenDetails;
+  return (
+    <Tooltip label={diagnostic}>
+      <span
+        className={`context-usage cache-usage${usage.providerMissWithoutLocalMutation ? " cache-warning" : ""}`}
+        aria-label={t("cacheUsage", { percent: percentLabel })}
+      >
+        {t("cacheBadge", { percent: percentLabel })}
       </span>
     </Tooltip>
   );
