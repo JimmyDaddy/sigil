@@ -209,6 +209,9 @@ pub enum PlanReviewAttemptStatus {
     WaitingForInput,
     Finalizing,
     DraftReady,
+    /// RFC-0067: the draft could not be compiled into an executable candidate; the plan needs
+    /// changes before it can be adopted.
+    CompileFailed,
     CompletedWithoutDraft,
     Failed,
     Interrupted,
@@ -222,6 +225,7 @@ impl PlanReviewAttemptStatus {
             Self::WaitingForInput => "waiting_for_input",
             Self::Finalizing => "finalizing",
             Self::DraftReady => "draft_ready",
+            Self::CompileFailed => "compile_failed",
             Self::CompletedWithoutDraft => "completed_without_draft",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
@@ -936,6 +940,7 @@ fn legal_same_attempt_transition(
             PlanReviewAttemptStatus::WaitingForInput
                 | PlanReviewAttemptStatus::Finalizing
                 | PlanReviewAttemptStatus::DraftReady
+                | PlanReviewAttemptStatus::CompileFailed
                 | PlanReviewAttemptStatus::CompletedWithoutDraft
                 | PlanReviewAttemptStatus::Failed
                 | PlanReviewAttemptStatus::Interrupted
@@ -943,6 +948,7 @@ fn legal_same_attempt_transition(
         ) | (
             PlanReviewAttemptStatus::WaitingForInput,
             PlanReviewAttemptStatus::Started
+                | PlanReviewAttemptStatus::CompileFailed
                 | PlanReviewAttemptStatus::CompletedWithoutDraft
                 | PlanReviewAttemptStatus::Failed
                 | PlanReviewAttemptStatus::Interrupted
@@ -950,6 +956,7 @@ fn legal_same_attempt_transition(
         ) | (
             PlanReviewAttemptStatus::Finalizing,
             PlanReviewAttemptStatus::DraftReady
+                | PlanReviewAttemptStatus::CompileFailed
                 | PlanReviewAttemptStatus::CompletedWithoutDraft
                 | PlanReviewAttemptStatus::Failed
                 | PlanReviewAttemptStatus::Interrupted

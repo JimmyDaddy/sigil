@@ -4,8 +4,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    ControlEntry, PlanApprovalExpiry, PlanPermissionGrantedEntry, Session, SessionLogEntry,
-    TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, ToolApprovalSessionGrantEntry,
+    ControlEntry, PlanApprovalExpiry, PlanApprovalScope, PlanPermissionGrantedEntry, Session,
+    SessionLogEntry, TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, ToolApprovalSessionGrantEntry,
     ToolApprovalSessionGrantExpiry, ToolPermissionPlanV2, ToolSubjectAudit,
     permission::{
         ApprovalMode, InteractionMode, PermissionDecision, PermissionDecisionReason,
@@ -270,6 +270,32 @@ fn active_plan_permission_grant(session: &Session) -> Option<PlanPermissionGrant
         .find_map(|(index, entry)| match entry {
             SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => {
                 Some((index, grant.clone()))
+            }
+            // RFC-0067: the adoption authority carries the plan-scoped grant.
+            SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(adoption))
+                if adoption.permission_grant.is_some() =>
+            {
+                let candidate = &adoption.adopted_candidate;
+                let scope = candidate.permission_scope_candidate.as_ref()?;
+                Some((
+                    index,
+                    PlanPermissionGrantedEntry {
+                        plan_id: adoption.plan_id.clone(),
+                        plan_hash: adoption.plan_hash.clone(),
+                        task_id: adoption.task_id.clone(),
+                        workspace_snapshot_id: candidate
+                            .compile_binding
+                            .base_workspace_snapshot_id
+                            .clone(),
+                        permission: adoption.permission_grant?,
+                        scope: PlanApprovalScope {
+                            summary: scope.summary.clone(),
+                            workspace_paths: scope.workspace_paths.clone(),
+                        },
+                        expires: PlanApprovalExpiry::Session,
+                        granted_at_ms: adoption.adopted_at_ms,
+                    },
+                ))
             }
             _ => None,
         })?;

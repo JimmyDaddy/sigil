@@ -1129,6 +1129,13 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::PlanDraftCreated(_) => DurableEventType::PlanDraftCreated,
         ControlEntry::PlanDecisionRecorded(_) => DurableEventType::PlanDecisionRecorded,
         ControlEntry::PlanPermissionGranted(_) => DurableEventType::PlanPermissionGranted,
+        ControlEntry::ExecutablePlanCandidatePreparedV1(_) => {
+            DurableEventType::PlanExecutionCandidatePrepared
+        }
+        ControlEntry::PlanReadyCommittedV1(_) => DurableEventType::PlanReadyCommitted,
+        ControlEntry::PlanCompileFailedV1(_) => DurableEventType::PlanCompileFailed,
+        ControlEntry::PlanExecutionAdoptedV1(_) => DurableEventType::PlanExecutionAdopted,
+        ControlEntry::TaskAdmissionAttemptedV1(_) => DurableEventType::TaskAdmissionAttempted,
         ControlEntry::ConversationRouteDecisionRecorded(_) => {
             DurableEventType::ConversationRouteDecisionRecorded
         }

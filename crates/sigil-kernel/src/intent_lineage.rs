@@ -499,6 +499,13 @@ impl DurableLineageFacts {
             }
             match control {
                 ControlEntry::TaskPlan(value) => push_fact!(facts.task_plans, value),
+                // RFC-0067: the adoption authority carries the accepted TaskPlan.
+                ControlEntry::PlanExecutionAdoptedV1(adoption) => {
+                    push_fact!(
+                        facts.task_plans,
+                        adoption.adopted_candidate.task_plan.clone()
+                    )
+                }
                 ControlEntry::TaskParticipantAttempt(value) => {
                     push_fact!(facts.task_attempts, value)
                 }

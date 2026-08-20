@@ -186,6 +186,12 @@ fn validate_pending_plan_binding<'a>(
     if attempt.status != PlanReviewAttemptStatus::DraftReady {
         bail!("pending plan review is not draft-ready");
     }
+    // RFC-0067 6.1: DraftReady means the exact candidate and ready marker are durable; a legacy
+    // or crash-incomplete draft is not runnable through the model route.
+    let artifacts = crate::PlanArtifactProjection::from_entries(session.entries());
+    if !artifacts.plan_is_ready(&pending.plan_id) {
+        bail!("pending plan review is not executable: no ready candidate");
+    }
     Ok(pending)
 }
 

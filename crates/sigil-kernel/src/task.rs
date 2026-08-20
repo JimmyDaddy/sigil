@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Digest;
@@ -380,6 +380,351 @@ impl TaskRunStatus {
     }
 }
 
+/// Durable execution phase of a Task adopted through the single execution spine (RFC-0067).
+///
+/// `Preparing` is the initial phase of every adopted Task; admission transitions it to `Ready`,
+/// `Blocked` or `Paused`. `Blocked` is recoverable and never means the Task is gone.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskExecutionPhaseV1 {
+    Preparing,
+    Ready,
+    Running,
+    Blocked,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl TaskExecutionPhaseV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Blocked => "blocked",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
+}
+
+/// One monotonic admission attempt of an adopted Task (RFC-0067 10.2).
+///
+/// Every resume or relevant environment change appends a higher ordinal; historical attempts are
+/// never overwritten.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskAdmissionAttemptV1 {
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub ordinal: u32,
+    pub candidate_hash: String,
+    pub observed_environment: TaskAdmissionObservationV1,
+    pub outcome: TaskAdmissionOutcomeV1,
+}
+
+impl TaskAdmissionAttemptV1 {
+    /// Validates the durable admission record is bounded and self-consistent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a zero ordinal or plan version, an invalid candidate digest,
+    /// unbounded blocker text, or a malformed lease/evidence digest.
+    pub fn validate(&self) -> Result<()> {
+        if self.ordinal == 0 {
+            bail!("task admission ordinal must start at one");
+        }
+        if self.plan_version == 0 {
+            bail!("task admission plan version must start at one");
+        }
+        let digest = self
+            .candidate_hash
+            .strip_prefix("sha256:")
+            .unwrap_or(&self.candidate_hash);
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("task admission candidate hash is not a sha256 digest");
+        }
+        self.observed_environment.validate()?;
+        match &self.outcome {
+            TaskAdmissionOutcomeV1::Ready(lease) => {
+                if lease.lease_id.is_empty()
+                    || lease.lease_id.len() > 128
+                    || crate::safe_persistence_text(&lease.lease_id) != lease.lease_id
+                    || !lease.lease_id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+                    })
+                {
+                    bail!("task admission lease id is not a bounded safe identity");
+                }
+            }
+            TaskAdmissionOutcomeV1::Blocked(blocker) => blocker.validate()?,
+            TaskAdmissionOutcomeV1::Paused(_) => {}
+        }
+        let size = serde_json::to_vec(self).context("failed to size task admission attempt")?;
+        if size.len() > MAX_TASK_ADMISSION_RECORD_BYTES {
+            bail!(
+                "task admission attempt exceeds maximum of {} bytes",
+                MAX_TASK_ADMISSION_RECORD_BYTES
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Maximum serialized size of one durable Task admission attempt.
+pub const MAX_TASK_ADMISSION_RECORD_BYTES: usize = 64 * 1024;
+
+impl TaskAdmissionObservationV1 {
+    /// Validates the environment observation is bounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unbounded snapshot ids or duplicated capabilities.
+    pub fn validate(&self) -> Result<()> {
+        for (label, value) in [
+            (
+                "admission base workspace snapshot",
+                self.base_workspace_snapshot_id.as_deref(),
+            ),
+            (
+                "admission current workspace snapshot",
+                self.current_workspace_snapshot_id.as_deref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                validate_admission_snapshot_id(label, value)?;
+            }
+        }
+        if self
+            .missing_capabilities
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != self.missing_capabilities.len()
+        {
+            bail!("task admission repeats a missing capability");
+        }
+        if self.missing_capabilities.len() > TASK_STEP_CONTRACT_MAX_ITEMS {
+            bail!("task admission missing capabilities exceed maximum count");
+        }
+        Ok(())
+    }
+}
+
+fn validate_admission_snapshot_id(label: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 128 || crate::safe_persistence_text(value) != value {
+        bail!("{label} is not bounded safe text");
+    }
+    Ok(())
+}
+
+/// Environment facts observed by one Task admission attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskAdmissionObservationV1 {
+    pub base_workspace_snapshot_id: Option<String>,
+    pub current_workspace_snapshot_id: Option<String>,
+    pub workspace_state: WorkspaceAdmissionStateV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_capabilities: Vec<TaskCapabilityV2>,
+    pub provider_route_available: bool,
+    pub credential_available: bool,
+    pub permission_profile_ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_space_bytes: Option<u64>,
+    pub external_writer_active: bool,
+    pub verification_runner_available: bool,
+    pub observed_at_ms: u64,
+}
+
+/// Workspace relationship observed at admission time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAdmissionStateV1 {
+    /// Current snapshot equals the candidate's base snapshot.
+    ExactMatch,
+    /// The workspace changed but every mutation is already audited against this Task.
+    AuditedSelfMutation,
+    /// The workspace changed without an audited cause for this Task.
+    ExternalDrift,
+    /// No current snapshot could be produced.
+    SnapshotUnavailable,
+}
+
+/// Typed admission outcome for one attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum TaskAdmissionOutcomeV1 {
+    Ready(TaskRuntimeLeaseBindingV1),
+    Blocked(TaskBlockerV1),
+    Paused(TaskPauseReasonV1),
+}
+
+/// Lease binding returned when admission grants a Task runtime start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskRuntimeLeaseBindingV1 {
+    pub lease_id: String,
+    pub granted_at_ms: u64,
+}
+
+/// Recoverable blocker produced by Task admission (RFC-0067 10.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskBlockerV1 {
+    pub reason_code: TaskBlockerReasonCodeV1,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_step: Option<TaskStepId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_capability: Option<TaskCapabilityV2>,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_actions: Vec<TaskBlockerActionV1>,
+    pub evidence_digest: String,
+    pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at_ms: Option<u64>,
+}
+
+impl TaskBlockerV1 {
+    pub fn is_resolved(&self) -> bool {
+        self.resolved_at_ms.is_some()
+    }
+
+    /// Validates the blocker record is bounded and self-consistent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unbounded text, an invalid evidence digest, or an impossible
+    /// created/resolved ordering.
+    pub fn validate(&self) -> Result<()> {
+        if self.summary.is_empty()
+            || self.summary.len() > TASK_STEP_CONTRACT_MAX_TEXT_CHARS
+            || crate::safe_persistence_text(&self.summary) != self.summary
+        {
+            bail!("task blocker summary is not bounded safe text");
+        }
+        let digest = self
+            .evidence_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&self.evidence_digest);
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("task blocker evidence digest is not a sha256 digest");
+        }
+        if self.available_actions.len() > 8 {
+            bail!("task blocker available actions exceed maximum count");
+        }
+        if self
+            .resolved_at_ms
+            .is_some_and(|resolved| resolved < self.created_at_ms)
+        {
+            bail!("task blocker resolved before it was created");
+        }
+        Ok(())
+    }
+}
+
+/// Stable blocker reason codes (RFC-0067 10.3).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskBlockerReasonCodeV1 {
+    WorkspaceChanged,
+    WorkspaceSnapshotUnavailable,
+    MissingRequiredCapability,
+    ProviderUnavailable,
+    CredentialUnavailable,
+    PermissionRequired,
+    WorkspaceTrustRequired,
+    ExternalWriterActive,
+    IsolationUnavailable,
+    DiskSpaceExhausted,
+    ArtifactStorageUnavailable,
+    SessionStorageDegraded,
+    VerificationRunnerUnavailable,
+    RouteRebindRequired,
+    ContractRecompileRequired,
+}
+
+impl TaskBlockerReasonCodeV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceChanged => "workspace_changed",
+            Self::WorkspaceSnapshotUnavailable => "workspace_snapshot_unavailable",
+            Self::MissingRequiredCapability => "missing_required_capability",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::CredentialUnavailable => "credential_unavailable",
+            Self::PermissionRequired => "permission_required",
+            Self::WorkspaceTrustRequired => "workspace_trust_required",
+            Self::ExternalWriterActive => "external_writer_active",
+            Self::IsolationUnavailable => "isolation_unavailable",
+            Self::DiskSpaceExhausted => "disk_space_exhausted",
+            Self::ArtifactStorageUnavailable => "artifact_storage_unavailable",
+            Self::SessionStorageDegraded => "session_storage_degraded",
+            Self::VerificationRunnerUnavailable => "verification_runner_unavailable",
+            Self::RouteRebindRequired => "route_rebind_required",
+            Self::ContractRecompileRequired => "contract_recompile_required",
+        }
+    }
+}
+
+/// Typed action a user may take on an active blocker.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskBlockerActionV1 {
+    RetryAdmission,
+    Replan,
+    Cancel,
+    RebindRoute,
+    GrantPermission,
+    Resume,
+}
+
+impl TaskBlockerActionV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RetryAdmission => "retry_admission",
+            Self::Replan => "replan",
+            Self::Cancel => "cancel",
+            Self::RebindRoute => "rebind_route",
+            Self::GrantPermission => "grant_permission",
+            Self::Resume => "resume",
+        }
+    }
+}
+
+/// Durable reason a Task is paused (RFC-0067 10.1).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPauseReasonV1 {
+    UserRequested,
+    CreatePaused,
+    AdmissionHeld,
+}
+
+impl TaskPauseReasonV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserRequested => "user_requested",
+            Self::CreatePaused => "create_paused",
+            Self::AdmissionHeld => "admission_held",
+        }
+    }
+}
+
 /// Durable task plan status.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -569,7 +914,7 @@ impl TaskCapabilityV2 {
         }
     }
 
-    fn tool_capability(self) -> crate::ToolCapability {
+    pub fn tool_capability(self) -> crate::ToolCapability {
         match self {
             Self::WorkspaceRead => crate::ToolCapability::WorkspaceRead,
             Self::WorkspaceWrite => crate::ToolCapability::WorkspaceWrite,
@@ -730,7 +1075,9 @@ impl TaskPlanContractSetCommittedV2 {
     }
 }
 
-fn task_contract_set_sha256(contracts: &[TaskStepContractBoundEntryV2]) -> Result<String> {
+pub(crate) fn task_contract_set_sha256(
+    contracts: &[TaskStepContractBoundEntryV2],
+) -> Result<String> {
     let mut canonical = contracts.to_vec();
     canonical.sort_by(|left, right| left.step_id.cmp(&right.step_id));
     Ok(format!(
@@ -2384,6 +2731,10 @@ pub struct TaskStateProjection {
     pub focus_conflicts: usize,
     focus_explicitly_selected: bool,
     task_run_scopes: BTreeMap<TaskId, String>,
+    /// Monotonic RFC-0067 admission attempts per Task.
+    pub admission_attempts: BTreeMap<TaskId, Vec<TaskAdmissionAttemptV1>>,
+    /// Latest unresolved RFC-0067 blocker per Task.
+    pub active_blockers: BTreeMap<TaskId, TaskBlockerV1>,
 }
 
 impl TaskStateProjection {
@@ -2460,6 +2811,12 @@ impl TaskStateProjection {
             }
             ControlEntry::TaskCreatedFromPlan(entry) if entry.stale_reason.is_none() => {
                 self.select_current_task(&entry.task_id);
+            }
+            ControlEntry::PlanExecutionAdoptedV1(adoption) => {
+                self.apply_adoption(adoption);
+            }
+            ControlEntry::TaskAdmissionAttemptedV1(attempt) => {
+                self.apply_admission_attempt(attempt);
             }
             ControlEntry::TaskContinuationSelected(entry) => {
                 self.apply_continuation_focus(entry);
@@ -2699,6 +3056,107 @@ impl TaskStateProjection {
             Ok(expected) if expected == *entry => plan.contract_set_committed_v2 = true,
             _ => task.participant_conflicts = task.participant_conflicts.saturating_add(1),
         }
+    }
+
+    /// Derives the RFC-0067 Task state from the single adoption authority.
+    ///
+    /// No separate TaskRun/TaskPlan/contract records are required; every existing view is
+    /// synthesized from the adopted candidate so the Task identity exists atomically with the
+    /// accepted plan, step contracts and intent lineage.
+    fn apply_adoption(&mut self, adoption: &crate::PlanExecutionAdoptedV1Entry) {
+        let candidate = &adoption.adopted_candidate;
+        let desired_status = if adoption.start_mode == crate::PlanTaskStartMode::CreatePaused {
+            TaskRunStatus::Paused
+        } else {
+            TaskRunStatus::Started
+        };
+        if !self.tasks.contains_key(&candidate.task_id) {
+            self.apply_run(&TaskRunEntry {
+                task_id: candidate.task_id.clone(),
+                parent_session_ref: adoption.parent_session_ref.clone(),
+                objective: candidate.safe_objective.clone(),
+                title: Some(candidate.semantic_title.clone()),
+                status: desired_status,
+                reason: Some(format!("adopted from plan {}", adoption.plan_id.as_str())),
+            });
+        }
+        if self
+            .tasks
+            .get(&candidate.task_id)
+            .and_then(|task| task.plans.get(&candidate.task_plan.plan_version))
+            .is_none()
+        {
+            self.apply_plan(&candidate.task_plan.clone());
+            for contract in &candidate.step_contracts {
+                self.apply_step_contract(contract);
+            }
+            self.apply_contract_set_commit(&TaskPlanContractSetCommittedV2 {
+                schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
+                task_id: candidate.task_id.clone(),
+                plan_version: candidate.task_plan.plan_version,
+                contract_count: candidate.step_contracts.len(),
+                contract_set_sha256: candidate.contract_set_digest.clone(),
+            });
+        }
+        self.select_current_task(&candidate.task_id);
+    }
+
+    fn apply_admission_attempt(&mut self, attempt: &TaskAdmissionAttemptV1) {
+        self.admission_attempts
+            .entry(attempt.task_id.clone())
+            .or_default()
+            .push(attempt.clone());
+        match &attempt.outcome {
+            TaskAdmissionOutcomeV1::Blocked(blocker) => {
+                self.active_blockers
+                    .insert(attempt.task_id.clone(), blocker.clone());
+            }
+            TaskAdmissionOutcomeV1::Ready(_) | TaskAdmissionOutcomeV1::Paused(_) => {
+                self.active_blockers.remove(&attempt.task_id);
+            }
+        }
+    }
+
+    /// Returns the latest RFC-0067 admission attempt for one Task, if any.
+    pub fn latest_admission_attempt(&self, task_id: &TaskId) -> Option<&TaskAdmissionAttemptV1> {
+        self.admission_attempts
+            .get(task_id)
+            .and_then(|attempts| attempts.last())
+    }
+
+    /// Returns the next monotonic admission ordinal for one Task.
+    #[must_use]
+    pub fn next_admission_ordinal(&self, task_id: &TaskId) -> u32 {
+        self.latest_admission_attempt(task_id)
+            .map_or(0, |attempt| attempt.ordinal)
+            .saturating_add(1)
+    }
+
+    /// Returns the latest unresolved blocker for one Task, if any.
+    pub fn active_blocker(&self, task_id: &TaskId) -> Option<&TaskBlockerV1> {
+        self.active_blockers.get(task_id)
+    }
+
+    /// Derives the RFC-0067 execution phase from durable facts only.
+    pub fn execution_phase(&self, task_id: &TaskId) -> Option<TaskExecutionPhaseV1> {
+        let task = self.tasks.get(task_id)?;
+        let phase = match task.status {
+            TaskRunStatus::Completed => TaskExecutionPhaseV1::Completed,
+            TaskRunStatus::Failed => TaskExecutionPhaseV1::Failed,
+            TaskRunStatus::Cancelled => TaskExecutionPhaseV1::Cancelled,
+            TaskRunStatus::Interrupted => TaskExecutionPhaseV1::Interrupted,
+            TaskRunStatus::Paused => TaskExecutionPhaseV1::Paused,
+            TaskRunStatus::Running => TaskExecutionPhaseV1::Running,
+            TaskRunStatus::Started => match self.latest_admission_attempt(task_id) {
+                Some(attempt) => match &attempt.outcome {
+                    TaskAdmissionOutcomeV1::Ready(_) => TaskExecutionPhaseV1::Ready,
+                    TaskAdmissionOutcomeV1::Blocked(_) => TaskExecutionPhaseV1::Blocked,
+                    TaskAdmissionOutcomeV1::Paused(_) => TaskExecutionPhaseV1::Paused,
+                },
+                None => TaskExecutionPhaseV1::Preparing,
+            },
+        };
+        Some(phase)
     }
 
     fn apply_step(&mut self, entry: &TaskStepEntry) {

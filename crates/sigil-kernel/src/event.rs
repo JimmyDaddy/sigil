@@ -180,6 +180,11 @@ durable_event_types! {
     PlanDraftCreated => ("plan_draft_created", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanDecisionRecorded => ("plan_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanPermissionGranted => ("plan_permission_granted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanExecutionCandidatePrepared => ("plan_execution_candidate_prepared", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanReadyCommitted => ("plan_ready_committed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanCompileFailed => ("plan_compile_failed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanExecutionAdopted => ("plan_execution_adopted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskAdmissionAttempted => ("task_admission_attempted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ConversationRouteDecisionRecorded => ("conversation_route_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanReviewAttempt => ("plan_review_attempt", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     UserInputLifecycleChanged => ("user_input_lifecycle_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -766,7 +771,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         | DurableEventType::MergeReviewResolved => {
             TypedDomainEvent::WriteIsolation(decode_write_isolation_record(&event)?)
         }
-        DurableEventType::TaskStatusChanged => {
+        DurableEventType::TaskStatusChanged
+        | DurableEventType::PlanExecutionAdopted
+        | DurableEventType::TaskAdmissionAttempted => {
             let control = decode_control_entry(&event)?;
             match control {
                 ControlEntry::TaskRun(_)
@@ -782,7 +789,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 | ControlEntry::TaskParticipantRetryScheduled(_)
                 | ControlEntry::TaskParticipantResult(_)
                 | ControlEntry::TaskStepCheckpointV2(_)
-                | ControlEntry::TaskFinalAnswerCommitted(_) => {
+                | ControlEntry::TaskFinalAnswerCommitted(_)
+                | ControlEntry::PlanExecutionAdoptedV1(_)
+                | ControlEntry::TaskAdmissionAttemptedV1(_) => {
                     TypedDomainEvent::TaskStatusChanged(control)
                 }
                 _ => bail!("task status event carried non-task control payload"),
@@ -1722,6 +1731,11 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
             "conversation_route_decision_recorded"
         }
         ControlEntry::PlanReviewAttempt(_) => "plan_review_attempt",
+        ControlEntry::ExecutablePlanCandidatePreparedV1(_) => "plan_execution_candidate_prepared",
+        ControlEntry::PlanReadyCommittedV1(_) => "plan_ready_committed",
+        ControlEntry::PlanCompileFailedV1(_) => "plan_compile_failed",
+        ControlEntry::PlanExecutionAdoptedV1(_) => "plan_execution_adopted",
+        ControlEntry::TaskAdmissionAttemptedV1(_) => "task_admission_attempted",
         ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
         ControlEntry::TaskHandoffRequested(_) => "task_handoff_requested",
         ControlEntry::TaskHandoffResolved(_) => "task_handoff_resolved",

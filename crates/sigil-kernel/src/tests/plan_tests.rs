@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)] // Test fixtures prefer direct unwraps.
 use anyhow::Result;
 use serde_json::json;
 
@@ -775,4 +776,373 @@ fn workspace_edits_plan_permission_does_not_cover_shell_network_mcp_or_agent() {
         None,
         ToolPreviewCapability::Required
     )));
+}
+
+// --- RFC-0067 single execution spine tests ---
+
+fn compile_input() -> crate::PlanCompileInputV1 {
+    crate::PlanCompileInputV1 {
+        source_attempt_id: "attempt-1".to_owned(),
+        source_turn_id: "message-1".to_owned(),
+        task_config_contract_hash: crate::stable_event_uuid("sigil-plan-task-config-v1", "test"),
+        planner_schema_hash: crate::stable_event_uuid("sigil-plan-planner-schema-v1", "v2"),
+        task_contract_schema_hash: crate::stable_event_uuid("sigil-task-contract-schema-v1", "v2"),
+        intent_schema_hash: None,
+        max_plan_steps: 64,
+        workspace_id: None,
+        session_scope_id: Some("test-session".to_owned()),
+    }
+}
+
+fn executable_draft(plan_id: PlanId, summary: &str) -> crate::PlanDraftCreatedEntry {
+    crate::PlanDraftCreatedEntry {
+        plan_id,
+        schema_version: 2,
+        source: PlanSourceRef::default(),
+        plan_hash: crate::plan_text_hash(summary),
+        summary: summary.to_owned(),
+        inline_text: None,
+        steps: vec![crate::PlanDraftStep {
+            step_id: "step_1".to_owned(),
+            title: "Implement the change".to_owned(),
+            display_name: Some("implement".to_owned()),
+            detail: None,
+            role: Some(crate::AgentRole::Executor),
+            depends_on: Vec::new(),
+            intent_aliases: Vec::new(),
+            mode: Some(TaskStepMode::Write),
+            isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            target_paths: vec!["src/lib.rs".to_owned()],
+            required_capabilities: Vec::new(),
+            deliverables: vec!["working implementation".to_owned()],
+            acceptance_criteria: Vec::new(),
+            suggested_checks: Vec::new(),
+            risk: None,
+            notes: Vec::new(),
+        }],
+        intent_proposal: None,
+        target_paths: vec!["src/lib.rs".to_owned()],
+        suggested_checks: Vec::new(),
+        risk: None,
+        notes: Vec::new(),
+        workspace_snapshot_id: Some("sha256:snapshot-a".to_owned()),
+        created_at_ms: 10,
+    }
+}
+
+#[test]
+fn executable_candidate_compiles_pure_and_round_trips() {
+    let draft = executable_draft(PlanId::new("plan_test_1").unwrap(), "Implement the change");
+    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input())
+        .expect("executable draft must compile");
+    candidate.validate().expect("candidate must self-check");
+    assert_eq!(candidate.plan_id, draft.plan_id);
+    assert_eq!(candidate.plan_hash, draft.plan_hash);
+    assert_eq!(candidate.task_id, task_id_from_plan_draft(&draft).unwrap());
+    assert_eq!(candidate.task_plan.plan_version, 1);
+    assert_eq!(candidate.task_plan.status, crate::TaskPlanStatus::Accepted);
+    assert_eq!(candidate.step_contracts.len(), 1);
+    assert!(candidate.candidate_hash.starts_with("sha256:"));
+    assert!(
+        candidate
+            .required_capabilities
+            .contains(&crate::TaskCapabilityV2::WorkspaceWrite)
+    );
+    assert_eq!(candidate.compile_binding.source_attempt_id, "attempt-1");
+    assert_eq!(
+        candidate
+            .compile_binding
+            .base_workspace_snapshot_id
+            .as_deref(),
+        Some("sha256:snapshot-a")
+    );
+    // Retrying the same attempt produces the identical candidate hash.
+    let recompiled = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    assert_eq!(recompiled.candidate_hash, candidate.candidate_hash);
+    // ...but different content changes the hash.
+    let mut changed = draft.clone();
+    changed.summary = "Implement a different change".to_owned();
+    changed.plan_hash = crate::plan_text_hash(&changed.summary);
+    let changed_candidate =
+        crate::compile_executable_plan_candidate(&changed, &compile_input()).unwrap();
+    assert_ne!(changed_candidate.candidate_hash, candidate.candidate_hash);
+    // Serialized round-trip keeps the exact hash.
+    let serialized = serde_json::to_value(&candidate).unwrap();
+    let decoded: crate::ExecutablePlanCandidateV1 = serde_json::from_value(serialized).unwrap();
+    assert_eq!(decoded, candidate);
+}
+
+#[test]
+fn candidate_canonical_hash_ignores_volatile_fields() {
+    let draft = executable_draft(PlanId::new("plan_test_2").unwrap(), "Hash stability");
+    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    let base_hash = candidate.candidate_hash.clone();
+    // Timestamps are not part of the candidate; map ordering is canonicalized by serde_json.
+    let mut value = serde_json::to_value(&candidate).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("volatile_timestamp".to_owned(), json!(1_700_000_000_000u64));
+    let hash = crate::candidate_canonical_hash(&candidate).unwrap();
+    assert_eq!(hash, base_hash);
+}
+
+#[test]
+fn compile_failures_are_typed_and_never_reach_ready() {
+    let plan_id = PlanId::new("plan_test_3").unwrap();
+    let mut draft = executable_draft(plan_id.clone(), "Needs changes");
+    draft.steps[0].isolation = None;
+    let failure = crate::compile_executable_plan_candidate(&draft, &compile_input())
+        .expect_err("missing isolation must fail compile");
+    assert_eq!(failure.reason_code, "incomplete_step_contract");
+    assert_eq!(failure.affected_step.as_deref(), Some("step_1"));
+
+    draft.steps[0].isolation = Some(TaskIsolationMode::SequentialWorkspaceWrite);
+    draft.steps[0].mode = Some(TaskStepMode::Verify);
+    let failure = crate::compile_executable_plan_candidate(&draft, &compile_input())
+        .expect_err("verify steps must fail compile");
+    assert_eq!(failure.reason_code, "verify_step_forbidden");
+
+    draft.steps[0].mode = Some(TaskStepMode::Write);
+    let mut bounded = compile_input();
+    bounded.max_plan_steps = 0;
+    let failure = crate::compile_executable_plan_candidate(&draft, &bounded)
+        .expect_err("step limit must fail compile");
+    assert_eq!(failure.reason_code, "step_limit_exceeded");
+}
+
+#[test]
+fn ready_state_derives_from_candidate_and_marker_only() {
+    let plan_id = PlanId::new("plan_test_4").unwrap();
+    let draft = executable_draft(plan_id.clone(), "Ready state");
+    let mut projection = PlanArtifactProjection::default();
+    projection.apply_draft(&draft);
+    // Legacy draft without candidate is not Ready.
+    assert_eq!(
+        projection.plan_ready_state(&plan_id),
+        crate::PlanReadyStateV1::LegacyPlanNeedsRecompile
+    );
+    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    projection
+        .candidates
+        .insert(plan_id.clone(), candidate.clone());
+    // Candidate without marker is an incomplete crash prefix.
+    assert_eq!(
+        projection.plan_ready_state(&plan_id),
+        crate::PlanReadyStateV1::CandidatePrepared
+    );
+    projection.ready_markers.insert(
+        plan_id.clone(),
+        crate::PlanReadyCommittedV1Entry {
+            plan_id: plan_id.clone(),
+            plan_hash: draft.plan_hash.clone(),
+            candidate_hash: candidate.candidate_hash.clone(),
+            attempt_id: "attempt-1".to_owned(),
+            committed_at_ms: 20,
+        },
+    );
+    assert_eq!(
+        projection.plan_ready_state(&plan_id),
+        crate::PlanReadyStateV1::Ready
+    );
+    // Marker with a mismatched candidate is still an incomplete prefix.
+    projection
+        .ready_markers
+        .get_mut(&plan_id)
+        .unwrap()
+        .candidate_hash = "sha256:other".to_owned();
+    assert_eq!(
+        projection.plan_ready_state(&plan_id),
+        crate::PlanReadyStateV1::CandidatePrepared
+    );
+}
+
+#[test]
+fn adoption_event_is_the_single_authority_for_plan_and_task_views() {
+    let plan_id = PlanId::new("plan_test_5").unwrap();
+    let draft = executable_draft(plan_id.clone(), "Adoption authority");
+    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    let adoption = crate::PlanExecutionAdoptedV1Entry {
+        command_id: "run-command-1".to_owned(),
+        plan_id: plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+        candidate_hash: candidate.candidate_hash.clone(),
+        task_id: candidate.task_id.clone(),
+        task_title: candidate.semantic_title.clone(),
+        parent_session_ref: crate::SessionRef::new_relative("parent.jsonl").unwrap(),
+        start_mode: crate::PlanTaskStartMode::CreateAndRun,
+        permission_grant: Some(PlanApprovalPermission::WorkspaceEdits),
+        adopted_candidate: Box::new(candidate.clone()),
+        initial_phase: crate::TaskExecutionPhaseV1::Preparing,
+        adopted_at_ms: 30,
+    };
+    adoption.validate().expect("adoption event must validate");
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
+        SessionLogEntry::Control(ControlEntry::ExecutablePlanCandidatePreparedV1(Box::new(
+            candidate,
+        ))),
+        SessionLogEntry::Control(ControlEntry::PlanReadyCommittedV1(
+            crate::PlanReadyCommittedV1Entry {
+                plan_id: plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                candidate_hash: adoption.candidate_hash.clone(),
+                attempt_id: "attempt-1".to_owned(),
+                committed_at_ms: 20,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(Box::new(adoption))),
+    ];
+    let artifacts = PlanArtifactProjection::from_entries(&entries);
+    assert_eq!(artifacts.adoptions.len(), 1);
+    assert_eq!(
+        artifacts
+            .adoption_for_command("run-command-1")
+            .unwrap()
+            .task_id,
+        artifacts
+            .adoption_for_task(
+                &artifacts
+                    .adoption_for_command("run-command-1")
+                    .unwrap()
+                    .task_id
+            )
+            .unwrap()
+            .task_id
+    );
+    // Decision and task-created views derive from the single adoption event.
+    assert_eq!(
+        artifacts.latest_decision(&plan_id).unwrap().decision,
+        PlanDecision::Accepted
+    );
+    assert!(artifacts.task_created_for_plan(&plan_id));
+    assert!(!artifacts.plan_is_rejected(&plan_id));
+    // Task views derive from the adoption event without separate TaskRun/TaskPlan records.
+    let tasks = crate::TaskStateProjection::from_entries(&entries);
+    let task_id = artifacts
+        .adoption_for_command("run-command-1")
+        .unwrap()
+        .task_id
+        .clone();
+    let task = tasks
+        .tasks
+        .get(&task_id)
+        .expect("adopted task must project");
+    assert_eq!(task.status, crate::TaskRunStatus::Started);
+    assert_eq!(task.title.as_deref(), Some("Adoption authority"));
+    assert_eq!(
+        tasks.execution_phase(&task_id),
+        Some(crate::TaskExecutionPhaseV1::Preparing)
+    );
+    assert_eq!(task.latest_plan_version, Some(1));
+    assert_eq!(task.plans.get(&1).unwrap().step_contracts.len(), 1);
+    assert!(task.plans.get(&1).unwrap().contract_set_committed_v2);
+    assert_eq!(tasks.current_task_id.as_ref(), Some(&task_id));
+}
+
+#[test]
+fn admission_attempts_are_monotonic_and_drive_phase() {
+    let plan_id = PlanId::new("plan_test_6").unwrap();
+    let draft = executable_draft(plan_id.clone(), "Admission phase");
+    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)),
+        SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(Box::new(
+            crate::PlanExecutionAdoptedV1Entry {
+                command_id: "run-command-2".to_owned(),
+                plan_id: plan_id.clone(),
+                plan_hash: candidate.plan_hash.clone(),
+                candidate_hash: candidate.candidate_hash.clone(),
+                task_id: candidate.task_id.clone(),
+                task_title: candidate.semantic_title.clone(),
+                parent_session_ref: crate::SessionRef::new_relative("parent.jsonl").unwrap(),
+                start_mode: crate::PlanTaskStartMode::CreateAndRun,
+                permission_grant: None,
+                adopted_candidate: Box::new(candidate.clone()),
+                initial_phase: crate::TaskExecutionPhaseV1::Preparing,
+                adopted_at_ms: 30,
+            },
+        ))),
+    ];
+    let blocker = crate::TaskBlockerV1 {
+        reason_code: crate::TaskBlockerReasonCodeV1::WorkspaceChanged,
+        summary: "workspace changed".to_owned(),
+        affected_step: None,
+        affected_capability: None,
+        retryable: true,
+        available_actions: vec![crate::TaskBlockerActionV1::RetryAdmission],
+        evidence_digest: crate::stable_event_hash(b"evidence"),
+        created_at_ms: 40,
+        resolved_at_ms: None,
+    };
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskAdmissionAttemptedV1(crate::TaskAdmissionAttemptV1 {
+            task_id: candidate.task_id.clone(),
+            plan_version: 1,
+            ordinal: 1,
+            candidate_hash: candidate.candidate_hash.clone(),
+            observed_environment: crate::TaskAdmissionObservationV1 {
+                base_workspace_snapshot_id: Some("sha256:snapshot-a".to_owned()),
+                current_workspace_snapshot_id: Some("sha256:snapshot-b".to_owned()),
+                workspace_state: crate::WorkspaceAdmissionStateV1::ExternalDrift,
+                missing_capabilities: Vec::new(),
+                provider_route_available: true,
+                credential_available: true,
+                permission_profile_ok: true,
+                disk_space_bytes: None,
+                external_writer_active: false,
+                verification_runner_available: true,
+                observed_at_ms: 40,
+            },
+            outcome: crate::TaskAdmissionOutcomeV1::Blocked(blocker.clone()),
+        }),
+    ));
+    let tasks = crate::TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        tasks.execution_phase(&candidate.task_id),
+        Some(crate::TaskExecutionPhaseV1::Blocked)
+    );
+    assert_eq!(tasks.next_admission_ordinal(&candidate.task_id), 2);
+    assert_eq!(
+        tasks
+            .active_blocker(&candidate.task_id)
+            .unwrap()
+            .reason_code,
+        crate::TaskBlockerReasonCodeV1::WorkspaceChanged
+    );
+    // A second attempt resolves the blocker and moves the phase to Ready.
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskAdmissionAttemptedV1(crate::TaskAdmissionAttemptV1 {
+            task_id: candidate.task_id.clone(),
+            plan_version: 1,
+            ordinal: 2,
+            candidate_hash: candidate.candidate_hash.clone(),
+            observed_environment: crate::TaskAdmissionObservationV1 {
+                base_workspace_snapshot_id: Some("sha256:snapshot-a".to_owned()),
+                current_workspace_snapshot_id: Some("sha256:snapshot-a".to_owned()),
+                workspace_state: crate::WorkspaceAdmissionStateV1::ExactMatch,
+                missing_capabilities: Vec::new(),
+                provider_route_available: true,
+                credential_available: true,
+                permission_profile_ok: true,
+                disk_space_bytes: None,
+                external_writer_active: false,
+                verification_runner_available: true,
+                observed_at_ms: 50,
+            },
+            outcome: crate::TaskAdmissionOutcomeV1::Ready(crate::TaskRuntimeLeaseBindingV1 {
+                lease_id: "lease-1".to_owned(),
+                granted_at_ms: 50,
+            }),
+        }),
+    ));
+    let tasks = crate::TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        tasks.execution_phase(&candidate.task_id),
+        Some(crate::TaskExecutionPhaseV1::Ready)
+    );
+    assert!(tasks.active_blocker(&candidate.task_id).is_none());
+    // CreatePaused adoption stays Paused and never invents blockers.
+    let paused = crate::TaskStateProjection::from_entries(&entries);
+    assert_eq!(paused.admission_attempts.len(), 1);
 }

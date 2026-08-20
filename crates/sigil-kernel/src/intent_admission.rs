@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -193,7 +194,7 @@ impl IntentPlanAdmissionV1 {
         }
     }
 
-    fn durable_events(
+    pub(crate) fn durable_events(
         &self,
         task_plan_binding: Option<IntentTaskPlanBindingV1>,
     ) -> Result<Vec<(DurableEventType, EventClass, serde_json::Value)>> {
@@ -267,7 +268,7 @@ impl IntentPlanAdmissionV1 {
 }
 
 /// Host-owned mapping from one Task step to provider-local intent aliases.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskStepIntentAliasBindingV1 {
     pub step_id: TaskStepId,
     pub intent_aliases: Vec<String>,
@@ -928,7 +929,19 @@ impl IntentStackProjectionV1 {
             return Ok(());
         }
 
-        let TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskPlan(task_plan)) = typed else {
+        // RFC-0067: the single adoption authority carries the accepted TaskPlan, so a
+        // task-bound IntentPlan acceptance may be followed by either a TaskPlan record or a
+        // PlanExecutionAdoptedV1 event.
+        let task_plan = match typed {
+            TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskPlan(task_plan)) => {
+                Some(task_plan.clone())
+            }
+            TypedDomainEvent::TaskStatusChanged(ControlEntry::PlanExecutionAdoptedV1(adoption)) => {
+                Some(adoption.adopted_candidate.task_plan.clone())
+            }
+            _ => None,
+        };
+        let Some(task_plan) = task_plan else {
             self.pending_acceptance = Some(pending);
             bail!("task-bound IntentPlan acceptance was not followed by its TaskPlan record");
         };

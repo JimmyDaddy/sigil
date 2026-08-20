@@ -60,6 +60,14 @@ impl StableCompactionSnapshot {
         &self.frontier
     }
 
+    /// Returns the last durable stream sequence at the current frontier (0 for an empty stream).
+    #[must_use]
+    pub fn durable_frontier_sequence(&self) -> u64 {
+        self.frontier
+            .cursor()
+            .map_or(0, |cursor| cursor.last_applied_stream_sequence)
+    }
+
     /// Returns the immutable live entry projection at the frontier.
     #[must_use]
     pub fn entries(&self) -> &[SessionLogEntry] {
@@ -1968,6 +1976,25 @@ impl Session {
     /// Returns durable plan artifact state reconstructed from append-only control entries.
     pub fn plan_artifact_projection(&self) -> PlanArtifactProjection {
         PlanArtifactProjection::from_entries(&self.entries)
+    }
+
+    /// Returns the last durable stream sequence at the current frontier (0 for an empty stream).
+    #[must_use]
+    pub fn durable_frontier_sequence(&self) -> u64 {
+        self.store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .active_projection_snapshot()
+                    .ok()
+                    .and_then(|snapshot| {
+                        snapshot
+                            .frontier()
+                            .cursor()
+                            .map(|cursor| cursor.last_applied_stream_sequence)
+                    })
+            })
+            .unwrap_or(0)
     }
 
     /// Rebuilds plan artifact state directly from the durable v2 event stream.

@@ -270,6 +270,16 @@ pub enum ControlEntry {
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
     PlanPermissionGranted(PlanPermissionGrantedEntry),
     TaskCreatedFromPlan(TaskCreatedFromPlanEntry),
+    /// RFC-0067: durable executable plan candidate prepared before DraftReady.
+    ExecutablePlanCandidatePreparedV1(Box<crate::ExecutablePlanCandidateV1>),
+    /// RFC-0067: final marker proving a candidate is adoptable; the only DraftReady authority.
+    PlanReadyCommittedV1(crate::PlanReadyCommittedV1Entry),
+    /// RFC-0067: typed compile failure; the plan review never becomes DraftReady.
+    PlanCompileFailedV1(crate::PlanCompileFailureV1),
+    /// RFC-0067: the single atomic authority of one Run command.
+    PlanExecutionAdoptedV1(Box<crate::PlanExecutionAdoptedV1Entry>),
+    /// RFC-0067: one monotonic admission attempt with its typed outcome.
+    TaskAdmissionAttemptedV1(crate::TaskAdmissionAttemptV1),
     TaskHandoffRequested(TaskHandoffRequestedEntry),
     TaskHandoffResolved(TaskHandoffResolvedEntry),
     TaskContinuationSelected(crate::TaskContinuationSelectedEntry),
@@ -391,6 +401,11 @@ impl ControlEntry {
             Self::UserInputContinuationReleased(entry) => entry.validate(),
             Self::UserInputResolved(entry) => entry.validate(),
             Self::AgentUserInputRoute(entry) => entry.validate(),
+            Self::ExecutablePlanCandidatePreparedV1(candidate) => candidate.validate(),
+            Self::PlanReadyCommittedV1(marker) => marker.validate(),
+            Self::PlanCompileFailedV1(failure) => failure.validate(),
+            Self::PlanExecutionAdoptedV1(adoption) => adoption.validate(),
+            Self::TaskAdmissionAttemptedV1(attempt) => attempt.validate(),
             _ => Ok(()),
         }
     }
