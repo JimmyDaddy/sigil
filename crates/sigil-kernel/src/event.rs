@@ -10,16 +10,22 @@ use uuid::Uuid;
 use crate::{
     ApprovalMode, ApprovalRequestIdentityV2, ChangeSet, ChangeSetResult, CommandPermissionMatch,
     CompactionAppliedV2, CompactionFailureEntry, CompactionStartedEntry, ControlEntry,
-    ConversationInputPromotedEntry, EgressDisclosurePresented, ExecutionContainmentRequest,
-    HostedToolAuthorization, HostedToolOutcome, IntentEventV1, JobIntentEntry,
-    McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared, NetworkEffect,
-    OrchestrationRouteDisabledEntry, PathTrustZone, PermissionConfirmation,
-    PermissionDecisionReason, PermissionRisk, ProviderContinuationCandidateInvalidatedEntry,
-    ProviderContinuationCandidateRecordedEntry, ProviderContinuationObservedEntry,
-    ProviderContinuationPayloadLifecycleEntry, ProviderContinuationState,
-    ProviderContinuationToolClosureRecordedEntry, ProviderObservedResolutionPlanRecordedEntry,
-    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry, QueryEgressOutcome,
-    QueryEgressStarted, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
+    ConversationInputPromotedEntry, EffectReconciliationProbeStartedEntryV1,
+    EffectReconciliationRequiredEntryV1, EffectReconciliationTerminalEntryV1,
+    EgressDisclosurePresented, ExecutionContainmentRequest, HostedToolAuthorization,
+    HostedToolOutcome, IntentEventV1, JobIntentEntry, McpTransportAuthorization, ModelMessage,
+    MutationCommitted, MutationPrepared, NetworkEffect, OrchestrationRouteDisabledEntry,
+    PathTrustZone, PermissionConfirmation, PermissionDecisionReason, PermissionRisk,
+    ProviderContinuationCandidateInvalidatedEntry, ProviderContinuationCandidateRecordedEntry,
+    ProviderContinuationObservedEntry, ProviderContinuationPayloadLifecycleEntry,
+    ProviderContinuationState, ProviderContinuationToolClosureRecordedEntry,
+    ProviderObservedResolutionPlanRecordedEntry, ProviderPhysicalAttemptStartedEntry,
+    ProviderPhysicalAttemptTerminalEntry, ProviderTurnPartialOutputDiscardedEntryV1,
+    ProviderTurnRecoveryExhaustedEntry, ProviderTurnRecoveryScheduledEntry,
+    ProviderTurnRecoveryStartedEntry, ProviderTurnTransportFallbackSelectedEntryV1,
+    PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1, QueryEgressOutcome, QueryEgressStarted,
+    RecoveryBlockerRaisedV1, RecoveryBlockerResolutionStartedV1, RecoveryBlockerResolvedV1,
+    RecoveryBlockerSupersededV1, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
     TaskGuidancePromotedEntry, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
     TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalLifecycleEvent, TerminalTaskEntry,
     ToolAnalysisStatus, ToolApprovalSessionGrantUnavailableReason, ToolCall, ToolOperation,
@@ -28,6 +34,12 @@ use crate::{
     UsageStats, VerificationCheckRunEntry, VerificationFailureLocatorRecorded,
     VerificationReceiptLinkRecorded, VerificationRecordedEntry, WebFetchTransportAuthorization,
     WorkspaceMutationDetected,
+    session::{
+        validate_effect_reconciliation_required, validate_effect_reconciliation_terminal,
+        validate_provider_turn_recovery_exhausted, validate_provider_turn_recovery_schedule,
+        validate_provider_turn_recovery_started,
+        validate_provider_turn_transport_fallback_selected,
+    },
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -184,6 +196,9 @@ durable_event_types! {
     PlanReadyCommitted => ("plan_ready_committed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanCompileFailed => ("plan_compile_failed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanExecutionAdopted => ("plan_execution_adopted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskMaterializationAttemptStarted => ("task_materialization_attempt_started", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskMaterializationPrepared => ("task_materialization_prepared", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskMaterializationBlocked => ("task_materialization_blocked", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskAdmissionAttempted => ("task_admission_attempted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ConversationRouteDecisionRecorded => ("conversation_route_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanReviewAttempt => ("plan_review_attempt", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -272,6 +287,20 @@ durable_event_types! {
     QueryEgressOutcome => ("query_egress_outcome", RecoveryCritical, Critical, DirectJson, "query_egress_outcome"),
     ProviderPhysicalAttemptStarted => ("provider_physical_attempt_started", RecoveryCritical, Critical, DirectJson, "provider_physical_attempt_started"),
     ProviderPhysicalAttemptTerminal => ("provider_physical_attempt_terminal", RecoveryCritical, Critical, DirectJson, "provider_physical_attempt_terminal"),
+    ProviderTurnRecoveryScheduled => ("provider_turn_recovery_scheduled", RecoveryCritical, Critical, DirectJson, "provider_turn_recovery_scheduled"),
+    ProviderTurnTransportFallbackSelected => ("provider_turn_transport_fallback_selected", RecoveryCritical, Critical, DirectJson, "provider_turn_transport_fallback_selected"),
+    ProviderTurnRecoveryStarted => ("provider_turn_recovery_started", RecoveryCritical, Critical, DirectJson, "provider_turn_recovery_started"),
+    ProviderTurnRecoveryExhausted => ("provider_turn_recovery_exhausted", RecoveryCritical, Critical, DirectJson, "provider_turn_recovery_exhausted"),
+    ProviderTurnPartialOutputDiscarded => ("provider_turn_partial_output_discarded", RecoveryCritical, Critical, DirectJson, "provider_turn_partial_output_discarded"),
+    EffectReconciliationRequired => ("effect_reconciliation_required", RecoveryCritical, Critical, DirectJson, "effect_reconciliation_required"),
+    EffectReconciliationProbeStarted => ("effect_reconciliation_probe_started", RecoveryCritical, Critical, DirectJson, "effect_reconciliation_probe_started"),
+    EffectReconciliationTerminal => ("effect_reconciliation_terminal", RecoveryCritical, Critical, DirectJson, "effect_reconciliation_terminal"),
+    PublicEventOutbox => ("public_event_outbox", RecoveryCritical, Critical, DirectJson, "public_event_outbox"),
+    PublicEventDeliveryReceipt => ("public_event_delivery_receipt", RecoveryCritical, Critical, DirectJson, "public_event_delivery_receipt"),
+    RecoveryBlockerRaised => ("recovery_blocker_raised", RecoveryCritical, Critical, DirectJson, "recovery_blocker_raised"),
+    RecoveryBlockerResolutionStarted => ("recovery_blocker_resolution_started", RecoveryCritical, Critical, DirectJson, "recovery_blocker_resolution_started"),
+    RecoveryBlockerResolved => ("recovery_blocker_resolved", RecoveryCritical, Critical, DirectJson, "recovery_blocker_resolved"),
+    RecoveryBlockerSuperseded => ("recovery_blocker_superseded", RecoveryCritical, Critical, DirectJson, "recovery_blocker_superseded"),
     ProviderContinuationObserved => ("provider_continuation_observed", RecoveryCritical, Critical, DirectJson, "provider_continuation_observed"),
     ProviderContinuationPayloadLifecycleRecorded => ("provider_continuation_payload_lifecycle_recorded", RecoveryCritical, Critical, DirectJson, "provider_continuation_payload_lifecycle_recorded"),
     ProviderContinuationCandidateRecorded => ("provider_continuation_candidate_recorded", RecoveryCritical, Critical, DirectJson, "provider_continuation_candidate_recorded"),
@@ -495,6 +524,20 @@ pub enum TypedStoredEventDecode {
 pub enum TypedDomainEvent {
     ProviderPhysicalAttemptStarted(Box<ProviderPhysicalAttemptStartedEntry>),
     ProviderPhysicalAttemptTerminal(ProviderPhysicalAttemptTerminalEntry),
+    ProviderTurnRecoveryScheduled(ProviderTurnRecoveryScheduledEntry),
+    ProviderTurnTransportFallbackSelected(ProviderTurnTransportFallbackSelectedEntryV1),
+    ProviderTurnRecoveryStarted(ProviderTurnRecoveryStartedEntry),
+    ProviderTurnRecoveryExhausted(ProviderTurnRecoveryExhaustedEntry),
+    ProviderTurnPartialOutputDiscarded(ProviderTurnPartialOutputDiscardedEntryV1),
+    EffectReconciliationRequired(EffectReconciliationRequiredEntryV1),
+    EffectReconciliationProbeStarted(EffectReconciliationProbeStartedEntryV1),
+    EffectReconciliationTerminal(EffectReconciliationTerminalEntryV1),
+    PublicEventOutbox(Box<PublicEventOutboxEntryV1>),
+    PublicEventDeliveryReceipt(PublicEventDeliveryReceiptV1),
+    RecoveryBlockerRaised(RecoveryBlockerRaisedV1),
+    RecoveryBlockerResolutionStarted(RecoveryBlockerResolutionStartedV1),
+    RecoveryBlockerResolved(RecoveryBlockerResolvedV1),
+    RecoveryBlockerSuperseded(RecoveryBlockerSupersededV1),
     ProviderContinuationObserved(ProviderContinuationObservedEntry),
     ProviderContinuationPayloadLifecycleRecorded(ProviderContinuationPayloadLifecycleEntry),
     ProviderContinuationCandidateRecorded(Box<ProviderContinuationCandidateRecordedEntry>),
@@ -579,6 +622,76 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
             let entry: ProviderPhysicalAttemptTerminalEntry = decode_event_payload(&event)?;
             entry.validate_shape()?;
             TypedDomainEvent::ProviderPhysicalAttemptTerminal(entry)
+        }
+        DurableEventType::ProviderTurnRecoveryScheduled => {
+            let entry: ProviderTurnRecoveryScheduledEntry = decode_event_payload(&event)?;
+            validate_provider_turn_recovery_schedule(&entry)?;
+            TypedDomainEvent::ProviderTurnRecoveryScheduled(entry)
+        }
+        DurableEventType::ProviderTurnTransportFallbackSelected => {
+            let entry: ProviderTurnTransportFallbackSelectedEntryV1 = decode_event_payload(&event)?;
+            validate_provider_turn_transport_fallback_selected(&entry)?;
+            TypedDomainEvent::ProviderTurnTransportFallbackSelected(entry)
+        }
+        DurableEventType::ProviderTurnRecoveryStarted => {
+            let entry: ProviderTurnRecoveryStartedEntry = decode_event_payload(&event)?;
+            validate_provider_turn_recovery_started(&entry)?;
+            TypedDomainEvent::ProviderTurnRecoveryStarted(entry)
+        }
+        DurableEventType::ProviderTurnRecoveryExhausted => {
+            let entry: ProviderTurnRecoveryExhaustedEntry = decode_event_payload(&event)?;
+            validate_provider_turn_recovery_exhausted(&entry)?;
+            TypedDomainEvent::ProviderTurnRecoveryExhausted(entry)
+        }
+        DurableEventType::ProviderTurnPartialOutputDiscarded => {
+            let entry: ProviderTurnPartialOutputDiscardedEntryV1 = decode_event_payload(&event)?;
+            crate::session::validate_provider_turn_partial_output_discarded(&entry)?;
+            TypedDomainEvent::ProviderTurnPartialOutputDiscarded(entry)
+        }
+        DurableEventType::EffectReconciliationRequired => {
+            let entry: EffectReconciliationRequiredEntryV1 = decode_event_payload(&event)?;
+            validate_effect_reconciliation_required(&entry)?;
+            TypedDomainEvent::EffectReconciliationRequired(entry)
+        }
+        DurableEventType::EffectReconciliationProbeStarted => {
+            let entry: EffectReconciliationProbeStartedEntryV1 = decode_event_payload(&event)?;
+            crate::session::validate_effect_reconciliation_probe_started(&entry)?;
+            TypedDomainEvent::EffectReconciliationProbeStarted(entry)
+        }
+        DurableEventType::EffectReconciliationTerminal => {
+            let entry: EffectReconciliationTerminalEntryV1 = decode_event_payload(&event)?;
+            validate_effect_reconciliation_terminal(&entry)?;
+            TypedDomainEvent::EffectReconciliationTerminal(entry)
+        }
+        DurableEventType::PublicEventOutbox => {
+            let entry: PublicEventOutboxEntryV1 = decode_event_payload(&event)?;
+            crate::session::validate_public_event_outbox_entry(&entry)?;
+            TypedDomainEvent::PublicEventOutbox(Box::new(entry))
+        }
+        DurableEventType::PublicEventDeliveryReceipt => {
+            let entry: PublicEventDeliveryReceiptV1 = decode_event_payload(&event)?;
+            crate::session::validate_public_event_delivery_receipt(&entry)?;
+            TypedDomainEvent::PublicEventDeliveryReceipt(entry)
+        }
+        DurableEventType::RecoveryBlockerRaised => {
+            let entry: RecoveryBlockerRaisedV1 = decode_event_payload(&event)?;
+            entry.validate()?;
+            TypedDomainEvent::RecoveryBlockerRaised(entry)
+        }
+        DurableEventType::RecoveryBlockerResolutionStarted => {
+            let entry: RecoveryBlockerResolutionStartedV1 = decode_event_payload(&event)?;
+            entry.validate()?;
+            TypedDomainEvent::RecoveryBlockerResolutionStarted(entry)
+        }
+        DurableEventType::RecoveryBlockerResolved => {
+            let entry: RecoveryBlockerResolvedV1 = decode_event_payload(&event)?;
+            entry.validate()?;
+            TypedDomainEvent::RecoveryBlockerResolved(entry)
+        }
+        DurableEventType::RecoveryBlockerSuperseded => {
+            let entry: RecoveryBlockerSupersededV1 = decode_event_payload(&event)?;
+            entry.validate()?;
+            TypedDomainEvent::RecoveryBlockerSuperseded(entry)
         }
         DurableEventType::ProviderContinuationObserved => {
             let entry: ProviderContinuationObservedEntry = decode_event_payload(&event)?;
@@ -773,6 +886,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         }
         DurableEventType::TaskStatusChanged
         | DurableEventType::PlanExecutionAdopted
+        | DurableEventType::TaskMaterializationAttemptStarted
+        | DurableEventType::TaskMaterializationPrepared
+        | DurableEventType::TaskMaterializationBlocked
         | DurableEventType::TaskAdmissionAttempted => {
             let control = decode_control_entry(&event)?;
             match control {
@@ -780,6 +896,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 | ControlEntry::TaskContinuationSelected(_)
                 | ControlEntry::TaskRunCancellationScopeBound(_)
                 | ControlEntry::TaskRunTargetSelected(_)
+                | ControlEntry::TaskDirectExecutionAdmittedV1(_)
+                | ControlEntry::TaskDirectExecutionAttemptV1(_)
+                | ControlEntry::TaskChecklistUpdatedV1(_)
                 | ControlEntry::TaskPlan(_)
                 | ControlEntry::TaskStepContractBoundV2(_)
                 | ControlEntry::TaskPlanContractSetCommittedV2(_)
@@ -791,6 +910,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 | ControlEntry::TaskStepCheckpointV2(_)
                 | ControlEntry::TaskFinalAnswerCommitted(_)
                 | ControlEntry::PlanExecutionAdoptedV1(_)
+                | ControlEntry::TaskMaterializationAttemptStartedV1(_)
+                | ControlEntry::TaskMaterializationPreparedV1(_)
+                | ControlEntry::TaskMaterializationBlockedV1(_)
                 | ControlEntry::TaskAdmissionAttemptedV1(_) => {
                     TypedDomainEvent::TaskStatusChanged(control)
                 }
@@ -1292,6 +1414,8 @@ pub enum RunEvent {
     ToolResult(ToolResult),
     Usage(UsageStats),
     ContinuationState(ProviderContinuationState),
+    ProviderTurnRecovery(crate::PublicProviderTurnRecoveryViewV1),
+    ProviderTurnPartialOutputDiscarded(crate::PublicProviderTurnPartialOutputDiscardedViewV1),
     Control(ControlEntry),
     AssistantMessage(ModelMessage),
     Notice(String),
@@ -1436,11 +1560,20 @@ pub enum PublicRunEventKind {
         phase: crate::PublicTaskPhase,
         status: String,
     },
+    TaskExecutionAdmitted {
+        task_id: String,
+        execution: crate::TaskExecutionBindingV1,
+    },
     TaskPlanUpdated {
         task_id: String,
         plan_version: u32,
         status: String,
         steps: Vec<crate::PublicTaskPlanStep>,
+    },
+    TaskChecklistUpdated {
+        task_id: String,
+        revision: u32,
+        items: Vec<crate::PublicTaskChecklistItemV1>,
     },
     TaskBatchChanged {
         task_id: String,
@@ -1467,6 +1600,15 @@ pub enum PublicRunEventKind {
     },
     RunFailed {
         error: String,
+    },
+    RunBlocked {
+        reason: String,
+    },
+    RunPaused {
+        reason: String,
+    },
+    RunInterrupted {
+        reason: String,
     },
     RouteRecoveryRequired {
         code: PublicRouteRecoveryCode,
@@ -1546,6 +1688,12 @@ pub enum PublicRunEventKind {
     },
     ContinuationState {
         state: ProviderContinuationState,
+    },
+    ProviderTurnRecoveryChanged {
+        recovery: crate::PublicProviderTurnRecoveryViewV1,
+    },
+    ProviderTurnPartialOutputDiscarded {
+        output: crate::PublicProviderTurnPartialOutputDiscardedViewV1,
     },
     Control {
         control: PublicControlEvent,
@@ -1671,6 +1819,12 @@ impl From<RunEvent> for PublicRunEventKind {
             RunEvent::ToolResult(result) => Self::ToolResult { result },
             RunEvent::Usage(usage) => Self::Usage { usage },
             RunEvent::ContinuationState(state) => Self::ContinuationState { state },
+            RunEvent::ProviderTurnRecovery(recovery) => {
+                Self::ProviderTurnRecoveryChanged { recovery }
+            }
+            RunEvent::ProviderTurnPartialOutputDiscarded(output) => {
+                Self::ProviderTurnPartialOutputDiscarded { output }
+            }
             RunEvent::Control(entry) => Self::Control {
                 control: entry.into(),
             },
@@ -1735,8 +1889,16 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::PlanReadyCommittedV1(_) => "plan_ready_committed",
         ControlEntry::PlanCompileFailedV1(_) => "plan_compile_failed",
         ControlEntry::PlanExecutionAdoptedV1(_) => "plan_execution_adopted",
+        ControlEntry::TaskMaterializationAttemptStartedV1(_) => {
+            "task_materialization_attempt_started"
+        }
+        ControlEntry::TaskMaterializationPreparedV1(_) => "task_materialization_prepared",
+        ControlEntry::TaskMaterializationBlockedV1(_) => "task_materialization_blocked",
         ControlEntry::TaskAdmissionAttemptedV1(_) => "task_admission_attempted",
         ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
+        ControlEntry::TaskDirectExecutionAdmittedV1(_) => "task_direct_execution_admitted_v1",
+        ControlEntry::TaskDirectExecutionAttemptV1(_) => "task_direct_execution_attempt_v1",
+        ControlEntry::TaskChecklistUpdatedV1(_) => "task_checklist_updated_v1",
         ControlEntry::TaskHandoffRequested(_) => "task_handoff_requested",
         ControlEntry::TaskHandoffResolved(_) => "task_handoff_resolved",
         ControlEntry::TaskContinuationSelected(_) => "task_continuation_selected",

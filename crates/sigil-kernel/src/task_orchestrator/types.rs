@@ -1,6 +1,26 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+/// Runtime-neutral request for executing a complete Task objective without a TaskPlan.
+#[derive(Debug, Clone)]
+pub struct TaskDirectExecutionSessionRunRequest {
+    pub task: SequentialTaskRequest,
+    pub admission: crate::TaskDirectExecutionAdmittedV1,
+    pub attempt: crate::TaskDirectExecutionAttemptV1,
+    pub input: AgentRunInput,
+    pub options: AgentRunOptions,
+}
+
+/// Bounded terminal output of one direct Task execution agent run.
+#[derive(Debug, Clone)]
+pub struct TaskDirectExecutionSessionRunOutput {
+    pub attempt_id: String,
+    pub final_text: String,
+    pub final_message_id: Option<String>,
+    pub outcome: AgentRunOutcome,
+    pub disposition: crate::AgentRunDisposition,
+}
+
 type TaskChildSessionBatchCommitAction = Box<
     dyn FnOnce(
             &mut Session,

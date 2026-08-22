@@ -3073,6 +3073,8 @@ fn mcp_unknown_dirty_adds_user_visible_source_reason() {
                 workspace_revision: 1,
                 reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
                 unknown_dirty: true,
+                changed_paths: Vec::new(),
+                changed_paths_truncated: true,
                 metadata: Default::default(),
             },
         ));

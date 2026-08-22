@@ -929,9 +929,9 @@ impl IntentStackProjectionV1 {
             return Ok(());
         }
 
-        // RFC-0067: the single adoption authority carries the accepted TaskPlan, so a
-        // task-bound IntentPlan acceptance may be followed by either a TaskPlan record or a
-        // PlanExecutionAdoptedV1 event.
+        // A task-bound IntentPlan acceptance is settled by the accepted TaskPlan carried in the
+        // adjacent authority record. RFC-0067 used PlanExecutionAdoptedV1; RFC-0069 retains the
+        // same envelope for the post-approval TaskMaterializationPreparedV1 receipt.
         let task_plan = match typed {
             TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskPlan(task_plan)) => {
                 Some(task_plan.clone())
@@ -939,6 +939,9 @@ impl IntentStackProjectionV1 {
             TypedDomainEvent::TaskStatusChanged(ControlEntry::PlanExecutionAdoptedV1(adoption)) => {
                 Some(adoption.adopted_candidate.task_plan.clone())
             }
+            TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskMaterializationPreparedV1(
+                materialization,
+            )) => Some(materialization.adopted_candidate.task_plan.clone()),
             _ => None,
         };
         let Some(task_plan) = task_plan else {

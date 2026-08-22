@@ -62,6 +62,23 @@ pub(super) fn append_failed_run_lifecycle_events(
     )
 }
 
+/// Persists an actionable recovery pause without misrepresenting it as a failed agent run.
+pub(super) fn append_paused_run_lifecycle_events(
+    session: &mut Session,
+    terminal_reason: &'static str,
+    tool_calls: usize,
+) -> Result<()> {
+    append_run_lifecycle_event_payload(
+        session,
+        "paused",
+        terminal_reason,
+        None,
+        tool_calls,
+        None,
+        None,
+    )
+}
+
 fn append_run_lifecycle_event_payload(
     session: &mut Session,
     run_status: &'static str,

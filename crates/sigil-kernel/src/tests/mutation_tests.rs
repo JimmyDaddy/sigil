@@ -18,7 +18,7 @@ use crate::{
     create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
     delete_file_with_mutation_in_batch, file_content_hash,
     restore_file_from_snapshot_with_mutation, stable_workspace_id, write_file_with_mutation,
-    write_file_with_mutation_in_batch,
+    write_file_with_mutation_expected_in_batch, write_file_with_mutation_in_batch,
 };
 
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
@@ -132,6 +132,76 @@ fn workspace_mutation_lease_serializes_regular_controlled_writes() -> Result<()>
     assert_eq!(
         recorder.current_workspace_mutation_epoch(workspace.path())?,
         1
+    );
+    Ok(())
+}
+
+#[test]
+fn independent_path_cas_writes_share_a_workspace_without_global_snapshot_failure() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(state.path().join("session.jsonl"))?;
+    let recorder =
+        MutationEventRecorder::with_artifact_root(store, state.path().join("mutation-artifacts"));
+    let left = workspace.path().join("left.txt");
+    let right = workspace.path().join("right.txt");
+    fs::write(&left, b"left-before")?;
+    fs::write(&right, b"right-before")?;
+    let left_before = file_content_hash(&left)?;
+    let right_before = file_content_hash(&right)?;
+
+    let mut workers = Vec::new();
+    for (call_id, path, expected_before, after) in [
+        (
+            "independent-left",
+            left.clone(),
+            left_before,
+            b"left-after".as_slice(),
+        ),
+        (
+            "independent-right",
+            right.clone(),
+            right_before,
+            b"right-after".as_slice(),
+        ),
+    ] {
+        let worker_recorder = recorder.clone();
+        let workspace_root = workspace.path().to_path_buf();
+        workers.push(std::thread::spawn(move || {
+            write_file_with_mutation_expected_in_batch(
+                Some(&worker_recorder),
+                &workspace_root,
+                call_id,
+                None,
+                path.file_name().expect("fixture file name"),
+                &path,
+                expected_before,
+                after,
+            )
+        }));
+    }
+    for worker in workers {
+        worker
+            .join()
+            .expect("independent path worker should not panic")?;
+    }
+
+    assert_eq!(fs::read(&left)?, b"left-after");
+    assert_eq!(fs::read(&right)?, b"right-after");
+    let event_types = stored_event_types(&recorder.store)?;
+    assert_eq!(
+        event_types
+            .iter()
+            .filter(|event_type| event_type.as_str() == DurableEventType::MutationPrepared.as_str())
+            .count(),
+        2
+    );
+    assert_eq!(
+        event_types
+            .iter()
+            .filter(|event_type| event_type.as_str() == DurableEventType::MutationCommitted.as_str())
+            .count(),
+        2
     );
     Ok(())
 }
@@ -2365,6 +2435,7 @@ fn execution_mutation_profile_reconcile_records_later_change_after_existing_dete
         workspace_revision: profile.pre_execution_workspace_revision,
         workspace_snapshot_id: profile.pre_execution_snapshot_id.clone(),
         workspace_knowledge: profile.workspace_knowledge.clone(),
+        manifest: None,
     };
 
     fs::write(workspace.join("note.txt"), "early")?;
@@ -2484,6 +2555,7 @@ fn workspace_mutation_scan_records_incomplete_snapshot_as_unknown_dirty() -> Res
         workspace_revision: 3,
         workspace_snapshot_id: None,
         workspace_knowledge: WorkspaceKnowledge::UnknownDirty,
+        manifest: None,
     };
     let after = WorkspaceMutationScan {
         workspace_id: "workspace-1".to_owned(),
@@ -2492,6 +2564,7 @@ fn workspace_mutation_scan_records_incomplete_snapshot_as_unknown_dirty() -> Res
         workspace_revision: 3,
         workspace_snapshot_id: Some("snapshot-after".to_owned()),
         workspace_knowledge: WorkspaceKnowledge::Clean(3),
+        manifest: None,
     };
 
     let event = recorder
@@ -2529,6 +2602,7 @@ fn workspace_mutation_scan_records_after_incomplete_snapshot_as_unknown_dirty() 
         workspace_revision: 7,
         workspace_snapshot_id: Some("snapshot-before".to_owned()),
         workspace_knowledge: WorkspaceKnowledge::Clean(7),
+        manifest: None,
     };
     let after = WorkspaceMutationScan {
         workspace_id: "workspace-1".to_owned(),
@@ -2537,6 +2611,7 @@ fn workspace_mutation_scan_records_after_incomplete_snapshot_as_unknown_dirty() 
         workspace_revision: 7,
         workspace_snapshot_id: None,
         workspace_knowledge: WorkspaceKnowledge::UnknownDirty,
+        manifest: None,
     };
 
     let event = recorder
@@ -2597,6 +2672,7 @@ fn workspace_mutation_scan_unavailable_after_preserves_before_snapshot() -> Resu
         workspace_revision: 7,
         workspace_snapshot_id: Some("snapshot-before".to_owned()),
         workspace_knowledge: WorkspaceKnowledge::Clean(7),
+        manifest: None,
     };
 
     let event = recorder.record_workspace_scan_unavailable_after(

@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -19,6 +23,8 @@ use super::{
     PreparedFileMutation, ToolCallId, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
     WorkspaceMutationScan, directory_state_hash, file_content_hash,
 };
+
+const MAX_WORKSPACE_MUTATION_CHANGED_PATHS: usize = 256;
 
 impl MutationEventRecorder {
     /// Reconciles one live prepared file mutation against its current on-disk state.
@@ -320,6 +326,7 @@ impl MutationEventRecorder {
         let workspace_revision = latest_workspace_revision(&self.store, &before.workspace_id)?
             .max(before.workspace_revision)
             .saturating_add(1);
+        let (changed_paths, changed_paths_truncated) = workspace_changed_paths(before, after);
         let payload = WorkspaceMutationDetected {
             operation_id: workspace_detection_operation_id(
                 &before.workspace_id,
@@ -340,6 +347,8 @@ impl MutationEventRecorder {
             reason,
             unknown_dirty: before.workspace_knowledge.is_unknown_dirty()
                 || after.workspace_knowledge.is_unknown_dirty(),
+            changed_paths,
+            changed_paths_truncated,
             metadata: BTreeMap::new(),
         };
         self.append_workspace_mutation_detected(&payload).map(Some)
@@ -366,6 +375,7 @@ impl MutationEventRecorder {
         let workspace_revision = latest_workspace_revision(&self.store, &before.workspace_id)?
             .max(before.workspace_revision)
             .saturating_add(1);
+        let (changed_paths, changed_paths_truncated) = workspace_changed_paths(before, after);
         let payload = WorkspaceMutationDetected {
             operation_id: workspace_detection_operation_id(
                 &before.workspace_id,
@@ -386,6 +396,8 @@ impl MutationEventRecorder {
             reason,
             unknown_dirty: before.workspace_knowledge.is_unknown_dirty()
                 || after.workspace_knowledge.is_unknown_dirty(),
+            changed_paths,
+            changed_paths_truncated,
             metadata,
         };
         self.append_workspace_mutation_detected(&payload).map(Some)
@@ -423,6 +435,8 @@ impl MutationEventRecorder {
             workspace_revision: workspace_revision.saturating_add(1),
             reason: WorkspaceMutationDetectionReason::ScanUnavailable,
             unknown_dirty: true,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata: BTreeMap::new(),
         };
         self.append_workspace_mutation_detected(&payload)
@@ -459,6 +473,8 @@ impl MutationEventRecorder {
             workspace_revision,
             reason: WorkspaceMutationDetectionReason::ScanUnavailable,
             unknown_dirty: true,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata,
         };
         self.append_workspace_mutation_detected(&payload)
@@ -517,6 +533,8 @@ impl MutationEventRecorder {
             workspace_revision: workspace_revision.saturating_add(1),
             reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
             unknown_dirty: true,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata,
         };
         self.append_workspace_mutation_detected(&payload)
@@ -553,6 +571,8 @@ impl MutationEventRecorder {
             workspace_revision,
             reason: WorkspaceMutationDetectionReason::ScanUnavailable,
             unknown_dirty: true,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata: BTreeMap::new(),
         };
         self.append_workspace_mutation_detected(&payload)
@@ -595,6 +615,7 @@ impl MutationEventRecorder {
             workspace_revision: profile.pre_execution_workspace_revision,
             workspace_snapshot_id: profile.pre_execution_snapshot_id.clone(),
             workspace_knowledge: profile.workspace_knowledge.clone(),
+            manifest: None,
         };
         let workspace_root = workspace_root.as_ref();
         if let Ok(after) = self.capture_workspace_scan(workspace_root, &scope) {
@@ -736,7 +757,42 @@ fn workspace_scan_from_snapshot(
         workspace_revision,
         workspace_snapshot_id: snapshot.workspace_snapshot_id,
         workspace_knowledge: snapshot.workspace_knowledge,
+        manifest: Some(snapshot.manifest),
     }
+}
+
+fn workspace_changed_paths(
+    before: &WorkspaceMutationScan,
+    after: &WorkspaceMutationScan,
+) -> (Vec<PathBuf>, bool) {
+    let (Some(before), Some(after)) = (before.manifest.as_ref(), after.manifest.as_ref()) else {
+        return (
+            Vec::new(),
+            before.workspace_snapshot_id != after.workspace_snapshot_id,
+        );
+    };
+    let before_by_path = before
+        .entries
+        .iter()
+        .map(|entry| (entry.normalized_path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let after_by_path = after
+        .entries
+        .iter()
+        .map(|entry| (entry.normalized_path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let paths = before_by_path
+        .keys()
+        .chain(after_by_path.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut changed = paths
+        .into_iter()
+        .filter(|path| before_by_path.get(path) != after_by_path.get(path))
+        .collect::<Vec<_>>();
+    let truncated = changed.len() > MAX_WORKSPACE_MUTATION_CHANGED_PATHS;
+    changed.truncate(MAX_WORKSPACE_MUTATION_CHANGED_PATHS);
+    (changed, truncated)
 }
 
 fn workspace_mutation_detection_reason(

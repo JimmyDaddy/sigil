@@ -499,11 +499,18 @@ impl DurableLineageFacts {
             }
             match control {
                 ControlEntry::TaskPlan(value) => push_fact!(facts.task_plans, value),
-                // RFC-0067: the adoption authority carries the accepted TaskPlan.
+                // RFC-0067 adoption and RFC-0069 materialization both carry the accepted
+                // TaskPlan authority used to validate subsequent task intent executions.
                 ControlEntry::PlanExecutionAdoptedV1(adoption) => {
                     push_fact!(
                         facts.task_plans,
                         adoption.adopted_candidate.task_plan.clone()
+                    )
+                }
+                ControlEntry::TaskMaterializationPreparedV1(materialization) => {
+                    push_fact!(
+                        facts.task_plans,
+                        materialization.adopted_candidate.task_plan.clone()
                     )
                 }
                 ControlEntry::TaskParticipantAttempt(value) => {

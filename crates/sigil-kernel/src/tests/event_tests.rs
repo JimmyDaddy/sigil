@@ -561,6 +561,8 @@ fn typed_event_decode_covers_mutation_and_verification_family() {
         workspace_revision: 4,
         reason: WorkspaceMutationDetectionReason::ScanUnavailable,
         unknown_dirty: true,
+        changed_paths: Vec::new(),
+        changed_paths_truncated: true,
         metadata: Default::default(),
     };
     let detected_event = StoredEvent::new(

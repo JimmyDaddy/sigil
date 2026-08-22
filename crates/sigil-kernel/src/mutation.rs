@@ -52,8 +52,9 @@ pub use events::{
 pub use hash::{bytes_hash, file_content_hash};
 pub use ops::{
     create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
-    delete_file_with_mutation_in_batch, restore_file_from_snapshot_with_mutation,
-    write_file_with_mutation, write_file_with_mutation_in_batch,
+    delete_file_with_mutation_expected_in_batch, delete_file_with_mutation_in_batch,
+    restore_file_from_snapshot_with_mutation, write_file_with_mutation,
+    write_file_with_mutation_expected_in_batch, write_file_with_mutation_in_batch,
 };
 pub use recorder::MutationEventRecorder;
 pub use retention::{

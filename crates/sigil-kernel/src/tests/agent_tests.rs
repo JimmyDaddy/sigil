@@ -34,9 +34,11 @@ use crate::{
     PlanApprovalPermission, PlanApprovalScope, PlanId, PlanPermissionGrantedEntry,
     PlanReviewHandoffBinding, PlanReviewPurposeContext, PreparedToolExecution,
     PromotedConversationInput, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
+    ProviderContinuationState, ProviderFailureClassV1, ProviderFailureObservationV1,
+    ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
-    ProviderRequestRejection, REQUEST_PLAN_REVIEW_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
+    ProviderRequestRejection, ProviderTurnRecoveryEvidenceV1, ProviderTurnRecoveryPolicyV1,
+    ProviderWireStateV1, REQUEST_PLAN_REVIEW_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
     REQUEST_USER_INPUT_TOOL_NAME, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
     ResponseHandle, RunCancellationOwner, RunEvent, RuntimeContextCandidates,
     SUBMIT_PLAN_DRAFT_TOOL_NAME, SecretString, Session, SessionLogEntry, SessionRef,
@@ -10869,6 +10871,39 @@ struct UnclassifiedPreStreamErrorProvider {
     calls: Arc<AtomicUsize>,
 }
 
+/// Deterministic stand-in for a TLS EOF after request bytes may have been sent. The adapter
+/// owns the typed mapping; recovery must not inspect the error text.
+struct TlsCloseThenSuccessProvider {
+    failures: usize,
+    calls: Arc<AtomicUsize>,
+}
+
+struct PartialStreamThenSuccessProvider {
+    calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+/// A streamed tool-request prefix is not replay-safe, even when the adapter subsequently fails
+/// before the tool call can become a settled local effect.
+struct PartialToolRequestThenErrorProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+/// Test-only route with two provider-declared equivalent transports. It starts on the primary
+/// transport and can move only after the durable fallback selection event is appended.
+struct EquivalentTransportFallbackProvider {
+    calls: Arc<AtomicUsize>,
+    fallback_active: Arc<AtomicBool>,
+}
+
+/// Deterministic stand-in for typed 429/5xx provider failures. The stream text is deliberately
+/// uninformative: recovery must follow the provider-owned typed observation rather than parsing
+/// error strings.
+struct ClassifiedFailureThenSuccessProvider {
+    calls: Arc<AtomicUsize>,
+    failure_class: ProviderFailureClassV1,
+}
+
 #[async_trait]
 impl Provider for StreamErrorProvider {
     fn name(&self) -> &str {
@@ -11062,6 +11097,219 @@ impl Provider for UnclassifiedPreStreamErrorProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         anyhow::bail!("transport outcome is uncertain")
+    }
+}
+
+#[async_trait]
+impl Provider for TlsCloseThenSuccessProvider {
+    fn name(&self) -> &str {
+        "mock-tls-close"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn observe_failure(
+        &self,
+        _error: &anyhow::Error,
+        wire_state: ProviderWireStateV1,
+    ) -> ProviderFailureObservationV1 {
+        ProviderFailureObservationV1::transport_interrupted(wire_state)
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_index < self.failures {
+            anyhow::bail!("peer closed connection without sending TLS close_notify");
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for PartialStreamThenSuccessProvider {
+    fn name(&self) -> &str {
+        "mock-partial-stream"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn observe_failure(
+        &self,
+        _error: &anyhow::Error,
+        wire_state: ProviderWireStateV1,
+    ) -> ProviderFailureObservationV1 {
+        ProviderFailureObservationV1::transport_interrupted(wire_state)
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.requests
+            .lock()
+            .expect("partial-stream request capture lock should not be poisoned")
+            .push(request);
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_index == 0 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(
+                    "discard this partial answer".to_owned(),
+                )),
+                Err(anyhow::anyhow!(
+                    "deterministic tls eof after response start"
+                )),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("recovered answer".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for PartialToolRequestThenErrorProvider {
+    fn name(&self) -> &str {
+        "mock-partial-tool-request"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn observe_failure(
+        &self,
+        _error: &anyhow::Error,
+        wire_state: ProviderWireStateV1,
+    ) -> ProviderFailureObservationV1 {
+        ProviderFailureObservationV1::transport_interrupted(wire_state)
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "partial-tool-call".to_owned(),
+                name: "write_file".to_owned(),
+            }),
+            Err(anyhow::anyhow!(
+                "deterministic tls eof after streamed tool request"
+            )),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for EquivalentTransportFallbackProvider {
+    fn name(&self) -> &str {
+        "mock-equivalent-transport"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn observe_failure(
+        &self,
+        _error: &anyhow::Error,
+        wire_state: ProviderWireStateV1,
+    ) -> ProviderFailureObservationV1 {
+        ProviderFailureObservationV1::transport_interrupted(wire_state)
+    }
+
+    fn transport_fallback_candidate(
+        &self,
+        _request: &CompletionRequest,
+        _failure: &ProviderFailureObservationV1,
+    ) -> Option<crate::ProviderTransportFallbackCandidateV1> {
+        (!self.fallback_active.load(Ordering::SeqCst)).then(|| {
+            crate::ProviderTransportFallbackCandidateV1 {
+                fallback_transport_id: "https".to_owned(),
+                source_transport_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                fallback_transport_fingerprint: format!("sha256:{}", "b".repeat(64)),
+                semantic_route_fingerprint: format!("sha256:{}", "c".repeat(64)),
+            }
+        })
+    }
+
+    fn activate_transport_fallback(
+        &self,
+        candidate: &crate::ProviderTransportFallbackCandidateV1,
+    ) -> Result<()> {
+        candidate.validate()?;
+        anyhow::ensure!(
+            candidate.fallback_transport_id == "https",
+            "unexpected fallback transport"
+        );
+        self.fallback_active.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.fallback_active.load(Ordering::SeqCst) {
+            anyhow::bail!("deterministic primary transport TLS EOF")
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(
+                "fallback transport answer".to_owned(),
+            )),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ClassifiedFailureThenSuccessProvider {
+    fn name(&self) -> &str {
+        "mock-classified-provider-failure"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn observe_failure(
+        &self,
+        _error: &anyhow::Error,
+        wire_state: ProviderWireStateV1,
+    ) -> ProviderFailureObservationV1 {
+        ProviderFailureObservationV1::classified(
+            self.failure_class,
+            wire_state,
+            "deterministic_classified_provider_failure",
+        )
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            anyhow::bail!("opaque fixture failure")
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(
+                "classified recovery answer".to_owned(),
+            )),
+            Ok(ProviderChunk::Done),
+        ])))
     }
 }
 
@@ -11404,7 +11652,7 @@ async fn agent_retries_confirmed_pre_dispatch_connect_failures_with_frozen_reque
         handler
             .events
             .iter()
-            .filter(|event| matches!(event, RunEvent::Notice(message) if message.contains("connection failed before request dispatch")))
+            .filter(|event| matches!(event, RunEvent::Notice(message) if message.contains("Reconnecting...")))
             .count(),
         2
     );
@@ -11428,6 +11676,14 @@ async fn agent_retries_confirmed_pre_dispatch_connect_failures_with_frozen_reque
         started
             .iter()
             .all(|entry| entry.logical_run_id == started[0].logical_run_id)
+    );
+
+    let recovery = session.provider_turn_recovery_projection()?;
+    assert_eq!(
+        recovery
+            .recoveries_for_logical_run_id(&started[0].logical_run_id)
+            .len(),
+        2
     );
     assert!(
         started
@@ -11463,6 +11719,1100 @@ async fn agent_retries_confirmed_pre_dispatch_connect_failures_with_frozen_reque
             .map(|attempt| attempt.entry.physical_attempt_id.as_str()),
         Some(attempts[2].entry.physical_attempt_id.as_str())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_recovers_zero_effect_tls_close_in_same_logical_turn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        TlsCloseThenSuccessProvider {
+            failures: 1,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session =
+        Session::new("mock-tls-close", "mock-model").with_store(JsonlSessionStore::new(&path)?);
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.final_text, "done");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(handler.events.iter().any(
+        |event| matches!(event, RunEvent::Notice(message) if message == "Reconnecting... 1/2")
+    ));
+    assert!(handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::ProviderTurnRecovery(view)
+            if view.phase == crate::PublicProviderTurnRecoveryPhaseV1::Waiting
+                && view.retry_count == 1
+                && view.active_retry_count == 1
+                && view.active_max_retries == 2
+                && view.max_transport_retries == 2
+                && !view.user_attention_required
+    )));
+    assert!(handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::ProviderTurnRecovery(view)
+            if view.phase == crate::PublicProviderTurnRecoveryPhaseV1::Recovering
+                && view.retry_count == 1
+    )));
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let attempts = ProviderPhysicalAttemptProjection::from_records(&records)?;
+    let logical_run_id = attempts
+        .attempts()
+        .first()
+        .expect("the initial physical attempt should be present")
+        .entry
+        .logical_run_id
+        .clone();
+    let chain = attempts.attempts_for_logical_run_id(&logical_run_id);
+    assert_eq!(chain.len(), 2);
+    assert!(matches!(
+        chain[0].terminal.as_ref(),
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+            durable_output_event_ids,
+            durable_side_effect_event_ids,
+            ..
+        }) if durable_output_event_ids.is_empty() && durable_side_effect_event_ids.is_empty()
+    ));
+    assert!(matches!(
+        chain[1].terminal.as_ref(),
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::Completed,
+            ..
+        })
+    ));
+    assert_eq!(
+        attempts
+            .effective_attempt_for_logical_run_id(&logical_run_id)?
+            .map(|attempt| attempt.entry.physical_attempt_id.as_str()),
+        Some(chain[1].entry.physical_attempt_id.as_str())
+    );
+
+    let recovery = session.provider_turn_recovery_projection()?;
+    let schedules = recovery.recoveries_for_logical_run_id(&logical_run_id);
+    assert_eq!(schedules.len(), 1);
+    assert!(schedules[0].started.is_some());
+    assert!(
+        recovery
+            .terminal_for_logical_run_id(&logical_run_id)
+            .is_none()
+    );
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::RunFinalized.as_str()
+                && event.payload.get("run_status").and_then(Value::as_str) == Some("failed")
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_recovers_typed_rate_limit_and_transient_server_failures() -> Result<()> {
+    let policy = ProviderTurnRecoveryPolicyV1 {
+        max_transport_retries: 1,
+        max_partial_output_retries: 0,
+        initial_delay_ms: 0,
+        max_delay_ms: 0,
+        jitter_ratio_millionths: 0,
+        max_cumulative_delay_ms: 0,
+    };
+    for failure_class in [
+        ProviderFailureClassV1::RateLimited,
+        ProviderFailureClassV1::TransientServer,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::new(
+            ClassifiedFailureThenSuccessProvider {
+                calls: Arc::clone(&calls),
+                failure_class,
+            },
+            ToolRegistry::new(),
+        )
+        .with_provider_turn_recovery_policy(policy)?;
+        let mut session = Session::new("mock-classified-provider-failure", "mock-model")
+            .with_store(JsonlSessionStore::new(temp.path().join("session.jsonl"))?);
+        let mut handler = RecordingEventHandler::default();
+
+        let output = agent
+            .run(
+                &mut session,
+                "recover typed failure",
+                scripted_run_options(1),
+                &mut handler,
+            )
+            .await?;
+
+        assert_eq!(output.final_text, "classified recovery answer");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let attempts = session.provider_physical_attempt_projection()?;
+        let logical_run_id = attempts
+            .attempts()
+            .first()
+            .expect("typed failure should have an initial attempt")
+            .entry
+            .logical_run_id
+            .clone();
+        assert_eq!(
+            attempts.attempts_for_logical_run_id(&logical_run_id).len(),
+            2
+        );
+        let recovery = session.provider_turn_recovery_projection()?;
+        assert!(
+            recovery
+                .recoveries_for_logical_run_id(&logical_run_id)
+                .iter()
+                .any(|state| state.schedule.failure_class == failure_class)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_blocks_typed_authentication_and_protocol_failures_without_resend() -> Result<()> {
+    for (failure_class, expected_reason) in [
+        (
+            ProviderFailureClassV1::Authentication,
+            "provider_configuration_or_capacity_required",
+        ),
+        (
+            ProviderFailureClassV1::ProtocolViolation,
+            "provider_request_requires_attention",
+        ),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::new(
+            ClassifiedFailureThenSuccessProvider {
+                calls: Arc::clone(&calls),
+                failure_class,
+            },
+            ToolRegistry::new(),
+        );
+        let temp = tempfile::tempdir()?;
+        let mut session = Session::new("mock-classified-provider-failure", "mock-model")
+            .with_store(JsonlSessionStore::new(temp.path().join("session.jsonl"))?);
+        let mut handler = RecordingEventHandler::default();
+
+        let _error = agent
+            .run(
+                &mut session,
+                "do not resend blocked failure",
+                scripted_run_options(1),
+                &mut handler,
+            )
+            .await
+            .expect_err("typed non-transient failures must not be replayed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let logical_run_id = session
+            .provider_physical_attempt_projection()?
+            .attempts()
+            .first()
+            .expect("blocked failure should have one attempt")
+            .entry
+            .logical_run_id
+            .clone();
+        let recovery = session.provider_turn_recovery_projection()?;
+        assert!(
+            recovery
+                .recoveries_for_logical_run_id(&logical_run_id)
+                .is_empty()
+        );
+        assert!(
+            recovery
+                .terminal_for_logical_run_id(&logical_run_id)
+                .is_some_and(|terminal| terminal.reason_code == expected_reason)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_discards_partial_stream_before_bounded_retry_and_replaces_live_output() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        PartialStreamThenSuccessProvider {
+            calls: Arc::clone(&calls),
+            requests: Arc::clone(&requests),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-partial-stream", "mock-model")
+        .with_store(JsonlSessionStore::new(&path)?);
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run(&mut session, "hi", scripted_run_options(1), &mut handler)
+        .await?;
+
+    assert_eq!(output.final_text, "recovered answer");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::ProviderTurnPartialOutputDiscarded(view)
+            if view.text_discarded
+                && !view.reasoning_discarded
+                && !view.tool_request_discarded
+    )));
+    let requests = requests
+        .lock()
+        .expect("partial-stream request capture should remain available");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().all(|message| {
+        message
+            .content
+            .as_deref()
+            .is_none_or(|content| !content.contains("discard this partial answer"))
+    }));
+    assert!(session.messages().iter().all(|message| {
+        message
+            .content
+            .as_deref()
+            .is_none_or(|content| !content.contains("discard this partial answer"))
+    }));
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let attempts = ProviderPhysicalAttemptProjection::from_records(&records)?;
+    let logical_run_id = attempts
+        .attempts()
+        .first()
+        .expect("partial-stream attempt must be durable")
+        .entry
+        .logical_run_id
+        .clone();
+    let chain = attempts.attempts_for_logical_run_id(&logical_run_id);
+    assert_eq!(chain.len(), 2);
+    let recovery = session.provider_turn_recovery_projection()?;
+    assert!(
+        recovery
+            .discarded_partial_for_physical_attempt(&chain[0].entry.physical_attempt_id)
+            .is_some()
+    );
+    let schedule = recovery
+        .recoveries_for_logical_run_id(&logical_run_id)
+        .into_iter()
+        .next()
+        .expect("partial-stream retry must be scheduled durably");
+    assert_eq!(
+        schedule.schedule.retry_kind,
+        crate::ProviderTurnRecoveryRetryKindV1::PartialOutput
+    );
+    assert_eq!(
+        schedule.schedule.budget_snapshot.partial_output_retry_count,
+        1
+    );
+    assert!(handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::ProviderTurnRecovery(view)
+            if view.phase == crate::PublicProviderTurnRecoveryPhaseV1::Waiting
+                && view.active_retry_count == 1
+                && view.active_max_retries == 1
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_blocks_partial_tool_request_without_replaying_provider_or_tool_effect() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        PartialToolRequestThenErrorProvider {
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-partial-tool-request", "mock-model")
+        .with_store(JsonlSessionStore::new(&path)?);
+    let mut handler = RecordingEventHandler::default();
+
+    let error = agent
+        .run(&mut session, "hi", scripted_run_options(1), &mut handler)
+        .await
+        .expect_err("a partial tool request must require review rather than replay");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        error
+            .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+            .is_some_and(|terminal| {
+                terminal.disposition == crate::ProviderTurnRecoveryTerminalDispositionV1::Blocked
+                    && terminal.reason_code == "partial_provider_tool_request_requires_review"
+            })
+    );
+    assert!(handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::ProviderTurnPartialOutputDiscarded(view)
+            if !view.text_discarded
+                && !view.reasoning_discarded
+                && view.tool_request_discarded
+    )));
+
+    let attempts = session.provider_physical_attempt_projection()?;
+    let logical_run_id = attempts
+        .attempts()
+        .first()
+        .expect("partial tool attempt must be durable")
+        .entry
+        .logical_run_id
+        .clone();
+    assert_eq!(
+        attempts.attempts_for_logical_run_id(&logical_run_id).len(),
+        1
+    );
+    let recovery = session.provider_turn_recovery_projection()?;
+    assert!(
+        recovery
+            .recoveries_for_logical_run_id(&logical_run_id)
+            .is_empty()
+    );
+    assert!(matches!(
+        recovery.terminal_for_logical_run_id(&logical_run_id),
+        Some(terminal)
+            if terminal.reason_code == "partial_provider_tool_request_requires_review"
+                && terminal.terminal_disposition
+                    == crate::ProviderTurnRecoveryTerminalDispositionV1::Blocked
+    ));
+    assert!(
+        session
+            .messages()
+            .iter()
+            .all(|message| message.role != MessageRole::Tool)
+    );
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::RunFinalized.as_str()
+                && event.payload.get("run_status").and_then(Value::as_str) == Some("failed")
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_selects_equivalent_transport_only_after_durable_recovery_authority() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fallback_active = Arc::new(AtomicBool::new(false));
+    let agent = Agent::new(
+        EquivalentTransportFallbackProvider {
+            calls: Arc::clone(&calls),
+            fallback_active: Arc::clone(&fallback_active),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-equivalent-transport", "mock-model")
+        .with_store(JsonlSessionStore::new(&path)?);
+    let mut handler = RecordingEventHandler::default();
+
+    let output = agent
+        .run(&mut session, "hi", scripted_run_options(1), &mut handler)
+        .await?;
+
+    assert_eq!(output.final_text, "fallback transport answer");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(fallback_active.load(Ordering::SeqCst));
+    let recovery = session.provider_turn_recovery_projection()?;
+    let state = recovery
+        .recoveries_for_logical_run_id(
+            &session
+                .provider_physical_attempt_projection()?
+                .attempts()
+                .first()
+                .expect("primary attempt should be durable")
+                .entry
+                .logical_run_id,
+        )
+        .into_iter()
+        .next()
+        .expect("fallback recovery should be durable");
+    assert_eq!(
+        state
+            .transport_fallback
+            .as_ref()
+            .map(|selection| selection.candidate.fallback_transport_id.as_str()),
+        Some("https")
+    );
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let fallback_position = records
+        .iter()
+        .position(|record| {
+            matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_type
+                        == DurableEventType::ProviderTurnTransportFallbackSelected.as_str()
+            )
+        })
+        .expect("fallback selection must be durable");
+    let start_position = records
+        .iter()
+        .position(|record| {
+            matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_type == DurableEventType::ProviderTurnRecoveryStarted.as_str()
+            )
+        })
+        .expect("recovery must start durably");
+    assert!(fallback_position < start_position);
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::RunFinalized.as_str()
+                && event.payload.get("run_status").and_then(Value::as_str) == Some("failed")
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_repeats_deterministic_tls_recovery_without_duplicate_terminal_events() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let policy = ProviderTurnRecoveryPolicyV1 {
+        max_transport_retries: 1,
+        max_partial_output_retries: 0,
+        initial_delay_ms: 0,
+        max_delay_ms: 0,
+        jitter_ratio_millionths: 0,
+        max_cumulative_delay_ms: 0,
+    };
+    for run_index in 0..100 {
+        let path = temp.path().join(format!("tls-recovery-{run_index}.jsonl"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::new(
+            TlsCloseThenSuccessProvider {
+                failures: 1,
+                calls: Arc::clone(&calls),
+            },
+            ToolRegistry::new(),
+        )
+        .with_provider_turn_recovery_policy(policy)?;
+        let mut session =
+            Session::new("mock-tls-close", "mock-model").with_store(JsonlSessionStore::new(&path)?);
+        let mut handler = RecordingEventHandler::default();
+
+        let output = agent
+            .run(
+                &mut session,
+                "recover deterministically",
+                scripted_run_options(1),
+                &mut handler,
+            )
+            .await?;
+
+        assert_eq!(output.final_text, "done", "iteration {run_index}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "iteration {run_index}");
+        let attempts = session.provider_physical_attempt_projection()?;
+        assert_eq!(attempts.attempts().len(), 2, "iteration {run_index}");
+        assert!(
+            attempts
+                .attempts()
+                .iter()
+                .all(|attempt| attempt.terminal.is_some()),
+            "iteration {run_index}"
+        );
+        assert!(
+            session
+                .provider_turn_recovery_projection()?
+                .recoveries_for_logical_run_id(
+                    &attempts
+                        .attempts()
+                        .first()
+                        .expect("retry fixture must retain the logical attempt")
+                        .entry
+                        .logical_run_id,
+                )
+                .iter()
+                .all(|state| state.schedule.recovery_policy_fingerprint == policy.fingerprint()),
+            "iteration {run_index} must retain the configured policy snapshot"
+        );
+        let records = JsonlSessionStore::read_event_records(&path)?;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record,
+                    SessionStreamRecord::Stored(event)
+                        if event.event_type == DurableEventType::ProviderTurnRecoveryScheduled.as_str()
+                ))
+                .count(),
+            1,
+            "iteration {run_index}"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record,
+                    SessionStreamRecord::Stored(event)
+                        if event.event_type == DurableEventType::ProviderTurnRecoveryStarted.as_str()
+                ))
+                .count(),
+            1,
+            "iteration {run_index}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_restores_durable_transport_fallback_after_session_reload() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let logical_run_id = "fallback-restart-logical-turn";
+    let mut session = Session::new("mock-equivalent-transport", "mock-model")
+        .with_store(JsonlSessionStore::new(&path)?);
+    session.ensure_identity_entry()?;
+    let mut durable_user = ModelMessage::user("continue over the selected equivalent transport");
+    durable_user.id = "fallback-restart-user".to_owned();
+    session.append_user_message(durable_user.clone())?;
+    let frozen = FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        CompletionRequest {
+            provider_name: "mock-equivalent-transport".to_owned(),
+            model_name: "mock-model".to_owned(),
+            messages: vec![durable_user],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let mut original =
+        crate::session::ProviderPhysicalAttemptAudit::start(&session, logical_run_id, &frozen)
+            .await?;
+    let original_id = original
+        .physical_attempt_id()
+        .expect("durable original physical attempt")
+        .to_owned();
+    original
+        .finish(
+            &session,
+            ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+            None,
+        )
+        .await?;
+    let evidence = ProviderTurnRecoveryEvidenceV1::from_terminal_attempt(
+        session
+            .provider_physical_attempt_projection()?
+            .attempt(&original_id)
+            .expect("the original attempt must be projected"),
+        ProviderFailureObservationV1::transport_interrupted(
+            ProviderWireStateV1::RequestBytesMayHaveBeenSent,
+        ),
+        &frozen,
+    )?;
+    let schedule = crate::session::ProviderTurnRecoveryAudit::schedule(
+        &session,
+        &evidence,
+        Default::default(),
+        0,
+        ProviderTurnRecoveryPolicyV1::default(),
+    )
+    .await?;
+    crate::session::ProviderTurnRecoveryAudit::select_transport_fallback(
+        &session,
+        &schedule,
+        crate::ProviderTransportFallbackCandidateV1 {
+            fallback_transport_id: "https".to_owned(),
+            source_transport_fingerprint: format!("sha256:{}", "a".repeat(64)),
+            fallback_transport_fingerprint: format!("sha256:{}", "b".repeat(64)),
+            semantic_route_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        },
+    )
+    .await?;
+    drop(session);
+
+    let mut resumed = Session::load_from_store(
+        "mock-equivalent-transport",
+        "mock-model",
+        JsonlSessionStore::new(&path)?,
+    )?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fallback_active = Arc::new(AtomicBool::new(false));
+    let agent = Agent::new(
+        EquivalentTransportFallbackProvider {
+            calls: Arc::clone(&calls),
+            fallback_active: Arc::clone(&fallback_active),
+        },
+        ToolRegistry::new(),
+    );
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(
+            &mut resumed,
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_initial_frozen_provider_request(frozen)
+                .with_logical_run_id(logical_run_id),
+            scripted_run_options(1),
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "fallback transport answer");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(fallback_active.load(Ordering::SeqCst));
+    let recovery = resumed.provider_turn_recovery_projection()?;
+    let state = recovery
+        .recovery(&schedule.recovery_id)
+        .expect("the selected recovery must survive reload");
+    assert!(state.started.is_some());
+    assert_eq!(
+        state
+            .transport_fallback
+            .as_ref()
+            .map(|selection| selection.candidate.fallback_transport_id.as_str()),
+        Some("https")
+    );
+    assert_eq!(
+        JsonlSessionStore::read_event_records(&path)?
+            .iter()
+            .filter(|record| matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_type
+                        == DurableEventType::ProviderTurnTransportFallbackSelected.as_str()
+            ))
+            .count(),
+        1,
+        "recovery must reuse the durable selection instead of creating a second one"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_blocks_unstarted_recovery_when_policy_fingerprint_changes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let logical_run_id = "policy-drift-recovery-logical-turn";
+    let mut session =
+        Session::new("mock-tls-close", "mock-model").with_store(JsonlSessionStore::new(&path)?);
+    session.ensure_identity_entry()?;
+    let mut durable_user = ModelMessage::user("do not silently alter recovery policy");
+    durable_user.id = "policy-drift-user".to_owned();
+    session.append_user_message(durable_user.clone())?;
+    let frozen = FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        CompletionRequest {
+            provider_name: "mock-tls-close".to_owned(),
+            model_name: "mock-model".to_owned(),
+            messages: vec![durable_user],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let mut original =
+        crate::session::ProviderPhysicalAttemptAudit::start(&session, logical_run_id, &frozen)
+            .await?;
+    let original_id = original
+        .physical_attempt_id()
+        .expect("durable original physical attempt")
+        .to_owned();
+    original
+        .finish(
+            &session,
+            ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+            None,
+        )
+        .await?;
+    let evidence = ProviderTurnRecoveryEvidenceV1::from_terminal_attempt(
+        session
+            .provider_physical_attempt_projection()?
+            .attempt(&original_id)
+            .expect("the original attempt must be projected"),
+        ProviderFailureObservationV1::transport_interrupted(
+            ProviderWireStateV1::RequestBytesMayHaveBeenSent,
+        ),
+        &frozen,
+    )?;
+    let schedule = crate::session::ProviderTurnRecoveryAudit::schedule(
+        &session,
+        &evidence,
+        Default::default(),
+        0,
+        ProviderTurnRecoveryPolicyV1::default(),
+    )
+    .await?;
+    drop(session);
+
+    let mut resumed = Session::load_from_store(
+        "mock-tls-close",
+        "mock-model",
+        JsonlSessionStore::new(&path)?,
+    )?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        TlsCloseThenSuccessProvider {
+            failures: 0,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    )
+    .with_provider_turn_recovery_policy(ProviderTurnRecoveryPolicyV1 {
+        max_transport_retries: 1,
+        max_partial_output_retries: 0,
+        initial_delay_ms: 0,
+        max_delay_ms: 0,
+        jitter_ratio_millionths: 0,
+        max_cumulative_delay_ms: 0,
+    })?;
+    let mut handler = RecordingEventHandler::default();
+    agent
+        .run_with_input(
+            &mut resumed,
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_initial_frozen_provider_request(frozen)
+                .with_logical_run_id(logical_run_id),
+            scripted_run_options(1),
+            &mut handler,
+        )
+        .await
+        .expect_err("policy drift must block before sending replacement provider bytes");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let recovery = resumed.provider_turn_recovery_projection()?;
+    assert!(matches!(
+        recovery.recovery(&schedule.recovery_id),
+        Some(state)
+            if state.started.is_none()
+                && state.exhausted.as_ref().is_some_and(|terminal| {
+                    terminal.reason_code == "provider_recovery_policy_changed_re_admit_required"
+                        && terminal.terminal_disposition
+                            == crate::ProviderTurnRecoveryTerminalDispositionV1::Blocked
+                })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_claims_unstarted_durable_recovery_after_session_reload() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let logical_run_id = "recovery-restart-logical-turn";
+    let mut session = Session::new("mock-tls-close", "mock-model").with_store(store);
+    session.ensure_identity_entry()?;
+    let mut durable_user = ModelMessage::user("continue the durable provider turn");
+    durable_user.id = "recovery-restart-user".to_owned();
+    session.append_user_message(durable_user.clone())?;
+    let frozen = FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        CompletionRequest {
+            provider_name: "mock-tls-close".to_owned(),
+            model_name: "mock-model".to_owned(),
+            messages: vec![durable_user],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let mut original =
+        crate::session::ProviderPhysicalAttemptAudit::start(&session, logical_run_id, &frozen)
+            .await?;
+    let original_id = original
+        .physical_attempt_id()
+        .expect("durable original physical attempt")
+        .to_owned();
+    original
+        .finish(
+            &session,
+            ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+            None,
+        )
+        .await?;
+    let attempts = session.provider_physical_attempt_projection()?;
+    let evidence = ProviderTurnRecoveryEvidenceV1::from_terminal_attempt(
+        attempts
+            .attempt(&original_id)
+            .expect("the original attempt must be projected"),
+        ProviderFailureObservationV1::transport_interrupted(
+            ProviderWireStateV1::RequestBytesMayHaveBeenSent,
+        ),
+        &frozen,
+    )?;
+    let schedule = crate::session::ProviderTurnRecoveryAudit::schedule(
+        &session,
+        &evidence,
+        Default::default(),
+        500,
+        ProviderTurnRecoveryPolicyV1::default(),
+    )
+    .await?;
+    drop(session);
+
+    // The process may have died after schedule append. The new owner waits against the durable
+    // absolute deadline and CAS-claims the existing schedule rather than minting a replacement.
+    let mut resumed = Session::load_from_store(
+        "mock-tls-close",
+        "mock-model",
+        JsonlSessionStore::new(&path)?,
+    )?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        TlsCloseThenSuccessProvider {
+            failures: 0,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(
+            &mut resumed,
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_initial_frozen_provider_request(frozen)
+                .with_logical_run_id(logical_run_id),
+            scripted_run_options(1),
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let attempts = resumed.provider_physical_attempt_projection()?;
+    let chain = attempts.attempts_for_logical_run_id(logical_run_id);
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[0].entry.physical_attempt_id, original_id);
+    let recovery = resumed.provider_turn_recovery_projection()?;
+    let recovered = recovery
+        .recovery(&schedule.recovery_id)
+        .expect("recovery schedule must survive reload");
+    assert!(recovered.started.is_some());
+    assert!(handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::ProviderTurnRecovery(view)
+            if view.phase == crate::PublicProviderTurnRecoveryPhaseV1::Recovering
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_only_agent_run_never_sends_without_a_durable_schedule() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        TlsCloseThenSuccessProvider {
+            failures: 0,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session =
+        Session::new("mock-tls-close", "mock-model").with_store(JsonlSessionStore::new(&path)?);
+    let mut handler = RecordingEventHandler::default();
+
+    let error = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user_with_message_id("resume only", "recovery-only-input")
+                .with_logical_run_id("recovery-only-logical-turn")
+                .with_durable_provider_recovery_only(),
+            scripted_run_options(1),
+            &mut handler,
+        )
+        .await
+        .expect_err("an existing participant cannot invent a fresh provider turn after restart");
+
+    assert!(
+        error
+            .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+            .is_some_and(|terminal| terminal.reason_code == "provider_recovery_schedule_missing")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(
+        session
+            .provider_physical_attempt_projection()?
+            .attempts_for_logical_run_id("recovery-only-logical-turn")
+            .is_empty()
+    );
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    assert!(records.iter().any(|record| matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::RunFinalized.as_str()
+                && event.payload.get("run_status").and_then(Value::as_str) == Some("paused")
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_reload_blocks_started_recovery_without_reissuing_provider_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let logical_run_id = "recovery-started-restart-logical-turn";
+    let mut session = Session::new("mock-tls-close", "mock-model").with_store(store);
+    session.ensure_identity_entry()?;
+    let mut durable_user = ModelMessage::user("do not reissue an uncertain recovery");
+    durable_user.id = "recovery-started-restart-user".to_owned();
+    session.append_user_message(durable_user.clone())?;
+    let frozen = FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        CompletionRequest {
+            provider_name: "mock-tls-close".to_owned(),
+            model_name: "mock-model".to_owned(),
+            messages: vec![durable_user],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let mut original =
+        crate::session::ProviderPhysicalAttemptAudit::start(&session, logical_run_id, &frozen)
+            .await?;
+    let original_id = original
+        .physical_attempt_id()
+        .expect("durable original physical attempt")
+        .to_owned();
+    original
+        .finish(
+            &session,
+            ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+            None,
+        )
+        .await?;
+    let attempts = session.provider_physical_attempt_projection()?;
+    let evidence = ProviderTurnRecoveryEvidenceV1::from_terminal_attempt(
+        attempts
+            .attempt(&original_id)
+            .expect("the original attempt must be projected"),
+        ProviderFailureObservationV1::transport_interrupted(
+            ProviderWireStateV1::RequestBytesMayHaveBeenSent,
+        ),
+        &frozen,
+    )?;
+    let schedule = crate::session::ProviderTurnRecoveryAudit::schedule(
+        &session,
+        &evidence,
+        Default::default(),
+        0,
+        ProviderTurnRecoveryPolicyV1::default(),
+    )
+    .await?;
+    let started = crate::session::ProviderTurnRecoveryAudit::start(&session, &schedule).await?;
+    let _abandoned_after_send_barrier =
+        crate::session::ProviderPhysicalAttemptAudit::start_recovery(
+            &session,
+            logical_run_id,
+            &frozen,
+            &schedule,
+            &started.physical_attempt_id,
+        )
+        .await?;
+    drop(session);
+
+    let mut resumed = Session::load_from_store(
+        "mock-tls-close",
+        "mock-model",
+        JsonlSessionStore::new(&path)?,
+    )?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        TlsCloseThenSuccessProvider {
+            failures: 0,
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut handler = RecordingEventHandler::default();
+    agent
+        .run_with_input(
+            &mut resumed,
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_initial_frozen_provider_request(frozen)
+                .with_logical_run_id(logical_run_id),
+            scripted_run_options(1),
+            &mut handler,
+        )
+        .await
+        .expect_err("a started recovery must not resend provider bytes after process loss");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let attempts = resumed.provider_physical_attempt_projection()?;
+    let chain = attempts.attempts_for_logical_run_id(logical_run_id);
+    assert_eq!(chain.len(), 2);
+    assert!(matches!(
+        chain[1].terminal.as_ref(),
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::Interrupted,
+            ..
+        })
+    ));
+    let recovery = resumed.provider_turn_recovery_projection()?;
+    assert!(matches!(
+        recovery.terminal_for_logical_run_id(logical_run_id),
+        Some(terminal)
+            if terminal.reason_code == "recovery_started_without_safe_completion"
+                && terminal.terminal_disposition
+                    == crate::ProviderTurnRecoveryTerminalDispositionV1::Blocked
+    ));
     Ok(())
 }
 
@@ -11535,8 +12885,7 @@ async fn agent_bounds_confirmed_pre_dispatch_connect_retries() -> Result<()> {
 }
 
 #[tokio::test]
-async fn bound_initial_physical_attempt_uses_exact_identity_and_disables_hidden_retry() -> Result<()>
-{
+async fn bound_initial_physical_attempt_keeps_identity_then_uses_durable_recovery() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -11573,9 +12922,9 @@ async fn bound_initial_physical_attempt_uses_exact_identity_and_disables_hidden_
             &mut handler,
         )
         .await
-        .expect_err("a bound continuation attempt must return control instead of hidden retry");
+        .expect_err("bounded provider-turn recovery should pause after its durable budget is used");
 
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     let projection = session.provider_physical_attempt_projection()?;
     let attempt = projection
         .attempt(physical_attempt_id)
@@ -11587,6 +12936,19 @@ async fn bound_initial_physical_attempt_uses_exact_identity_and_disables_hidden_
             rejection: Some(ProviderRequestRejection::ConnectFailedBeforeDispatch),
             ..
         })
+    ));
+    let recovery = session.provider_turn_recovery_projection()?;
+    let logical_run_id = attempt.entry.logical_run_id.clone();
+    assert_eq!(
+        recovery
+            .recoveries_for_logical_run_id(&logical_run_id)
+            .len(),
+        2
+    );
+    assert!(matches!(
+        recovery.terminal_for_logical_run_id(&logical_run_id),
+        Some(terminal) if terminal.terminal_disposition
+            == crate::ProviderTurnRecoveryTerminalDispositionV1::Paused
     ));
     Ok(())
 }
@@ -11740,7 +13102,8 @@ async fn agent_never_retries_an_unclassified_pre_stream_transport_error() -> Res
 }
 
 #[tokio::test]
-async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
+async fn agent_blocks_unclassified_provider_stream_errors_with_safe_recovery_context() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -11768,9 +13131,9 @@ async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
             &mut handler,
         )
         .await
-        .expect_err("stream error should fail the run");
+        .expect_err("unclassified provider error should stop with an actionable recovery terminal");
 
-    assert!(error.to_string().contains("provider stream failed"));
+    assert!(error.to_string().contains("provider-turn recovery Blocked"));
     assert!(
         error
             .chain()
@@ -11785,25 +13148,19 @@ async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
         }
         _ => None,
     });
-    let finalized = finalized.expect("run finalized event should be present for provider error");
+    let finalized = finalized.expect("run finalized event should be present for provider recovery");
     assert_eq!(
         finalized.payload.get("run_status").and_then(Value::as_str),
-        Some("failed")
+        Some("paused")
     );
     assert_eq!(
         finalized
             .payload
             .get("terminal_reason")
             .and_then(Value::as_str),
-        Some("provider_stream_error")
+        Some("provider_request_requires_attention")
     );
-    assert!(
-        finalized
-            .payload
-            .get("error")
-            .and_then(Value::as_str)
-            .is_some_and(|error| error == "provider turn failed before a safe terminal result")
-    );
+    assert!(finalized.payload.get("error").is_some_and(Value::is_null));
     assert!(!finalized.payload.to_string().contains("socket closed"));
     let physical_terminal = records.iter().find_map(|record| match record {
         SessionStreamRecord::Stored(event)
@@ -11821,6 +13178,22 @@ async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
             ..
         })
     ));
+    let recovery = session.provider_turn_recovery_projection()?;
+    let logical_run_id = recovery
+        .terminal_for_logical_run_id(
+            &session
+                .provider_physical_attempt_projection()?
+                .attempts()
+                .first()
+                .expect("provider attempt should be persisted")
+                .entry
+                .logical_run_id,
+        )
+        .expect("provider recovery terminal should be durable");
+    assert_eq!(
+        logical_run_id.terminal_disposition,
+        crate::ProviderTurnRecoveryTerminalDispositionV1::Blocked
+    );
     Ok(())
 }
 
@@ -13334,10 +14707,10 @@ async fn production_agent_requests_preserve_cache_prefix_across_tool_turn_user_t
     let projection = ProviderPhysicalAttemptProjection::from_records(
         &JsonlSessionStore::read_event_records(&store_path)?,
     )?;
-    let attempts = ["cache-run-1", "cache-run-2", "cache-run-3"]
-        .into_iter()
-        .flat_map(|run_id| projection.attempts_for_logical_run_id(run_id))
-        .collect::<Vec<_>>();
+    // A tool follow-up is a distinct logical provider turn. The durable attempts still preserve
+    // one continuous request frontier, so audit the session-wide start order against the
+    // provider capture rather than assuming every turn owns the caller's root logical id.
+    let attempts = projection.attempts();
     assert_eq!(attempts.len(), 4);
     for (index, attempt) in attempts.iter().enumerate() {
         let envelope = attempt

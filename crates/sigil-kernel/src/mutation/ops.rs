@@ -59,6 +59,39 @@ pub fn write_file_with_mutation_in_batch(
     coordinator.commit_write(&prepared, content).map(Some)
 }
 
+/// Writes only when the exact content read during planning still owns the target path.
+///
+/// This is an effect-local compare-and-swap: unrelated workspace drift remains harmless, while a
+/// concurrent change to this path is rejected before the durable prepare/write boundary.
+pub fn write_file_with_mutation_expected_in_batch(
+    recorder: Option<&MutationEventRecorder>,
+    workspace_root: &Path,
+    tool_call_id: &str,
+    batch_id: Option<MutationBatchId>,
+    relative_path: impl Into<PathBuf>,
+    absolute_path: impl Into<PathBuf>,
+    expected_before_hash: Option<String>,
+    content: &[u8],
+) -> Result<Option<CommittedFileMutation>> {
+    let recorder = require_mutation_recorder(recorder)?;
+    let coordinator = recorder.coordinator(workspace_root, tool_call_id.to_owned(), batch_id)?;
+    let relative_path = normalize_relative_path(relative_path.into())?;
+    let absolute_path = absolute_path.into();
+    ensure_absolute_path_matches_subject(
+        &coordinator.workspace_root,
+        &relative_path,
+        &absolute_path,
+    )?;
+    coordinator.create_missing_parent_directories(&absolute_path)?;
+    let prepared = coordinator.prepare_file_expected(
+        relative_path,
+        absolute_path,
+        expected_before_hash,
+        Some(bytes_hash(content)),
+    )?;
+    coordinator.commit_write(&prepared, content).map(Some)
+}
+
 pub fn create_directory_with_mutation(
     recorder: Option<&MutationEventRecorder>,
     workspace_root: &Path,
@@ -122,6 +155,34 @@ pub fn delete_file_with_mutation_in_batch(
     let recorder = require_mutation_recorder(recorder)?;
     let coordinator = recorder.coordinator(workspace_root, tool_call_id.to_owned(), batch_id)?;
     let prepared = coordinator.prepare_file(relative_path, &absolute_path, None)?;
+    coordinator.commit_delete(&prepared).map(Some)
+}
+
+/// Deletes only when the exact content read during planning still owns the target path.
+pub fn delete_file_with_mutation_expected_in_batch(
+    recorder: Option<&MutationEventRecorder>,
+    workspace_root: &Path,
+    tool_call_id: &str,
+    batch_id: Option<MutationBatchId>,
+    relative_path: impl Into<PathBuf>,
+    absolute_path: impl Into<PathBuf>,
+    expected_before_hash: Option<String>,
+) -> Result<Option<CommittedFileMutation>> {
+    let absolute_path = absolute_path.into();
+    let recorder = require_mutation_recorder(recorder)?;
+    let coordinator = recorder.coordinator(workspace_root, tool_call_id.to_owned(), batch_id)?;
+    let relative_path = normalize_relative_path(relative_path.into())?;
+    ensure_absolute_path_matches_subject(
+        &coordinator.workspace_root,
+        &relative_path,
+        &absolute_path,
+    )?;
+    let prepared = coordinator.prepare_file_expected(
+        relative_path,
+        &absolute_path,
+        expected_before_hash,
+        None,
+    )?;
     coordinator.commit_delete(&prepared).map(Some)
 }
 

@@ -263,8 +263,13 @@ impl JsonlSessionStore {
                 causation_id: None,
             }
         }));
-        self.writer
-            .append_events_if_records(pending, false, should_append)
+        if pending.len() > 1 {
+            self.writer
+                .append_crash_safe_bundle_if_records(pending, should_append)
+        } else {
+            self.writer
+                .append_events_if_records(pending, false, should_append)
+        }
     }
 
     pub(crate) fn append_event_if<F>(
@@ -1135,6 +1140,15 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::PlanReadyCommittedV1(_) => DurableEventType::PlanReadyCommitted,
         ControlEntry::PlanCompileFailedV1(_) => DurableEventType::PlanCompileFailed,
         ControlEntry::PlanExecutionAdoptedV1(_) => DurableEventType::PlanExecutionAdopted,
+        ControlEntry::TaskMaterializationAttemptStartedV1(_) => {
+            DurableEventType::TaskMaterializationAttemptStarted
+        }
+        ControlEntry::TaskMaterializationPreparedV1(_) => {
+            DurableEventType::TaskMaterializationPrepared
+        }
+        ControlEntry::TaskMaterializationBlockedV1(_) => {
+            DurableEventType::TaskMaterializationBlocked
+        }
         ControlEntry::TaskAdmissionAttemptedV1(_) => DurableEventType::TaskAdmissionAttempted,
         ControlEntry::ConversationRouteDecisionRecorded(_) => {
             DurableEventType::ConversationRouteDecisionRecorded
@@ -1147,6 +1161,9 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         | ControlEntry::UserInputContinuationReleased(_)
         | ControlEntry::UserInputResolved(_) => DurableEventType::UserInputLifecycleChanged,
         ControlEntry::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
+        ControlEntry::TaskDirectExecutionAdmittedV1(_)
+        | ControlEntry::TaskDirectExecutionAttemptV1(_)
+        | ControlEntry::TaskChecklistUpdatedV1(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskHandoffRequested(_) => DurableEventType::TaskHandoffRequested,
         ControlEntry::TaskHandoffResolved(_) => DurableEventType::TaskHandoffResolved,
         ControlEntry::TaskContinuationSelected(_) => DurableEventType::TaskStatusChanged,

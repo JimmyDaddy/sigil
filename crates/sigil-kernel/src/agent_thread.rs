@@ -768,6 +768,20 @@ struct AgentInvocationWorkspaceFrontier {
     current_snapshot_id: crate::WorkspaceSnapshotId,
 }
 
+/// Process-local result of observing a mutable workspace at an invocation boundary.
+///
+/// The invocation grant remains bound to the original snapshot as immutable audit evidence, but
+/// workspace contents are not authority. A later observation may therefore advance the moving
+/// frontier without reminting the grant or invalidating unrelated read/tool authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentInvocationWorkspaceObservationV1 {
+    Unchanged,
+    Rebased {
+        previous_snapshot_id: crate::WorkspaceSnapshotId,
+        observed_snapshot_id: crate::WorkspaceSnapshotId,
+    },
+}
+
 impl fmt::Debug for AgentInvocationGrant {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -803,7 +817,6 @@ impl AgentInvocationGrant {
             permission_upper_bound_fingerprint: &permission_upper_bound_fingerprint,
             network_upper_bound: binding.network_upper_bound,
             tool_contract_fingerprint: &binding.tool_contract_fingerprint,
-            workspace_snapshot_id: &binding.workspace_snapshot_id,
             root_cancellation_scope_id: &binding.root_cancellation_scope_id,
             expires_at_ms: binding.expires_at_ms,
         };
@@ -843,7 +856,11 @@ impl AgentInvocationGrant {
         self.binding.network_upper_bound
     }
 
-    /// Revalidates all invocation facts immediately before child/provider admission.
+    /// Revalidates immutable invocation facts immediately before child/provider admission.
+    ///
+    /// Workspace contents are observed and rebased separately from authority. A concurrent human
+    /// or worker edit must not revoke a role, permission ceiling, tool contract, cancellation
+    /// scope, or expiry that is otherwise still valid.
     ///
     /// # Errors
     ///
@@ -861,12 +878,10 @@ impl AgentInvocationGrant {
         workspace_snapshot_id: &crate::WorkspaceSnapshotId,
         root_cancellation_scope_id: &str,
         now_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<AgentInvocationWorkspaceObservationV1> {
         if now_ms >= self.binding.expires_at_ms {
             bail!("agent invocation grant expired");
         }
-        let workspace_snapshot_matches =
-            self.workspace_frontier_snapshot_id()? == *workspace_snapshot_id;
         if &self.binding.source != source
             || &self.binding.authority != authority
             || self.binding.root_logical_run_id != root_logical_run_id
@@ -874,51 +889,71 @@ impl AgentInvocationGrant {
             || self.binding.role != role
             || self.binding.isolation != isolation
             || self.binding.tool_contract_fingerprint != tool_contract_fingerprint
-            || !workspace_snapshot_matches
             || self.binding.root_cancellation_scope_id != root_cancellation_scope_id
         {
             bail!("agent invocation grant binding changed before child admission");
         }
-        Ok(())
+        self.observe_workspace(workspace_snapshot_id)
     }
 
     /// Revalidates the dynamic authority that must still hold at a child tool-effect boundary.
     ///
     /// # Errors
     ///
-    /// Returns an error after expiry, cancellation-scope drift, tool-contract drift, or workspace
-    /// snapshot drift. Callers must perform this check before mutation scanning or external I/O.
+    /// Returns an error after expiry, cancellation-scope drift, or tool-contract drift. Workspace
+    /// drift advances the process-local observation frontier and is handled by path/effect-level
+    /// stale-write and reconciliation guards instead of revoking the entire invocation.
     pub fn validate_tool_effect(
         &self,
         tool_contract_fingerprint: &str,
         workspace_snapshot_id: &crate::WorkspaceSnapshotId,
         root_cancellation_scope_id: &str,
         now_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<AgentInvocationWorkspaceObservationV1> {
         if now_ms >= self.binding.expires_at_ms {
             bail!("agent invocation grant expired before tool execution");
         }
         if self.binding.tool_contract_fingerprint != tool_contract_fingerprint {
             bail!("agent invocation tool contracts changed after grant minting");
         }
-        if self.workspace_frontier_snapshot_id()? != *workspace_snapshot_id {
-            bail!("agent invocation workspace changed outside its audited mutation frontier");
-        }
         if self.binding.root_cancellation_scope_id != root_cancellation_scope_id {
             bail!("agent invocation cancellation scope changed after grant minting");
         }
-        Ok(())
+        self.observe_workspace(workspace_snapshot_id)
+    }
+
+    fn observe_workspace(
+        &self,
+        observed_snapshot_id: &crate::WorkspaceSnapshotId,
+    ) -> Result<AgentInvocationWorkspaceObservationV1> {
+        let mut frontier = self
+            .workspace_frontier
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent invocation workspace frontier is unavailable"))?;
+        if frontier.current_snapshot_id == *observed_snapshot_id {
+            return Ok(AgentInvocationWorkspaceObservationV1::Unchanged);
+        }
+        let previous_snapshot_id = std::mem::replace(
+            &mut frontier.current_snapshot_id,
+            observed_snapshot_id.clone(),
+        );
+        Ok(AgentInvocationWorkspaceObservationV1::Rebased {
+            previous_snapshot_id,
+            observed_snapshot_id: observed_snapshot_id.clone(),
+        })
     }
 
     /// Advances a writable invocation to the workspace state produced by one authorized tool.
     ///
     /// The initial binding remains immutable audit evidence. This process-local frontier may move
-    /// only after the tool's mutation evidence has been settled, and only when no other writer
-    /// changed the frontier between the pre-effect validation and the post-effect snapshot.
+    /// only after the tool's mutation evidence has been settled. Concurrent observation drift is
+    /// not an invocation failure: this method leaves the newer frontier untouched and lets the
+    /// next tool boundary capture current workspace state again.
     ///
     /// # Errors
     ///
-    /// Returns an error for read-only invocations, concurrent frontier drift, or poisoned state.
+    /// Returns an error for read-only invocations that reached a mutation boundary, or poisoned
+    /// state.
     pub(crate) fn advance_workspace_frontier(
         &self,
         observed_before: &crate::WorkspaceSnapshotId,
@@ -928,27 +963,20 @@ impl AgentInvocationGrant {
             .workspace_frontier
             .lock()
             .map_err(|_| anyhow::anyhow!("agent invocation workspace frontier is unavailable"))?;
-        if frontier.current_snapshot_id != *observed_before {
-            bail!("agent invocation workspace frontier changed during tool execution");
-        }
-        if frontier.current_snapshot_id == observed_after {
-            return Ok(());
-        }
         if matches!(
             self.binding.isolation,
             crate::TaskIsolationMode::SharedReadOnly
         ) {
             bail!("read-only agent invocation changed the workspace");
         }
+        if frontier.current_snapshot_id != *observed_before {
+            return Ok(());
+        }
+        if frontier.current_snapshot_id == observed_after {
+            return Ok(());
+        }
         frontier.current_snapshot_id = observed_after;
         Ok(())
-    }
-
-    fn workspace_frontier_snapshot_id(&self) -> Result<crate::WorkspaceSnapshotId> {
-        self.workspace_frontier
-            .lock()
-            .map(|frontier| frontier.current_snapshot_id.clone())
-            .map_err(|_| anyhow::anyhow!("agent invocation workspace frontier is unavailable"))
     }
 
     /// Produces the safe, non-executable durable audit projection.
@@ -994,7 +1022,6 @@ struct AgentInvocationGrantFingerprintMaterial<'a> {
     permission_upper_bound_fingerprint: &'a str,
     network_upper_bound: crate::NetworkPolicy,
     tool_contract_fingerprint: &'a str,
-    workspace_snapshot_id: &'a str,
     root_cancellation_scope_id: &'a str,
     expires_at_ms: u64,
 }

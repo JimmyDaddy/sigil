@@ -20,13 +20,56 @@ use crate::{
     TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry,
     TaskStateProjection, TaskStepCheckpointV2, TaskStepEntry, TaskStepId, TaskStepMode,
     TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
-    TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
+    TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref, derive_task_execution_segments,
     normalize_task_agent_display_name, project_conversation_prompt_for_persistence,
     stale_task_approval_routes_for_restore, task_final_message_id, task_guidance_applied_entry,
     task_guidance_apply_tool_spec, task_participant_attempt_id, task_participant_session_ref,
     task_plan_update_commit_v2, task_plan_update_entry, task_plan_update_result_content,
     task_plan_update_tool_spec, task_semantic_title, validate_task_plan_graph_steps,
 };
+
+#[test]
+fn execution_segments_only_join_exact_linear_execution_contracts() -> Result<()> {
+    let step = |id: &str, depends_on: Vec<TaskStepId>, isolation| -> Result<TaskStepSpec> {
+        Ok(TaskStepSpec {
+            step_id: TaskStepId::new(id)?,
+            title: id.to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on,
+            intent_refs: Vec::new(),
+            mode: Some(TaskStepMode::Write),
+            isolation: Some(isolation),
+        })
+    };
+    let one = TaskStepId::new("one")?;
+    let two = TaskStepId::new("two")?;
+    let segments = derive_task_execution_segments(&[
+        step(
+            "one",
+            Vec::new(),
+            TaskIsolationMode::SequentialWorkspaceWrite,
+        )?,
+        step(
+            "two",
+            vec![one.clone()],
+            TaskIsolationMode::SequentialWorkspaceWrite,
+        )?,
+        step(
+            "three",
+            vec![one, two],
+            TaskIsolationMode::SequentialWorkspaceWrite,
+        )?,
+        step("four", Vec::new(), TaskIsolationMode::ChangesetOnly)?,
+    ]);
+    assert_eq!(segments.len(), 3);
+    assert_eq!(
+        segments[0].step_ids,
+        vec![TaskStepId::new("one")?, TaskStepId::new("two")?]
+    );
+    Ok(())
+}
 
 #[test]
 fn task_plan_v2_commit_replays_complete_execution_contract() -> Result<()> {
@@ -86,6 +129,7 @@ fn task_plan_v2_commit_replays_complete_execution_contract() -> Result<()> {
                 crate::ToolCapability::WorkspaceWrite,
                 crate::ToolCapability::VcsRead,
             ]),
+            replay_contract: crate::ToolReplayContractV1::non_replayable(),
         }],
     )?;
     let marker = TaskPlanContractSetCommittedV2::new(&commit.plan, &commit.step_contracts)?;
@@ -356,11 +400,11 @@ fn task_pause_request_binds_exact_task_and_plan_version() -> Result<()> {
 
     assert!(request.has_exact_identity());
     assert!(request.request_id.starts_with("task-pause-"));
-    request.plan_version = 4;
+    request.execution = crate::TaskExecutionBindingV1::Plan { plan_version: 4 };
     assert!(!request.has_exact_identity());
     request.request_id = request.expected_request_id();
     assert!(request.has_exact_identity());
-    request.plan_version = 0;
+    request.execution = crate::TaskExecutionBindingV1::Plan { plan_version: 0 };
     request.request_id = request.expected_request_id();
     assert!(!request.has_exact_identity());
     Ok(())

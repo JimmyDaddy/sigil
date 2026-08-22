@@ -491,7 +491,7 @@ impl Tool for ReadOnlyShellFixtureTool {
 }
 
 #[tokio::test]
-async fn child_tool_execution_revalidates_workspace_and_tool_contract_grant() -> Result<()> {
+async fn child_read_tool_rebases_workspace_without_revoking_grant_authority() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     fs::write(workspace.path().join("tracked.txt"), "before\n")?;
     let mut registry = ToolRegistry::new();
@@ -535,20 +535,13 @@ async fn child_tool_execution_revalidates_workspace_and_tool_contract_grant() ->
     let first = registry.execute(context.clone(), call.clone()).await?;
     assert!(!first.is_error());
     fs::write(workspace.path().join("tracked.txt"), "after\n")?;
-    let error = registry
-        .execute(context, call)
-        .await
-        .expect_err("workspace drift must invalidate child tool authority");
-    assert!(
-        error
-            .to_string()
-            .contains("workspace changed outside its audited mutation frontier")
-    );
+    let second = registry.execute(context, call).await?;
+    assert!(!second.is_error());
     Ok(())
 }
 
 #[tokio::test]
-async fn writable_child_grant_advances_after_audited_mutation_but_rejects_external_drift()
+async fn writable_child_grant_advances_after_audited_mutation_and_read_rebases_external_drift()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -635,7 +628,7 @@ async fn writable_child_grant_advances_after_audited_mutation_but_rejects_extern
     );
 
     fs::write(workspace.join("tracked.txt"), "external\n")?;
-    let error = registry
+    let external_read = registry
         .execute(
             context,
             ToolCall {
@@ -644,13 +637,8 @@ async fn writable_child_grant_advances_after_audited_mutation_but_rejects_extern
                 args_json: "{}".to_owned(),
             },
         )
-        .await
-        .expect_err("unattributed workspace drift must still invalidate child authority");
-    assert!(
-        error
-            .to_string()
-            .contains("workspace changed outside its audited mutation frontier")
-    );
+        .await?;
+    assert!(!external_read.is_error());
     Ok(())
 }
 
@@ -963,6 +951,7 @@ fn unknown_mutation_finish_is_noop_without_recorder() -> Result<()> {
         workspace_revision: 0,
         workspace_snapshot_id: Some("snapshot-1".to_owned()),
         workspace_knowledge: WorkspaceKnowledge::Clean(0),
+        manifest: None,
     };
 
     super::finish_unknown_mutation_scan(&ctx, &spec, "call-shell", Some(scan))?;

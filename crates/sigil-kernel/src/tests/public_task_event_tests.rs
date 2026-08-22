@@ -37,12 +37,19 @@ fn projector_emits_typed_plan_batch_and_step_events_without_raw_detail() -> Resu
 
     assert!(matches!(
         &plan_events[..],
-        [PublicRunEventKind::TaskPlanUpdated {
-            task_id,
-            plan_version: 1,
-            status,
-            steps,
-        }] if task_id == "task_public"
+        [
+            PublicRunEventKind::TaskExecutionAdmitted {
+                task_id: admitted_task_id,
+                execution: crate::TaskExecutionBindingV1::Plan { plan_version: 1 },
+            },
+            PublicRunEventKind::TaskPlanUpdated {
+                task_id,
+                plan_version: 1,
+                status,
+                steps,
+            }
+        ] if admitted_task_id == "task_public"
+            && task_id == "task_public"
             && status == "accepted"
             && steps[0].step_id == "step_public"
     ));

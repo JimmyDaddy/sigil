@@ -47,6 +47,10 @@ use crate::{
         TaskPlanUpdateContext, TaskRunStatus, TaskStepCheckpointV2, TaskStepId,
         task_guidance_apply_tool_spec, task_plan_update_tool_spec_for_worktree,
     },
+    task_checklist::{
+        TaskChecklistUpdateContextV1, UPDATE_TASK_CHECKLIST_TOOL_NAME,
+        update_task_checklist_tool_spec,
+    },
     task_handoff::{
         CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
         ConversationTurnRef, KEEP_PENDING_PLAN_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
@@ -78,6 +82,7 @@ mod preview;
 mod provider_stream;
 mod readiness;
 mod run_lifecycle;
+mod task_checklist;
 mod task_guidance;
 mod task_handoff;
 mod task_plan;
@@ -109,8 +114,9 @@ use provider_stream::collect_provider_turn;
 pub use readiness::projected_agent_run_readiness;
 use run_lifecycle::{
     append_completed_run_lifecycle_events, append_failed_run_lifecycle_events,
-    append_run_lifecycle_events,
+    append_paused_run_lifecycle_events, append_run_lifecycle_events,
 };
+use task_checklist::handle_task_checklist_update_call;
 use task_guidance::{
     append_tool_ignored_after_task_guidance_acceptance, handle_task_guidance_apply_call,
     task_guidance_apply_call_is_accepted,
@@ -194,6 +200,8 @@ where
                 RunEvent::ToolApprovalResolved { .. }
                 | RunEvent::Usage(_)
                 | RunEvent::ContinuationState(_)
+                | RunEvent::ProviderTurnRecovery(_)
+                | RunEvent::ProviderTurnPartialOutputDiscarded(_)
                 | RunEvent::Control(_)
                 | RunEvent::Notice(_) => false,
             };
@@ -275,6 +283,7 @@ pub enum AgentRunPurpose {
     Conversation(Box<ConversationPurposeContext>),
     PlanReview(PlanReviewPurposeContext),
     TaskPlanner(TaskPlannerContext),
+    TaskDirectExecution(TaskDirectExecutionContext),
     TaskParticipant(TaskParticipantContext),
     TaskSynthesis(TaskSynthesisContext),
 }
@@ -316,6 +325,16 @@ pub struct PlanReviewPurposeContext {
 pub struct TaskPlannerContext {
     pub task_id: TaskId,
     pub attempt_id: Option<TaskParticipantAttemptId>,
+}
+
+/// Purpose binding for a first-class direct Task execution attempt.
+///
+/// Unlike [`TaskParticipantContext`], this context deliberately has no plan version or step id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDirectExecutionContext {
+    pub task_id: TaskId,
+    pub admission_id: String,
+    pub attempt_id: String,
 }
 
 /// Purpose binding for one task plan participant.
@@ -441,6 +460,7 @@ pub struct AgentRunInput {
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
+    pub task_checklist_update: Option<TaskChecklistUpdateContextV1>,
     pub plan_review_draft: Option<PlanReviewDraftContext>,
     pub plan_review_submit_only: bool,
     pub task_guidance_assessment: Option<TaskGuidanceAssessmentContext>,
@@ -461,6 +481,12 @@ pub struct AgentRunInput {
     pending_input_provider: Option<Arc<dyn PendingConversationInputProvider>>,
     initial_frozen_provider_request: Option<FrozenProviderRequestMaterial>,
     initial_provider_physical_attempt_id: Option<crate::ProviderPhysicalAttemptId>,
+    /// Restricts this run to claiming an already durable provider-turn recovery schedule.
+    ///
+    /// Task restart uses this guard for an existing participant: absence of the exact schedule
+    /// must become an actionable blocker instead of issuing a fresh request from a recovered
+    /// child session.
+    recovery_only_provider_turn: bool,
     max_output_tokens: Option<u32>,
     suppressed_tool_names: Vec<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
@@ -487,6 +513,7 @@ impl fmt::Debug for AgentRunInput {
                 &self.tool_artifact_read_budget.is_some(),
             )
             .field("task_plan_update", &self.task_plan_update)
+            .field("task_checklist_update", &self.task_checklist_update)
             .field(
                 "task_guidance_assessment",
                 &self.task_guidance_assessment.as_ref().map(|context| {
@@ -537,6 +564,10 @@ impl fmt::Debug for AgentRunInput {
                 "initial_provider_physical_attempt_id",
                 &self.initial_provider_physical_attempt_id,
             )
+            .field(
+                "recovery_only_provider_turn",
+                &self.recovery_only_provider_turn,
+            )
             .field("max_output_tokens", &self.max_output_tokens)
             .field("suppressed_tool_names", &self.suppressed_tool_names)
             .field(
@@ -557,6 +588,16 @@ impl fmt::Debug for AgentRunInput {
 impl AgentRunInput {
     pub fn user(prompt: impl Into<String>) -> Self {
         let message_id = uuid::Uuid::new_v4().to_string();
+        Self::user_with_message_id(prompt, message_id)
+    }
+
+    /// Creates a persisted user input bound to a caller-owned durable message identity.
+    ///
+    /// Internal task participants use this for restart-safe request reconstruction: re-entering
+    /// the same participant can prove that it is referring to the same child-session source
+    /// message instead of appending a second copy of its step prompt.
+    pub fn user_with_message_id(prompt: impl Into<String>, message_id: impl Into<String>) -> Self {
+        let message_id = message_id.into();
         Self {
             persisted_user_message: Some(prompt.into()),
             persisted_user_message_id: Some(message_id),
@@ -564,6 +605,7 @@ impl AgentRunInput {
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            task_checklist_update: None,
             plan_review_draft: None,
             plan_review_submit_only: false,
             task_guidance_assessment: None,
@@ -584,6 +626,7 @@ impl AgentRunInput {
             pending_input_provider: None,
             initial_frozen_provider_request: None,
             initial_provider_physical_attempt_id: None,
+            recovery_only_provider_turn: false,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
@@ -600,6 +643,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            task_checklist_update: None,
             plan_review_draft: None,
             plan_review_submit_only: false,
             task_guidance_assessment: None,
@@ -620,6 +664,7 @@ impl AgentRunInput {
             pending_input_provider: None,
             initial_frozen_provider_request: None,
             initial_provider_physical_attempt_id: None,
+            recovery_only_provider_turn: false,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
@@ -635,6 +680,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            task_checklist_update: None,
             plan_review_draft: None,
             plan_review_submit_only: false,
             task_guidance_assessment: None,
@@ -655,6 +701,7 @@ impl AgentRunInput {
             pending_input_provider: None,
             initial_frozen_provider_request: None,
             initial_provider_physical_attempt_id: None,
+            recovery_only_provider_turn: false,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
@@ -732,6 +779,16 @@ impl AgentRunInput {
             }));
         }
         self.task_plan_update = Some(context);
+        self
+    }
+
+    /// Enables best-effort display checklist updates for one exact Task.
+    ///
+    /// Checklist state never grants execution or completion authority and malformed model output
+    /// is returned as an ordinary tool error without terminating the Task.
+    #[must_use]
+    pub fn with_task_checklist_update(mut self, context: TaskChecklistUpdateContextV1) -> Self {
+        self.task_checklist_update = Some(context);
         self
     }
 
@@ -859,6 +916,17 @@ impl AgentRunInput {
         physical_attempt_id: crate::ProviderPhysicalAttemptId,
     ) -> Self {
         self.initial_provider_physical_attempt_id = Some(physical_attempt_id);
+        self
+    }
+
+    /// Allows dispatch only by claiming an existing durable provider-turn recovery schedule.
+    ///
+    /// This is used after process loss for an already-started task participant. It prevents a
+    /// recovered child session from silently creating a fresh provider turn when the recovery
+    /// authority is missing, stale, or belongs to another logical turn.
+    #[must_use]
+    pub fn with_durable_provider_recovery_only(mut self) -> Self {
+        self.recovery_only_provider_turn = true;
         self
     }
 
@@ -1771,6 +1839,7 @@ impl fmt::Debug for PromotedConversationInput {
 pub struct Agent<P> {
     provider: P,
     tools: ToolRegistry,
+    provider_turn_recovery_policy: crate::ProviderTurnRecoveryPolicyV1,
 }
 
 impl<P> Agent<P>
@@ -1779,7 +1848,26 @@ where
 {
     /// Creates a new agent from one provider implementation and tool registry.
     pub fn new(provider: P, tools: ToolRegistry) -> Self {
-        Self { provider, tools }
+        Self {
+            provider,
+            tools,
+            provider_turn_recovery_policy: crate::ProviderTurnRecoveryPolicyV1::default(),
+        }
+    }
+
+    /// Installs the provider-neutral recovery policy used only when this agent creates future
+    /// provider-turn recovery schedules. Existing schedules retain their durable policy snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the policy contains incompatible delay bounds.
+    pub fn with_provider_turn_recovery_policy(
+        mut self,
+        provider_turn_recovery_policy: crate::ProviderTurnRecoveryPolicyV1,
+    ) -> Result<Self> {
+        provider_turn_recovery_policy.validate()?;
+        self.provider_turn_recovery_policy = provider_turn_recovery_policy;
+        Ok(self)
     }
 
     /// Returns the registered tool surface used by this agent.
@@ -1805,6 +1893,21 @@ where
     #[must_use]
     pub fn into_parts(self) -> (P, ToolRegistry) {
         (self.provider, self.tools)
+    }
+
+    /// Consumes the agent while retaining its future provider-turn recovery policy.
+    ///
+    /// Runtime wrappers that preserve provider behavior must use this variant so wrapping never
+    /// silently changes the schedule policy for a live task.
+    #[must_use]
+    pub fn into_parts_with_provider_turn_recovery_policy(
+        self,
+    ) -> (P, ToolRegistry, crate::ProviderTurnRecoveryPolicyV1) {
+        (
+            self.provider,
+            self.tools,
+            self.provider_turn_recovery_policy,
+        )
     }
 
     /// Returns the provider capability flags for this agent.
@@ -2056,6 +2159,7 @@ where
             mut transient_context,
             mut runtime_context,
             task_plan_update,
+            mut task_checklist_update,
             plan_review_draft,
             plan_review_submit_only,
             task_guidance_assessment,
@@ -2076,6 +2180,7 @@ where
             pending_input_provider,
             mut initial_frozen_provider_request,
             mut initial_provider_physical_attempt_id,
+            recovery_only_provider_turn,
             max_output_tokens,
             suppressed_tool_names,
             web_task_tree_budget,
@@ -2118,6 +2223,7 @@ where
                 Some(
                     AgentRunPurpose::PlanReview(_)
                     | AgentRunPurpose::TaskPlanner(_)
+                    | AgentRunPurpose::TaskDirectExecution(_)
                     | AgentRunPurpose::TaskParticipant(_)
                     | AgentRunPurpose::TaskSynthesis(_),
                 )
@@ -2171,9 +2277,12 @@ where
                     },
                 })
             }
-            Some(AgentRunPurpose::TaskPlanner(_) | AgentRunPurpose::TaskSynthesis(_)) | None => {
-                None
-            }
+            Some(
+                AgentRunPurpose::TaskPlanner(_)
+                | AgentRunPurpose::TaskDirectExecution(_)
+                | AgentRunPurpose::TaskSynthesis(_),
+            )
+            | None => None,
             Some(AgentRunPurpose::PlanReview(_)) => None,
         };
         let task_participant_context = purpose.as_ref().and_then(|purpose| match purpose {
@@ -2300,10 +2409,12 @@ where
                 0,
                 ModelMessage::system(task_planner_system_prompt_contract_material()),
             ),
-            Some(AgentRunPurpose::TaskParticipant(_)) => transient_context.insert(
-                0,
-                ModelMessage::system(task_participant_system_prompt_contract_material()),
-            ),
+            Some(AgentRunPurpose::TaskDirectExecution(_) | AgentRunPurpose::TaskParticipant(_)) => {
+                transient_context.insert(
+                    0,
+                    ModelMessage::system(task_participant_system_prompt_contract_material()),
+                )
+            }
             Some(AgentRunPurpose::Conversation(_))
             | Some(AgentRunPurpose::PlanReview(_))
             | Some(AgentRunPurpose::TaskSynthesis(_))
@@ -2315,6 +2426,29 @@ where
             return Err(anyhow!(
                 "tool registry collides with reserved internal tool {TASK_GUIDANCE_APPLY_TOOL_NAME}"
             ));
+        }
+        if task_checklist_update.is_some()
+            && tools.spec_for(UPDATE_TASK_CHECKLIST_TOOL_NAME).is_some()
+        {
+            return Err(anyhow!(
+                "tool registry collides with reserved internal tool {UPDATE_TASK_CHECKLIST_TOOL_NAME}"
+            ));
+        }
+        if let Some(checklist) = task_checklist_update.as_ref() {
+            match purpose.as_ref() {
+                Some(AgentRunPurpose::TaskDirectExecution(direct))
+                    if direct.task_id == checklist.task_id => {}
+                Some(AgentRunPurpose::TaskDirectExecution(_)) => {
+                    return Err(anyhow!(
+                        "Task checklist update authority belongs to another direct Task"
+                    ));
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "Task checklist updates require direct-execution run authority"
+                    ));
+                }
+            }
         }
 
         if cancellation
@@ -2619,6 +2753,7 @@ where
                         AgentRunPurpose::Conversation(_)
                             | AgentRunPurpose::PlanReview(_)
                             | AgentRunPurpose::TaskPlanner(_)
+                            | AgentRunPurpose::TaskDirectExecution(_)
                     )
                 ) && !plan_review_submit_only
                     && !suppressed_tool_names
@@ -2632,6 +2767,9 @@ where
                     tool_specs.push(task_plan_update_tool_spec_for_worktree(
                         context.worktree_availability,
                     ));
+                }
+                if task_checklist_update.is_some() {
+                    tool_specs.push(update_task_checklist_tool_spec());
                 }
                 if plan_review_draft.is_some() {
                     tool_specs.push(submit_plan_draft_tool_spec());
@@ -2656,7 +2794,14 @@ where
                     uuid::Uuid::new_v4()
                 )
             } else {
-                logical_run_id.clone()
+                // The first generation retains the caller-owned logical id for existing durable
+                // task bindings. Every tool follow-up is a distinct logical provider turn so its
+                // recovery budget and source frontier cannot be mixed with an earlier request.
+                if model_turns <= 1 {
+                    logical_run_id.clone()
+                } else {
+                    format!("{logical_run_id}:provider-turn:{model_turns}")
+                }
             };
             let (request, current_hosted_processor, current_hosted_dispatch_lifecycle) =
                 match initial_frozen_request.as_ref() {
@@ -2768,6 +2913,7 @@ where
                     Some(frozen_request) => {
                         provider_stream::collect_frozen_provider_turn(
                             &self.provider,
+                            self.provider_turn_recovery_policy,
                             session,
                             frozen_request,
                             &provider_logical_run_id,
@@ -2781,6 +2927,8 @@ where
                                     .as_ref(),
                                 initial_physical_attempt_id: current_provider_physical_attempt_id
                                     .as_deref(),
+                                require_durable_recovery_claim: recovery_only_provider_turn
+                                    && model_turns == 1,
                             },
                         )
                         .await
@@ -2788,6 +2936,7 @@ where
                     None => {
                         collect_provider_turn(
                             &self.provider,
+                            self.provider_turn_recovery_policy,
                             session,
                             request,
                             &provider_logical_run_id,
@@ -2801,6 +2950,8 @@ where
                                     .as_ref(),
                                 initial_physical_attempt_id: current_provider_physical_attempt_id
                                     .as_deref(),
+                                require_durable_recovery_claim: recovery_only_provider_turn
+                                    && model_turns == 1,
                             },
                         )
                         .await
@@ -2825,12 +2976,22 @@ where
                         )?;
                         pending_join_context_keys.clear();
                     }
-                    append_failed_run_lifecycle_events(
-                        session,
-                        "provider_stream_error",
-                        total_tool_calls,
-                        "provider turn failed before a safe terminal result",
-                    )?;
+                    if let Some(recovery) =
+                        error.downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+                    {
+                        append_paused_run_lifecycle_events(
+                            session,
+                            recovery.reason_code,
+                            total_tool_calls,
+                        )?;
+                    } else {
+                        append_failed_run_lifecycle_events(
+                            session,
+                            "provider_stream_error",
+                            total_tool_calls,
+                            "provider turn failed before a safe terminal result",
+                        )?;
+                    }
                     return Err(error);
                 }
             };
@@ -3529,6 +3690,36 @@ where
                             &mut assistant_batch_results,
                         )?;
                         accepted_task_plan = accepted_task_plan || accepted;
+                        continue;
+                    }
+                    if call.name == UPDATE_TASK_CHECKLIST_TOOL_NAME {
+                        let Some(context) = task_checklist_update.as_mut() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "update_task_checklist is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            assistant_batch_results.push((call.clone(), result));
+                            continue;
+                        };
+                        handle_task_checklist_update_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            context,
+                            &mut assistant_batch_results,
+                        )?;
                         continue;
                     }
                     if call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME {
@@ -4471,12 +4662,7 @@ async fn execute_parallel_tool_body(
         .await
     {
         Ok(result) => result,
-        Err(error) => ToolResult::error(
-            call.id,
-            call.name,
-            ToolErrorKind::Internal,
-            error.to_string(),
-        ),
+        Err(error) => crate::tool::tool_result_from_execution_error(call.id, call.name, &error),
     };
     ParallelToolExecutionOutcome {
         ordinal,
@@ -5878,11 +6064,10 @@ where
             .await
         {
             Ok(result) => result,
-            Err(error) => ToolResult::error(
+            Err(error) => crate::tool::tool_result_from_execution_error(
                 call.id.clone(),
                 call.name.clone(),
-                ToolErrorKind::Internal,
-                error.to_string(),
+                &error,
             ),
         }
     } else {
@@ -5918,18 +6103,16 @@ where
                     .await
                     {
                         Ok(result) => result,
-                        Err(error) => ToolResult::error(
+                        Err(error) => crate::tool::tool_result_from_execution_error(
                             call.id.clone(),
                             call.name.clone(),
-                            ToolErrorKind::Internal,
-                            error.to_string(),
+                            &error,
                         ),
                     },
-                    Err(error) => ToolResult::error(
+                    Err(error) => crate::tool::tool_result_from_execution_error(
                         call.id.clone(),
                         call.name.clone(),
-                        ToolErrorKind::Internal,
-                        error.to_string(),
+                        &error,
                     ),
                 }
             }
@@ -5944,11 +6127,10 @@ where
                 .await
                 {
                     Ok(result) => result,
-                    Err(error) => ToolResult::error(
+                    Err(error) => crate::tool::tool_result_from_execution_error(
                         call.id.clone(),
                         call.name.clone(),
-                        ToolErrorKind::Internal,
-                        error.to_string(),
+                        &error,
                     ),
                 },
                 None => ToolResult::error(

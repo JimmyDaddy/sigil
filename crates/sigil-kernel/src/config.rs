@@ -25,6 +25,12 @@ use crate::{
     permission::{ApprovalMode, NetworkPolicy, PermissionConfig},
     process_environment::normalize_environment_variable_names,
     provider::ReasoningEffort,
+    session::{
+        DEFAULT_PROVIDER_TURN_INITIAL_DELAY_MS, DEFAULT_PROVIDER_TURN_JITTER_RATIO_MILLIONTHS,
+        DEFAULT_PROVIDER_TURN_MAX_CUMULATIVE_DELAY_MS, DEFAULT_PROVIDER_TURN_MAX_DELAY_MS,
+        DEFAULT_PROVIDER_TURN_MAX_PARTIAL_OUTPUT_RETRIES,
+        DEFAULT_PROVIDER_TURN_MAX_TRANSPORT_RETRIES, ProviderTurnRecoveryPolicyV1,
+    },
     task::AgentRole,
     verification::VerificationConfig,
 };
@@ -554,6 +560,11 @@ pub struct ModelRequestConfig {
     pub stream_idle_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_total_timeout_secs: Option<u64>,
+    /// Internal storage for the provider-neutral durable recovery policy. `RootConfig` maps the
+    /// public `[recovery.provider]` table here at parse/save boundaries so existing runtime
+    /// consumers retain one coherent request-transport policy.
+    #[serde(default)]
+    pub provider_turn_recovery: ProviderTurnRecoveryConfig,
 }
 
 impl Default for ModelRequestConfig {
@@ -562,6 +573,7 @@ impl Default for ModelRequestConfig {
             request_timeout_secs: default_model_request_timeout_secs(),
             stream_idle_timeout_secs: default_model_request_stream_idle_timeout_secs(),
             stream_total_timeout_secs: None,
+            provider_turn_recovery: ProviderTurnRecoveryConfig::default(),
         }
     }
 }
@@ -588,6 +600,189 @@ impl ModelRequestConfig {
             stream_total_timeout: self.stream_total_timeout_secs.map(Duration::from_secs),
         })
     }
+
+    /// Resolves the bounded policy used for provider-turn recovery schedules.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured retry or delay value exceeds the product hard caps or
+    /// the delay bounds are internally inconsistent.
+    pub fn provider_turn_recovery_policy(&self) -> Result<ProviderTurnRecoveryPolicyV1> {
+        self.provider_turn_recovery.to_policy()
+    }
+}
+
+/// Product-configurable bounds for future durable provider-turn recovery schedules.
+///
+/// The canonical user-facing table is `[recovery.provider]`. Existing schedules keep their
+/// persisted policy fingerprint and never change when this configuration changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProviderTurnRecoveryConfig {
+    #[serde(default = "default_provider_turn_max_transport_retries")]
+    pub max_transport_retries: u32,
+    #[serde(default = "default_provider_turn_max_partial_output_retries")]
+    pub max_partial_output_retries: u32,
+    #[serde(default = "default_provider_turn_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+    #[serde(default = "default_provider_turn_max_delay_ms")]
+    pub max_delay_ms: u64,
+    #[serde(
+        default = "default_provider_turn_jitter_ratio_millionths",
+        rename = "jitter_ratio",
+        serialize_with = "serialize_provider_turn_jitter_ratio",
+        deserialize_with = "deserialize_provider_turn_jitter_ratio"
+    )]
+    pub jitter_ratio_millionths: u32,
+    #[serde(default = "default_provider_turn_max_cumulative_delay_ms")]
+    pub max_cumulative_delay_ms: u64,
+}
+
+impl Default for ProviderTurnRecoveryConfig {
+    fn default() -> Self {
+        Self {
+            max_transport_retries: default_provider_turn_max_transport_retries(),
+            max_partial_output_retries: default_provider_turn_max_partial_output_retries(),
+            initial_delay_ms: default_provider_turn_initial_delay_ms(),
+            max_delay_ms: default_provider_turn_max_delay_ms(),
+            jitter_ratio_millionths: default_provider_turn_jitter_ratio_millionths(),
+            max_cumulative_delay_ms: default_provider_turn_max_cumulative_delay_ms(),
+        }
+    }
+}
+
+impl ProviderTurnRecoveryConfig {
+    /// Resolves the config to the policy consumed by a provider-turn owner.
+    pub fn to_policy(&self) -> Result<ProviderTurnRecoveryPolicyV1> {
+        anyhow::ensure!(
+            self.max_transport_retries <= 10,
+            "model_request.provider_turn_recovery.max_transport_retries must not exceed 10"
+        );
+        anyhow::ensure!(
+            self.max_partial_output_retries <= 3,
+            "model_request.provider_turn_recovery.max_partial_output_retries must not exceed 3"
+        );
+        anyhow::ensure!(
+            self.initial_delay_ms <= 60_000,
+            "model_request.provider_turn_recovery.initial_delay_ms must not exceed 60000"
+        );
+        anyhow::ensure!(
+            self.max_delay_ms <= 120_000,
+            "model_request.provider_turn_recovery.max_delay_ms must not exceed 120000"
+        );
+        anyhow::ensure!(
+            self.max_cumulative_delay_ms <= 600_000,
+            "model_request.provider_turn_recovery.max_cumulative_delay_ms must not exceed 600000"
+        );
+        anyhow::ensure!(
+            self.jitter_ratio_millionths <= 1_000_000,
+            "model_request.provider_turn_recovery.jitter_ratio must be between 0.0 and 1.0"
+        );
+        let policy = ProviderTurnRecoveryPolicyV1 {
+            max_transport_retries: self.max_transport_retries,
+            max_partial_output_retries: self.max_partial_output_retries,
+            initial_delay_ms: self.initial_delay_ms,
+            max_delay_ms: self.max_delay_ms,
+            jitter_ratio_millionths: self.jitter_ratio_millionths,
+            max_cumulative_delay_ms: self.max_cumulative_delay_ms,
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+}
+
+const fn default_provider_turn_max_transport_retries() -> u32 {
+    DEFAULT_PROVIDER_TURN_MAX_TRANSPORT_RETRIES
+}
+
+const fn default_provider_turn_max_partial_output_retries() -> u32 {
+    DEFAULT_PROVIDER_TURN_MAX_PARTIAL_OUTPUT_RETRIES
+}
+
+const fn default_provider_turn_initial_delay_ms() -> u64 {
+    DEFAULT_PROVIDER_TURN_INITIAL_DELAY_MS
+}
+
+const fn default_provider_turn_max_delay_ms() -> u64 {
+    DEFAULT_PROVIDER_TURN_MAX_DELAY_MS
+}
+
+const fn default_provider_turn_jitter_ratio_millionths() -> u32 {
+    DEFAULT_PROVIDER_TURN_JITTER_RATIO_MILLIONTHS
+}
+
+const fn default_provider_turn_max_cumulative_delay_ms() -> u64 {
+    DEFAULT_PROVIDER_TURN_MAX_CUMULATIVE_DELAY_MS
+}
+
+fn serialize_provider_turn_jitter_ratio<S>(
+    millionths: &u32,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_f64(f64::from(*millionths) / 1_000_000.0)
+}
+
+fn deserialize_provider_turn_jitter_ratio<'de, D>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let ratio = f64::deserialize(deserializer)?;
+    if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+        return Err(serde::de::Error::custom(
+            "provider_turn_recovery.jitter_ratio must be between 0.0 and 1.0",
+        ));
+    }
+    let millionths = ratio * 1_000_000.0;
+    let rounded = millionths.round();
+    if (millionths - rounded).abs() > f64::EPSILON {
+        return Err(serde::de::Error::custom(
+            "provider_turn_recovery.jitter_ratio supports at most six decimal places",
+        ));
+    }
+    Ok(rounded as u32)
+}
+
+/// Parses the canonical RFC-0068 `[recovery.provider]` table into the existing internal request
+/// transport configuration. Keeping this translation at the root boundary makes the on-disk
+/// contract explicit without leaking a provider-recovery ownership concern into every consumer
+/// that legitimately owns `ModelRequestConfig` today.
+fn parse_root_config_toml(raw: &str) -> Result<RootConfig> {
+    let mut root: toml::Table =
+        toml::from_str(raw).map_err(|_| anyhow::anyhow!("failed to parse config"))?;
+    let Some(recovery) = root.remove("recovery") else {
+        return toml::from_str(raw).map_err(|_| anyhow::anyhow!("failed to parse config"));
+    };
+    let recovery = recovery.as_table().context("[recovery] must be a table")?;
+    anyhow::ensure!(
+        recovery.len() == 1 && recovery.contains_key("provider"),
+        "[recovery] supports only the [recovery.provider] policy table"
+    );
+    let provider_policy = recovery
+        .get("provider")
+        .cloned()
+        .context("[recovery.provider] is required when [recovery] is present")?;
+    anyhow::ensure!(
+        provider_policy.is_table(),
+        "[recovery.provider] must be a table"
+    );
+    let model_request = root
+        .entry("model_request".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let model_request = model_request
+        .as_table_mut()
+        .context("[model_request] must be a table")?;
+    anyhow::ensure!(
+        !model_request.contains_key("provider_turn_recovery"),
+        "configure provider recovery in [recovery.provider], not [model_request.provider_turn_recovery]"
+    );
+    model_request.insert("provider_turn_recovery".to_owned(), provider_policy);
+    let normalized = toml::to_string(&root).context("failed to normalize recovery config")?;
+    toml::from_str(&normalized).map_err(|_| anyhow::anyhow!("failed to parse config"))
 }
 
 fn default_model_request_timeout_secs() -> u64 {
@@ -1142,8 +1337,7 @@ impl RootConfig {
 
     /// Parses persisted TOML without consulting process environment overrides.
     pub fn parse_persisted(raw: &str) -> Result<Self> {
-        let config: Self =
-            toml::from_str(raw).map_err(|_| anyhow::anyhow!("failed to parse config"))?;
+        let config = parse_root_config_toml(raw)?;
         config.validate_config_schema()?;
         Ok(config)
     }
@@ -1154,7 +1348,7 @@ impl RootConfig {
     ) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        let mut config: Self = toml::from_str(&raw)
+        let mut config = parse_root_config_toml(&raw)
             .map_err(|_| anyhow::anyhow!("failed to parse {}", path.display()))?;
         config.validate_config_schema()?;
         config.apply_model_request_env_overrides_with(read_env)?;
@@ -1174,9 +1368,8 @@ impl RootConfig {
     pub fn save_if_unchanged(&self, path: &Path, expected: &Self) -> Result<()> {
         let lock = ConfigUpdateLockGuard::acquire(path)?;
         let live = Self::load(path)?;
-        let expected =
-            toml::to_string(expected).context("failed to fingerprint expected config")?;
-        let live = toml::to_string(&live).context("failed to fingerprint live config")?;
+        let expected = expected.render_persisted_toml()?;
+        let live = live.render_persisted_toml()?;
         anyhow::ensure!(
             expected == live,
             "config changed since it was loaded; reload and retry"
@@ -1209,10 +1402,32 @@ impl RootConfig {
             lock.config_path == path,
             "config update lock does not match publication path"
         );
-        let rendered =
-            toml::to_string_pretty(self).context("failed to serialize root config to toml")?;
+        let rendered = self.render_persisted_toml()?;
         atomic_publish_private_file(path, rendered.as_bytes())
             .with_context(|| format!("failed to write config at {}", path.display()))
+    }
+
+    fn render_persisted_toml(&self) -> Result<String> {
+        let mut root = toml::Value::try_from(self.clone())
+            .context("failed to serialize root config to toml")?;
+        let root_table = root
+            .as_table_mut()
+            .context("serialized root config must be a TOML table")?;
+        let Some(model_request) = root_table.get_mut("model_request") else {
+            return toml::to_string_pretty(&root)
+                .context("failed to serialize root config to toml");
+        };
+        let model_request = model_request
+            .as_table_mut()
+            .context("serialized model_request must be a TOML table")?;
+        let Some(provider_policy) = model_request.remove("provider_turn_recovery") else {
+            return toml::to_string_pretty(&root)
+                .context("failed to serialize root config to toml");
+        };
+        let mut recovery = toml::Table::new();
+        recovery.insert("provider".to_owned(), provider_policy);
+        root_table.insert("recovery".to_owned(), toml::Value::Table(recovery));
+        toml::to_string_pretty(&root).context("failed to serialize root config to toml")
     }
 
     /// Applies provider-neutral model request timeout environment overrides.
@@ -1255,6 +1470,7 @@ impl RootConfig {
             self.agent.connection.is_some(),
             "config_version = {CONFIG_VERSION_V2} requires [agent].connection"
         );
+        self.model_request.provider_turn_recovery_policy()?;
         for (name, role) in self.task.role_configs() {
             anyhow::ensure!(
                 role.connection.is_some() == role.model.is_some(),

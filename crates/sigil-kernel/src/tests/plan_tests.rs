@@ -6,9 +6,11 @@ use crate::{
     ControlEntry, NetworkEffect, PlanApprovalPermission, PlanArtifactProjection, PlanDecision,
     PlanDecisionActor, PlanDecisionRecordedEntry, PlanId, PlanSourceRef, SessionLogEntry,
     TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess, ToolCategory,
-    ToolPreviewCapability, ToolSpec, plan_draft_created_entry, plan_review_detail_from_entries,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, submit_plan_draft_entry,
-    task_id_from_plan_draft, task_plan_from_plan_draft,
+    ToolPreviewCapability, ToolSpec, plain_text_plan_draft_entry,
+    plain_text_plan_draft_entry_with_plan_id, plan_draft_created_entry,
+    plan_review_detail_from_entries, plan_task_input_from_draft, plan_text_hash,
+    plan_workspace_paths, submit_plan_draft_entry, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
 };
 
 fn tool_spec(
@@ -153,6 +155,67 @@ fn plan_draft_created_entry_skips_blank_and_preserves_metadata() -> Result<()> {
 }
 
 #[test]
+fn plain_text_plan_is_bounded_reviewable_input_without_graph_authority() -> Result<()> {
+    let plan_id = PlanId::new("plan_plain_text")?;
+    assert!(
+        plain_text_plan_draft_entry_with_plan_id(
+            plan_id.clone(),
+            "  \n\t",
+            PlanSourceRef::default(),
+            42,
+            None,
+        )?
+        .is_none()
+    );
+
+    let text = "# Implementation plan\n\n1. Inspect the live path.\n2. Apply and verify.";
+    let draft = plain_text_plan_draft_entry_with_plan_id(
+        plan_id.clone(),
+        text,
+        PlanSourceRef::default(),
+        42,
+        Some("snapshot-1".to_owned()),
+    )?
+    .expect("non-empty model prose remains reviewable");
+
+    assert_eq!(draft.plan_id, plan_id);
+    assert_eq!(draft.summary, "Implementation plan");
+    assert_eq!(draft.inline_text.as_deref(), Some(text));
+    assert_eq!(draft.plan_hash, plan_text_hash(text));
+    assert!(draft.steps.is_empty());
+    assert!(draft.intent_proposal.is_none());
+    assert!(draft.target_paths.is_empty());
+    assert!(draft.suggested_checks.is_empty());
+    assert_eq!(draft.workspace_snapshot_id.as_deref(), Some("snapshot-1"));
+    Ok(())
+}
+
+#[test]
+fn plain_text_plan_derives_stable_host_identity_from_persisted_text() -> Result<()> {
+    let source = PlanSourceRef::default();
+    let left = plain_text_plan_draft_entry(
+        "# Implement\n\n1. Inspect.\n2. Edit and verify.",
+        source.clone(),
+        42,
+        None,
+    )?
+    .expect("plain model output should remain reviewable");
+    let right = plain_text_plan_draft_entry(
+        "  # Implement\n\n1. Inspect.\n2. Edit and verify.  ",
+        source,
+        43,
+        None,
+    )?
+    .expect("equivalent trimmed output should remain reviewable");
+
+    assert_eq!(left.plan_id, right.plan_id);
+    assert_eq!(left.plan_hash, right.plan_hash);
+    assert_eq!(left.summary, "Implement");
+    assert!(left.steps.is_empty());
+    Ok(())
+}
+
+#[test]
 fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"计划如下。
@@ -183,10 +246,10 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
     .expect("non-empty plan should create a durable draft");
     let task_input = plan_task_input_from_draft(&draft);
 
-    assert!(task_input.contains("Execute the following user-approved structured plan"));
-    assert!(task_input.contains("authoritative task input"));
-    assert!(task_input.contains("Preserve the approved plan's scope and order"));
-    assert!(task_input.contains("Approved structured plan:"));
+    assert!(task_input.contains("Execute the following user-approved Plan"));
+    assert!(task_input.contains("Treat the complete Plan as task context"));
+    assert!(task_input.contains("inspect the live workspace"));
+    assert!(task_input.contains("Approved Plan:"));
     assert!(task_input.contains("This docs has typoo"));
     assert_eq!(draft.target_paths, vec!["README.md"]);
     Ok(())
@@ -408,8 +471,9 @@ fn sigil_plan_v2_carries_digest_bound_intent_proposal_without_runtime_authority(
 }
 
 #[test]
-fn sigil_plan_v2_rejects_intent_aliases_without_matching_proposal() {
-    let error = plan_draft_created_entry(
+fn sigil_plan_v2_keeps_missing_intent_aliases_reviewable_until_task_materialization() -> Result<()>
+{
+    let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
 {
   "summary": "Unsafe partial intent plan",
@@ -427,14 +491,65 @@ fn sigil_plan_v2_rejects_intent_aliases_without_matching_proposal() {
         PlanSourceRef::default(),
         42,
         None,
-    )
-    .expect_err("unknown provider alias must fail closed");
+    )?
+    .expect("readable plan must remain reviewable before task materialization");
 
-    assert!(
-        error
-            .to_string()
-            .contains("require a top-level intent proposal")
+    let error = crate::compile_executable_plan_candidate(&draft, &compile_input())
+        .expect_err("task materialization must reject an intent alias without a proposal");
+    assert!(error.reason.contains("require a top-level intent proposal"));
+    Ok(())
+}
+
+#[test]
+fn single_intent_proposal_binds_unannotated_write_steps_during_materialization() -> Result<()> {
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Apply one approved change",
+  "intents": [{
+    "intent_alias": "apply-change",
+    "title": "Apply change",
+    "statement": "Apply the approved change across each implementation step.",
+    "acceptance_criteria": [{
+      "criterion_alias": "complete",
+      "statement": "The change is complete.",
+      "required": true
+    }],
+    "depends_on_aliases": []
+  }],
+  "steps": [{
+    "id": "write",
+    "title": "Apply change",
+    "role": "executor",
+    "depends_on": [],
+    "mode": "write",
+    "isolation": "sequential_workspace_write",
+    "target_paths": ["src/lib.rs"]
+  }],
+  "target_paths": ["src/lib.rs"]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("single-intent plan should create a durable draft");
+    let mut input = compile_input();
+    input.workspace_id = Some("workspace-test".to_owned());
+
+    let candidate = crate::compile_executable_plan_candidate(&draft, &input)
+        .expect("the host can deterministically bind the sole intent");
+    let prepared = candidate
+        .prepared_intent_admission
+        .as_ref()
+        .expect("intent-enabled candidate must retain its prepared admission");
+    assert_eq!(prepared.alias_bindings.len(), 1);
+    assert_eq!(
+        prepared.alias_bindings[0].intent_aliases,
+        vec!["apply-change"]
     );
+    assert_eq!(candidate.task_plan.steps[0].intent_refs.len(), 1);
+    Ok(())
 }
 #[test]
 fn sigil_plan_v2_accepts_single_string_notes_and_acceptance() -> Result<()> {
@@ -912,24 +1027,24 @@ fn compile_failures_are_typed_and_never_reach_ready() {
 }
 
 #[test]
-fn ready_state_derives_from_candidate_and_marker_only() {
+fn durable_draft_is_ready_while_candidate_state_remains_advisory() {
     let plan_id = PlanId::new("plan_test_4").unwrap();
     let draft = executable_draft(plan_id.clone(), "Ready state");
     let mut projection = PlanArtifactProjection::default();
     projection.apply_draft(&draft);
-    // Legacy draft without candidate is not Ready.
+    // A durable draft is reviewable and directly runnable without a model-authored candidate.
     assert_eq!(
         projection.plan_ready_state(&plan_id),
-        crate::PlanReadyStateV1::LegacyPlanNeedsRecompile
+        crate::PlanReadyStateV1::Ready
     );
     let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
     projection
         .candidates
         .insert(plan_id.clone(), candidate.clone());
-    // Candidate without marker is an incomplete crash prefix.
+    // Legacy candidate evidence cannot make the readable Plan less runnable.
     assert_eq!(
         projection.plan_ready_state(&plan_id),
-        crate::PlanReadyStateV1::CandidatePrepared
+        crate::PlanReadyStateV1::Ready
     );
     projection.ready_markers.insert(
         plan_id.clone(),
@@ -945,12 +1060,18 @@ fn ready_state_derives_from_candidate_and_marker_only() {
         projection.plan_ready_state(&plan_id),
         crate::PlanReadyStateV1::Ready
     );
-    // Marker with a mismatched candidate is still an incomplete prefix.
+    // Even mismatched advisory evidence cannot invalidate the durable Plan text.
     projection
         .ready_markers
         .get_mut(&plan_id)
         .unwrap()
         .candidate_hash = "sha256:other".to_owned();
+    assert_eq!(
+        projection.plan_ready_state(&plan_id),
+        crate::PlanReadyStateV1::Ready
+    );
+    // Candidate/marker crash prefixes without their Plan remain non-runnable legacy evidence.
+    projection.plans.remove(&plan_id);
     assert_eq!(
         projection.plan_ready_state(&plan_id),
         crate::PlanReadyStateV1::CandidatePrepared
@@ -973,6 +1094,7 @@ fn adoption_event_is_the_single_authority_for_plan_and_task_views() {
         start_mode: crate::PlanTaskStartMode::CreateAndRun,
         permission_grant: Some(PlanApprovalPermission::WorkspaceEdits),
         adopted_candidate: Box::new(candidate.clone()),
+        execution_segments: None,
         initial_phase: crate::TaskExecutionPhaseV1::Preparing,
         adopted_at_ms: 30,
     };
@@ -1041,6 +1163,134 @@ fn adoption_event_is_the_single_authority_for_plan_and_task_views() {
 }
 
 #[test]
+fn materialization_attempts_replay_block_then_prepare_without_replacing_task_shell() {
+    let plan_id = PlanId::new("plan_r69_materialization_lifecycle").unwrap();
+    let draft = executable_draft(plan_id.clone(), "Materialization lifecycle");
+    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    let task_id = candidate.task_id.clone();
+    let blocker = crate::TaskBlockerV1 {
+        reason_code: crate::TaskBlockerReasonCodeV1::ContractRecompileRequired,
+        summary: "task preparation needs a corrected contract".to_owned(),
+        affected_step: None,
+        affected_capability: None,
+        retryable: true,
+        available_actions: vec![crate::TaskBlockerActionV1::RetryAdmission],
+        evidence_digest: crate::stable_event_hash(b"materialization-blocked"),
+        created_at_ms: 20,
+        resolved_at_ms: None,
+    };
+    let materialization = crate::PlanExecutionAdoptedV1Entry {
+        command_id: "r69-materialize-command".to_owned(),
+        plan_id: plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+        candidate_hash: candidate.candidate_hash.clone(),
+        task_id: task_id.clone(),
+        task_title: candidate.semantic_title.clone(),
+        parent_session_ref: crate::SessionRef::new_relative("parent.jsonl").unwrap(),
+        start_mode: crate::PlanTaskStartMode::CreateAndRun,
+        permission_grant: None,
+        execution_segments: Some(crate::materialize_execution_segments(&candidate)),
+        adopted_candidate: Box::new(candidate),
+        initial_phase: crate::TaskExecutionPhaseV1::Preparing,
+        adopted_at_ms: 10,
+    };
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(
+            PlanDecisionRecordedEntry {
+                plan_id: plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                decision: PlanDecision::Accepted,
+                decided_by: PlanDecisionActor::User,
+                decided_at_ms: 10,
+                reason: Some("approved before materialization".to_owned()),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskRun(crate::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: crate::SessionRef::new_relative("parent.jsonl").unwrap(),
+            objective: materialization.adopted_candidate.safe_objective.clone(),
+            title: Some(materialization.task_title.clone()),
+            status: crate::TaskRunStatus::Started,
+            reason: Some("stable shell".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(
+            TaskCreatedFromPlanEntry {
+                plan_id: plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                task_id: task_id.clone(),
+                task_plan_version: 0,
+                step_mapping: Vec::new(),
+                stale_reason: Some("Task materialization pending".to_owned()),
+                created_at_ms: 10,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationAttemptStartedV1(
+            crate::TaskMaterializationAttemptStartedV1 {
+                task_id: task_id.clone(),
+                generation: 1,
+                plan_hash: draft.plan_hash.clone(),
+                compiler_contract_fingerprint: crate::stable_event_hash(b"compiler-v1"),
+                started_at_ms: 20,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationBlockedV1(
+            crate::TaskMaterializationBlockedV1 {
+                task_id: task_id.clone(),
+                generation: 1,
+                plan_hash: draft.plan_hash.clone(),
+                blocker_id: "r69-materialization-blocker-1".to_owned(),
+                blocker,
+                blocked_at_ms: 20,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationAttemptStartedV1(
+            crate::TaskMaterializationAttemptStartedV1 {
+                task_id: task_id.clone(),
+                generation: 2,
+                plan_hash: draft.plan_hash.clone(),
+                compiler_contract_fingerprint: crate::stable_event_hash(b"compiler-v2"),
+                started_at_ms: 30,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(Box::new(
+            materialization,
+        ))),
+    ];
+
+    let artifacts = PlanArtifactProjection::from_entries(&entries);
+    assert_eq!(
+        artifacts
+            .materialization_attempts
+            .get(&task_id)
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(artifacts.next_materialization_generation(&task_id), 3);
+    assert!(artifacts.materialization_for_task(&task_id).is_some());
+    assert!(
+        artifacts
+            .materialization_blocker_for_task(&task_id)
+            .is_none()
+    );
+
+    let tasks = crate::TaskStateProjection::from_entries(&entries);
+    assert!(tasks.tasks.contains_key(&task_id));
+    assert!(tasks.active_blocker(&task_id).is_none());
+    let segments = tasks
+        .tasks
+        .get(&task_id)
+        .and_then(|task| task.execution_segments.get(&1))
+        .expect("post-approval materialization must carry execution segments");
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].task_id, task_id);
+    assert_eq!(
+        segments[0].checkpoint_policy,
+        crate::SegmentCheckpointPolicyV1::EveryProviderTurn
+    );
+}
+
+#[test]
 fn admission_attempts_are_monotonic_and_drive_phase() {
     let plan_id = PlanId::new("plan_test_6").unwrap();
     let draft = executable_draft(plan_id.clone(), "Admission phase");
@@ -1059,6 +1309,7 @@ fn admission_attempts_are_monotonic_and_drive_phase() {
                 start_mode: crate::PlanTaskStartMode::CreateAndRun,
                 permission_grant: None,
                 adopted_candidate: Box::new(candidate.clone()),
+                execution_segments: None,
                 initial_phase: crate::TaskExecutionPhaseV1::Preparing,
                 adopted_at_ms: 30,
             },

@@ -19,8 +19,9 @@ use fs2::FileExt;
 use serde_json::json;
 
 use crate::{
-    DurableEventType, EventClass, ExtensionProcessLifecycleAudit, JsonlSessionStore, StoredEvent,
-    verification::stable_workspace_id,
+    DurableEventType, EffectReconciliationProbeStartedEntryV1, EffectReconciliationProjectionV1,
+    EffectReconciliationRequiredEntryV1, EventClass, ExtensionProcessLifecycleAudit,
+    JsonlSessionStore, StoredEvent, verification::stable_workspace_id,
 };
 
 use super::{
@@ -342,6 +343,97 @@ impl MutationEventRecorder {
             EventClass::Critical,
             serde_json::to_value(payload)
                 .context("failed to encode workspace mutation detected payload")?,
+        )
+    }
+
+    /// Appends the recovery-critical blocker for one unknown effect whose workspace outcome could
+    /// not be attributed completely.
+    pub fn append_effect_reconciliation_required(
+        &self,
+        payload: &EffectReconciliationRequiredEntryV1,
+    ) -> Result<bool> {
+        crate::session::validate_effect_reconciliation_required(payload)?;
+        let payload = payload.clone();
+        self.store.append_event_if(
+            DurableEventType::EffectReconciliationRequired,
+            EventClass::Critical,
+            serde_json::to_value(&payload)
+                .context("failed to encode effect reconciliation required payload")?,
+            move |records| {
+                let projection = EffectReconciliationProjectionV1::from_records(records)?;
+                match projection.required(&payload.reconciliation_id) {
+                    Some(existing) if existing == &payload => Ok(false),
+                    Some(_) => bail!("effect reconciliation id is reused with conflicting facts"),
+                    None => Ok(true),
+                }
+            },
+        )
+    }
+
+    /// Atomically claims the one read-only probe permitted for an active reconciliation.  A
+    /// second process receives `false` for the same exact claim and an error for a conflicting
+    /// probe; neither can create a duplicate observation owner.
+    pub fn append_effect_reconciliation_probe_started(
+        &self,
+        payload: &EffectReconciliationProbeStartedEntryV1,
+    ) -> Result<bool> {
+        crate::session::validate_effect_reconciliation_probe_started(payload)?;
+        let payload = payload.clone();
+        self.store.append_event_if(
+            DurableEventType::EffectReconciliationProbeStarted,
+            EventClass::Critical,
+            serde_json::to_value(&payload)
+                .context("failed to encode effect reconciliation probe start payload")?,
+            move |records| {
+                let projection = EffectReconciliationProjectionV1::from_records(records)?;
+                if projection.terminal(&payload.reconciliation_id).is_some() {
+                    bail!("effect reconciliation is already terminal");
+                }
+                if projection.required(&payload.reconciliation_id).is_none() {
+                    bail!("effect reconciliation probe has no required authority");
+                }
+                match projection.active_probe(&payload.reconciliation_id) {
+                    Some(existing) if existing == &payload => Ok(false),
+                    Some(_) => bail!("effect reconciliation probe is already claimed"),
+                    None => Ok(true),
+                }
+            },
+        )
+    }
+
+    /// Appends the one terminal read-only probe result for a previously uncertain effect.
+    pub fn append_effect_reconciliation_terminal(
+        &self,
+        payload: &crate::EffectReconciliationTerminalEntryV1,
+    ) -> Result<bool> {
+        crate::session::validate_effect_reconciliation_terminal(payload)?;
+        let payload = payload.clone();
+        self.store.append_event_if(
+            DurableEventType::EffectReconciliationTerminal,
+            EventClass::Critical,
+            serde_json::to_value(&payload)
+                .context("failed to encode effect reconciliation terminal payload")?,
+            move |records| {
+                let projection = EffectReconciliationProjectionV1::from_records(records)?;
+                if projection.required(&payload.reconciliation_id).is_none() {
+                    bail!("effect reconciliation terminal has no required authority");
+                }
+                match projection.terminal(&payload.reconciliation_id) {
+                    Some(existing) if existing == &payload => Ok(false),
+                    Some(_) => bail!("effect reconciliation already has a conflicting terminal"),
+                    None => {
+                        if let Some(probe_id) = payload.probe_id.as_deref() {
+                            let probe = projection.active_probe(&payload.reconciliation_id).ok_or_else(|| {
+                                anyhow::anyhow!("probe-owned reconciliation terminal has no active claim")
+                            })?;
+                            if probe.probe_id != probe_id {
+                                bail!("probe-owned reconciliation terminal does not match active claim");
+                            }
+                        }
+                        Ok(true)
+                    }
+                }
+            },
         )
     }
 

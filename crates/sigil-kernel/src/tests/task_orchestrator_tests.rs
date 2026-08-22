@@ -15,38 +15,42 @@ use serde_json::{Value, json};
 
 use crate::RunCancellationOwner;
 use crate::{
-    Agent, AgentFinalAnswerRef, AgentRunInput, AgentRunOptions, AutoApproveHandler, CandidateCheck,
-    CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    CheckpointRestored, CompletionRequest, ControlEntry, ConversationInputQueueId,
-    ConversationQueueRevision, ConversationTurnRef, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DurableEventType, EventClass, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
-    ExecutionBackendKind, ExecutionFuture, ExecutionMutationProfile, ExecutionReceipt,
-    ExecutionRequest, FileType, IntegrationPlanId, IntegrationPlanRecorded, InteractionMode,
-    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
-    MutationPrepared, MutationSubject, MutationSyncClass, PermissionConfig, Provider,
-    ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent,
-    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
-    SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME, TERMINAL_TASK_SCHEMA_VERSION,
-    TaskChildSessionStatus, TaskContinuationSelectedEntry, TaskGuidanceAppliedEntry,
-    TaskGuidanceApplyReason, TaskGuidanceMaterializedEntry, TaskGuidancePromotedEntry, TaskId,
-    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
-    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
-    TaskParticipantRetryError, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
-    TaskPlanEntry, TaskPlanStatus, TaskPlannerWorktreeAvailability, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
-    TaskVerificationRerunRequest, TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle,
-    TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
-    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceSnapshotId,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired,
-    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
-    project_conversation_prompt_for_persistence, stable_event_uuid, stable_workspace_id,
-    task_participant_attempt_id, task_participant_input_hash, task_participant_session_ref,
+    Agent, AgentFinalAnswerRef, AgentRunInput, AgentRunOptions, AgentRunPurpose,
+    AutoApproveHandler, CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion,
+    CheckSpec, CheckSpecRecordedEntry, CheckpointRestored, CompletionRequest, ControlEntry,
+    ConversationInputQueueId, ConversationQueueRevision, ConversationTurnRef,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventClass, EvidenceScope,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture,
+    ExecutionMutationProfile, ExecutionReceipt, ExecutionRequest, FileType, IntegrationPlanId,
+    IntegrationPlanRecorded, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
+    ModelMessage, MutationEventRecorder, MutationPrepared, MutationSubject, MutationSyncClass,
+    PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
+    ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME,
+    TERMINAL_TASK_SCHEMA_VERSION, TaskChildSessionStatus, TaskContinuationSelectedEntry,
+    TaskGuidanceAppliedEntry, TaskGuidanceApplyReason, TaskGuidanceMaterializedEntry,
+    TaskGuidancePromotedEntry, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantContext,
+    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryError,
+    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus,
+    TaskPlannerWorktreeAvailability, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest,
+    TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
+    ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceSnapshotId, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
+    WriteLeaseReleaseStatus, WriteLeaseScope, project_conversation_prompt_for_persistence,
+    stable_event_uuid, stable_workspace_id, task_participant_attempt_id,
+    task_participant_input_hash, task_participant_logical_run_id, task_participant_session_ref,
     write_file_with_mutation,
 };
 
+use super::runner::{
+    direct_execution_prompt, synchronize_step_recovery_blockers, task_participant_input_message_id,
+};
 use super::{
     StepRunOutput, TaskChildSessionBatchCommitEnvelope, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskIntegrationRunOutput,
@@ -62,6 +66,153 @@ use super::{
     task_step_auto_run_policy, task_step_default_policy, task_step_dependency_result_context,
     task_step_readiness,
 };
+
+#[test]
+fn direct_execution_prompt_keeps_the_same_task_and_applies_current_follow_up() {
+    let prompt = direct_execution_prompt(
+        "Finish the approved implementation",
+        Some("What is the current verification doing?"),
+    );
+
+    assert!(prompt.contains("Finish the approved implementation"));
+    assert!(prompt.contains("What is the current verification doing?"));
+    assert!(prompt.contains("keep the existing checklist"));
+    assert!(prompt.contains("same Task"));
+}
+
+#[derive(Clone, Default)]
+struct CapturingDirectContinuationRunner {
+    inputs: Arc<Mutex<Vec<AgentRunInput>>>,
+}
+
+#[async_trait]
+impl TaskChildSessionRunner for CapturingDirectContinuationRunner {
+    async fn run_direct_execution_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskDirectExecutionSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskDirectExecutionSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        let attempt_id = request.attempt.attempt_id;
+        self.inputs
+            .lock()
+            .expect("direct input capture lock")
+            .push(request.input);
+        Ok(crate::TaskDirectExecutionSessionRunOutput {
+            attempt_id,
+            final_text: "direct continuation completed".to_owned(),
+            final_message_id: Some("direct-continuation-final".to_owned()),
+            outcome: crate::AgentRunOutcome::default(),
+            disposition: crate::AgentRunDisposition::FinalAnswer,
+        })
+    }
+
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        _request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        anyhow::bail!("planned child execution is not expected in this direct fixture")
+    }
+}
+
+#[tokio::test]
+async fn direct_continuation_keeps_checklist_tool_context_after_follow_up() -> Result<()> {
+    let runner = CapturingDirectContinuationRunner::default();
+    let captured_inputs = Arc::clone(&runner.inputs);
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(runner);
+    let task_id = TaskId::new("task-direct-continuation-checklist")?;
+    let objective = "Finish the approved implementation";
+    let admission = crate::TaskDirectExecutionAdmittedV1::approved_plan(
+        task_id.clone(),
+        objective,
+        crate::PlanId::new("plan-direct-continuation-checklist")?,
+        format!("sha256:{}", "c".repeat(64)),
+        1,
+    );
+    let mut session = Session::new("fixture", "model");
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
+        ControlEntry::TaskChecklistUpdatedV1(crate::TaskChecklistUpdatedV1 {
+            task_id: task_id.clone(),
+            revision: 1,
+            items: vec![
+                crate::TaskChecklistItemV1 {
+                    item_id: "inspect".to_owned(),
+                    text: "Inspect the current state".to_owned(),
+                    status: crate::TaskChecklistItemStatusV1::Completed,
+                },
+                crate::TaskChecklistItemV1 {
+                    item_id: "verify".to_owned(),
+                    text: "Verify the implementation".to_owned(),
+                    status: crate::TaskChecklistItemStatusV1::InProgress,
+                },
+            ],
+        }),
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: None,
+        }),
+    ])?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_direct_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: objective.to_owned(),
+            },
+            options(),
+            Some("What is the current verification doing?"),
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    let inputs = captured_inputs.lock().expect("direct input capture lock");
+    let input = inputs.as_slice().last().expect("captured direct input");
+    assert_eq!(
+        input
+            .task_checklist_update
+            .as_ref()
+            .map(|context| (&context.task_id, context.current_revision)),
+        Some((&task_id, 1))
+    );
+    assert!(input.transient_context.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("What is the current verification doing?"))
+    }));
+    Ok(())
+}
 
 struct PlannerProvider;
 struct GuidanceApplyProvider;
@@ -718,6 +869,26 @@ impl TaskChildSessionRunner for RetryingPlannerSynthesisChildRunner {
 
 #[async_trait]
 impl TaskChildSessionRunner for AlwaysRateLimitedControlChildRunner {
+    async fn run_direct_execution_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: crate::TaskDirectExecutionSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<crate::TaskDirectExecutionSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        Ok(crate::TaskDirectExecutionSessionRunOutput {
+            attempt_id: request.attempt.attempt_id,
+            final_text: "direct Task completed after bounded planner retries".to_owned(),
+            final_message_id: Some("direct-task-final".to_owned()),
+            outcome: crate::AgentRunOutcome::default(),
+            disposition: crate::AgentRunDisposition::FinalAnswer,
+        })
+    }
+
     async fn run_planner_session<H, A>(
         &self,
         _parent_session: &mut Session,
@@ -1861,7 +2032,7 @@ async fn planner_and_synthesis_rate_limits_use_new_attempts_and_complete() -> Re
 }
 
 #[tokio::test]
-async fn planner_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
+async fn planner_rate_limit_falls_back_after_bounded_retry_budget() -> Result<()> {
     let planner_calls = Arc::new(AtomicUsize::new(0));
     let orchestrator =
         SequentialTaskOrchestrator::new_with_child_runner(AlwaysRateLimitedControlChildRunner {
@@ -1874,7 +2045,7 @@ async fn planner_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
-    let error = orchestrator
+    let output = orchestrator
         .run(
             &mut session,
             SequentialTaskRequest {
@@ -1890,20 +2061,29 @@ async fn planner_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
             &mut handler,
             &mut approval,
         )
-        .await
-        .expect_err("planner must stop after the retry budget");
+        .await?;
 
-    assert!(format!("{error:#}").contains("remains rate limited"));
     assert_eq!(planner_calls.load(Ordering::SeqCst), 3);
     let projection = session.task_state_projection();
     let task = projection.tasks.get(&task_id).expect("task was projected");
-    assert_eq!(task.status, TaskRunStatus::Failed);
+    assert_eq!(output.plan_version, None);
+    assert!(output.steps.is_empty());
+    assert_eq!(task.status, TaskRunStatus::Completed);
+    assert!(task.plans.is_empty());
+    assert!(task.direct_execution_admission.is_some());
+    assert_eq!(task.direct_execution_attempts.len(), 1);
     assert_eq!(
         task.participant_attempts_for(TaskParticipantPurpose::Planner, None, None)
             .len(),
         3
     );
-    assert_eq!(task.participant_retry_schedules.len(), 2);
+    assert_eq!(
+        task.participant_retry_schedules
+            .values()
+            .filter(|schedule| schedule.purpose == TaskParticipantPurpose::Planner)
+            .count(),
+        2
+    );
     Ok(())
 }
 
@@ -2464,9 +2644,17 @@ async fn continue_consumes_one_durable_retry_schedule_after_restart() -> Result<
         Some(&step.step_id),
         2,
     )?;
-    let expected_input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+    let expected_input = AgentRunInput::user_with_message_id(
         subagent_step_prompt(objective, 1, &step, None, None),
-    )]);
+        task_participant_input_message_id(&retry_attempt_id),
+    )
+    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step.step_id.clone(),
+        attempt_id: retry_attempt_id.clone(),
+    }))
+    .with_logical_run_id(task_participant_logical_run_id(&retry_attempt_id));
     let mut session = Session::new("fixture", "model");
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -2559,6 +2747,156 @@ async fn continue_consumes_one_durable_retry_schedule_after_restart() -> Result<
         2
     );
     assert_eq!(task.participant_retry_schedules.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn continue_resumes_started_synthesis_in_its_existing_child_session() -> Result<()> {
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(RetryingReadChildRunner {
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let task_id = TaskId::new("task_1")?;
+    let step = read_executor_step("inspect", "Inspect durable result", Vec::new())?;
+    let mut session = Session::new("fixture", "model");
+    seed_task_with_steps(&mut session, TaskRunStatus::Paused, vec![step.clone()])?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step.step_id.clone(),
+        role: step.role,
+        status: TaskStepStatus::Completed,
+        title: Some(step.title.clone()),
+        summary: Some("durably complete before synthesis restart".to_owned()),
+        reason: None,
+    }))?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Synthesis,
+        Some(1),
+        None,
+        1,
+    )?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Synthesis,
+            ordinal: 1,
+            plan_version: Some(1),
+            step_id: None,
+            role: crate::AgentRole::Planner,
+            child_session_ref: child_session_ref.clone(),
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        },
+    ))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "resume final synthesis without replacing its child".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("task remains projected");
+    let synthesis = task.participant_attempts_for(TaskParticipantPurpose::Synthesis, Some(1), None);
+    assert_eq!(synthesis.len(), 1);
+    assert_eq!(synthesis[0].attempt_id, attempt_id);
+    assert_eq!(synthesis[0].child_session_ref, child_session_ref);
+    assert_eq!(synthesis[0].status, TaskParticipantAttemptStatus::Completed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_resumes_started_planner_in_its_existing_child_session() -> Result<()> {
+    let planner_calls = Arc::new(AtomicUsize::new(1));
+    let synthesis_calls = Arc::new(AtomicUsize::new(1));
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(RetryingPlannerSynthesisChildRunner {
+            planner_calls: Arc::clone(&planner_calls),
+            synthesis_calls: Arc::clone(&synthesis_calls),
+        });
+    let task_id = TaskId::new("task_resume_planner")?;
+    let mut session = Session::new("fixture", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "resume durable planner".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Planner,
+            ordinal: 1,
+            plan_version: None,
+            step_id: None,
+            role: crate::AgentRole::Planner,
+            child_session_ref: child_session_ref.clone(),
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        },
+    ))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let output = orchestrator
+        .run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "resume durable planner".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            options(),
+            8,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("task remains projected");
+    let planners = task.participant_attempts_for(TaskParticipantPurpose::Planner, None, None);
+    assert_eq!(planners.len(), 1);
+    assert_eq!(planners[0].attempt_id, attempt_id);
+    assert_eq!(planners[0].child_session_ref, child_session_ref);
+    assert_eq!(planners[0].status, TaskParticipantAttemptStatus::Completed);
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(synthesis_calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
@@ -3431,6 +3769,28 @@ async fn sequential_task_orchestrator_continues_dependent_steps_until_completed(
         .get(&TaskId::new("task_1")?)
         .cloned()
         .expect("completed task projection");
+    let mut step_attempts = task
+        .participant_attempts
+        .values()
+        .filter(|attempt| attempt.purpose == TaskParticipantPurpose::Step)
+        .collect::<Vec<_>>();
+    step_attempts.sort_by(|left, right| {
+        left.step_id
+            .as_ref()
+            .cmp(&right.step_id.as_ref())
+            .then(left.ordinal.cmp(&right.ordinal))
+    });
+    assert_eq!(step_attempts.len(), 3);
+    assert_ne!(step_attempts[0].attempt_id, step_attempts[1].attempt_id);
+    assert_ne!(step_attempts[1].attempt_id, step_attempts[2].attempt_id);
+    assert_eq!(
+        step_attempts[0].child_session_ref,
+        step_attempts[1].child_session_ref
+    );
+    assert_eq!(
+        step_attempts[1].child_session_ref,
+        step_attempts[2].child_session_ref
+    );
     assert_eq!(
         task.final_answer.as_ref().map(|entry| entry.plan_version),
         Some(1)
@@ -5007,9 +5367,9 @@ async fn read_batch_commits_independent_success_before_blocking_failed_dependent
             entry,
             SessionLogEntry::Control(ControlEntry::TaskStep(step))
                 if step.step_id.as_str() == "write"
-                    && step.status == TaskStepStatus::Cancelled
+                    && step.status == TaskStepStatus::Blocked
                     && step.reason.as_deref().is_some_and(|reason| {
-                        reason.contains("dependency read_a ended with failed")
+                        reason.contains("upstream_failed:read_a")
                     })
         )
     }));
@@ -5393,7 +5753,7 @@ async fn task_write_isolation_active_lease_pauses_ready_queue_without_running_st
 }
 
 #[tokio::test]
-async fn task_write_isolation_cancels_dependents_after_failed_write() -> Result<()> {
+async fn task_write_isolation_blocks_dependents_after_failed_write() -> Result<()> {
     let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(FailingProvider, ToolRegistry::new()),
@@ -5448,7 +5808,7 @@ async fn task_write_isolation_cancels_dependents_after_failed_write() -> Result<
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "failed write cancels dependent".to_owned(),
+                objective: "failed write blocks dependent".to_owned(),
             },
             options(),
             options(),
@@ -5473,9 +5833,9 @@ async fn task_write_isolation_cancels_dependents_after_failed_write() -> Result<
             entry,
             SessionLogEntry::Control(ControlEntry::TaskStep(step))
                 if step.step_id == TaskStepId::new("verify").expect("valid step id")
-                    && step.status == TaskStepStatus::Cancelled
+                    && step.status == TaskStepStatus::Blocked
                     && step.reason.as_deref().is_some_and(|reason| {
-                        reason.contains("dependency write ended with failed")
+                        reason.contains("upstream_failed:write")
                     })
         )
     }));
@@ -5772,7 +6132,7 @@ async fn changeset_only_child_fails_when_parent_snapshot_changes() -> Result<()>
 }
 
 #[tokio::test]
-async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
+async fn continue_run_continues_after_a_nonterminal_tool_error_and_safe_receipt() -> Result<()> {
     let mut executor_registry = ToolRegistry::new();
     executor_registry.register(Arc::new(RecoverableErrorTool));
     let orchestrator = test_orchestrator(
@@ -5860,17 +6220,6 @@ async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
             .count(),
         2
     );
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskStep(step))
-                if step.step_id == TaskStepId::new("step_1").expect("valid step id")
-                    && step.reason.as_deref().is_some_and(|reason| {
-                        reason.contains("recovered tool error")
-                            && reason.contains("bad path")
-                    })
-        )
-    }));
     Ok(())
 }
 
@@ -5975,7 +6324,8 @@ fn blocked_step_is_reprojected_from_completed_participant_evidence() -> Result<(
 }
 
 #[test]
-fn legacy_blocked_step_with_final_answer_and_nonblocking_readiness_is_reprojected() -> Result<()> {
+fn legacy_blocked_step_with_final_answer_is_not_reprojected_without_a_resolution_receipt()
+-> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("planner", "model", store)?;
@@ -6071,7 +6421,7 @@ fn legacy_blocked_step_with_final_answer_and_nonblocking_readiness_is_reprojecte
     result.terminal_status = Some(TaskParticipantAttemptStatus::Blocked);
     session.append_control(ControlEntry::TaskParticipantResult(result))?;
 
-    assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 1);
+    assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 0);
     assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 0);
     let projection = session.task_state_projection();
     let task = projection.tasks.get(&task_id).expect("reprojected task");
@@ -6079,7 +6429,7 @@ fn legacy_blocked_step_with_final_answer_and_nonblocking_readiness_is_reprojecte
         task.steps
             .get(&(1, step_1.step_id.clone()))
             .map(|step| step.status),
-        Some(TaskStepStatus::Completed)
+        Some(TaskStepStatus::Blocked)
     );
     let verification = session.verification_state_projection();
     let readiness = verification
@@ -6089,10 +6439,10 @@ fn legacy_blocked_step_with_final_answer_and_nonblocking_readiness_is_reprojecte
             step_1.step_id.as_str()
         )))
         .expect("reprojected readiness");
-    assert_eq!(readiness.evaluation.run_status, crate::RunStatus::Completed);
+    assert_eq!(readiness.evaluation.run_status, crate::RunStatus::Blocked);
     assert_eq!(
         readiness.evaluation.visible_state,
-        VisibleCompletionState::Completed
+        VisibleCompletionState::NeedsUser
     );
     let graph = task
         .plans
@@ -6105,8 +6455,88 @@ fn legacy_blocked_step_with_final_answer_and_nonblocking_readiness_is_reprojecte
             .into_iter()
             .map(|step| step.step_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["batch-kernel"]
+        vec!["audit-change-set"]
     );
+    Ok(())
+}
+
+#[test]
+fn active_durable_recovery_blocker_prevents_final_text_from_completing_a_step() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("planner", "model", store)?;
+    let task_id = TaskId::new("task_recovery_blocker")?;
+    let step_id = TaskStepId::new("step_recovery_blocker")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        1,
+    )?;
+    let attempt = TaskParticipantAttemptEntry {
+        attempt_id: attempt_id.clone(),
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 1,
+        plan_version: Some(1),
+        step_id: Some(step_id.clone()),
+        role: crate::AgentRole::Executor,
+        child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    let blocked = StepRunOutput {
+        final_text: "the model claims this step is done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            tool_errors: vec![crate::ToolError {
+                kind: crate::ToolErrorKind::WorkspaceConflict,
+                message: "raw workspace detail must not decide completion".to_owned(),
+                retryable: true,
+                details: json!({"active": true, "call_id": "call-conflict"}),
+            }],
+            ..crate::AgentRunOutcome::default()
+        },
+        final_answer_ref: None,
+        artifact_refs: Vec::new(),
+        changeset_proposal: None,
+        isolated_parent_snapshot_id: None,
+    };
+    assert!(synchronize_step_recovery_blockers(
+        &mut session,
+        &task_id,
+        &step_id,
+        &attempt,
+        &blocked,
+    )?);
+    let projection = session
+        .try_recovery_blocker_projection_from_durable()?
+        .expect("durable recovery projection");
+    assert_eq!(projection.active().len(), 1);
+
+    let settled = StepRunOutput {
+        outcome: crate::AgentRunOutcome {
+            tool_errors: vec![crate::ToolError {
+                kind: crate::ToolErrorKind::WorkspaceConflict,
+                message: "workspace rebased".to_owned(),
+                retryable: true,
+                details: json!({"active": false, "resolved_by_call_id": "call-rebased"}),
+            }],
+            ..crate::AgentRunOutcome::default()
+        },
+        ..blocked
+    };
+    assert!(!synchronize_step_recovery_blockers(
+        &mut session,
+        &task_id,
+        &step_id,
+        &attempt,
+        &settled,
+    )?);
+    let projection = session
+        .try_recovery_blocker_projection_from_durable()?
+        .expect("durable recovery projection");
+    assert!(projection.active().is_empty());
     Ok(())
 }
 
@@ -6160,7 +6590,7 @@ async fn continue_run_errors_when_task_is_missing() -> Result<()> {
 }
 
 #[tokio::test]
-async fn planner_provider_error_marks_task_failed() -> Result<()> {
+async fn planner_provider_error_falls_back_to_direct_execution() -> Result<()> {
     let orchestrator = test_orchestrator(
         boxed_agent(FailingProvider, ToolRegistry::new()),
         boxed_agent(
@@ -6202,20 +6632,20 @@ async fn planner_provider_error_marks_task_failed() -> Result<()> {
             &mut handler,
             &mut approval_handler,
         )
-        .await;
+        .await?;
 
-    assert!(result.is_err());
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskRun(run))
-                if run.status == TaskRunStatus::Failed
-                    && run
-                        .reason
-                        .as_deref()
-                        .is_some_and(|reason| reason.contains("planner failed"))
-        )
-    }));
+    assert_eq!(result.status, TaskRunStatus::Completed);
+    assert_eq!(result.plan_version, None);
+    assert!(result.steps.is_empty());
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&TaskId::new("task_1")?)
+        .expect("fallback task must remain projected");
+    assert_eq!(task.status, TaskRunStatus::Completed);
+    assert!(task.plans.is_empty());
+    assert!(task.direct_execution_admission.is_some());
+    assert_eq!(task.direct_execution_attempts.len(), 1);
     Ok(())
 }
 
@@ -7281,7 +7711,7 @@ async fn max_turns_marks_step_and_task_interrupted() -> Result<()> {
 }
 
 #[tokio::test]
-async fn planner_without_plan_marks_task_failed() -> Result<()> {
+async fn planner_without_plan_falls_back_to_direct_execution() -> Result<()> {
     let orchestrator = test_orchestrator(
         boxed_agent(NoPlanProvider, ToolRegistry::new()),
         boxed_agent(
@@ -7323,20 +7753,20 @@ async fn planner_without_plan_marks_task_failed() -> Result<()> {
             &mut handler,
             &mut approval_handler,
         )
-        .await;
+        .await?;
 
-    assert!(result.is_err());
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskRun(run))
-                if run.status == TaskRunStatus::Failed
-                    && run
-                        .reason
-                        .as_deref()
-                        .is_some_and(|reason| reason.contains("task orchestration failed"))
-        )
-    }));
+    assert_eq!(result.status, TaskRunStatus::Completed);
+    assert_eq!(result.plan_version, None);
+    assert!(result.steps.is_empty());
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&TaskId::new("task_1")?)
+        .expect("fallback task must remain projected");
+    assert_eq!(task.status, TaskRunStatus::Completed);
+    assert!(task.plans.is_empty());
+    assert!(task.direct_execution_admission.is_some());
+    assert_eq!(task.direct_execution_attempts.len(), 1);
     Ok(())
 }
 
@@ -9339,6 +9769,8 @@ fn durable_workspace_mutation_evidence_replays_stored_events() -> Result<()> {
             workspace_revision: 4,
             reason: WorkspaceMutationDetectionReason::SnapshotChanged,
             unknown_dirty: false,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata: Default::default(),
         })?,
     )?;
@@ -9358,6 +9790,8 @@ fn durable_workspace_mutation_evidence_replays_stored_events() -> Result<()> {
             workspace_revision: 5,
             reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
             unknown_dirty: true,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata: Default::default(),
         })?,
     )?;

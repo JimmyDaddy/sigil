@@ -3,14 +3,14 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionStrategy, CompactionThresholdStatus,
     ConfigPlatform, ConfigPublishError, DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS,
-    McpServerConfig, McpServerStartup, McpTrustClass, MemoryConfig, ModelRequestConfig, RootConfig,
-    SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
-    SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement,
-    TerminalNotificationMethod, ThemeId, UsageCostCurrency, WebPolicyCap, WebProxyMode,
-    WebRedirectPolicy, WebSearchRoute, atomic_publish_private_config_with_parent_sync,
-    default_user_config_dir, default_user_config_path, preferred_config_path,
-    preferred_config_path_for_known_paths, resolve_workspace_root, user_home_dir_from_env,
-    windows_replace_error_requires_recovery,
+    McpServerConfig, McpServerStartup, McpTrustClass, MemoryConfig, ModelRequestConfig,
+    ProviderTurnRecoveryConfig, RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV,
+    SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV,
+    SyntaxThemeId, TerminalKeyboardEnhancement, TerminalNotificationMethod, ThemeId,
+    UsageCostCurrency, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchRoute,
+    atomic_publish_private_config_with_parent_sync, default_user_config_dir,
+    default_user_config_path, preferred_config_path, preferred_config_path_for_known_paths,
+    resolve_workspace_root, user_home_dir_from_env, windows_replace_error_requires_recovery,
 };
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, ConnectionId, CredentialStorageMode,
@@ -390,9 +390,17 @@ model = "deepseek-v4-pro"
 request_timeout_secs = 7
 stream_idle_timeout_secs = 11
 stream_total_timeout_secs = 17
+
+[recovery.provider]
+max_transport_retries = 4
+max_partial_output_retries = 2
+initial_delay_ms = 20
+max_delay_ms = 80
+jitter_ratio = 0.10
+max_cumulative_delay_ms = 400
 "#;
 
-    let config: RootConfig = toml::from_str(raw).expect("model request config should parse");
+    let config = RootConfig::parse_persisted(raw).expect("model request config should parse");
     let timeouts = config
         .model_request
         .to_timeouts()
@@ -401,9 +409,77 @@ stream_total_timeout_secs = 17
     assert_eq!(config.model_request.request_timeout_secs, 7);
     assert_eq!(config.model_request.stream_idle_timeout_secs, 11);
     assert_eq!(config.model_request.stream_total_timeout_secs, Some(17));
+    assert_eq!(
+        config
+            .model_request
+            .provider_turn_recovery_policy()
+            .expect("recovery config should resolve")
+            .fingerprint(),
+        "provider-turn-recovery-v1:4:2:20:80:100000:400"
+    );
     assert_eq!(timeouts.request_timeout, Duration::from_secs(7));
     assert_eq!(timeouts.stream_idle_timeout, Duration::from_secs(11));
     assert_eq!(timeouts.stream_total_timeout, Some(Duration::from_secs(17)));
+
+    let temp = tempfile::tempdir().expect("temporary config directory should create");
+    let persisted_path = temp.path().join("sigil.toml");
+    config
+        .save(&persisted_path)
+        .expect("recovery config should persist");
+    let persisted =
+        std::fs::read_to_string(&persisted_path).expect("persisted config should be readable");
+    assert!(persisted.contains("[recovery.provider]"));
+    assert!(!persisted.contains("[model_request.provider_turn_recovery]"));
+    let reloaded = RootConfig::load_persisted(&persisted_path)
+        .expect("persisted recovery config should reload");
+    assert_eq!(
+        reloaded
+            .model_request
+            .provider_turn_recovery_policy()
+            .expect("reloaded recovery config should resolve")
+            .fingerprint(),
+        "provider-turn-recovery-v1:4:2:20:80:100000:400"
+    );
+}
+
+#[test]
+fn provider_turn_recovery_config_rejects_invalid_policy_bounds() {
+    let invalid_retry_cap = ProviderTurnRecoveryConfig {
+        max_transport_retries: 11,
+        ..ProviderTurnRecoveryConfig::default()
+    };
+    assert!(
+        invalid_retry_cap
+            .to_policy()
+            .expect_err("transport hard cap must be enforced")
+            .to_string()
+            .contains("max_transport_retries")
+    );
+
+    let invalid_delays = ProviderTurnRecoveryConfig {
+        initial_delay_ms: 100,
+        max_delay_ms: 10,
+        ..ProviderTurnRecoveryConfig::default()
+    };
+    assert!(
+        invalid_delays
+            .to_policy()
+            .expect_err("delay ordering must be enforced")
+            .to_string()
+            .contains("max_delay_ms")
+    );
+
+    let invalid_jitter = ProviderTurnRecoveryConfig {
+        jitter_ratio_millionths: 1_000_001,
+        ..ProviderTurnRecoveryConfig::default()
+    };
+    assert!(
+        invalid_jitter
+            .to_policy()
+            .expect_err("jitter hard cap must be enforced")
+            .to_string()
+            .contains("jitter_ratio")
+    );
 }
 
 #[test]

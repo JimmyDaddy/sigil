@@ -244,6 +244,107 @@ pub enum ToolConcurrencyClass {
     ParallelReadOnly,
 }
 
+/// Runtime-only replay authority for one exact tool generation.
+///
+/// This does not appear in [`ToolSpec`]: replay safety is a host-side effect contract and must
+/// never perturb the provider-visible schema or prompt-cache prefix. Unknown shell, MCP, hosted
+/// and generic network effects therefore remain non-replayable unless their implementation opts
+/// into an observation-backed contract.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolReplayClassV1 {
+    /// Re-running an incomplete read cannot change world state. The current V1 runtime still
+    /// records the original execution boundary before admitting a new read.
+    PureRead,
+    /// The effect owns an exact idempotency key and may create a successor only after its
+    /// implementation-specific admission check succeeds.
+    Idempotent,
+    /// The effect must first observe the exact outside state; it never receives implicit replay
+    /// authority from the task or permission mode.
+    Reconciliable,
+    /// An incomplete effect is blocked for explicit reconciliation; the host never replays it.
+    NonReplayable,
+}
+
+/// Versioned local contract used when recovering an interrupted tool effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolReplayContractV1 {
+    pub schema_version: u16,
+    pub class: ToolReplayClassV1,
+    /// Opaque implementation-owned idempotency receipt kind. Required only for `Idempotent`.
+    pub idempotency_key_kind: Option<String>,
+    /// Opaque read-only observation probe kind. Required for `Reconciliable` effects.
+    pub reconciliation_probe_kind: Option<String>,
+    /// Opaque implementation-owned version/fingerprint. It is included in local invocation
+    /// grants but excluded from provider request material.
+    pub runtime_fingerprint: String,
+}
+
+impl ToolReplayContractV1 {
+    #[must_use]
+    pub fn non_replayable() -> Self {
+        Self {
+            schema_version: 1,
+            class: ToolReplayClassV1::NonReplayable,
+            idempotency_key_kind: None,
+            reconciliation_probe_kind: None,
+            runtime_fingerprint: "tool-replay-v1:non-replayable".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn pure_read() -> Self {
+        Self {
+            schema_version: 1,
+            class: ToolReplayClassV1::PureRead,
+            idempotency_key_kind: None,
+            reconciliation_probe_kind: None,
+            runtime_fingerprint: "tool-replay-v1:pure-read".to_owned(),
+        }
+    }
+
+    /// Declares a prepared local effect that can only be observed, never implicitly replayed.
+    #[must_use]
+    pub fn reconciliable(probe_kind: impl Into<String>) -> Self {
+        Self {
+            schema_version: 1,
+            class: ToolReplayClassV1::Reconciliable,
+            idempotency_key_kind: None,
+            reconciliation_probe_kind: Some(probe_kind.into()),
+            runtime_fingerprint: "tool-replay-v1:reconciliable".to_owned(),
+        }
+    }
+
+    /// Rejects malformed or unversioned runtime-only recovery contracts at admission.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != 1
+            || self.runtime_fingerprint.trim().is_empty()
+            || self.runtime_fingerprint.len() > 256
+        {
+            bail!("tool replay contract is malformed");
+        }
+        let valid_kind = |value: &Option<String>| {
+            value
+                .as_deref()
+                .is_none_or(|value| !value.trim().is_empty() && value.len() <= 128)
+        };
+        if !valid_kind(&self.idempotency_key_kind) || !valid_kind(&self.reconciliation_probe_kind) {
+            bail!("tool replay contract contains an invalid runtime-only kind");
+        }
+        match self.class {
+            ToolReplayClassV1::Idempotent if self.idempotency_key_kind.is_none() => {
+                bail!("idempotent tool replay contract lacks an idempotency key kind");
+            }
+            ToolReplayClassV1::Reconciliable if self.reconciliation_probe_kind.is_none() => {
+                bail!("reconciliable tool replay contract lacks an observation probe kind");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 /// Provider-neutral semantic ability contributed by one concrete tool generation.
 ///
 /// Unlike [`ToolCategory`], capabilities are used for task admission. They are part of the local
@@ -281,6 +382,7 @@ pub struct ToolRuntimeContract {
     pub mutation_tracking: ToolMutationTracking,
     pub concurrency_class: ToolConcurrencyClass,
     pub capabilities: BTreeSet<ToolCapability>,
+    pub replay_contract: ToolReplayContractV1,
 }
 
 /// One resource or capability subject touched by a tool call.
@@ -1470,6 +1572,12 @@ pub enum ToolErrorKind {
     DurabilityRequired,
     /// An approval-bound immutable mutation no longer matches its call or workspace revision.
     StalePreparedMutation,
+    /// A concurrent workspace write touched evidence needed by this effect. The effect must be
+    /// re-read, regenerated, or reconciled; the enclosing Task remains resumable.
+    WorkspaceConflict,
+    /// The effect may have happened but its terminal receipt is not yet proven. Automatic replay
+    /// is forbidden until a read-only reconciliation probe settles the exact effect.
+    EffectReconciliationRequired,
     /// The session-scoped scratch namespace has reached its capacity quota.
     ScratchQuotaExceeded,
     Internal,
@@ -1497,10 +1605,57 @@ impl ToolErrorKind {
             Self::Unsupported => "unsupported",
             Self::DurabilityRequired => "durability_required",
             Self::StalePreparedMutation => "stale_prepared_mutation",
+            Self::WorkspaceConflict => "workspace_conflict",
+            Self::EffectReconciliationRequired => "effect_reconciliation_required",
             Self::ScratchQuotaExceeded => "scratch_quota_exceeded",
             Self::Internal => "internal",
         }
     }
+
+    /// Returns true when this error is an active recovery boundary rather than an irrecoverable
+    /// tool failure. A successful typed tool receipt may resolve it; final prose may not.
+    #[must_use]
+    pub fn is_recovery_blocker(self) -> bool {
+        matches!(
+            self,
+            Self::ResourceExhausted
+                | Self::DurabilityRequired
+                | Self::StalePreparedMutation
+                | Self::WorkspaceConflict
+                | Self::EffectReconciliationRequired
+        )
+    }
+}
+
+/// Typed infrastructure failure at the boundary between an admitted tool and its effect receipt.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ToolExecutionGuardError {
+    #[error("tool effect requires reconciliation before it can be replayed or accepted")]
+    EffectReconciliationRequired,
+}
+
+pub(crate) fn tool_result_from_execution_error(
+    call_id: impl Into<String>,
+    tool_name: impl Into<String>,
+    error: &anyhow::Error,
+) -> ToolResult {
+    let kind = match error.downcast_ref::<ToolExecutionGuardError>() {
+        Some(ToolExecutionGuardError::EffectReconciliationRequired) => {
+            ToolErrorKind::EffectReconciliationRequired
+        }
+        None => ToolErrorKind::Internal,
+    };
+    ToolResult::error(call_id, tool_name, kind, error.to_string()).with_error_details(
+        kind.is_recovery_blocker(),
+        serde_json::json!({
+            "recovery_blocker": kind.is_recovery_blocker(),
+            "recovery_action": match kind {
+                ToolErrorKind::WorkspaceConflict => "reread_or_rebase",
+                ToolErrorKind::EffectReconciliationRequired => "reconcile_effect",
+                _ => "inspect",
+            },
+        }),
+    )
 }
 
 /// Shared summary used by TUI, CLI, and future audit surfaces.
@@ -2417,6 +2572,14 @@ pub trait Tool: Send + Sync {
         ToolConcurrencyClass::Exclusive
     }
 
+    /// Declares the runtime-only reconciliation/replay contract for interrupted effects.
+    ///
+    /// The default is fail-closed. A tool may not become replayable merely because it is run
+    /// under `danger-full-access` or because the enclosing task was otherwise read-only.
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::non_replayable()
+    }
+
     /// Declares semantic abilities used by task admission.
     ///
     /// The default is deliberately conservative and derives only unambiguous abilities from the
@@ -2824,6 +2987,7 @@ impl ResolvedToolInvocation {
         finish_agent_invocation_workspace_effect(
             &ctx,
             &self.contract.spec,
+            &call_id,
             self.contract.mutation_tracking,
             workspace_frontier,
             audited_workspace_scan,
@@ -3161,6 +3325,7 @@ impl ToolRegistry {
                     mutation_tracking: registration.tool.mutation_tracking(),
                     concurrency_class: registration.tool.concurrency_class(),
                     capabilities: registration.tool.capabilities(),
+                    replay_contract: registration.tool.replay_contract(),
                 })
             })
             .collect()
@@ -3176,7 +3341,8 @@ impl ToolRegistry {
             .contracts()
             .into_iter()
             .map(|contract| {
-                json!({
+                contract.replay_contract.validate()?;
+                Ok(json!({
                     "spec": contract.spec,
                     "mutation_tracking": match contract.mutation_tracking {
                         ToolMutationTracking::None => "none",
@@ -3192,9 +3358,10 @@ impl ToolRegistry {
                         .iter()
                         .map(|capability| capability.as_str())
                         .collect::<Vec<_>>(),
-                })
+                    "replay_contract": contract.replay_contract,
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let encoded = serde_json::to_vec(&contracts)?;
         let mut hasher = Sha256::new();
         hasher.update(encoded);
@@ -3208,12 +3375,15 @@ impl ToolRegistry {
         };
         let registration = self.allowed_registration(&tools, name)?;
         let tool = Arc::clone(&registration.tool);
+        let replay_contract = tool.replay_contract();
+        replay_contract.validate()?;
         Ok(ResolvedToolInvocation {
             contract: ToolRuntimeContract {
                 spec: tool.spec(),
                 mutation_tracking: tool.mutation_tracking(),
                 concurrency_class: tool.concurrency_class(),
                 capabilities: tool.capabilities(),
+                replay_contract,
             },
             tool,
             _invocation_lease: registration.acquire()?,
@@ -3277,6 +3447,7 @@ impl ToolRegistry {
         finish_agent_invocation_workspace_effect(
             &ctx,
             &spec,
+            &call_id,
             mutation_tracking,
             workspace_frontier,
             audited_workspace_scan,
@@ -3392,6 +3563,7 @@ impl ToolRegistry {
         finish_agent_invocation_workspace_effect(
             &ctx,
             &spec,
+            &call_id,
             mutation_tracking,
             workspace_frontier,
             audited_workspace_scan,
@@ -3793,6 +3965,7 @@ fn finish_unknown_mutation_scan(
 fn finish_agent_invocation_workspace_effect(
     ctx: &ToolContext,
     spec: &ToolSpec,
+    call_id: &str,
     mutation_tracking: ToolMutationTracking,
     validated_workspace_snapshot_id: Option<crate::WorkspaceSnapshotId>,
     audited_workspace_scan: Option<WorkspaceMutationScan>,
@@ -3808,24 +3981,80 @@ fn finish_agent_invocation_workspace_effect(
     }
     let observed_after = crate::agent_invocation_workspace_snapshot_id(&ctx.workspace_root)?;
     if mutation_tracking == ToolMutationTracking::Unknown {
-        let audited_workspace_scan = audited_workspace_scan.ok_or_else(|| {
-            anyhow!("workspace mutation audit is unavailable after child tool execution")
-        })?;
-        let Some(audited_workspace_snapshot_id) =
-            audited_workspace_scan.workspace_snapshot_id.as_ref()
-        else {
-            bail!("workspace mutation audit produced an incomplete snapshot");
-        };
-        let recorder = ctx.mutation_recorder.as_ref().ok_or_else(|| {
-            anyhow!("workspace mutation recorder is unavailable after child tool execution")
-        })?;
-        let confirmed =
-            recorder.capture_workspace_scan(&ctx.workspace_root, &audited_workspace_scan.scope)?;
-        if confirmed.workspace_snapshot_id.as_ref() != Some(audited_workspace_snapshot_id) {
-            bail!("workspace changed after mutation audit and before grant frontier advancement");
+        let complete_audit = audited_workspace_scan.as_ref().is_some_and(|scan| {
+            scan.workspace_snapshot_id.is_some()
+                && scan.manifest.is_some()
+                && !scan.workspace_knowledge.is_unknown_dirty()
+        });
+        if !complete_audit {
+            return Err(effect_reconciliation_required_error(
+                ctx,
+                spec,
+                call_id,
+                &validated_workspace_snapshot_id,
+            ));
         }
     }
     grant.advance_workspace_frontier(&validated_workspace_snapshot_id, observed_after)
+}
+
+fn effect_reconciliation_required_error(
+    ctx: &ToolContext,
+    spec: &ToolSpec,
+    call_id: &str,
+    validated_workspace_snapshot_id: &crate::WorkspaceSnapshotId,
+) -> anyhow::Error {
+    let effect_seed = format!(
+        "{}\0{}\0{}\0{}",
+        ctx.logical_run_id().unwrap_or("unbound-logical-run"),
+        call_id,
+        spec.name,
+        validated_workspace_snapshot_id
+    );
+    let effect_digest = crate::stable_event_hash(effect_seed.as_bytes());
+    let reconciliation_id =
+        crate::stable_event_uuid("sigil-effect-reconciliation-v1", &effect_digest);
+    let requested_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let entry = crate::EffectReconciliationRequiredEntryV1 {
+        schema_version: crate::EFFECT_RECONCILIATION_SCHEMA_VERSION,
+        reconciliation_id,
+        effect_id: call_id.to_owned(),
+        effect_digest,
+        replay_contract_fingerprint: "tool-replay-v1:non_replayable_unknown_effect".to_owned(),
+        reason_code: "workspace_effect_evidence_incomplete".to_owned(),
+        requested_at_unix_ms,
+        logical_run_id: ctx.logical_run_id().map(str::to_owned),
+        task_id: None,
+        step_id: None,
+        participant_attempt_id: None,
+        base_workspace_observation_id: Some(validated_workspace_snapshot_id.as_str().to_owned()),
+        current_workspace_observation_id: None,
+        known_receipt_ids: Vec::new(),
+        allowed_probe_kinds: vec![crate::ReconciliationProbeKindV1::WorkspaceObservation],
+        probe_budget_ms: 10_000,
+    };
+    let persist_error = ctx
+        .mutation_recorder
+        .as_ref()
+        .ok_or_else(|| anyhow!("durable mutation recorder is unavailable"))
+        .and_then(|recorder| {
+            recorder
+                .append_effect_reconciliation_required(&entry)
+                .map(|_| ())
+        })
+        .err();
+    let error = anyhow::Error::from(ToolExecutionGuardError::EffectReconciliationRequired);
+    match persist_error {
+        Some(persist_error) => error.context(format!(
+            "failed to persist effect reconciliation requirement: {persist_error:#}"
+        )),
+        None => error,
+    }
 }
 
 fn unknown_mutation_scan_finish_error(spec: &ToolSpec, error: anyhow::Error) -> anyhow::Error {

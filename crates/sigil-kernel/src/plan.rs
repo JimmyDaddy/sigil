@@ -12,10 +12,10 @@ use crate::{
     PlanReviewId, TaskStepIntentAliasBindingV1,
     session::{ControlEntry, SessionLogEntry},
     task::{
-        AgentRole, TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskCapabilityV2, TaskExecutionPhaseV1,
-        TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
-        TaskStepContractBoundEntryV2, TaskStepContractV2, TaskStepId, TaskStepMode, TaskStepSpec,
-        task_contract_set_sha256,
+        AgentRole, TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskBlockerV1, TaskCapabilityV2,
+        TaskExecutionPhaseV1, TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry,
+        TaskPlanStatus, TaskStepContractBoundEntryV2, TaskStepContractV2, TaskStepId, TaskStepMode,
+        TaskStepSpec, task_contract_set_sha256,
     },
     tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
     verification::{CheckCommand, ToolEffect},
@@ -207,8 +207,7 @@ pub struct PlanReviewDetailV1 {
     pub lineage: PlanLineageV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_markdown: Option<String>,
-    /// RFC-0067: executable-candidate compile facts. `DraftReady` is only projected when this
-    /// state is `Ready`.
+    /// Legacy/advisory executable-candidate facts. They never gate Plan review or direct Run.
     pub compile: PlanCompileDetailV1,
 }
 
@@ -654,9 +653,9 @@ pub enum PlanReadyStateV1 {
     CompileFailed,
     /// Candidate is durable but the final ready marker is missing (crash window).
     CandidatePrepared,
-    /// Candidate and ready marker are durable: `DraftReady` means adoptable.
+    /// A readable Plan artifact is durable and may be reviewed or directly executed.
     Ready,
-    /// A readable structured draft exists without any candidate (legacy pre-RFC-0067 plan).
+    /// Legacy serialized value retained for replay compatibility.
     LegacyPlanNeedsRecompile,
 }
 
@@ -736,6 +735,10 @@ pub struct PlanExecutionAdoptedV1Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_grant: Option<PlanApprovalPermission>,
     pub adopted_candidate: Box<ExecutablePlanCandidateV1>,
+    /// RFC-0069 materializer-owned participant continuity receipts. Legacy RFC-0067 adoptions
+    /// omit this field and remain replayable through the deterministic compatibility path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_segments: Option<Vec<crate::ExecutionSegmentV1>>,
     pub initial_phase: TaskExecutionPhaseV1,
     pub adopted_at_ms: u64,
 }
@@ -776,6 +779,11 @@ impl PlanExecutionAdoptedV1Entry {
             );
         }
         self.adopted_candidate.validate()?;
+        if let Some(segments) = &self.execution_segments
+            && *segments != crate::materialize_execution_segments(&self.adopted_candidate)
+        {
+            bail!("plan execution segments do not match the materialized candidate authority");
+        }
         let size =
             serde_json::to_vec(self).context("failed to size plan execution adoption event")?;
         if size.len() > MAX_EXECUTABLE_PLAN_CANDIDATE_BYTES.saturating_mul(2) {
@@ -785,10 +793,76 @@ impl PlanExecutionAdoptedV1Entry {
     }
 }
 
+/// Durable start of one post-approval Task materialization generation (RFC-0069 8.4).
+///
+/// The stable Task shell exists before this record. A later prepared or blocked outcome must bind
+/// this exact generation, so restart recovery never creates a second Task for the same approval.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskMaterializationAttemptStartedV1 {
+    pub task_id: TaskId,
+    pub generation: u32,
+    pub plan_hash: String,
+    pub compiler_contract_fingerprint: String,
+    pub started_at_ms: u64,
+}
+
+impl TaskMaterializationAttemptStartedV1 {
+    /// Validates the bounded, durable materialization attempt identity.
+    pub fn validate(&self) -> Result<()> {
+        if self.generation == 0 {
+            bail!("task materialization generation must be non-zero");
+        }
+        validate_sha256_digest("task materialization plan hash", &self.plan_hash)?;
+        validate_sha256_digest(
+            "task materialization compiler contract fingerprint",
+            &self.compiler_contract_fingerprint,
+        )?;
+        if self.started_at_ms == 0 {
+            bail!("task materialization start timestamp must be non-zero");
+        }
+        Ok(())
+    }
+}
+
+/// Durable blocked outcome for one exact materialization attempt (RFC-0069 8.4).
+///
+/// This is intentionally Task-local. It never revokes the approved Plan or the stable Task
+/// identity; a later generation may safely retry after a revision or environment repair.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskMaterializationBlockedV1 {
+    pub task_id: TaskId,
+    pub generation: u32,
+    pub plan_hash: String,
+    pub blocker_id: String,
+    pub blocker: TaskBlockerV1,
+    pub blocked_at_ms: u64,
+}
+
+impl TaskMaterializationBlockedV1 {
+    /// Validates that the blocked outcome binds one exact started materialization generation.
+    pub fn validate(&self) -> Result<()> {
+        if self.generation == 0 {
+            bail!("task materialization blocker generation must be non-zero");
+        }
+        validate_sha256_digest("task materialization blocker plan hash", &self.plan_hash)?;
+        validate_plan_stable_id("task materialization blocker id", &self.blocker_id)?;
+        self.blocker.validate()?;
+        if self.blocked_at_ms < self.blocker.created_at_ms || self.blocked_at_ms == 0 {
+            bail!("task materialization blocker timestamp is invalid");
+        }
+        Ok(())
+    }
+}
+
 /// Typed Run command shared by every product surface (RFC-0067 9.1).
 ///
 /// `source` is audit-only and never changes domain behavior. `expected_durable_frontier` is the
-/// compare-and-swap position the adoption append must still observe.
+/// compare-and-swap position the approval append must still observe. `expected_candidate_hash`
+/// is retained for RFC-0067 replay compatibility only: RFC-0069 approval binds the readable
+/// Plan hash and creates a Task shell before authoritative materialization, so new writers must
+/// leave it empty and must not use it to authorize approval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct PlanRunCommandV1 {
@@ -908,8 +982,9 @@ pub fn candidate_canonical_hash(candidate: &ExecutablePlanCandidateV1) -> Result
 /// Compiles one validated plan draft into a complete executable candidate (RFC-0067 7.3).
 ///
 /// The compiler is pure and deterministic: it never reads the workspace, provider, tool registry,
-/// credentials or disk. Every failure is a typed [`PlanCompileFailureV1`]; the plan review never
-/// reaches `DraftReady` when compilation fails.
+/// credentials or disk. Every failure is a typed [`PlanCompileFailureV1`]. Compilation is a
+/// preflight cache before approval and an authoritative materialization step after approval; a
+/// readable plan remains reviewable even when this compiler reports a blocker.
 pub fn compile_executable_plan_candidate(
     draft: &PlanDraftCreatedEntry,
     input: &PlanCompileInputV1,
@@ -981,6 +1056,47 @@ fn compile_executable_plan_candidate_impl(
         return Err(failure(
             "incomplete_step_contract",
             "plan step is missing its role, mode or isolation contract".to_owned(),
+            Some(step.step_id.clone()),
+        ));
+    }
+    if let Some(proposal) = draft.intent_proposal.as_ref() {
+        let known_aliases = proposal
+            .intents
+            .iter()
+            .map(|intent| intent.intent_alias.as_str())
+            .collect::<BTreeSet<_>>();
+        for step in &draft.steps {
+            let aliases = materialization_intent_aliases_for_step(draft, step);
+            let unique_aliases = aliases.iter().collect::<BTreeSet<_>>();
+            if unique_aliases.len() != aliases.len()
+                || aliases
+                    .iter()
+                    .any(|alias| !known_aliases.contains(alias.as_str()))
+            {
+                return Err(failure(
+                    "intent_alias_binding_invalid",
+                    "plan step intent bindings are duplicated or reference an unknown proposal alias"
+                        .to_owned(),
+                    Some(step.step_id.clone()),
+                ));
+            }
+            if step.mode == Some(TaskStepMode::Write) && aliases.len() != 1 {
+                return Err(failure(
+                    "intent_alias_binding_incomplete",
+                    "intent-enabled write task materialization requires exactly one intent alias"
+                        .to_owned(),
+                    Some(step.step_id.clone()),
+                ));
+            }
+        }
+    } else if let Some(step) = draft
+        .steps
+        .iter()
+        .find(|step| !step.intent_aliases.is_empty())
+    {
+        return Err(failure(
+            "intent_aliases_without_proposal",
+            "plan step intent aliases require a top-level intent proposal".to_owned(),
             Some(step.step_id.clone()),
         ));
     }
@@ -1119,8 +1235,11 @@ fn compile_executable_plan_candidate_impl(
     let alias_bindings = draft
         .steps
         .iter()
-        .filter(|step| !step.intent_aliases.is_empty())
-        .map(|step| {
+        .filter_map(|step| {
+            let intent_aliases = materialization_intent_aliases_for_step(draft, step);
+            (!intent_aliases.is_empty()).then_some((step, intent_aliases))
+        })
+        .map(|(step, intent_aliases)| {
             Ok(TaskStepIntentAliasBindingV1 {
                 step_id: TaskStepId::new(step.step_id.clone()).map_err(|error| {
                     failure(
@@ -1129,12 +1248,13 @@ fn compile_executable_plan_candidate_impl(
                         Some(step.step_id.clone()),
                     )
                 })?,
-                intent_aliases: step.intent_aliases.clone(),
+                intent_aliases,
             })
         })
         .collect::<std::result::Result<Vec<_>, Box<PlanCompileFailureV1>>>()?;
-    let prepared_intent_admission = prepare_intent_admission(draft, &task_id, input)
-        .map_err(|error| failure("intent_preparation_failed", format!("{error:#}"), None))?;
+    let prepared_intent_admission =
+        prepare_intent_admission(draft, &task_id, input, &alias_bindings)
+            .map_err(|error| failure("intent_preparation_failed", format!("{error:#}"), None))?;
     if let Some(prepared) = prepared_intent_admission.as_ref() {
         if alias_bindings.is_empty() {
             return Err(failure(
@@ -1224,15 +1344,12 @@ fn prepare_intent_admission(
     draft: &PlanDraftCreatedEntry,
     task_id: &TaskId,
     input: &PlanCompileInputV1,
+    alias_bindings: &[TaskStepIntentAliasBindingV1],
 ) -> Result<Option<PreparedIntentAdmissionV1>> {
     let Some(proposal) = draft.intent_proposal.as_ref() else {
         return Ok(None);
     };
-    if !draft
-        .steps
-        .iter()
-        .any(|step| !step.intent_aliases.is_empty())
-    {
+    if alias_bindings.is_empty() {
         bail!("intent proposal without any step intent alias binding");
     }
     let workspace_id = input.workspace_id.clone().ok_or_else(|| {
@@ -1261,17 +1378,6 @@ fn prepare_intent_admission(
         authority_event_id.clone(),
         proposal.proposal_digest.clone(),
     )?;
-    let alias_bindings = draft
-        .steps
-        .iter()
-        .filter(|step| !step.intent_aliases.is_empty())
-        .map(|step| {
-            Ok(TaskStepIntentAliasBindingV1 {
-                step_id: TaskStepId::new(step.step_id.clone())?,
-                intent_aliases: step.intent_aliases.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
     let admission = crate::admit_suggested_decomposition(&context, proposal, &authority)?;
     let admission_digest = intent_admission_digest(&admission)?;
     Ok(Some(PreparedIntentAdmissionV1 {
@@ -1282,9 +1388,32 @@ fn prepare_intent_admission(
         proposal_digest: proposal.proposal_digest.as_str().to_owned(),
         source_turn_id: proposal.source_turn_id.clone(),
         authority_event_id,
-        alias_bindings,
+        alias_bindings: alias_bindings.to_vec(),
         admission_digest,
     }))
+}
+
+/// Returns the effective intent aliases for one materialized Task step.
+///
+/// A Plan's single top-level intent unambiguously owns every write step unless the planner
+/// supplied a more specific binding. This is a host-owned normalization, not an inference from
+/// prose: the plan has exactly one durable, user-approved intent proposal, and the compiler
+/// records the resulting binding in the candidate receipt. Multiple proposals remain explicit so
+/// the model or user cannot accidentally collapse distinct work into one intent.
+fn materialization_intent_aliases_for_step(
+    draft: &PlanDraftCreatedEntry,
+    step: &PlanDraftStep,
+) -> Vec<String> {
+    if step.mode == Some(TaskStepMode::Write)
+        && step.intent_aliases.is_empty()
+        && let Some(proposal) = draft
+            .intent_proposal
+            .as_ref()
+            .filter(|proposal| proposal.intents.len() == 1)
+    {
+        return vec![proposal.intents[0].intent_alias.clone()];
+    }
+    step.intent_aliases.clone()
 }
 
 fn intent_admission_digest(admission: &crate::IntentPlanAdmissionV1) -> Result<String> {
@@ -1355,6 +1484,190 @@ pub enum PlanExecutionAdoptionCommit {
     Appended,
     /// The frontier moved or the same command/candidate was already adopted; nothing changed.
     CasSkipped,
+}
+
+/// Atomically commits explicit Plan approval, a stable Task identity, and first-class direct
+/// execution authority.
+///
+/// The four session entries are written as one crash-safe bundle under the durable single-writer
+/// lease. Once approval is durable, the Task is therefore immediately executable without a
+/// second model-authored materialization or DAG compilation boundary.
+///
+/// # Errors
+///
+/// Returns an error for stale authority, conflicting durable facts, a non-durable session or an
+/// approval/task/direct-execution bundle that does not bind the same exact plan.
+pub fn append_plan_approval_task_shell_at_frontier(
+    session: &mut crate::Session,
+    decision: &PlanDecisionRecordedEntry,
+    task_run: &crate::TaskRunEntry,
+    task_link: &TaskCreatedFromPlanEntry,
+    direct_execution: &crate::TaskDirectExecutionAdmittedV1,
+    checklist: Option<&crate::TaskChecklistUpdatedV1>,
+    permission_grant: Option<&PlanPermissionGrantedEntry>,
+    expected_frontier: u64,
+) -> Result<PlanExecutionAdoptionCommit> {
+    if decision.decision != PlanDecision::Accepted || decision.decided_by != PlanDecisionActor::User
+    {
+        bail!("plan approval shell requires an explicit user Accepted decision");
+    }
+    if !matches!(
+        task_run.status,
+        crate::TaskRunStatus::Started | crate::TaskRunStatus::Paused
+    ) {
+        bail!("plan approval Task shell must start as Started or Paused");
+    }
+    let draft = session
+        .plan_artifact_projection()
+        .plans
+        .get(&decision.plan_id)
+        .cloned()
+        .context("plan approval shell references an unknown durable draft")?;
+    if draft.plan_hash != decision.plan_hash
+        || task_id_from_plan_draft(&draft)? != task_run.task_id
+        || task_link.plan_id != decision.plan_id
+        || task_link.plan_hash != decision.plan_hash
+        || task_link.task_id != task_run.task_id
+        || task_link.task_plan_version != 0
+        || !task_link.step_mapping.is_empty()
+        || task_link.stale_reason.is_some()
+        || direct_execution.task_id != task_run.task_id
+        || !direct_execution.matches_objective(&task_run.objective)
+        || !matches!(
+            &direct_execution.source,
+            crate::TaskDirectExecutionSourceV1::ApprovedPlan { plan_id, plan_hash }
+                if plan_id == &decision.plan_id && plan_hash == &decision.plan_hash
+        )
+    {
+        bail!("plan approval and direct Task execution do not bind the exact durable plan");
+    }
+    direct_execution.validate()?;
+    if let Some(checklist) = checklist {
+        checklist.validate()?;
+        if checklist.task_id != task_run.task_id || checklist.revision != 1 {
+            bail!("initial Task checklist does not bind the approved Task");
+        }
+    }
+    if let Some(grant) = permission_grant
+        && (grant.plan_id != draft.plan_id
+            || grant.plan_hash != draft.plan_hash
+            || grant.task_id != task_run.task_id
+            || grant.workspace_snapshot_id != draft.workspace_snapshot_id
+            || grant.permission != PlanApprovalPermission::WorkspaceEdits
+            || grant.scope.workspace_paths != draft.target_paths
+            || grant.scope.summary
+                != format!("scoped edits for task {}", task_run.task_id.as_str())
+            || grant.expires != PlanApprovalExpiry::Session
+            || grant.granted_at_ms != decision.decided_at_ms)
+    {
+        bail!("plan approval permission grant does not bind the exact durable plan and Task");
+    }
+    let store = session
+        .durable_store()
+        .context("plan approval shell requires a durable session store")?;
+    let predicate_decision = decision.clone();
+    let predicate_task = task_run.clone();
+    let predicate_link = task_link.clone();
+    let predicate_direct = direct_execution.clone();
+    let predicate_checklist = checklist.cloned();
+    let predicate_grant = permission_grant.cloned();
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision.clone())),
+        SessionLogEntry::Control(ControlEntry::TaskRun(task_run.clone())),
+        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(task_link.clone())),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            direct_execution.clone(),
+        )),
+    ];
+    if let Some(checklist) = checklist {
+        entries.push(SessionLogEntry::Control(
+            ControlEntry::TaskChecklistUpdatedV1(checklist.clone()),
+        ));
+    }
+    if let Some(grant) = permission_grant {
+        entries.push(SessionLogEntry::Control(
+            ControlEntry::PlanPermissionGranted(grant.clone()),
+        ));
+    }
+    let appended = store
+        .append_events_and_session_entries_if(Vec::new(), &entries, move |records| {
+            let current = records.last().map_or(0, |record| record.stream_sequence());
+            if current != expected_frontier {
+                return Ok(false);
+            }
+            let mut existing_entries = Vec::new();
+            for record in records {
+                if let Some(entry) = record.session_log_entry()? {
+                    existing_entries.push(entry);
+                }
+            }
+            let plans = PlanArtifactProjection::from_entries(&existing_entries);
+            let accepted = plans
+                .latest_decision(&predicate_decision.plan_id)
+                .filter(|entry| entry.decision == PlanDecision::Accepted);
+            let existing_link = plans
+                .tasks_created
+                .get(&predicate_link.plan_id)
+                .and_then(|entries| entries.first());
+            let tasks = crate::TaskStateProjection::from_entries(&existing_entries);
+            let existing_task = tasks.tasks.get(&predicate_task.task_id);
+            let existing_direct =
+                existing_task.and_then(|task| task.direct_execution_admission.as_ref());
+            let existing_checklist = existing_task.and_then(|task| task.checklist.as_ref());
+            let existing_grant = plans
+                .permission_grants
+                .get(&predicate_decision.plan_id)
+                .and_then(|grants| {
+                    grants
+                        .iter()
+                        .find(|grant| grant.task_id == predicate_task.task_id)
+                });
+            match (accepted, existing_task, existing_link, existing_direct) {
+                (None, None, None, None) if existing_grant.is_none() => Ok(true),
+                (
+                    Some(existing_decision),
+                    Some(existing_task),
+                    Some(existing_link),
+                    Some(existing_direct),
+                ) if existing_decision.plan_hash == predicate_decision.plan_hash
+                    && existing_task.parent_session_ref == predicate_task.parent_session_ref
+                    && existing_task.objective == predicate_task.objective
+                    && existing_link.plan_hash == predicate_link.plan_hash
+                    && existing_link.task_id == predicate_link.task_id
+                    && existing_link.task_plan_version == 0
+                    && existing_direct == &predicate_direct
+                    && existing_checklist == predicate_checklist.as_ref()
+                    && existing_grant == predicate_grant.as_ref() =>
+                {
+                    Ok(false)
+                }
+                _ => bail!("plan approval direct Task execution conflicts with durable state"),
+            }
+        })?
+        .is_some();
+    if appended {
+        session
+            .record_durably_appended_control(ControlEntry::PlanDecisionRecorded(decision.clone()));
+        session.record_durably_appended_control(ControlEntry::TaskRun(task_run.clone()));
+        session
+            .record_durably_appended_control(ControlEntry::TaskCreatedFromPlan(task_link.clone()));
+        session.record_durably_appended_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            direct_execution.clone(),
+        ));
+        if let Some(checklist) = checklist {
+            session.record_durably_appended_control(ControlEntry::TaskChecklistUpdatedV1(
+                checklist.clone(),
+            ));
+        }
+        if let Some(grant) = permission_grant {
+            session.record_durably_appended_control(ControlEntry::PlanPermissionGranted(
+                grant.clone(),
+            ));
+        }
+        Ok(PlanExecutionAdoptionCommit::Appended)
+    } else {
+        Ok(PlanExecutionAdoptionCommit::CasSkipped)
+    }
 }
 
 /// Appends the single `PlanExecutionAdoptedV1` authority with its intent activation in one
@@ -1440,6 +1753,84 @@ pub fn append_plan_execution_adoption_at_frontier(
     }
 }
 
+/// Appends RFC-0069 Task materialization after the approval/task-shell bundle is already durable.
+///
+/// The payload deliberately reuses the V1 candidate envelope for replay compatibility, but this
+/// event does not synthesize an Accepted decision or a Task shell. New product writers must use
+/// this function; `append_plan_execution_adoption_at_frontier` is retained only for legacy replay
+/// and compatibility tests.
+pub fn append_task_materialization_prepared_at_frontier(
+    session: &mut crate::Session,
+    materialization: &PlanExecutionAdoptedV1Entry,
+    expected_frontier: u64,
+) -> Result<PlanExecutionAdoptionCommit> {
+    materialization.validate()?;
+    let store = session
+        .durable_store()
+        .context("task materialization requires a durable session store")?;
+    let mut durable_events = Vec::new();
+    if let Some(prepared) = materialization
+        .adopted_candidate
+        .prepared_intent_admission
+        .as_ref()
+    {
+        let draft = session
+            .plan_artifact_projection()
+            .plans
+            .get(&materialization.plan_id)
+            .cloned()
+            .context("materialized candidate is missing its durable plan draft")?;
+        let admission = materialize_prepared_intent_admission(&draft, prepared)?;
+        durable_events = admission.durable_events(Some(crate::IntentTaskPlanBindingV1 {
+            task_id: materialization.task_id.as_str().to_owned(),
+            task_plan_version: materialization.adopted_candidate.task_plan.plan_version,
+        }))?;
+    }
+    let expected = materialization.clone();
+    let appended = store
+        .append_events_and_session_entries_if(
+            durable_events,
+            &[SessionLogEntry::Control(
+                ControlEntry::TaskMaterializationPreparedV1(Box::new(materialization.clone())),
+            )],
+            move |records| {
+                let current = records.last().map_or(0, |record| record.stream_sequence());
+                if current != expected_frontier {
+                    return Ok(false);
+                }
+                let mut projection = PlanArtifactProjection::default();
+                for record in records {
+                    let Some(entry) = record.session_log_entry()? else {
+                        continue;
+                    };
+                    if let SessionLogEntry::Control(control) = &entry {
+                        projection.apply_control_entry(control);
+                    }
+                }
+                match projection.materialization_for_task(&expected.task_id) {
+                    None => Ok(true),
+                    Some(existing)
+                        if existing.plan_id == expected.plan_id
+                            && existing.plan_hash == expected.plan_hash
+                            && existing.candidate_hash == expected.candidate_hash =>
+                    {
+                        Ok(false)
+                    }
+                    Some(_) => bail!("task materialization conflicts with durable task state"),
+                }
+            },
+        )?
+        .is_some();
+    if appended {
+        session.record_durably_appended_control(ControlEntry::TaskMaterializationPreparedV1(
+            Box::new(materialization.clone()),
+        ));
+        Ok(PlanExecutionAdoptionCommit::Appended)
+    } else {
+        Ok(PlanExecutionAdoptionCommit::CasSkipped)
+    }
+}
+
 /// Permission chosen from the plan approval surface.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1500,6 +1891,13 @@ pub struct PlanArtifactProjection {
     pub adoptions: BTreeMap<PlanId, Vec<PlanExecutionAdoptedV1Entry>>,
     /// Adoption receipts keyed by command id for idempotent read-back.
     pub adoption_receipts: BTreeMap<String, PlanExecutionAdoptedV1Entry>,
+    /// RFC-0069 materialization receipts keyed by Task identity. New writers append these only
+    /// after the Plan approval and stable Task shell are durable.
+    pub materializations: BTreeMap<TaskId, PlanExecutionAdoptedV1Entry>,
+    /// Materialization attempts by Task, retained so retries increment their durable generation.
+    pub materialization_attempts: BTreeMap<TaskId, Vec<TaskMaterializationAttemptStartedV1>>,
+    /// Latest unresolved materialization blocker per Task. A prepared receipt clears it.
+    pub materialization_blockers: BTreeMap<TaskId, TaskMaterializationBlockedV1>,
 }
 
 impl PlanArtifactProjection {
@@ -1536,6 +1934,15 @@ impl PlanArtifactProjection {
             }
             ControlEntry::PlanExecutionAdoptedV1(adoption) => {
                 self.apply_adoption(adoption);
+            }
+            ControlEntry::TaskMaterializationAttemptStartedV1(attempt) => {
+                self.apply_materialization_attempt(attempt);
+            }
+            ControlEntry::TaskMaterializationPreparedV1(materialization) => {
+                self.apply_materialization(materialization);
+            }
+            ControlEntry::TaskMaterializationBlockedV1(blocked) => {
+                self.apply_materialization_blocked(blocked);
             }
             _ => {}
         }
@@ -1575,6 +1982,52 @@ impl PlanArtifactProjection {
             });
     }
 
+    fn apply_materialization(&mut self, materialization: &PlanExecutionAdoptedV1Entry) {
+        self.materializations
+            .insert(materialization.task_id.clone(), materialization.clone());
+        self.materialization_blockers
+            .remove(&materialization.task_id);
+    }
+
+    fn apply_materialization_attempt(&mut self, attempt: &TaskMaterializationAttemptStartedV1) {
+        if attempt.validate().is_err() {
+            return;
+        }
+        let attempts = self
+            .materialization_attempts
+            .entry(attempt.task_id.clone())
+            .or_default();
+        if attempts
+            .iter()
+            .any(|existing| existing.generation == attempt.generation)
+        {
+            return;
+        }
+        attempts.push(attempt.clone());
+    }
+
+    fn apply_materialization_blocked(&mut self, blocked: &TaskMaterializationBlockedV1) {
+        if blocked.validate().is_err() {
+            return;
+        }
+        let Some(attempt) = self
+            .materialization_attempts
+            .get(&blocked.task_id)
+            .and_then(|attempts| {
+                attempts
+                    .iter()
+                    .find(|attempt| attempt.generation == blocked.generation)
+            })
+        else {
+            return;
+        };
+        if attempt.plan_hash != blocked.plan_hash {
+            return;
+        }
+        self.materialization_blockers
+            .insert(blocked.task_id.clone(), blocked.clone());
+    }
+
     /// Returns the latest candidate for one plan, if durable.
     pub fn latest_candidate(&self, plan_id: &PlanId) -> Option<&ExecutablePlanCandidateV1> {
         self.candidates.get(plan_id)
@@ -1593,38 +2046,51 @@ impl PlanArtifactProjection {
             .find(|adoption| &adoption.task_id == task_id)
     }
 
-    /// Derives the RFC-0067 readiness state of one plan from durable facts only.
+    /// Returns the post-approval materialization receipt for one stable Task shell.
+    #[must_use]
+    pub fn materialization_for_task(
+        &self,
+        task_id: &TaskId,
+    ) -> Option<&PlanExecutionAdoptedV1Entry> {
+        self.materializations.get(task_id)
+    }
+
+    /// Returns the next durable materialization generation for an approved Task shell.
+    #[must_use]
+    pub fn next_materialization_generation(&self, task_id: &TaskId) -> u32 {
+        self.materialization_attempts
+            .get(task_id)
+            .and_then(|attempts| attempts.iter().map(|attempt| attempt.generation).max())
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    /// Returns the latest unresolved materialization blocker for one Task.
+    #[must_use]
+    pub fn materialization_blocker_for_task(
+        &self,
+        task_id: &TaskId,
+    ) -> Option<&TaskMaterializationBlockedV1> {
+        self.materialization_blockers.get(task_id)
+    }
+
+    /// Derives the review readiness state of one Plan from durable facts only.
     pub fn plan_ready_state(&self, plan_id: &PlanId) -> PlanReadyStateV1 {
-        if let Some(marker) = self.ready_markers.get(plan_id) {
-            // RFC-0067 8.2: Ready requires the marker, candidate AND draft to bind the exact
-            // same plan/hash chain; a corrupted or fault-injected prefix must never project as
-            // Ready.
-            if self.candidates.get(plan_id).is_some_and(|candidate| {
-                candidate.plan_id == marker.plan_id
-                    && candidate.plan_hash == marker.plan_hash
-                    && candidate.candidate_hash == marker.candidate_hash
-            }) && self
-                .plans
-                .get(plan_id)
-                .is_some_and(|draft| draft.plan_hash == marker.plan_hash)
-            {
-                return PlanReadyStateV1::Ready;
-            }
-            return PlanReadyStateV1::CandidatePrepared;
+        // RFC-0069: a readable durable Plan is reviewable and directly executable. Candidate,
+        // compiler, intent, and DAG facts are legacy advisory evidence only.
+        if self.plans.contains_key(plan_id) {
+            return PlanReadyStateV1::Ready;
         }
-        if self.candidates.contains_key(plan_id) {
+        if self.ready_markers.contains_key(plan_id) || self.candidates.contains_key(plan_id) {
             return PlanReadyStateV1::CandidatePrepared;
         }
         if self.compile_failures.contains_key(plan_id) {
             return PlanReadyStateV1::CompileFailed;
         }
-        if self.plans.contains_key(plan_id) {
-            return PlanReadyStateV1::LegacyPlanNeedsRecompile;
-        }
         PlanReadyStateV1::NotReady
     }
 
-    /// True when the plan has an executable candidate AND a durable ready marker.
+    /// True when the exact readable Plan artifact is durable and reviewable.
     pub fn plan_is_ready(&self, plan_id: &PlanId) -> bool {
         matches!(self.plan_ready_state(plan_id), PlanReadyStateV1::Ready)
     }
@@ -1736,6 +2202,35 @@ pub fn plan_draft_created_entry(
     )
 }
 
+/// Captures non-empty model-authored prose under a host-derived Plan identity.
+///
+/// This is the model-agnostic fallback for Plan surfaces that do not already own a stable review
+/// identity. Structured Plan output may still use [`plan_draft_created_entry`] for richer display,
+/// but successful execution never depends on the model emitting that schema.
+///
+/// # Errors
+///
+/// Returns an error when the projected text exceeds the durable inline Plan bound.
+pub fn plain_text_plan_draft_entry(
+    plan_text: &str,
+    source: PlanSourceRef,
+    created_at_ms: u64,
+    workspace_snapshot_id: Option<String>,
+) -> Result<Option<PlanDraftCreatedEntry>> {
+    let plan_text = crate::safe_persistence_text(plan_text.trim());
+    if plan_text.trim().is_empty() {
+        return Ok(None);
+    }
+    let plan_id = plan_id_from_hash(&plan_text_hash(&plan_text))?;
+    plain_text_plan_draft_entry_with_plan_id(
+        plan_id,
+        &plan_text,
+        source,
+        created_at_ms,
+        workspace_snapshot_id,
+    )
+}
+
 /// Creates a durable plan draft record bound to a host-derived plan identity.
 ///
 /// Plan review lifecycles derive the plan id deterministically from the plan review and attempt
@@ -1770,6 +2265,62 @@ pub fn plan_draft_created_entry_with_plan_id(
         created_at_ms,
         workspace_snapshot_id,
     )
+}
+
+/// Captures a non-empty model-authored Plan as bounded reviewable text under a host identity.
+///
+/// This is the compatibility path for models that can produce useful prose but cannot reliably
+/// emit the `submit_plan_draft` tool schema. The host supplies every identity and authority field;
+/// the prose carries no Task DAG, role, intent, capability, permission, or scheduler authority.
+///
+/// # Errors
+///
+/// Returns an error when the projected text exceeds the durable inline Plan bound.
+pub fn plain_text_plan_draft_entry_with_plan_id(
+    plan_id: PlanId,
+    plan_text: &str,
+    source: PlanSourceRef,
+    created_at_ms: u64,
+    workspace_snapshot_id: Option<String>,
+) -> Result<Option<PlanDraftCreatedEntry>> {
+    let plan_text = crate::safe_persistence_text(plan_text.trim());
+    if plan_text.trim().is_empty() {
+        return Ok(None);
+    }
+    if plan_text.len() > PLAN_INLINE_TEXT_MAX_BYTES {
+        bail!("plain-text plan exceeds the {PLAN_INLINE_TEXT_MAX_BYTES}-byte durable inline limit");
+    }
+    let summary_line = plan_text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Plan")
+        .trim()
+        .trim_start_matches(|character: char| {
+            character == '#' || character == '-' || character == '*' || character.is_whitespace()
+        });
+    let mut summary = summary_line.chars().take(240).collect::<String>();
+    if summary.is_empty() {
+        summary = "Plan".to_owned();
+    }
+    Ok(Some(PlanDraftCreatedEntry {
+        plan_id,
+        schema_version: 2,
+        source,
+        plan_hash: plan_text_hash(&plan_text),
+        summary,
+        inline_text: Some(plan_text),
+        steps: Vec::new(),
+        intent_proposal: None,
+        target_paths: Vec::new(),
+        suggested_checks: Vec::new(),
+        risk: None,
+        notes: vec![
+            "Captured from plain model output; structured fields are display-only and unavailable."
+                .to_owned(),
+        ],
+        workspace_snapshot_id,
+        created_at_ms,
+    }))
 }
 
 fn plan_draft_entry_from_structured(
@@ -1861,7 +2412,7 @@ pub fn submit_plan_draft_entry(
         );
     }
     if args.steps.is_empty() {
-        bail!("submit_plan_draft requires at least one executable step");
+        bail!("submit_plan_draft requires at least one readable plan step");
     }
     let structured = materialize_structured_plan(
         2,
@@ -1876,7 +2427,7 @@ pub fn submit_plan_draft_entry(
         },
     );
     if structured.steps.is_empty() {
-        bail!("submit_plan_draft steps did not materialize into any executable step");
+        bail!("submit_plan_draft steps did not materialize into any readable plan step");
     }
     let sanitized = safe_structured_plan_draft(structured)?;
     let inline_plan_text = render_structured_plan_text(&sanitized);
@@ -1891,10 +2442,10 @@ pub fn submit_plan_draft_entry(
     )
 }
 
-/// Builds the objective passed to the normal `/task` planner after a user approves a plan.
+/// Builds the durable objective passed to the direct executor after a user approves a plan.
 ///
-/// The approved plan remains model-authored task input, but it must come from the structured
-/// `/plan` draft contract so the handoff does not infer scope from arbitrary prose.
+/// The approved Plan remains model-authored task input. Its optional structured fields are
+/// presentation context only; the host does not infer scheduler authority from the prose.
 pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
     let plan_text = entry.inline_text.clone().unwrap_or_else(|| {
         render_structured_plan_text(&StructuredPlanDraft {
@@ -1913,7 +2464,7 @@ pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
         })
     });
     format!(
-        "Execute the following user-approved structured plan with the configured approval and verification requirements. Treat the listed steps, dependencies, roles, modes, and isolation contracts as the authoritative task input. Preserve the approved plan's scope and order unless a change is necessary for correctness.\n\nApproved structured plan:\n\n{}",
+        "Execute the following user-approved Plan with the configured approval and verification requirements. Treat the complete Plan as task context, inspect the live workspace, use tools as needed, and adapt implementation details when necessary for correctness.\n\nApproved Plan:\n\n{}",
         plan_text.trim()
     )
 }
@@ -2896,42 +3447,10 @@ fn intent_proposal_from_structured(
     plan_hash: &str,
 ) -> Result<Option<IntentPlanProposalV1>> {
     if plan.intents.is_empty() {
-        if plan
-            .steps
-            .iter()
-            .any(|step| !step.intent_aliases.is_empty())
-        {
-            bail!("plan step intent aliases require a top-level intent proposal");
-        }
         return Ok(None);
     }
     if plan.schema_version != 2 {
         bail!("intent proposals require sigil-plan-v2");
-    }
-    let aliases = plan
-        .intents
-        .iter()
-        .map(|intent| intent.intent_alias.as_str())
-        .collect::<BTreeSet<_>>();
-    if aliases.len() != plan.intents.len() {
-        bail!("structured plan intent proposal contains duplicate aliases");
-    }
-    for step in &plan.steps {
-        let mut step_aliases = BTreeSet::new();
-        for alias in &step.intent_aliases {
-            if !aliases.contains(alias.as_str()) {
-                bail!("plan step references unknown intent alias {alias}");
-            }
-            if !step_aliases.insert(alias.as_str()) {
-                bail!("plan step repeats intent alias {alias}");
-            }
-        }
-        if step.mode == Some(TaskStepMode::Write) && step.intent_aliases.len() != 1 {
-            bail!(
-                "Intent-enabled write plan step {} must bind exactly one intent alias",
-                step.step_id
-            );
-        }
     }
     let source_turn_id = crate::stable_event_uuid("sigil-plan-intent-source-v1", plan_hash);
     let proposal_id = crate::stable_event_uuid("sigil-plan-intent-proposal-v1", plan_hash);
@@ -2972,6 +3491,14 @@ fn validate_plan_stable_id(label: &str, value: &str) -> Result<()> {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         bail!("{label} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_sha256_digest(label: &str, value: &str) -> Result<()> {
+    let digest = value.strip_prefix(PLAN_HASH_PREFIX).unwrap_or(value);
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} is not a sha256 digest");
     }
     Ok(())
 }

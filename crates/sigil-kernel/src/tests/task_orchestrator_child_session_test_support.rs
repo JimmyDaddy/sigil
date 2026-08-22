@@ -30,6 +30,45 @@ impl TestAgentTaskChildSessionRunner {
 
 #[async_trait]
 impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
+    async fn run_direct_execution_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskDirectExecutionSessionRunRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<TaskDirectExecutionSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        request.admission.validate()?;
+        request.attempt.validate()?;
+        if request.task.task_id != request.admission.task_id
+            || request.attempt.task_id != request.task.task_id
+            || request.attempt.admission_id != request.admission.admission_id
+            || !request.admission.matches_objective(&request.task.objective)
+        {
+            bail!("direct execution request does not match its durable Task authority");
+        }
+        let output = self
+            .executor
+            .run_with_approval_input(
+                parent_session,
+                request.input,
+                request.options,
+                handler,
+                approval_handler,
+            )
+            .await?;
+        Ok(TaskDirectExecutionSessionRunOutput {
+            attempt_id: request.attempt.attempt_id,
+            final_text: output.result.final_text,
+            final_message_id: output.result.final_message_id,
+            outcome: output.outcome,
+            disposition: output.disposition,
+        })
+    }
+
     async fn run_planner_session<H, A>(
         &self,
         parent_session: &mut Session,

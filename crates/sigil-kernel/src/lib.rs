@@ -13,6 +13,7 @@ pub mod conversation_fork;
 pub mod conversation_queue;
 pub mod conversation_route;
 pub mod conversation_run;
+pub mod direct_task_execution;
 pub mod egress;
 pub mod eval;
 pub mod event;
@@ -43,12 +44,14 @@ pub mod provider_error;
 pub mod provider_request_material;
 pub mod provider_timeout;
 pub mod public_task_event;
+pub mod recovery;
 pub mod resume;
 pub mod secret;
 pub mod session;
 pub mod skill;
 pub mod sse;
 pub mod task;
+pub mod task_checklist;
 pub mod task_handoff;
 pub mod task_memory;
 pub mod task_orchestrator;
@@ -68,8 +71,9 @@ pub use agent::{
     ConversationPurposeContext, FinalAnswerContext, PendingConversationInputProvider,
     PendingPlanDecisionRequiredAction, PlanReviewDraftSubmittedAction, PlanReviewPurposeContext,
     PromotedConversationInput, RunPendingPlanAction, StartDurableTaskAction, StartPlanReviewAction,
-    TaskContinuationControl, TaskParticipantContext, TaskPlannerContext, TaskSynthesisContext,
-    durable_tool_execution_entry, projected_agent_run_readiness, route_surface_tool_specs,
+    TaskContinuationControl, TaskDirectExecutionContext, TaskParticipantContext,
+    TaskPlannerContext, TaskSynthesisContext, durable_tool_execution_entry,
+    projected_agent_run_readiness, route_surface_tool_specs,
     route_surface_tool_specs_for_bound_context, route_surface_tool_specs_for_context,
     route_surface_tool_specs_with_memory,
 };
@@ -79,23 +83,24 @@ pub use agent_thread::{
     AgentDelegationRunContext, AgentElicitationRouteEntry, AgentFinalAnswerRef, AgentGraphSummary,
     AgentInvocationGrant, AgentInvocationGrantBinding, AgentInvocationGrantRecord,
     AgentInvocationGrantSource, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationRequest,
-    AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry,
-    AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
-    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
-    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
-    AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationProjection,
-    AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
-    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection, AgentRunAttemptStartedEntry,
-    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
-    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
-    AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
-    AgentThreadStateProjection, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, DelegationAuthority,
-    DelegationAuthorityRecord, TaskOrchestratorPhase, WorkspaceRootSnapshot,
-    agent_invocation_workspace_snapshot_id, closed_agent_routes, interrupted_agent_attempts,
-    interrupted_agent_mailbox_messages, interrupted_agent_result_continuations,
-    interrupted_agent_threads, stale_expired_agent_approval_routes,
+    AgentInvocationSource, AgentInvocationWorkspaceObservationV1, AgentMailboxMessageEntry,
+    AgentMailboxStatus, AgentMergeSafePointEntry, AgentPermissionPolicy, AgentProfile,
+    AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
+    AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
+    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
+    AgentResultContinuationProjection, AgentResultContinuationStatus, AgentResultPolicy,
+    AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
+    AgentRunAttemptProjection, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
+    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
+    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry,
+    AgentThreadProjection, AgentThreadResult, AgentThreadResultDeliveredEntry,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
+    AgentUsageSummary, DelegationAuthority, DelegationAuthorityRecord, TaskOrchestratorPhase,
+    WorkspaceRootSnapshot, agent_invocation_workspace_snapshot_id, closed_agent_routes,
+    interrupted_agent_attempts, interrupted_agent_mailbox_messages,
+    interrupted_agent_result_continuations, interrupted_agent_threads,
+    stale_expired_agent_approval_routes,
 };
 pub use approval::{
     APPROVAL_REQUEST_NO_EXPIRY_MS, ApprovalHandler, ApprovalRequestIdentityV2, AutoApproveHandler,
@@ -156,8 +161,8 @@ pub use config::{
     MIN_TERMINAL_NOTIFICATION_RUN_DURATION_MS, McpRemoteClientCapability, McpServerConfig,
     McpServerPinnedIdentity, McpServerStartup, McpServerTransportConfig, McpServerTrustPolicy,
     McpStreamableHttpConfig, McpTrustClass, MemoryConfig, ModelRequestConfig, ModelRequestTimeouts,
-    MultiAgentMode, MutationArtifactRetentionConfig, RoleModelConfig, RootConfig,
-    SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
+    MultiAgentMode, MutationArtifactRetentionConfig, ProviderTurnRecoveryConfig, RoleModelConfig,
+    RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
     SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SessionConfig, SessionRetentionConfig, SkillConfig,
     StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskRoutingPolicy,
     TerminalKeyboardEnhancement, TerminalNotificationConfig, TerminalNotificationMethod,
@@ -233,6 +238,11 @@ pub use conversation_run::{
     ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, MAX_CONVERSATION_RUN_ID_BYTES,
     MAX_CONVERSATION_RUN_MESSAGE_ID_BYTES, MAX_CONVERSATION_RUN_SUMMARY_BYTES,
     conversation_run_lifecycle_record_from_stream,
+};
+pub use direct_task_execution::{
+    TASK_DIRECT_EXECUTION_ADMISSION_SCHEMA_VERSION, TaskDirectExecutionAdmittedV1,
+    TaskDirectExecutionAttemptV1, TaskDirectExecutionSourceV1, task_direct_execution_attempt_id,
+    task_direct_execution_logical_run_id,
 };
 pub use egress::{
     DisclosurePresentationError, DisclosurePresentationReceipt, EgressAuditError,
@@ -412,9 +422,10 @@ pub use mutation::{
     PreparedFileMutation, RestoredFileMutation, SnapshotCoverage, WorkspaceMutationDetected,
     WorkspaceMutationDetectionReason, WorkspaceMutationScan, bytes_hash,
     create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
-    delete_file_with_mutation_in_batch, execute_controlled_checkpoint_restore, file_content_hash,
-    is_sensitive_mutation_artifact_path, preview_controlled_checkpoint_restore,
-    restore_file_from_snapshot_with_mutation, write_file_with_mutation,
+    delete_file_with_mutation_expected_in_batch, delete_file_with_mutation_in_batch,
+    execute_controlled_checkpoint_restore, file_content_hash, is_sensitive_mutation_artifact_path,
+    preview_controlled_checkpoint_restore, restore_file_from_snapshot_with_mutation,
+    write_file_with_mutation, write_file_with_mutation_expected_in_batch,
     write_file_with_mutation_in_batch,
 };
 pub use orchestration::{
@@ -479,9 +490,12 @@ pub use plan::{
     PlanReviewDetailV1, PlanReviewStepDetailV1, PlanRunCommandSource, PlanRunCommandV1,
     PlanRunPermissionChoiceV1, PlanRunReceiptV1, PlanRunRejectionV1, PlanSourceRef,
     PlanSuggestedCheck, PlanTaskStartMode, PlanToTaskStepMapping, PreparedIntentAdmissionV1,
-    TaskCreatedFromPlanEntry, append_plan_execution_adoption_at_frontier,
-    bind_candidate_plan_intents, candidate_canonical_hash, compile_executable_plan_candidate,
-    materialize_prepared_intent_admission, plan_draft_created_entry,
+    TaskCreatedFromPlanEntry, TaskMaterializationAttemptStartedV1, TaskMaterializationBlockedV1,
+    append_plan_approval_task_shell_at_frontier, append_plan_execution_adoption_at_frontier,
+    append_task_materialization_prepared_at_frontier, bind_candidate_plan_intents,
+    candidate_canonical_hash, compile_executable_plan_candidate,
+    materialize_prepared_intent_admission, plain_text_plan_draft_entry,
+    plain_text_plan_draft_entry_with_plan_id, plan_draft_created_entry,
     plan_draft_created_entry_with_plan_id, plan_review_detail_from_entries,
     plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, submit_plan_draft_entry,
     task_id_from_plan_draft, task_plan_from_plan_draft,
@@ -528,13 +542,16 @@ pub use provider::{
     PrefixRuntimeContextItemSummary, PrefixRuntimeContextSummary, PrefixSnapshot,
     PrefixSnapshotMaterialization, Provider, ProviderCapabilities, ProviderChunk,
     ProviderContextCapabilities, ProviderContinuationState, ProviderProtocolViolation,
-    ProviderRequestRejection, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
-    ResponseHandle, SessionStats, StatefulContinuationCapability, ToolCall,
-    ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+    ProviderRequestRejection, ProviderTransportFallbackCandidateV1, ReasoningArtifact,
+    ReasoningEffort, ReasoningStreamSupport, ResponseHandle, SessionStats,
+    StatefulContinuationCapability, ToolCall, ToolCallCompletionIdPolicy,
+    ToolCallStreamAccumulator, UsageStats,
 };
 pub use provider_error::{
-    PROVIDER_ERROR_BODY_LIMIT_BYTES, ProviderErrorBody, ProviderRateLimitError,
-    ProviderRouteCooldownError, provider_rate_limit_from_error, provider_status_error,
+    PROVIDER_ERROR_BODY_LIMIT_BYTES, ProviderErrorBody, ProviderFailureClassV1,
+    ProviderFailureObservationV1, ProviderRateLimitError, ProviderRetryHintV1,
+    ProviderRouteCooldownError, ProviderStreamEndedUnexpectedly, ProviderTimeoutError,
+    ProviderWireStateV1, provider_rate_limit_from_error, provider_status_error,
     read_provider_error_body,
 };
 pub use provider_request_material::{
@@ -551,7 +568,15 @@ pub use provider_timeout::{
 pub use public_task_event::{
     PublicConversationPhase, PublicConversationRoute, PublicPlanAction, PublicPlanReview,
     PublicPlanReviewSource, PublicPlanReviewStatus, PublicPlanRevisionStatusV1,
-    PublicPlanRevisionSummaryV1, PublicTaskEventProjector, PublicTaskPhase, PublicTaskPlanStep,
+    PublicPlanRevisionSummaryV1, PublicTaskChecklistItemV1, PublicTaskEventProjector,
+    PublicTaskPhase, PublicTaskPlanStep,
+};
+pub use recovery::{
+    AdapterKindV1, BoundaryOutcomeV1, EffectSettlementV1, FailureScopeV1, InterruptionReceiptV1,
+    IrrecoverableFailureV1, ProjectionKindV1, PublicRecoveryBlockerV1,
+    RECOVERY_BLOCKER_SCHEMA_VERSION, RecoverabilityV1, RecoveryActionV1, RecoveryBlockerRaisedV1,
+    RecoveryBlockerResolutionStartedV1, RecoveryBlockerResolvedV1, RecoveryBlockerSupersededV1,
+    RecoveryBlockerV1, RecoveryDomainV1,
 };
 pub use resume::{
     JobId, JobIntentEntry, LeaseId, ResumeDisposition, ResumeJobProjection,
@@ -582,8 +607,12 @@ pub use session::{
     DurableAppendExpectation, DurableAppendPermit, DurableAppendReceipt,
     DurableAppendRecordExpectation, DurableAppendRecordReceipt, DurableArtifactRefV1,
     DurableAuditBatch, DurableAuditError, DurableAuditRecord, DurableAuditWriter,
-    DurableEventReconciliation, DurableEventReconciliationExpectation, GroundedContinuityItemV2,
-    JsonlSessionStore, MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES,
+    DurableEventReconciliation, DurableEventReconciliationExpectation,
+    EFFECT_RECONCILIATION_SCHEMA_VERSION, EffectReconciliationOutcomeV1, EffectReconciliationProbe,
+    EffectReconciliationProbeReceiptV1, EffectReconciliationProbeRequestV1,
+    EffectReconciliationProbeStartedEntryV1, EffectReconciliationProjectionV1,
+    EffectReconciliationRequiredEntryV1, EffectReconciliationTerminalEntryV1,
+    GroundedContinuityItemV2, JsonlSessionStore, MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES,
     MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS, MAX_DURABLE_PERMISSION_MATCHES,
     MAX_DURABLE_PERMISSION_REASONS, MAX_DURABLE_PERMISSION_TEXT_BYTES,
     MAX_DURABLE_SUBJECT_LABEL_BYTES, MAX_DURABLE_TOOL_CONTROL_BYTES,
@@ -606,15 +635,16 @@ pub use session::{
     NativeProviderCompactionRequest, ObjectiveAuthorityRefV1,
     PROVIDER_CONTINUATION_PROJECTION_SCHEMA_VERSION, PROVIDER_CONTINUATION_SCHEMA_VERSION,
     PROVIDER_CONTINUATION_SESSION_KEY_SLOT_ID, PROVIDER_PHYSICAL_ATTEMPT_PROJECTION_SCHEMA_VERSION,
-    PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, PortableSemanticCompactionOutcome,
-    PortableSemanticCompactionPreflight, PortableSemanticCompactionRequest,
-    PortableTargetRequestMaterial, ProcessStreamCaptureConfigV1, ProjectedToolOutput,
-    ProtectedCompactionEventRef, ProviderArtifactComposition, ProviderCompactionArtifactRef,
-    ProviderContinuationActivationEvaluator, ProviderContinuationActivationGate,
-    ProviderContinuationActivationState, ProviderContinuationAfterInputTokenCount,
-    ProviderContinuationArtifactId, ProviderContinuationBeforeInputTokenCount,
-    ProviderContinuationCandidate, ProviderContinuationCandidateId,
-    ProviderContinuationCandidateInvalidatedEntry, ProviderContinuationCandidateInvalidationBasis,
+    PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+    PortableSemanticCompactionOutcome, PortableSemanticCompactionPreflight,
+    PortableSemanticCompactionRequest, PortableTargetRequestMaterial, ProcessStreamCaptureConfigV1,
+    ProjectedToolOutput, ProtectedCompactionEventRef, ProviderArtifactComposition,
+    ProviderCompactionArtifactRef, ProviderContinuationActivationEvaluator,
+    ProviderContinuationActivationGate, ProviderContinuationActivationState,
+    ProviderContinuationAfterInputTokenCount, ProviderContinuationArtifactId,
+    ProviderContinuationBeforeInputTokenCount, ProviderContinuationCandidate,
+    ProviderContinuationCandidateId, ProviderContinuationCandidateInvalidatedEntry,
+    ProviderContinuationCandidateInvalidationBasis,
     ProviderContinuationCandidateInvalidationCoordinator,
     ProviderContinuationCandidateInvalidationPersistence,
     ProviderContinuationCandidateInvalidationReason,
@@ -644,8 +674,19 @@ pub use session::{
     ProviderPhysicalAttemptProjection, ProviderPhysicalAttemptPurpose,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptState,
     ProviderPhysicalAttemptTerminalEntry, ProviderRetentionPolicyV1, ProviderToolCallClosureRef,
-    ProviderToolResultMessageV1, RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,
-    RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION, RecoverableToolOutputShrinkCandidateV1,
+    ProviderToolResultMessageV1, ProviderTurnPartialOutputDiscardedEntryV1,
+    ProviderTurnRecoveryEvidenceV1, ProviderTurnRecoveryExhaustedEntry,
+    ProviderTurnRecoveryPolicyV1, ProviderTurnRecoveryProjection, ProviderTurnRecoveryRetryKindV1,
+    ProviderTurnRecoveryScheduledEntry, ProviderTurnRecoveryStartedEntry,
+    ProviderTurnRecoveryTerminalDispositionV1, ProviderTurnRecoveryTerminalError,
+    ProviderTurnRequestMaterialAvailabilityV1, ProviderTurnTransportFallbackSelectedEntryV1,
+    PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1, PublicEventOutboxProjectionV1,
+    PublicEventOutboxRecorder, PublicProviderTurnPartialOutputDiscardedViewV1,
+    PublicProviderTurnRecoveryActionV1, PublicProviderTurnRecoveryPhaseV1,
+    PublicProviderTurnRecoveryViewV1, RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,
+    RECOVERY_BLOCKER_PROJECTION_SCHEMA_VERSION, RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION,
+    ReconciliationProbeKindV1, RecoverableToolOutputShrinkCandidateV1, RecoveryBlockerProjectionV1,
+    RecoveryBlockerResolutionStateV1, RecoveryBudgetProjectionV1, RecoveryDispositionV1,
     ResolvedCompactionSidecar, RetainedTurnGroupV3, RuntimeContextSnapshotStateV2,
     RuntimeContextSnapshotV2, SESSION_ANCHOR_V1_SCHEMA_VERSION,
     SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, SemanticCompactionGeneration, Session,
@@ -709,8 +750,9 @@ pub use skill::{
 };
 pub use sse::SseFrameBuffer;
 pub use task::{
-    AgentRole, DEFAULT_TASK_MAX_PLAN_VERSIONS, MAX_TASK_PARTICIPANT_AUTO_RETRIES,
-    MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
+    AgentRole, ContinuationContractV1, DEFAULT_TASK_MAX_PLAN_VERSIONS, ExecutionSegmentV1,
+    MAX_TASK_PARTICIPANT_AUTO_RETRIES, MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS,
+    SegmentCheckpointPolicyV1, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
     TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS,
     TASK_PARTICIPANT_RESULT_ARTIFACT_MAX_ITEMS, TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS,
     TASK_PARTICIPANT_RESULT_REF_MAX_CHARS, TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS,
@@ -719,28 +761,36 @@ pub use task::{
     TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD, TaskAdmissionAttemptV1, TaskAdmissionObservationV1,
     TaskAdmissionOutcomeV1, TaskApprovalRouteBinding, TaskBlockerActionV1, TaskBlockerReasonCodeV1,
     TaskBlockerV1, TaskCapabilityV2, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskExecutionPhaseV1, TaskFinalAnswerCommittedEntry,
-    TaskGraphProjection, TaskGraphStepProjection, TaskGuidanceAppliedEntry,
-    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskGuidanceMaterializedEntry, TaskId,
-    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
-    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
-    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPauseReasonV1,
-    TaskPauseRequest, TaskPlanContractSetCommittedV2, TaskPlanEntry, TaskPlanProjection,
-    TaskPlanStatus, TaskPlanUpdateCommitV2, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
-    TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue, TaskReadyQueueOptions,
-    TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
-    TaskRunProjection, TaskRunStatus, TaskRunTargetSelectedEntry, TaskRuntimeLeaseBindingV1,
-    TaskStateProjection, TaskStepAttemptId, TaskStepCheckpointV2, TaskStepContractBoundEntryV2,
-    TaskStepContractV2, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
-    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
-    WorkspaceAdmissionStateV1, bounded_task_participant_summary, child_session_ref,
-    normalize_task_agent_display_name, stale_task_approval_routes_for_restore,
-    task_final_message_id, task_guidance_applied_entry, task_guidance_apply_result_content,
-    task_guidance_apply_tool_spec, task_participant_attempt_id, task_participant_child_task_id,
-    task_participant_logical_run_id, task_participant_session_ref, task_plan_update_commit_v2,
-    task_plan_update_entry, task_plan_update_result_content, task_plan_update_tool_spec,
-    task_planner_logical_run_id, task_semantic_title, validate_task_plan_graph_steps,
-    validate_task_step_capability_admission,
+    TaskChildSessionStatus, TaskExecutionBindingV1, TaskExecutionPhaseV1, TaskExecutionSegmentV1,
+    TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskGraphStepProjection,
+    TaskGuidanceAppliedEntry, TaskGuidanceApplyReason, TaskGuidanceAssessmentContext,
+    TaskGuidanceMaterializedEntry, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
+    TaskParticipantResultEntry, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
+    TaskPauseReasonV1, TaskPauseRequest, TaskPlanContractSetCommittedV2, TaskPlanEntry,
+    TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateCommitV2, TaskPlanUpdateContext,
+    TaskPlannerWorktreeAvailability, TaskReadyDeferredReason, TaskReadyDeferredStep,
+    TaskReadyQueue, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunProjection, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskRuntimeLeaseBindingV1, TaskStateProjection, TaskStepAttemptId,
+    TaskStepCheckpointV2, TaskStepContractBoundEntryV2, TaskStepContractV2, TaskStepEntry,
+    TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus,
+    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, WorkspaceAdmissionStateV1,
+    bounded_task_participant_summary, child_session_ref, derive_task_execution_segments,
+    materialize_execution_segments, normalize_task_agent_display_name,
+    stale_task_approval_routes_for_restore, task_final_message_id, task_guidance_applied_entry,
+    task_guidance_apply_result_content, task_guidance_apply_tool_spec, task_participant_attempt_id,
+    task_participant_child_task_id, task_participant_logical_run_id, task_participant_session_ref,
+    task_plan_update_commit_v2, task_plan_update_entry, task_plan_update_result_content,
+    task_plan_update_tool_spec, task_planner_logical_run_id, task_semantic_title,
+    validate_task_plan_graph_steps, validate_task_step_capability_admission,
+};
+pub use task_checklist::{
+    TASK_CHECKLIST_ITEM_MAX_CHARS, TASK_CHECKLIST_MAX_ITEMS, TASK_CHECKLIST_MIN_ITEMS,
+    TaskChecklistItemStatusV1, TaskChecklistItemV1, TaskChecklistUpdateContextV1,
+    TaskChecklistUpdatedV1, UPDATE_TASK_CHECKLIST_TOOL_NAME, task_checklist_completed_update,
+    task_checklist_from_plan_steps, task_checklist_started_update, task_checklist_update_entry,
+    update_task_checklist_tool_spec,
 };
 pub use task_handoff::{
     CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
@@ -768,7 +818,8 @@ pub use task_orchestrator::{
     SequentialTaskStepOutput, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
     TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchFuture,
     TaskChildSessionBatchPreparation, TaskChildSessionRunOutput, TaskChildSessionRunRequest,
-    TaskChildSessionRunner, TaskIntegrationProposal, TaskIntegrationRunOutput,
+    TaskChildSessionRunner, TaskDirectExecutionSessionRunOutput,
+    TaskDirectExecutionSessionRunRequest, TaskIntegrationProposal, TaskIntegrationRunOutput,
     TaskIntegrationRunRequest, TaskParticipantRetryError, TaskParticipantRetryRouteDriftError,
     TaskPlannerSessionAwaitingUserInput, TaskPlannerSessionResumeRequest,
     TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
@@ -801,10 +852,10 @@ pub use tool::{
     ToolMutationTracking, ToolPreparation, ToolPreparationBinding, ToolPreparationDraft,
     ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewFileSnapshot,
     ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink, ToolReceiptMetadata,
-    ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolRuntimeContract, ToolSpec,
-    ToolSubject, ToolSubjectKind, ToolSubjectScope, WeakToolRegistry,
-    declared_tool_permission_plan,
+    ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry, ToolRegistryScope,
+    ToolReplayClassV1, ToolReplayContractV1, ToolResult, ToolResultMeta, ToolResultStatus,
+    ToolResultSummary, ToolRuntimeContract, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope, WeakToolRegistry, declared_tool_permission_plan,
 };
 pub use user_input::{
     AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION, AgentUserInputRouteEntryV1,

@@ -884,6 +884,178 @@ pub struct TaskStepSpec {
     pub isolation: Option<TaskIsolationMode>,
 }
 
+/// Runtime-derived contiguous execution unit; each member retains its own durable lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskExecutionSegmentV1 {
+    pub step_ids: Vec<TaskStepId>,
+    pub role: AgentRole,
+    pub mode: TaskStepMode,
+    pub isolation: TaskIsolationMode,
+}
+
+/// Continuation boundary attached to one materialized execution segment.
+///
+/// A segment only joins a direct dependency chain. It never turns parallel work into a shared
+/// transcript and never expands the authority granted to an individual step.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationContractV1 {
+    ExactLinearSameAuthority,
+}
+
+/// Checkpoint cadence required before a segment may continue after interruption.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentCheckpointPolicyV1 {
+    EveryProviderTurn,
+}
+
+/// RFC-0069 durable execution-segment receipt carried by Task materialization.
+///
+/// Individual steps retain their own lifecycle and completion proof. This record only proves
+/// which exact linear steps may reuse a participant/provider continuity boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ExecutionSegmentV1 {
+    pub segment_id: String,
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub ordered_step_ids: Vec<TaskStepId>,
+    pub role: AgentRole,
+    pub authority_fingerprint: String,
+    pub isolation: TaskIsolationMode,
+    pub continuation_contract: ContinuationContractV1,
+    pub checkpoint_policy: SegmentCheckpointPolicyV1,
+}
+
+/// Materializes the exact segment receipts for an executable candidate.
+///
+/// The authority fingerprint covers role, effective mode, isolation and the resolved V2
+/// capability set. This makes a candidate produced under a different task contract unable to
+/// silently reuse an earlier participant transcript.
+#[must_use]
+pub fn materialize_execution_segments(
+    candidate: &crate::ExecutablePlanCandidateV1,
+) -> Vec<ExecutionSegmentV1> {
+    let mut segments = Vec::<ExecutionSegmentV1>::new();
+    for step in &candidate.task_plan.steps {
+        let mode = step.effective_mode();
+        let isolation = step.effective_isolation();
+        let authority_fingerprint = execution_segment_authority_fingerprint(candidate, step);
+        let joins_previous = segments.last().is_some_and(|segment| {
+            let Some(previous) = segment.ordered_step_ids.last() else {
+                return false;
+            };
+            step.depends_on.as_slice() == std::slice::from_ref(previous)
+                && segment.role == step.role
+                && segment.isolation == isolation
+                && segment.authority_fingerprint == authority_fingerprint
+        });
+        if joins_previous {
+            if let Some(segment) = segments.last_mut() {
+                segment.ordered_step_ids.push(step.step_id.clone());
+            }
+            continue;
+        }
+        let plan_version = candidate.task_plan.plan_version.to_string();
+        let segment_id = format!(
+            "segment-{}",
+            &task_domain_hash(
+                "sigil-execution-segment-v1",
+                &[
+                    candidate.task_id.as_str(),
+                    &plan_version,
+                    step.step_id.as_str(),
+                    step.role.as_str(),
+                    mode.as_str(),
+                    isolation.as_str(),
+                    &authority_fingerprint,
+                ],
+            )[..24]
+        );
+        segments.push(ExecutionSegmentV1 {
+            segment_id,
+            task_id: candidate.task_id.clone(),
+            plan_version: candidate.task_plan.plan_version,
+            ordered_step_ids: vec![step.step_id.clone()],
+            role: step.role,
+            authority_fingerprint,
+            isolation,
+            continuation_contract: ContinuationContractV1::ExactLinearSameAuthority,
+            checkpoint_policy: SegmentCheckpointPolicyV1::EveryProviderTurn,
+        });
+    }
+    segments
+}
+
+fn execution_segment_authority_fingerprint(
+    candidate: &crate::ExecutablePlanCandidateV1,
+    step: &TaskStepSpec,
+) -> String {
+    let mut capabilities = candidate
+        .step_contracts
+        .iter()
+        .find(|binding| binding.step_id == step.step_id)
+        .map(|binding| {
+            binding
+                .contract
+                .required_capabilities
+                .iter()
+                .map(|capability| capability.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    capabilities.sort_unstable();
+    format!(
+        "sha256:{}",
+        task_domain_hash(
+            "sigil-execution-segment-authority-v1",
+            &[
+                step.role.as_str(),
+                step.effective_mode().as_str(),
+                step.effective_isolation().as_str(),
+                &capabilities.join(","),
+            ],
+        )
+    )
+}
+
+/// Groups only exact linear neighbours with identical execution contracts.
+#[must_use]
+pub fn derive_task_execution_segments(steps: &[TaskStepSpec]) -> Vec<TaskExecutionSegmentV1> {
+    let mut segments = Vec::new();
+    for step in steps {
+        let mode = step.mode.unwrap_or(TaskStepMode::Read);
+        let isolation = step
+            .isolation
+            .unwrap_or_else(|| TaskIsolationMode::default_for_mode(mode));
+        let joins_previous = segments
+            .last()
+            .is_some_and(|segment: &TaskExecutionSegmentV1| {
+                let Some(previous) = segment.step_ids.last() else {
+                    return false;
+                };
+                step.depends_on.as_slice() == std::slice::from_ref(previous)
+                    && segment.role == step.role
+                    && segment.mode == mode
+                    && segment.isolation == isolation
+            });
+        if joins_previous {
+            if let Some(segment) = segments.last_mut() {
+                segment.step_ids.push(step.step_id.clone());
+            }
+        } else {
+            segments.push(TaskExecutionSegmentV1 {
+                step_ids: vec![step.step_id.clone()],
+                role: step.role,
+                mode,
+                isolation,
+            });
+        }
+    }
+    segments
+}
+
 /// Capability a task step must possess before a participant may be launched.
 ///
 /// These values describe semantic abilities, not concrete tool names. The runtime resolves them
@@ -2177,13 +2349,36 @@ fn task_run_target_selection_id(task_id: &TaskId, run_scope_id: &str) -> String 
     )
 }
 
-/// Exact user action that pauses one accepted task-plan incarnation.
+/// Exact execution authority rendered with a Task pause action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum TaskExecutionBindingV1 {
+    /// One accepted multi-step TaskPlan generation.
+    Plan { plan_version: u32 },
+    /// One first-class direct-execution admission.
+    Direct { admission_id: String },
+}
+
+impl TaskExecutionBindingV1 {
+    fn validate(&self) -> bool {
+        match self {
+            Self::Plan { plan_version } => *plan_version > 0,
+            Self::Direct { admission_id } => {
+                !admission_id.is_empty()
+                    && admission_id.len() <= 256
+                    && !admission_id.chars().any(char::is_control)
+            }
+        }
+    }
+}
+
+/// Exact user action that pauses one admitted Task execution incarnation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct TaskPauseRequest {
     pub request_id: String,
     pub task_id: TaskId,
-    pub plan_version: u32,
+    pub execution: TaskExecutionBindingV1,
 }
 
 impl TaskPauseRequest {
@@ -2192,7 +2387,21 @@ impl TaskPauseRequest {
         let mut request = Self {
             request_id: String::new(),
             task_id,
-            plan_version,
+            execution: TaskExecutionBindingV1::Plan { plan_version },
+        };
+        request.request_id = request.expected_request_id();
+        request
+    }
+
+    /// Creates a pause request bound to first-class direct-execution authority.
+    #[must_use]
+    pub fn direct(task_id: TaskId, admission_id: impl Into<String>) -> Self {
+        let mut request = Self {
+            request_id: String::new(),
+            task_id,
+            execution: TaskExecutionBindingV1::Direct {
+                admission_id: admission_id.into(),
+            },
         };
         request.request_id = request.expected_request_id();
         request
@@ -2202,7 +2411,7 @@ impl TaskPauseRequest {
     pub fn expected_request_id(&self) -> String {
         let seed = serde_json::json!({
             "task_id": self.task_id,
-            "plan_version": self.plan_version,
+            "execution": self.execution,
         })
         .to_string();
         format!("task-pause-{}", crate::sha256_hex(seed.as_bytes()))
@@ -2210,7 +2419,7 @@ impl TaskPauseRequest {
 
     #[must_use]
     pub fn has_exact_identity(&self) -> bool {
-        self.plan_version > 0 && self.request_id == self.expected_request_id()
+        self.execution.validate() && self.request_id == self.expected_request_id()
     }
 }
 
@@ -2244,7 +2453,12 @@ pub struct TaskStepEntry {
     pub reason: Option<String>,
 }
 
-/// Append-only lifecycle record for an isolated task participant transcript.
+/// Append-only lifecycle record for a task participant transcript.
+///
+/// A step participant normally owns the deterministic child-session reference derived from its
+/// own attempt id. A later step in a runtime-derived execution segment may instead reference the
+/// immediately preceding completed step's transcript. The individual attempt identity and all
+/// task-step lifecycle records remain distinct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TaskParticipantAttemptEntry {
@@ -2307,11 +2521,98 @@ impl TaskParticipantAttemptEntry {
             bail!("task participant attempt id conflicts with its durable identity facts");
         }
         let expected_ref = task_participant_session_ref(&self.task_id, &self.attempt_id)?;
-        if self.child_session_ref != expected_ref {
+        if self.purpose != TaskParticipantPurpose::Step && self.child_session_ref != expected_ref {
             bail!("task participant attempt child session ref is not deterministic");
         }
         Ok(())
     }
+}
+
+/// Returns the child transcript that a step may continue as part of a runtime-derived execution
+/// segment.
+///
+/// This deliberately accepts only exact linear successors with matching role, mode, isolation,
+/// and committed capability authority. Isolated children are excluded because their integration
+/// boundary is independent from the model transcript.
+pub(crate) fn execution_segment_continuation_session_ref(
+    task: &TaskRunProjection,
+    plan_version: u32,
+    step: &TaskStepSpec,
+) -> Option<SessionRef> {
+    let plan = task.plans.get(&plan_version)?;
+    let predecessor_id = if let Some(segments) = task.execution_segments.get(&plan_version) {
+        let segment = segments
+            .iter()
+            .find(|segment| segment.ordered_step_ids.contains(&step.step_id))?;
+        let position = segment
+            .ordered_step_ids
+            .iter()
+            .position(|step_id| step_id == &step.step_id)?;
+        segment
+            .ordered_step_ids
+            .get(position.checked_sub(1)?)?
+            .clone()
+    } else {
+        // Legacy materialization records did not carry an execution-segment receipt. Their
+        // existing deterministic plan projection remains readable, but new records always take
+        // the authoritative branch above.
+        let segment = derive_task_execution_segments(&plan.steps)
+            .into_iter()
+            .find(|segment| segment.step_ids.contains(&step.step_id))?;
+        let position = segment
+            .step_ids
+            .iter()
+            .position(|step_id| step_id == &step.step_id)?;
+        segment.step_ids.get(position.checked_sub(1)?)?.clone()
+    };
+    let predecessor = plan
+        .steps
+        .iter()
+        .find(|candidate| candidate.step_id == predecessor_id)?;
+    if step.depends_on.as_slice() != std::slice::from_ref(&predecessor_id)
+        || predecessor.role != step.role
+        || predecessor.effective_mode() != step.effective_mode()
+        || predecessor.effective_isolation() != step.effective_isolation()
+        || !matches!(
+            step.effective_isolation(),
+            TaskIsolationMode::SharedReadOnly | TaskIsolationMode::SequentialWorkspaceWrite
+        )
+        || task
+            .steps
+            .get(&(plan_version, predecessor_id.clone()))
+            .is_none_or(|state| state.status != TaskStepStatus::Completed)
+        || !same_segment_invocation_authority(plan, &predecessor_id, &step.step_id)
+    {
+        return None;
+    }
+    task.participant_attempts
+        .values()
+        .filter(|attempt| {
+            attempt.purpose == TaskParticipantPurpose::Step
+                && attempt.plan_version == Some(plan_version)
+                && attempt.step_id.as_ref() == Some(&predecessor_id)
+                && attempt.role == step.role
+                && attempt.status == TaskParticipantAttemptStatus::Completed
+        })
+        .max_by_key(|attempt| attempt.ordinal)
+        .map(|attempt| attempt.child_session_ref.clone())
+}
+
+fn same_segment_invocation_authority(
+    plan: &TaskPlanProjection,
+    predecessor_id: &TaskStepId,
+    successor_id: &TaskStepId,
+) -> bool {
+    if !plan.contract_set_committed_v2 {
+        return plan.step_contracts.is_empty();
+    }
+    let Some(predecessor) = plan.step_contracts.get(predecessor_id) else {
+        return false;
+    };
+    let Some(successor) = plan.step_contracts.get(successor_id) else {
+        return false;
+    };
+    predecessor.required_capabilities == successor.required_capabilities
 }
 
 /// Durable proof that a bounded participant retry is safe for its declared recovery class.
@@ -2815,6 +3116,15 @@ impl TaskStateProjection {
             ControlEntry::PlanExecutionAdoptedV1(adoption) => {
                 self.apply_adoption(adoption);
             }
+            ControlEntry::TaskMaterializationAttemptStartedV1(attempt) => {
+                self.apply_materialization_attempt(attempt);
+            }
+            ControlEntry::TaskMaterializationPreparedV1(materialization) => {
+                self.apply_materialization(materialization);
+            }
+            ControlEntry::TaskMaterializationBlockedV1(blocked) => {
+                self.apply_materialization_blocked(blocked);
+            }
             ControlEntry::TaskAdmissionAttemptedV1(attempt) => {
                 self.apply_admission_attempt(attempt);
             }
@@ -2832,6 +3142,13 @@ impl TaskStateProjection {
                 self.apply_run_target_focus(entry);
             }
             ControlEntry::TaskRun(entry) => self.apply_run(entry),
+            ControlEntry::TaskDirectExecutionAdmittedV1(entry) => {
+                self.apply_direct_execution_admission(entry)
+            }
+            ControlEntry::TaskDirectExecutionAttemptV1(entry) => {
+                self.apply_direct_execution_attempt(entry)
+            }
+            ControlEntry::TaskChecklistUpdatedV1(entry) => self.apply_checklist(entry),
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),
             ControlEntry::TaskStepContractBoundV2(entry) => self.apply_step_contract(entry),
             ControlEntry::TaskPlanContractSetCommittedV2(entry) => {
@@ -2955,6 +3272,10 @@ impl TaskStateProjection {
     fn apply_plan(&mut self, entry: &TaskPlanEntry) {
         self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
+        if task.direct_execution_admission.is_some() {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
         if entry.status != TaskPlanStatus::Superseded {
             task.latest_plan_version = Some(entry.plan_version);
         }
@@ -2993,6 +3314,64 @@ impl TaskStateProjection {
                 reason: entry.reason.clone(),
             },
         );
+    }
+
+    fn apply_direct_execution_admission(&mut self, entry: &crate::TaskDirectExecutionAdmittedV1) {
+        self.record_task_replay(&entry.task_id, false);
+        let task = self.ensure_task(&entry.task_id);
+        if entry.validate().is_err()
+            || !entry.matches_objective(&task.objective)
+            || task.latest_plan_version.is_some()
+        {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        match task.direct_execution_admission.as_ref() {
+            Some(existing) if existing != entry => {
+                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            }
+            Some(_) => {}
+            None => task.direct_execution_admission = Some(entry.clone()),
+        }
+    }
+
+    fn apply_direct_execution_attempt(&mut self, entry: &crate::TaskDirectExecutionAttemptV1) {
+        self.record_task_replay(&entry.task_id, false);
+        let task = self.ensure_task(&entry.task_id);
+        if entry.validate().is_err()
+            || task
+                .direct_execution_admission
+                .as_ref()
+                .is_none_or(|admission| admission.admission_id != entry.admission_id)
+        {
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            return;
+        }
+        match task.direct_execution_attempts.get(&entry.attempt_id) {
+            Some(existing) if existing.status.is_terminal() && existing != entry => {
+                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
+            }
+            _ => {
+                task.direct_execution_attempts
+                    .insert(entry.attempt_id.clone(), entry.clone());
+            }
+        }
+    }
+
+    fn apply_checklist(&mut self, entry: &crate::TaskChecklistUpdatedV1) {
+        self.record_task_replay(&entry.task_id, false);
+        let task = self.ensure_task(&entry.task_id);
+        if entry.validate().is_err() {
+            task.checklist_conflicts = task.checklist_conflicts.saturating_add(1);
+            return;
+        }
+        match task.checklist.as_ref() {
+            Some(existing) if entry.revision < existing.revision => {}
+            Some(existing) if entry.revision == existing.revision && entry != existing => {
+                task.checklist_conflicts = task.checklist_conflicts.saturating_add(1);
+            }
+            _ => task.checklist = Some(entry.clone()),
+        }
     }
 
     fn apply_step_contract(&mut self, entry: &TaskStepContractBoundEntryV2) {
@@ -3064,13 +3443,46 @@ impl TaskStateProjection {
     /// synthesized from the adopted candidate so the Task identity exists atomically with the
     /// accepted plan, step contracts and intent lineage.
     fn apply_adoption(&mut self, adoption: &crate::PlanExecutionAdoptedV1Entry) {
+        self.apply_materialized_candidate(adoption, true);
+    }
+
+    /// Applies RFC-0069 post-approval materialization to an already durable Task shell.
+    fn apply_materialization(&mut self, materialization: &crate::PlanExecutionAdoptedV1Entry) {
+        self.apply_materialized_candidate(materialization, false);
+        self.active_blockers.remove(&materialization.task_id);
+    }
+
+    fn apply_materialization_attempt(
+        &mut self,
+        attempt: &crate::TaskMaterializationAttemptStartedV1,
+    ) {
+        if attempt.validate().is_err() || !self.tasks.contains_key(&attempt.task_id) {
+            return;
+        }
+        self.record_task_replay(&attempt.task_id, false);
+    }
+
+    fn apply_materialization_blocked(&mut self, blocked: &crate::TaskMaterializationBlockedV1) {
+        if blocked.validate().is_err() || !self.tasks.contains_key(&blocked.task_id) {
+            return;
+        }
+        self.record_task_replay(&blocked.task_id, false);
+        self.active_blockers
+            .insert(blocked.task_id.clone(), blocked.blocker.clone());
+    }
+
+    fn apply_materialized_candidate(
+        &mut self,
+        adoption: &crate::PlanExecutionAdoptedV1Entry,
+        allow_create_shell: bool,
+    ) {
         let candidate = &adoption.adopted_candidate;
         let desired_status = if adoption.start_mode == crate::PlanTaskStartMode::CreatePaused {
             TaskRunStatus::Paused
         } else {
             TaskRunStatus::Started
         };
-        if !self.tasks.contains_key(&candidate.task_id) {
+        if allow_create_shell && !self.tasks.contains_key(&candidate.task_id) {
             self.apply_run(&TaskRunEntry {
                 task_id: candidate.task_id.clone(),
                 parent_session_ref: adoption.parent_session_ref.clone(),
@@ -3079,6 +3491,11 @@ impl TaskStateProjection {
                 status: desired_status,
                 reason: Some(format!("adopted from plan {}", adoption.plan_id.as_str())),
             });
+        }
+        if !self.tasks.contains_key(&candidate.task_id) {
+            // A new materialization record may never manufacture a Task shell. Keep replay
+            // fail-closed; the durable approval bundle is the only shell authority.
+            return;
         }
         if self
             .tasks
@@ -3098,7 +3515,16 @@ impl TaskStateProjection {
                 contract_set_sha256: candidate.contract_set_digest.clone(),
             });
         }
-        self.select_current_task(&candidate.task_id);
+        if self.tasks.contains_key(&candidate.task_id) {
+            if let Some(segments) = adoption.execution_segments.as_ref() {
+                self.tasks
+                    .entry(candidate.task_id.clone())
+                    .or_insert_with(|| TaskRunProjection::placeholder(candidate.task_id.clone()))
+                    .execution_segments
+                    .insert(candidate.task_plan.plan_version, segments.clone());
+            }
+            self.select_current_task(&candidate.task_id);
+        }
     }
 
     fn apply_admission_attempt(&mut self, attempt: &TaskAdmissionAttemptV1) {
@@ -3153,6 +3579,7 @@ impl TaskStateProjection {
                     TaskAdmissionOutcomeV1::Blocked(_) => TaskExecutionPhaseV1::Blocked,
                     TaskAdmissionOutcomeV1::Paused(_) => TaskExecutionPhaseV1::Paused,
                 },
+                None if task.direct_execution_admission.is_some() => TaskExecutionPhaseV1::Ready,
                 None => TaskExecutionPhaseV1::Preparing,
             },
         };
@@ -3183,7 +3610,25 @@ impl TaskStateProjection {
     fn apply_participant_attempt(&mut self, entry: &TaskParticipantAttemptEntry) {
         self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
-        if entry.validate_shape().is_err() {
+        let direct_child_session_ref =
+            task_participant_session_ref(&entry.task_id, &entry.attempt_id).ok();
+        let valid_segment_continuation = entry
+            .plan_version
+            .and_then(|plan_version| {
+                entry.step_id.as_ref().and_then(|step_id| {
+                    task.plans
+                        .get(&plan_version)
+                        .and_then(|plan| plan.steps.iter().find(|step| step.step_id == *step_id))
+                        .and_then(|step| {
+                            execution_segment_continuation_session_ref(task, plan_version, step)
+                        })
+                })
+            })
+            .is_some_and(|session_ref| session_ref == entry.child_session_ref);
+        if entry.validate_shape().is_err()
+            || (direct_child_session_ref.as_ref() != Some(&entry.child_session_ref)
+                && !valid_segment_continuation)
+        {
             task.participant_conflicts = task.participant_conflicts.saturating_add(1);
             return;
         }
@@ -3428,6 +3873,13 @@ pub struct TaskRunProjection {
     pub title: Option<String>,
     pub status: TaskRunStatus,
     pub reason: Option<String>,
+    /// First-class authority for running the complete objective without a TaskPlan.
+    pub direct_execution_admission: Option<crate::TaskDirectExecutionAdmittedV1>,
+    /// Durable direct-execution attempts keyed by their stable attempt id.
+    pub direct_execution_attempts: BTreeMap<String, crate::TaskDirectExecutionAttemptV1>,
+    /// Latest display-only checklist. It has no execution or completion authority.
+    pub checklist: Option<crate::TaskChecklistUpdatedV1>,
+    pub checklist_conflicts: usize,
     pub latest_plan_version: Option<u32>,
     pub plans: BTreeMap<u32, TaskPlanProjection>,
     pub steps: BTreeMap<(u32, TaskStepId), TaskStepProjection>,
@@ -3439,6 +3891,8 @@ pub struct TaskRunProjection {
     pub participant_retry_schedules:
         BTreeMap<TaskParticipantAttemptId, TaskParticipantRetryScheduledEntry>,
     pub participant_results: BTreeMap<TaskParticipantAttemptId, TaskParticipantResultEntry>,
+    /// Authoritative RFC-0069 continuity receipts keyed by their accepted task-plan version.
+    pub execution_segments: BTreeMap<u32, Vec<ExecutionSegmentV1>>,
     pub final_answer: Option<TaskFinalAnswerCommittedEntry>,
     pub child_sessions: BTreeMap<(u32, TaskStepId, TaskId), TaskChildSessionEntry>,
     pub child_display_names: BTreeMap<(u32, TaskStepId, TaskId), String>,
@@ -3460,6 +3914,10 @@ impl TaskRunProjection {
             title: entry.title.clone(),
             status: entry.status,
             reason: entry.reason.clone(),
+            direct_execution_admission: None,
+            direct_execution_attempts: BTreeMap::new(),
+            checklist: None,
+            checklist_conflicts: 0,
             latest_plan_version: None,
             plans: BTreeMap::new(),
             steps: BTreeMap::new(),
@@ -3468,6 +3926,7 @@ impl TaskRunProjection {
             participant_attempts: BTreeMap::new(),
             participant_retry_schedules: BTreeMap::new(),
             participant_results: BTreeMap::new(),
+            execution_segments: BTreeMap::new(),
             final_answer: None,
             child_sessions: BTreeMap::new(),
             child_display_names: BTreeMap::new(),
@@ -3491,6 +3950,10 @@ impl TaskRunProjection {
             title: None,
             status: TaskRunStatus::Started,
             reason: None,
+            direct_execution_admission: None,
+            direct_execution_attempts: BTreeMap::new(),
+            checklist: None,
+            checklist_conflicts: 0,
             latest_plan_version: None,
             plans: BTreeMap::new(),
             steps: BTreeMap::new(),
@@ -3499,6 +3962,7 @@ impl TaskRunProjection {
             participant_attempts: BTreeMap::new(),
             participant_retry_schedules: BTreeMap::new(),
             participant_results: BTreeMap::new(),
+            execution_segments: BTreeMap::new(),
             final_answer: None,
             child_sessions: BTreeMap::new(),
             child_display_names: BTreeMap::new(),

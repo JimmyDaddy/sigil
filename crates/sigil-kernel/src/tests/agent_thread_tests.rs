@@ -1919,22 +1919,34 @@ fn invocation_grant_record_is_non_replayable_and_redacts_runtime_authority() -> 
 }
 
 #[test]
-fn invocation_grant_revalidation_fails_closed_on_drift_and_expiry() -> Result<()> {
+fn invocation_grant_revalidation_rebases_workspace_but_fails_on_authority_drift() -> Result<()> {
     let binding = sample_invocation_grant_binding(DelegationAuthority::ModelProactive)?;
     let grant = AgentInvocationGrant::mint(binding.clone(), 1)?;
 
-    grant.validate_invocation(
-        &binding.source,
-        &binding.authority,
-        &binding.root_logical_run_id,
-        &binding.profile_id,
-        binding.role,
-        binding.isolation,
-        &binding.tool_contract_fingerprint,
-        &binding.workspace_snapshot_id,
-        &binding.root_cancellation_scope_id,
-        99,
-    )?;
+    assert_eq!(
+        grant.validate_invocation(
+            &binding.source,
+            &binding.authority,
+            &binding.root_logical_run_id,
+            &binding.profile_id,
+            binding.role,
+            binding.isolation,
+            &binding.tool_contract_fingerprint,
+            &binding.workspace_snapshot_id,
+            &binding.root_cancellation_scope_id,
+            99,
+        )?,
+        crate::AgentInvocationWorkspaceObservationV1::Unchanged
+    );
+    assert!(matches!(
+        grant.validate_tool_effect(
+            &binding.tool_contract_fingerprint,
+            &"sha256:external-workspace-change".to_owned(),
+            &binding.root_cancellation_scope_id,
+            99,
+        )?,
+        crate::AgentInvocationWorkspaceObservationV1::Rebased { .. }
+    ));
     assert!(
         grant
             .validate_tool_effect(

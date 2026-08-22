@@ -216,6 +216,31 @@ pub(super) fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &To
         }
     }
     let ToolResultStatus::Error(error) = &result.status else {
+        // Recovery blockers are closed only by a later typed success receipt from the same tool
+        // generation. A model final answer is never evidence that a stale/conflicted/uncertain
+        // effect was actually resolved.
+        for previous in &mut outcome.tool_errors {
+            if previous.kind.is_recovery_blocker()
+                && previous
+                    .details
+                    .get("tool_name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(result.tool_name.as_str())
+                && previous
+                    .details
+                    .get("active")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true)
+            {
+                let mut details = previous.details.as_object().cloned().unwrap_or_default();
+                details.insert("active".to_owned(), serde_json::Value::Bool(false));
+                details.insert(
+                    "resolved_by_call_id".to_owned(),
+                    serde_json::Value::String(result.call_id.clone()),
+                );
+                previous.details = serde_json::Value::Object(details);
+            }
+        }
         return;
     };
     if error.kind == ToolErrorKind::ApprovalDenied {
@@ -224,7 +249,21 @@ pub(super) fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &To
     if error.kind == ToolErrorKind::Interrupted {
         outcome.interrupted_tool_calls.push(result.call_id.clone());
     }
-    outcome.tool_errors.push(error.clone());
+    let mut error = error.clone();
+    if error.kind.is_recovery_blocker() {
+        let mut details = error.details.as_object().cloned().unwrap_or_default();
+        details.insert("active".to_owned(), serde_json::Value::Bool(true));
+        details.insert(
+            "tool_name".to_owned(),
+            serde_json::Value::String(result.tool_name.clone()),
+        );
+        details.insert(
+            "call_id".to_owned(),
+            serde_json::Value::String(result.call_id.clone()),
+        );
+        error.details = serde_json::Value::Object(details);
+    }
+    outcome.tool_errors.push(error);
 }
 
 pub(super) fn append_invalid_tool_input_result<E>(

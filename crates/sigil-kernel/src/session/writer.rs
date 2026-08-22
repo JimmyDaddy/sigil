@@ -181,6 +181,31 @@ impl SharedSessionCoordinator {
         Ok(Some(events))
     }
 
+    pub(super) fn append_crash_safe_bundle_if_records<F>(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        if pending.len() < 2 {
+            bail!("conditional crash-safe bundle requires at least two events");
+        }
+        let (events, notice) = {
+            let mut writer = self.lock_writer()?;
+            let records = writer.read_records_writer()?;
+            if !should_append(&records)? {
+                return Ok(None);
+            }
+            let (events, _) = writer.append_crash_safe_bundle(pending)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (events, notice)
+        };
+        self.notify(notice);
+        Ok(Some(events))
+    }
+
     pub(super) fn append_events_if_records_at_frontier<F>(
         &self,
         pending: Vec<PendingStoredEvent>,
@@ -562,6 +587,12 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
             | ControlEntry::PlanReviewAttempt(_)
             | ControlEntry::TaskHandoffResolved(_)
             | ControlEntry::TaskCreatedFromPlan(_)
+            | ControlEntry::TaskDirectExecutionAdmittedV1(_)
+            | ControlEntry::TaskDirectExecutionAttemptV1(_)
+            | ControlEntry::TaskChecklistUpdatedV1(_)
+            | ControlEntry::TaskMaterializationAttemptStartedV1(_)
+            | ControlEntry::TaskMaterializationPreparedV1(_)
+            | ControlEntry::TaskMaterializationBlockedV1(_)
             | ControlEntry::TaskContinuationSelected(_)
             | ControlEntry::TaskRunCancellationScopeBound(_)
             | ControlEntry::TaskRunTargetSelected(_)

@@ -110,6 +110,8 @@ fn checkpoint_projection_marks_lifecycle_and_unknown_side_effects_truthfully() -
             workspace_revision: 2,
             reason: WorkspaceMutationDetectionReason::SnapshotChanged,
             unknown_dirty: true,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata: Default::default(),
         })?,
     )?;

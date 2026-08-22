@@ -24,6 +24,21 @@ pub trait TaskChildSessionRunner: Send + Sync {
         }
     }
 
+    /// Runs the complete durable Task objective without manufacturing a TaskPlan or TaskStep.
+    async fn run_direct_execution_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        _request: TaskDirectExecutionSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskDirectExecutionSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        bail!("task child session runner does not support direct Task execution")
+    }
+
     /// Runs the task planner in an isolated transcript and returns its accepted plan artifact.
     async fn run_planner_session<H, A>(
         &self,

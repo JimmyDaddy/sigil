@@ -557,6 +557,8 @@ fn unknown_codegen_workspace_mutation_marks_materialized_layer_drifted() -> Resu
             workspace_revision: 2,
             reason: WorkspaceMutationDetectionReason::ScanUnavailable,
             unknown_dirty: true,
+            changed_paths: Vec::new(),
+            changed_paths_truncated: true,
             metadata: Default::default(),
         },
     )?;

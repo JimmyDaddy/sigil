@@ -22,16 +22,17 @@ use crate::{
     MutationCommitted, MutationPrepared, MutationReconciled, MutationResolution, MutationSubject,
     PublicUserInputRequestV1, ReadinessEvaluatedEntry, ReadinessInput, RequiredAction, RunEvent,
     RunStatus, Session, SessionLogEntry, SessionStreamRecord, StoredEvent,
-    TaskGuidancePromotedEntry, TaskParticipantContext, TaskPlannerContext, TaskSynthesisContext,
-    ToolAccess, ToolCategory, ToolErrorKind, ToolExecutionStatus, ToolRegistry, ToolRegistryScope,
-    ToolResultMeta, ToolSpec, TrustedCheckSpec, UserInputDecisionCommandV1,
-    VerificationAutoRunPolicy, VerificationCheckRunEntry, VerificationCheckRunRequest,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationReceipt, VerificationRecordedEntry,
-    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationEvidence, WorkspaceSnapshotId, WorkspaceTrust,
-    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus,
-    WriteLeaseReleased, WriteLeaseScope, build_integration_plan, build_workspace_snapshot,
-    build_workspace_snapshot_for_event, evaluate_readiness,
+    TaskDirectExecutionContext, TaskGuidancePromotedEntry, TaskParticipantContext,
+    TaskPlannerContext, TaskSynthesisContext, ToolAccess, ToolCategory, ToolErrorKind,
+    ToolExecutionStatus, ToolRegistry, ToolRegistryScope, ToolResultMeta, ToolSpec,
+    TrustedCheckSpec, UserInputDecisionCommandV1, VerificationAutoRunPolicy,
+    VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
+    VerificationPolicy, VerificationReceipt, VerificationRecordedEntry, VerificationScope,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationEvidence, WorkspaceSnapshotId, WorkspaceTrust, WriteIsolationMode,
+    WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope,
+    build_integration_plan, build_workspace_snapshot, build_workspace_snapshot_for_event,
+    evaluate_readiness,
     session::ControlEntry,
     stable_event_uuid, stable_workspace_id,
     task::{
@@ -99,7 +100,8 @@ pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
     TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
     TaskChildSessionBatchFuture, TaskChildSessionBatchPreparation, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskIntegrationProposal, TaskIntegrationRunOutput,
+    TaskChildSessionRunRequest, TaskDirectExecutionSessionRunOutput,
+    TaskDirectExecutionSessionRunRequest, TaskIntegrationProposal, TaskIntegrationRunOutput,
     TaskIntegrationRunRequest, TaskParticipantRetryError, TaskParticipantRetryRouteDriftError,
     TaskPlannerSessionAwaitingUserInput, TaskPlannerSessionResumeRequest,
     TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
@@ -142,10 +144,11 @@ use readiness::{
 #[path = "tests/task_orchestrator_child_session_test_support.rs"]
 mod task_orchestrator_child_session_test_support;
 use scheduler::{
-    DEFAULT_TASK_READ_ONLY_CONCURRENCY, append_cancelled_dependent_steps, cancels_dependent_steps,
-    latest_executable_plan, run_status_from_step_status, runnable_steps_for_continue,
-    step_reason_after_readiness, step_reason_from_output, step_status_after_readiness,
-    step_status_from_outcome, step_terminal_reason, task_status_from_step_status,
+    DEFAULT_TASK_READ_ONLY_CONCURRENCY, append_blocked_dependent_steps,
+    append_cancelled_dependent_steps, cancels_dependent_steps, latest_executable_plan,
+    run_status_from_step_status, runnable_steps_for_continue, step_reason_after_readiness,
+    step_reason_from_output, step_status_after_readiness, step_status_from_outcome,
+    step_terminal_reason, task_status_from_step_status,
 };
 #[cfg(test)]
 use shared::route_id_for_call;

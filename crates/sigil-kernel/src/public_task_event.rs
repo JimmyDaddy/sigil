@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ControlEntry, IntegrationPlan, PlanReviewAttemptStatus, PublicRunEventKind,
-    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskPlanEntry, TaskPlanStatus, TaskRunStatus, TaskStepSpec,
-    TaskStepStatus,
+    TaskChecklistItemV1, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry, TaskPlanStatus,
+    TaskRunStatus, TaskStepSpec, TaskStepStatus,
 };
 
 /// Stable public task phase shared by TUI, HTTP, and desktop adapters.
@@ -79,6 +79,8 @@ pub enum PublicPlanReviewStatus {
     DraftReady,
     CompileFailed,
     CompletedWithoutDraft,
+    Blocked,
+    Paused,
     Failed,
     Interrupted,
     Cancelled,
@@ -93,6 +95,8 @@ impl From<PlanReviewAttemptStatus> for PublicPlanReviewStatus {
             PlanReviewAttemptStatus::DraftReady => Self::DraftReady,
             PlanReviewAttemptStatus::CompileFailed => Self::CompileFailed,
             PlanReviewAttemptStatus::CompletedWithoutDraft => Self::CompletedWithoutDraft,
+            PlanReviewAttemptStatus::Blocked => Self::Blocked,
+            PlanReviewAttemptStatus::Paused => Self::Paused,
             PlanReviewAttemptStatus::Failed => Self::Failed,
             PlanReviewAttemptStatus::Interrupted => Self::Interrupted,
             PlanReviewAttemptStatus::Cancelled => Self::Cancelled,
@@ -227,6 +231,25 @@ impl From<&TaskStepSpec> for PublicTaskPlanStep {
     }
 }
 
+/// Bounded public display-only checklist item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PublicTaskChecklistItemV1 {
+    pub item_id: String,
+    pub text: String,
+    pub status: crate::TaskChecklistItemStatusV1,
+}
+
+impl From<&TaskChecklistItemV1> for PublicTaskChecklistItemV1 {
+    fn from(item: &TaskChecklistItemV1) -> Self {
+        Self {
+            item_id: item.item_id.clone(),
+            text: item.text.clone(),
+            status: item.status,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PublicIntegrationPlanContext {
     task_id: String,
@@ -334,7 +357,45 @@ impl PublicTaskEventProjector {
                 phase: task_run_phase(entry.status),
                 status: task_run_status_label(entry.status).to_owned(),
             }],
-            ControlEntry::TaskPlan(entry) => vec![public_task_plan_updated(entry)],
+            ControlEntry::TaskPlan(entry) => {
+                let mut events = Vec::with_capacity(2);
+                if entry.status == TaskPlanStatus::Accepted {
+                    events.push(PublicRunEventKind::TaskExecutionAdmitted {
+                        task_id: entry.task_id.as_str().to_owned(),
+                        execution: crate::TaskExecutionBindingV1::Plan {
+                            plan_version: entry.plan_version,
+                        },
+                    });
+                }
+                events.push(public_task_plan_updated(entry));
+                events
+            }
+            ControlEntry::TaskDirectExecutionAdmittedV1(entry) => {
+                vec![PublicRunEventKind::TaskExecutionAdmitted {
+                    task_id: entry.task_id.as_str().to_owned(),
+                    execution: crate::TaskExecutionBindingV1::Direct {
+                        admission_id: entry.admission_id.clone(),
+                    },
+                }]
+            }
+            ControlEntry::TaskChecklistUpdatedV1(entry) => {
+                vec![PublicRunEventKind::TaskChecklistUpdated {
+                    task_id: entry.task_id.as_str().to_owned(),
+                    revision: entry.revision,
+                    items: entry
+                        .items
+                        .iter()
+                        .map(PublicTaskChecklistItemV1::from)
+                        .collect(),
+                }]
+            }
+            ControlEntry::TaskDirectExecutionAttemptV1(entry) => {
+                vec![PublicRunEventKind::TaskPhaseChanged {
+                    task_id: Some(entry.task_id.as_str().to_owned()),
+                    phase: PublicTaskPhase::Execution,
+                    status: task_participant_status_label(entry.status).to_owned(),
+                }]
+            }
             ControlEntry::TaskStep(entry) => {
                 let attempt_id = self
                     .step_attempts

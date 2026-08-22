@@ -270,6 +270,12 @@ pub enum ControlEntry {
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
     PlanPermissionGranted(PlanPermissionGrantedEntry),
     TaskCreatedFromPlan(TaskCreatedFromPlanEntry),
+    /// First-class authority for executing a complete Task objective without a TaskPlan.
+    TaskDirectExecutionAdmittedV1(crate::TaskDirectExecutionAdmittedV1),
+    /// Durable lifecycle of one direct execution attempt.
+    TaskDirectExecutionAttemptV1(crate::TaskDirectExecutionAttemptV1),
+    /// Display-only progress checklist; never execution or completion authority.
+    TaskChecklistUpdatedV1(crate::TaskChecklistUpdatedV1),
     /// RFC-0067: durable executable plan candidate prepared before DraftReady.
     ExecutablePlanCandidatePreparedV1(Box<crate::ExecutablePlanCandidateV1>),
     /// RFC-0067: final marker proving a candidate is adoptable; the only DraftReady authority.
@@ -278,6 +284,15 @@ pub enum ControlEntry {
     PlanCompileFailedV1(crate::PlanCompileFailureV1),
     /// RFC-0067: the single atomic authority of one Run command.
     PlanExecutionAdoptedV1(Box<crate::PlanExecutionAdoptedV1Entry>),
+    /// RFC-0069: post-approval materialization of the stable Task shell. The payload retains the
+    /// V1 candidate shape so old sessions can replay while new writers never use adoption as
+    /// their authority.
+    TaskMaterializationPreparedV1(Box<crate::PlanExecutionAdoptedV1Entry>),
+    /// RFC-0069: durable start of one idempotent post-approval materialization generation.
+    TaskMaterializationAttemptStartedV1(crate::TaskMaterializationAttemptStartedV1),
+    /// RFC-0069: materialization is blocked locally while the approved Plan and Task shell stay
+    /// durable and retryable.
+    TaskMaterializationBlockedV1(crate::TaskMaterializationBlockedV1),
     /// RFC-0067: one monotonic admission attempt with its typed outcome.
     TaskAdmissionAttemptedV1(crate::TaskAdmissionAttemptV1),
     TaskHandoffRequested(TaskHandoffRequestedEntry),
@@ -390,6 +405,9 @@ impl ControlEntry {
             Self::ToolArtifactTombstonePlan(entry) => entry.validate(),
             Self::TaskContinuationSelected(entry) => entry.validate_shape(),
             Self::TaskRunTargetSelected(entry) => entry.validate_shape(),
+            Self::TaskDirectExecutionAdmittedV1(entry) => entry.validate(),
+            Self::TaskDirectExecutionAttemptV1(entry) => entry.validate(),
+            Self::TaskChecklistUpdatedV1(entry) => entry.validate(),
             Self::TaskStepContractBoundV2(entry) => entry.validate(),
             Self::TaskPlanContractSetCommittedV2(entry) => entry.validate(),
             Self::TaskStepCheckpointV2(entry) => entry.validate(),
@@ -405,6 +423,9 @@ impl ControlEntry {
             Self::PlanReadyCommittedV1(marker) => marker.validate(),
             Self::PlanCompileFailedV1(failure) => failure.validate(),
             Self::PlanExecutionAdoptedV1(adoption) => adoption.validate(),
+            Self::TaskMaterializationPreparedV1(materialization) => materialization.validate(),
+            Self::TaskMaterializationAttemptStartedV1(attempt) => attempt.validate(),
+            Self::TaskMaterializationBlockedV1(blocked) => blocked.validate(),
             Self::TaskAdmissionAttemptedV1(attempt) => attempt.validate(),
             _ => Ok(()),
         }

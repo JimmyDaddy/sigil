@@ -29,6 +29,8 @@ pub enum ConversationRunTerminalStatusV1 {
     Failed,
     Cancelled,
     Interrupted,
+    /// The run is durably stopped at a recoverable boundary and may be continued later.
+    Paused,
     Blocked,
     AwaitingUserInput,
 }

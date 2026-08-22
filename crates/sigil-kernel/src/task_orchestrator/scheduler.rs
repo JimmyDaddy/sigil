@@ -176,10 +176,70 @@ pub(super) fn plan_steps_all_completed(
 }
 
 pub(super) fn cancels_dependent_steps(status: TaskStepStatus) -> bool {
-    matches!(
-        status,
-        TaskStepStatus::Failed | TaskStepStatus::Cancelled | TaskStepStatus::Interrupted
-    )
+    matches!(status, TaskStepStatus::Cancelled)
+}
+
+/// A failed predecessor is actionable task state, not task cancellation. Keep every downstream
+/// contract durable and explicitly blocked so a repair/replan can resume the same accepted plan.
+pub(super) fn append_blocked_dependent_steps<H>(
+    session: &mut Session,
+    handler: &mut H,
+    task_id: &TaskId,
+    plan_version: u32,
+    plan_steps: &[TaskStepSpec],
+    failed_step_id: &TaskStepId,
+) -> Result<usize>
+where
+    H: EventHandler + Send,
+{
+    let projected = session.task_state_projection();
+    let Some(task) = projected.tasks.get(task_id) else {
+        return Ok(0);
+    };
+    let mut blocked = BTreeSet::<TaskStepId>::new();
+    loop {
+        let mut changed = false;
+        for step in plan_steps {
+            if &step.step_id == failed_step_id || blocked.contains(&step.step_id) {
+                continue;
+            }
+            let depends_on_failed = step
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == failed_step_id || blocked.contains(dependency));
+            if !depends_on_failed
+                || task
+                    .steps
+                    .get(&(plan_version, step.step_id.clone()))
+                    .is_some_and(|projection| projection.status.is_terminal())
+            {
+                continue;
+            }
+            blocked.insert(step.step_id.clone());
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut count = 0;
+    for step_id in blocked {
+        let Some(step) = plan_steps.iter().find(|step| step.step_id == step_id) else {
+            continue;
+        };
+        append_task_step(
+            session,
+            handler,
+            task_id,
+            plan_version,
+            step,
+            TaskStepStatus::Blocked,
+            None,
+            Some(format!("upstream_failed:{}", failed_step_id.as_str())),
+        )?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 pub(super) fn append_cancelled_dependent_steps<H>(
@@ -334,6 +394,9 @@ pub(super) fn step_reason_from_output(
     if status == TaskStepStatus::Blocked && output.final_text.trim().is_empty() {
         return Some("participant ended without a bounded completion report".to_owned());
     }
+    if status == TaskStepStatus::Completed {
+        return None;
+    }
     let error = output.outcome.tool_errors.iter().rev().find(|error| {
         status != TaskStepStatus::Blocked
             || matches!(
@@ -343,17 +406,10 @@ pub(super) fn step_reason_from_output(
                     | ToolErrorKind::PermissionDenied
                     | ToolErrorKind::PathOutsideWorkspace
                     | ToolErrorKind::ExternalDirectoryRequired
-                    | ToolErrorKind::ResourceExhausted
             )
+            || recovery_tool_error_is_active(error)
     })?;
-    if status == TaskStepStatus::Completed {
-        Some(format!(
-            "completed with warnings: recovered tool error: {}",
-            error.message
-        ))
-    } else {
-        Some(error.message.clone())
-    }
+    Some(error.message.clone())
 }
 
 pub(super) fn step_reason_after_readiness(
@@ -413,13 +469,34 @@ pub(super) fn has_blocking_tool_error(outcome: &AgentRunOutcome) -> bool {
                 | ToolErrorKind::PathOutsideWorkspace
                 | ToolErrorKind::ExternalDirectoryRequired
                 | ToolErrorKind::ResourceExhausted
+                | ToolErrorKind::DurabilityRequired
+                | ToolErrorKind::StalePreparedMutation
+                | ToolErrorKind::WorkspaceConflict
+                | ToolErrorKind::EffectReconciliationRequired
         )
     })
+}
+
+pub(super) fn has_active_recovery_tool_blocker(outcome: &AgentRunOutcome) -> bool {
+    outcome
+        .tool_errors
+        .iter()
+        .any(recovery_tool_error_is_active)
+}
+
+fn recovery_tool_error_is_active(error: &crate::ToolError) -> bool {
+    error.kind.is_recovery_blocker()
+        && error
+            .details
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
 }
 
 /// Returns true only when a blocking tool error is still preventing a final answer.  A tool error
 /// from an earlier command is historical evidence once the participant has produced a final
 /// answer; it must not poison the parent task status.
 pub(super) fn unresolved_blocking_tool_error(output: &StepRunOutput) -> bool {
-    output.final_text.trim().is_empty() && has_blocking_tool_error(&output.outcome)
+    has_active_recovery_tool_blocker(&output.outcome)
+        || (output.final_text.trim().is_empty() && has_blocking_tool_error(&output.outcome))
 }

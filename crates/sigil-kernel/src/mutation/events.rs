@@ -6,7 +6,7 @@ use crate::{
     EventId, StoredEvent,
     verification::{
         FileType, ToolEffect, VerificationScope, VerificationScopeHash, WorkspaceId,
-        WorkspaceKnowledge, WorkspaceRevision, WorkspaceSnapshotId,
+        WorkspaceKnowledge, WorkspaceRevision, WorkspaceSnapshotId, WorkspaceSnapshotManifestV1,
     },
 };
 
@@ -107,6 +107,10 @@ pub struct WorkspaceMutationScan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_id: Option<WorkspaceSnapshotId>,
     pub workspace_knowledge: WorkspaceKnowledge,
+    /// Process-local manifest used to derive exact changed paths. Older durable/test fixtures may
+    /// omit it; absence means path attribution is incomplete, not that no path changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<WorkspaceSnapshotManifestV1>,
 }
 
 /// Why an unknown-effect execution produced workspace mutation evidence.
@@ -139,6 +143,10 @@ pub struct WorkspaceMutationDetected {
     pub workspace_revision: WorkspaceRevision,
     pub reason: WorkspaceMutationDetectionReason,
     pub unknown_dirty: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub changed_paths_truncated: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
 }

@@ -297,6 +297,35 @@ fn active_plan_permission_grant(session: &Session) -> Option<PlanPermissionGrant
                     },
                 ))
             }
+            // RFC-0069 materializes the same candidate envelope after the approval/task-shell
+            // bundle. Its scoped-edit choice is therefore the live plan authority for new
+            // writers, including isolated child workspaces whose subjects retain plan-relative
+            // paths.
+            SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(
+                materialization,
+            )) if materialization.permission_grant.is_some() => {
+                let candidate = &materialization.adopted_candidate;
+                let scope = candidate.permission_scope_candidate.as_ref()?;
+                Some((
+                    index,
+                    PlanPermissionGrantedEntry {
+                        plan_id: materialization.plan_id.clone(),
+                        plan_hash: materialization.plan_hash.clone(),
+                        task_id: materialization.task_id.clone(),
+                        workspace_snapshot_id: candidate
+                            .compile_binding
+                            .base_workspace_snapshot_id
+                            .clone(),
+                        permission: materialization.permission_grant?,
+                        scope: PlanApprovalScope {
+                            summary: scope.summary.clone(),
+                            workspace_paths: scope.workspace_paths.clone(),
+                        },
+                        expires: PlanApprovalExpiry::Session,
+                        granted_at_ms: materialization.adopted_at_ms,
+                    },
+                ))
+            }
             _ => None,
         })?;
     if task_has_terminal_status_after(entries, &grant.task_id, grant_index) {

@@ -213,6 +213,10 @@ pub enum PlanReviewAttemptStatus {
     /// changes before it can be adopted.
     CompileFailed,
     CompletedWithoutDraft,
+    /// The review cannot proceed until an owning recovery/action boundary is resolved.
+    Blocked,
+    /// The review is durable but intentionally paused pending a retry or external resource.
+    Paused,
     Failed,
     Interrupted,
     Cancelled,
@@ -227,6 +231,8 @@ impl PlanReviewAttemptStatus {
             Self::DraftReady => "draft_ready",
             Self::CompileFailed => "compile_failed",
             Self::CompletedWithoutDraft => "completed_without_draft",
+            Self::Blocked => "blocked",
+            Self::Paused => "paused",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
             Self::Cancelled => "cancelled",
@@ -236,7 +242,12 @@ impl PlanReviewAttemptStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::CompletedWithoutDraft | Self::Failed | Self::Interrupted | Self::Cancelled
+            Self::CompletedWithoutDraft
+                | Self::Blocked
+                | Self::Paused
+                | Self::Failed
+                | Self::Interrupted
+                | Self::Cancelled
         )
     }
 }
@@ -246,6 +257,8 @@ impl PlanReviewAttemptStatus {
 #[serde(rename_all = "snake_case")]
 pub enum PlanReviewTerminalReason {
     NoDraftAfterRetry,
+    RunBlocked,
+    RunPaused,
     RunFailed,
     RunInterrupted,
     UserCancelled,
@@ -261,6 +274,8 @@ impl PlanReviewTerminalReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NoDraftAfterRetry => "no_draft_after_retry",
+            Self::RunBlocked => "run_blocked",
+            Self::RunPaused => "run_paused",
             Self::RunFailed => "run_failed",
             Self::RunInterrupted => "run_interrupted",
             Self::UserCancelled => "user_cancelled",
@@ -490,18 +505,18 @@ pub struct PlanReviewDraftContext {
 
 /// Stable model-visible contract for one read-only plan review run.
 ///
-/// The run researches with read-only tools and must close with a typed `submit_plan_draft` call;
-/// free-text plans are never guessed into durable artifacts.
+/// The run researches with read-only tools and should prefer a typed `submit_plan_draft` call.
+/// Complete final prose is a bounded review-only fallback and never becomes DAG authority.
 #[must_use]
 pub fn plan_review_system_prompt_contract_material() -> &'static str {
-    "You are running a read-only plan review for the current request. Perform only a small, targeted amount of workspace research with the read-only tools advertised in this request; reuse evidence already present in the session and do not restart broad reconnaissance. Then submit one validated plan draft by calling submit_plan_draft with schema_version 2, a summary, executable steps (each with a stable step_id, title, role, depends_on, mode and isolation), target paths relative to the workspace, and suggested checks. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
+    "You are running a read-only plan review for the current request. Perform only a small, targeted amount of workspace research with the read-only tools advertised in this request; reuse evidence already present in the session and do not restart broad reconnaissance. Prefer submitting one validated plan draft by calling submit_plan_draft with schema_version 2, a summary, readable steps, target paths, and suggested checks. If you cannot reliably call that tool, return the complete readable Plan as final text; the host will preserve it for review without treating its prose as Task DAG authority. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
 }
 
 /// Stable host-owned contract injected when an automatic plan review run finished without a
 /// typed draft; the retry is bounded to one additional turn.
 #[must_use]
 pub fn plan_review_no_draft_retry_contract_material() -> &'static str {
-    "The research phase is complete and this is the single submit-only finalization turn. Do not request more workspace research or repeat reconnaissance. Use the evidence already recorded in the session and call submit_plan_draft with schema_version 2, a summary, at least one executable step, target paths and suggested checks. The only tool available in this turn is submit_plan_draft. If the recorded evidence is truthfully insufficient to produce an executable plan, return one short final explanation, and the host will close the review without creating a task."
+    "The research phase is complete and this is the single plan-finalization turn. Do not request more workspace research or repeat reconnaissance. Prefer calling submit_plan_draft with schema_version 2, a summary, readable steps, target paths and suggested checks. The only tool available in this turn is submit_plan_draft. If you cannot reliably call that tool, return the complete readable Plan as final text instead; the host will preserve it for user review without treating prose as Task DAG authority. Return a short no-plan explanation only when the recorded evidence is truthfully insufficient to propose any Plan."
 }
 
 /// Derives the retry-stable child session reference for one plan review attempt.
@@ -626,7 +641,7 @@ pub fn request_plan_review_tool_spec() -> ToolSpec {
 pub fn submit_plan_draft_tool_spec() -> ToolSpec {
     ToolSpec {
         name: SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
-        description: "Submit the read-only plan review draft for this request. The draft must use schema_version 2 with a summary, at least one executable step (each with a stable step_id, title, role, depends_on, mode and isolation), target paths relative to the workspace, and suggested checks. Optional intents remain unaccepted proposals: when intents are provided, every write-mode step must bind exactly one intent via intent_aliases, and every alias must reference a top-level intent_alias. The host validates the schema, stable ids, paths, checks and intent proposal; the host owns the plan identity, hash, timestamps and the durable artifact. Do not call this tool when the request cannot be expressed as executable steps."
+        description: "Submit the readable plan review draft for this request. Use schema_version 2 with a summary and at least one clear step outline; role, dependency, mode, isolation, intent aliases, target paths, risks and suggested checks are optional execution hints. The host owns plan identity, hash, timestamps and the durable artifact. User approval is independent from Task/DAG/intent compilation; incomplete execution hints may block only the post-approval Task materializer, never submission of an otherwise readable plan."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -754,6 +769,9 @@ Call request_task_planning (when available) when the goal is clear and directly 
 
 Call continue_existing_task (when available) only when the user is semantically resuming,
 finishing, correcting, or following up on the exact current durable Task selected by the host.
+Questions about that Task's status, progress, current activity, interruption, or next step are
+follow-ups and must use continue_existing_task even when the requested outcome is an explanation.
+This exact-Task follow-up rule takes priority over the ordinary explanation rule below.
 The tool has no task-id argument: never use it for an unrelated request or when a new Task or plan
 review is required.
 
@@ -942,6 +960,8 @@ fn legal_same_attempt_transition(
                 | PlanReviewAttemptStatus::DraftReady
                 | PlanReviewAttemptStatus::CompileFailed
                 | PlanReviewAttemptStatus::CompletedWithoutDraft
+                | PlanReviewAttemptStatus::Blocked
+                | PlanReviewAttemptStatus::Paused
                 | PlanReviewAttemptStatus::Failed
                 | PlanReviewAttemptStatus::Interrupted
                 | PlanReviewAttemptStatus::Cancelled,
@@ -950,6 +970,8 @@ fn legal_same_attempt_transition(
             PlanReviewAttemptStatus::Started
                 | PlanReviewAttemptStatus::CompileFailed
                 | PlanReviewAttemptStatus::CompletedWithoutDraft
+                | PlanReviewAttemptStatus::Blocked
+                | PlanReviewAttemptStatus::Paused
                 | PlanReviewAttemptStatus::Failed
                 | PlanReviewAttemptStatus::Interrupted
                 | PlanReviewAttemptStatus::Cancelled,
@@ -958,6 +980,8 @@ fn legal_same_attempt_transition(
             PlanReviewAttemptStatus::DraftReady
                 | PlanReviewAttemptStatus::CompileFailed
                 | PlanReviewAttemptStatus::CompletedWithoutDraft
+                | PlanReviewAttemptStatus::Blocked
+                | PlanReviewAttemptStatus::Paused
                 | PlanReviewAttemptStatus::Failed
                 | PlanReviewAttemptStatus::Interrupted
                 | PlanReviewAttemptStatus::Cancelled,

@@ -294,7 +294,7 @@ impl TaskContinuationSelectedEntry {
 pub fn continue_existing_task_tool_spec() -> ToolSpec {
     ToolSpec {
         name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
-        description: "Continue the exact current resumable durable Task selected by the host when the user's request semantically resumes, finishes, adjusts, or follows up on that Task. The host owns the task id, current status, plan version, permissions, and execution authority; do not use this for an unrelated request or to create a new Task."
+        description: "Continue the exact current resumable durable Task selected by the host when the user's request semantically resumes, finishes, adjusts, or follows up on that Task. A question about that Task's status, progress, interruption, or next step is a follow-up; use apply_current_request_as_guidance so the same executor can address it without losing Task progress. The host owns the task id, current status, optional plan version, permissions, and execution authority; do not use this for an unrelated request or to create a new Task."
             .to_owned(),
         input_schema: json!({
             "type": "object",

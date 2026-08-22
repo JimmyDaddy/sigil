@@ -16,9 +16,9 @@ use crate::{
     AgentRunInput, AgentRunOptions, CompactionConfig, CompletionRequest, EventHandler,
     FinalizedHostedTurn, HostedCitationCandidate, HostedFinalizationContext, HostedSourceCandidate,
     HostedToolLimits, HostedToolRequest, HostedToolSupport, HostedToolTerminalStatus,
-    InteractionMode, MemoryConfig, NoopEventHandler, PermissionConfig, Provider,
-    ProviderCapabilities, ReasoningStreamSupport, RunCancellationOwner, RunEvent, SecretString,
-    Session, ToolRegistry,
+    InteractionMode, JsonlSessionStore, MemoryConfig, ModelMessage, NoopEventHandler,
+    PermissionConfig, Provider, ProviderCapabilities, ReasoningStreamSupport, RunCancellationOwner,
+    RunEvent, SecretString, Session, ToolRegistry,
 };
 
 fn hosted_request() -> HostedToolRequest {
@@ -315,6 +315,73 @@ impl Provider for RawHostedProvider {
     }
 }
 
+struct RecoveringReadOnlyHostedProvider {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for RecoveringReadOnlyHostedProvider {
+    fn name(&self) -> &str {
+        "recovering-read-only-hosted"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        RawHostedProvider.capabilities()
+    }
+
+    fn hosted_web_search_capability(&self, model_name: &str) -> HostedWebSearchCapability {
+        RawHostedProvider.hosted_web_search_capability(model_name)
+    }
+
+    fn observe_failure(
+        &self,
+        _error: &anyhow::Error,
+        wire_state: crate::ProviderWireStateV1,
+    ) -> crate::ProviderFailureObservationV1 {
+        crate::ProviderFailureObservationV1::transport_interrupted(wire_state)
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        assert_eq!(request.hosted_tools, vec![hosted_request()]);
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::HostedToolStarted {
+                    authorization_id: "authorization-1".to_owned(),
+                    invocation_id: "invocation-failed".to_owned(),
+                    kind: HostedToolKind::WebSearch,
+                }),
+                Ok(ProviderChunk::TextDelta(
+                    "discarded private partial".to_owned(),
+                )),
+                Err(anyhow::anyhow!("response body interrupted")),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::HostedToolStarted {
+                authorization_id: "authorization-1".to_owned(),
+                invocation_id: "invocation-recovered".to_owned(),
+                kind: HostedToolKind::WebSearch,
+            }),
+            Ok(ProviderChunk::TextDelta("raw token=private".to_owned())),
+            Ok(ProviderChunk::HostedEvidence {
+                authorization_id: "authorization-1".to_owned(),
+                invocation_id: "invocation-recovered".to_owned(),
+                kind: HostedToolKind::WebSearch,
+                evidence: HostedEvidence::Source(HostedSourceCandidate::new(
+                    "raw-source",
+                    "https://example.com/?token=private",
+                    Some("raw title".to_owned()),
+                )),
+            }),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
 struct VisibilityCheckingProcessor {
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -400,6 +467,92 @@ async fn hosted_tool_agent_emits_and_persists_only_finalized_text() {
     assert!(!durable.contains("private"));
     assert!(!durable.contains("raw title"));
     assert!(!durable.contains("raw-source"));
+}
+
+#[tokio::test]
+async fn read_only_hosted_partial_stream_retries_with_exact_process_local_request() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut handler = RecordingHandler {
+        events: Arc::clone(&events),
+    };
+    let mut session = Session::new("recovering-read-only-hosted", "model").with_store(
+        JsonlSessionStore::new(workspace.path().join("session.jsonl"))
+            .expect("durable test session store"),
+    );
+    let recovery_policy = crate::ProviderTurnRecoveryPolicyV1 {
+        max_transport_retries: 1,
+        max_partial_output_retries: 1,
+        initial_delay_ms: 0,
+        max_delay_ms: 0,
+        jitter_ratio_millionths: 0,
+        max_cumulative_delay_ms: 0,
+    };
+    let agent = Agent::new(
+        RecoveringReadOnlyHostedProvider {
+            attempts: Arc::clone(&attempts),
+        },
+        ToolRegistry::new(),
+    )
+    .with_provider_turn_recovery_policy(recovery_policy)
+    .expect("test recovery policy should be valid");
+    let transient_overlay = ModelMessage::system(
+        "process-local task execution overlay https://example.com/?token=private",
+    );
+
+    let output_result = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::transient("search", vec![transient_overlay]).with_hosted_tools(
+                vec![hosted_request()],
+                Arc::new(VisibilityCheckingProcessor {
+                    events: Arc::clone(&events),
+                }),
+            ),
+            hosted_options(workspace.path()),
+            &mut handler,
+        )
+        .await;
+    let output = match output_result {
+        Ok(output) => output,
+        Err(error) => panic!(
+            "a read-only hosted stream interruption should retry in the same logical turn: {error:#}; recovery={:?}",
+            session
+                .provider_turn_recovery_projection()
+                .expect("provider recovery should project")
+        ),
+    };
+
+    assert_eq!(output.result.final_text, "safe answer");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        events.lock().expect("event lock").as_slice(),
+        ["safe reasoning", "safe answer"]
+    );
+    let attempts_projection = session
+        .provider_physical_attempt_projection()
+        .expect("provider attempts should project");
+    let projected_attempts = attempts_projection.attempts();
+    let first = projected_attempts
+        .first()
+        .expect("failed physical attempt should be recorded");
+    assert_eq!(
+        first
+            .entry
+            .request_envelope
+            .as_ref()
+            .expect("request envelope")
+            .reconstruction_disposition,
+        crate::ProviderRequestReconstructionDispositionV1::ProcessLocalOverlayRequired
+    );
+    assert!(
+        session
+            .provider_turn_recovery_projection()
+            .expect("provider recovery should project")
+            .terminal_for_logical_run_id(&first.entry.logical_run_id)
+            .is_none()
+    );
 }
 
 fn hosted_options(workspace_root: &std::path::Path) -> AgentRunOptions {

@@ -1,5 +1,8 @@
 use super::*;
-use crate::{ResolvedModelRoute, TaskGuidancePromotedEntry};
+use crate::{
+    RecoveryBlockerRaisedV1, RecoveryBlockerResolutionStartedV1, RecoveryBlockerResolvedV1,
+    RecoveryBlockerSupersededV1, ResolvedModelRoute, TaskGuidancePromotedEntry,
+};
 
 /// In-memory session state backed by an optional append-only JSONL store.
 #[derive(Debug)]
@@ -1515,6 +1518,58 @@ impl Session {
         Ok(event)
     }
 
+    /// Persists a recovery blocker before any surface is told that recovery is required.
+    pub fn append_recovery_blocker_raised(
+        &mut self,
+        entry: RecoveryBlockerRaisedV1,
+    ) -> Result<Option<StoredEvent>> {
+        entry.validate()?;
+        self.append_durable_event(
+            DurableEventType::RecoveryBlockerRaised,
+            EventClass::Critical,
+            serde_json::to_value(entry)?,
+        )
+    }
+
+    /// Persists an auditable start of one recovery action.
+    pub fn append_recovery_blocker_resolution_started(
+        &mut self,
+        entry: RecoveryBlockerResolutionStartedV1,
+    ) -> Result<Option<StoredEvent>> {
+        entry.validate()?;
+        self.append_durable_event(
+            DurableEventType::RecoveryBlockerResolutionStarted,
+            EventClass::Critical,
+            serde_json::to_value(entry)?,
+        )
+    }
+
+    /// Persists the terminal evidence for a recovered blocker.
+    pub fn append_recovery_blocker_resolved(
+        &mut self,
+        entry: RecoveryBlockerResolvedV1,
+    ) -> Result<Option<StoredEvent>> {
+        entry.validate()?;
+        self.append_durable_event(
+            DurableEventType::RecoveryBlockerResolved,
+            EventClass::Critical,
+            serde_json::to_value(entry)?,
+        )
+    }
+
+    /// Persists replacement of a blocker by a narrower durable blocker.
+    pub fn append_recovery_blocker_superseded(
+        &mut self,
+        entry: RecoveryBlockerSupersededV1,
+    ) -> Result<Option<StoredEvent>> {
+        entry.validate()?;
+        self.append_durable_event(
+            DurableEventType::RecoveryBlockerSuperseded,
+            EventClass::Critical,
+            serde_json::to_value(entry)?,
+        )
+    }
+
     pub(crate) fn append_durable_events_with_controls(
         &mut self,
         durable_events: Vec<(DurableEventType, EventClass, serde_json::Value)>,
@@ -1890,6 +1945,19 @@ impl Session {
         crate::ProviderPhysicalAttemptProjection::from_records(&records)
     }
 
+    /// Rebuilds provider-turn recovery authority from the durable stream without dispatching a
+    /// replacement request. Runtime restart recovery must claim this projection before I/O.
+    pub fn provider_turn_recovery_projection(
+        &self,
+    ) -> Result<crate::ProviderTurnRecoveryProjection> {
+        let store = self
+            .store
+            .as_ref()
+            .context("provider-turn recovery projection requires a durable session store")?;
+        let records = store.read_event_records_writer()?;
+        crate::ProviderTurnRecoveryProjection::from_records(&records)
+    }
+
     /// Reads native-continuation observations and inactive candidates from the durable stream.
     ///
     /// This query never activates a candidate, creates a provider request, or performs cleanup.
@@ -2011,6 +2079,34 @@ impl Session {
             apply_plan_artifact_projection_record(&mut projection, &mut cursor, &record)?;
         }
         Ok(Some(projection))
+    }
+
+    /// Rebuilds the recovery-blocker lifecycle directly from the critical durable event stream.
+    ///
+    /// Invalid lifecycle order, duplicate evidence, or a malformed critical payload is an error;
+    /// callers must not infer recovery state from presentation logs after that point.
+    pub fn try_recovery_blocker_projection_from_durable(
+        &self,
+    ) -> Result<Option<RecoveryBlockerProjectionV1>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        RecoveryBlockerProjectionV1::from_records(&records).map(Some)
+    }
+
+    /// Rebuilds every uncertain-effect reconciliation requirement from durable direct events.
+    ///
+    /// An active requirement is an explicit no-replay fence until a matching terminal probe
+    /// receipt is persisted.
+    pub fn try_effect_reconciliation_projection_from_durable(
+        &self,
+    ) -> Result<Option<EffectReconciliationProjectionV1>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        EffectReconciliationProjectionV1::from_records(&records).map(Some)
     }
 
     /// Returns a durable task projection reconstructed from append-only control entries.

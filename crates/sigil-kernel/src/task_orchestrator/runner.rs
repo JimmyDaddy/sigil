@@ -633,60 +633,107 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        let has_accepted_plan = admit_or_validate_task_run(session, handler, &request)?;
-        if !has_accepted_plan {
+        let admission = admit_or_validate_task_run(session, handler, &request)?;
+        if let TaskExecutionAdmissionState::Direct(direct) = admission {
+            return self
+                .run_direct_execution(
+                    session,
+                    request,
+                    direct,
+                    executor_options,
+                    None,
+                    handler,
+                    approval_handler,
+                )
+                .await;
+        }
+        let mut fallback_direct_execution = None;
+        if admission == TaskExecutionAdmissionState::NeedsPlanning {
             let worktree_availability = self
                 .child_runner
                 .planner_worktree_availability(&subagent_write_options)
                 .await;
+            let mut resumed_planner = session
+                .task_state_projection()
+                .tasks
+                .get(&request.task_id)
+                .map(started_planner_participant_recovery)
+                .transpose()?
+                .flatten();
             loop {
-                let projection = session.task_state_projection();
-                let task = projection
-                    .tasks
-                    .get(&request.task_id)
-                    .ok_or_else(|| anyhow!("task disappeared before planner retry admission"))?;
-                if !await_pending_participant_retry(
-                    task,
-                    TaskParticipantPurpose::Planner,
-                    None,
-                    self.cancellation.as_ref(),
-                )
-                .await
-                {
-                    append_task_run(
+                let (attempt, planner_input) = if let Some(attempt) = resumed_planner.take() {
+                    // The child session still contains the exact durable planner prompt. A
+                    // recovery-only run may claim only that planner's provider-turn schedule;
+                    // it cannot synthesize a new first request from the task objective.
+                    let planner_input = self.bind_cancellation(
+                        AgentRunInput::without_persisted_user_message(Vec::new())
+                            .with_task_plan_update(TaskPlanUpdateContext {
+                                task_id: request.task_id.clone(),
+                                max_plan_steps,
+                                max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                                worktree_availability,
+                            })
+                            .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
+                                task_id: request.task_id.clone(),
+                                attempt_id: Some(attempt.attempt_id.clone()),
+                            }))
+                            .with_logical_run_id(task_participant_logical_run_id(
+                                &attempt.attempt_id,
+                            ))
+                            .with_durable_provider_recovery_only(),
+                    );
+                    (attempt, planner_input)
+                } else {
+                    let projection = session.task_state_projection();
+                    let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
+                        anyhow!("task disappeared before planner retry admission")
+                    })?;
+                    if !await_pending_participant_retry(
+                        task,
+                        TaskParticipantPurpose::Planner,
+                        None,
+                        self.cancellation.as_ref(),
+                    )
+                    .await
+                    {
+                        append_task_run(
+                            session,
+                            handler,
+                            &request,
+                            TaskRunStatus::Cancelled,
+                            Some("task cancelled during planner provider retry backoff".to_owned()),
+                        )?;
+                        bail!("task cancelled during planner provider retry backoff");
+                    }
+                    let attempt = begin_participant_attempt(
                         session,
                         handler,
                         &request,
-                        TaskRunStatus::Cancelled,
-                        Some("task cancelled during planner provider retry backoff".to_owned()),
+                        TaskParticipantPurpose::Planner,
+                        None,
+                        None,
+                        AgentRole::Planner,
+                        None,
                     )?;
-                    bail!("task cancelled during planner provider retry backoff");
-                }
-                let attempt = begin_participant_attempt(
-                    session,
-                    handler,
-                    &request,
-                    TaskParticipantPurpose::Planner,
-                    None,
-                    None,
-                    AgentRole::Planner,
-                )?;
-                let planner_input = self.bind_cancellation(
-                    AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                        planner_prompt(&request.objective, worktree_availability),
-                    )])
-                    .with_task_plan_update(TaskPlanUpdateContext {
-                        task_id: request.task_id.clone(),
-                        max_plan_steps,
-                        max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
-                        worktree_availability,
-                    })
-                    .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
-                        task_id: request.task_id.clone(),
-                        attempt_id: Some(attempt.attempt_id.clone()),
-                    }))
-                    .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
-                );
+                    let planner_input = self.bind_cancellation(
+                        AgentRunInput::user_with_message_id(
+                            planner_prompt(&request.objective, worktree_availability),
+                            task_participant_input_message_id(&attempt.attempt_id),
+                        )
+                        .with_task_plan_update(TaskPlanUpdateContext {
+                            task_id: request.task_id.clone(),
+                            max_plan_steps,
+                            max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                            worktree_availability,
+                        })
+                        .with_run_purpose(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
+                            task_id: request.task_id.clone(),
+                            attempt_id: Some(attempt.attempt_id.clone()),
+                        }))
+                        .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
+                    );
+                    (attempt, planner_input)
+                };
                 validate_scheduled_retry_input(session, &attempt, &planner_input)?;
                 let planner_output = self
                     .child_runner
@@ -773,26 +820,72 @@ where
                         )? {
                             continue;
                         }
+                        let recovery_terminal = error
+                            .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+                            .is_some();
                         append_participant_terminal(
                             session,
                             handler,
                             &attempt,
-                            TaskParticipantAttemptStatus::Failed,
-                            Some(format!("planner failed: {error:#}")),
+                            if recovery_terminal {
+                                TaskParticipantAttemptStatus::Blocked
+                            } else {
+                                TaskParticipantAttemptStatus::Failed
+                            },
+                            Some(if recovery_terminal {
+                                format!("planner requires provider recovery: {error:#}")
+                            } else {
+                                format!("planner failed: {error:#}")
+                            }),
                         )?;
-                        append_task_run(
+                        if recovery_terminal {
+                            append_task_run(
+                                session,
+                                handler,
+                                &request,
+                                TaskRunStatus::Paused,
+                                Some(format!(
+                                    "task planner is blocked pending provider recovery: {error:#}"
+                                )),
+                            )?;
+                            return Ok(SequentialTaskRunOutput {
+                                task_id: request.task_id,
+                                plan_version: None,
+                                steps: Vec::new(),
+                                status: TaskRunStatus::Paused,
+                                pending_user_input: None,
+                            });
+                        }
+                        let direct = crate::TaskDirectExecutionAdmittedV1::planner_fallback(
+                            request.task_id.clone(),
+                            &request.objective,
+                            attempt.attempt_id.as_str(),
+                            unix_time_ms(),
+                        );
+                        append_task_controls(
                             session,
                             handler,
-                            &request,
-                            TaskRunStatus::Failed,
-                            Some(format!(
-                                "task orchestration failed: planner failed: {error:#}"
-                            )),
+                            vec![ControlEntry::TaskDirectExecutionAdmittedV1(direct.clone())],
                         )?;
-                        return Err(error);
+                        fallback_direct_execution = Some(direct);
+                        break;
                     }
                 }
             }
+        }
+
+        if let Some(direct) = fallback_direct_execution {
+            return self
+                .run_direct_execution(
+                    session,
+                    request,
+                    direct,
+                    executor_options,
+                    None,
+                    handler,
+                    approval_handler,
+                )
+                .await;
         }
 
         match self
@@ -824,6 +917,301 @@ where
                 Err(error)
             }
         }
+    }
+
+    /// Continues a first-class direct Task and optionally applies the exact current follow-up.
+    ///
+    /// Direct guidance is transient executor context, not a TaskPlan mutation and not new
+    /// scheduling authority. The durable direct admission remains bound to the original objective.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Task no longer has matching direct authority, when a prior
+    /// physical attempt still requires exact recovery, or when direct execution fails.
+    pub async fn continue_direct_run<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        executor_options: AgentRunOptions,
+        guidance: Option<&str>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let admission = match admit_or_validate_task_run(session, handler, &request)? {
+            TaskExecutionAdmissionState::Direct(admission) => admission,
+            TaskExecutionAdmissionState::NeedsPlanning | TaskExecutionAdmissionState::Planned => {
+                bail!("Task continuation no longer has direct execution authority")
+            }
+        };
+        self.run_direct_execution(
+            session,
+            request,
+            admission,
+            executor_options,
+            guidance,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    async fn run_direct_execution<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        admission: crate::TaskDirectExecutionAdmittedV1,
+        executor_options: AgentRunOptions,
+        guidance: Option<&str>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        admission.validate()?;
+        if admission.task_id != request.task_id || !admission.matches_objective(&request.objective)
+        {
+            bail!("direct execution admission does not match the durable Task objective");
+        }
+        let projection = session.task_state_projection();
+        let task = projection
+            .tasks
+            .get(&request.task_id)
+            .context("direct Task disappeared before attempt admission")?;
+        let mut started = task
+            .direct_execution_attempts
+            .values()
+            .filter(|attempt| {
+                attempt.admission_id == admission.admission_id
+                    && attempt.status == TaskParticipantAttemptStatus::Started
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if started.len() > 1 {
+            bail!("direct Task has multiple started execution attempts");
+        }
+        let recovering = !started.is_empty();
+        if recovering && guidance.is_some_and(|value| !value.trim().is_empty()) {
+            bail!("direct Task recovery cannot mix a new follow-up with an unsettled attempt");
+        }
+        append_task_run(
+            session,
+            handler,
+            &request,
+            TaskRunStatus::Running,
+            Some("running direct Task objective".to_owned()),
+        )?;
+        let current = session
+            .task_state_projection()
+            .tasks
+            .get(&request.task_id)
+            .cloned()
+            .context("direct Task disappeared before execution")?;
+        if let Some(update) = current
+            .checklist
+            .as_ref()
+            .and_then(crate::task_checklist_started_update)
+        {
+            append_task_control(
+                session,
+                handler,
+                ControlEntry::TaskChecklistUpdatedV1(update),
+            )?;
+        }
+        let attempt = match started.pop() {
+            Some(attempt) => attempt,
+            None => {
+                let ordinal = task
+                    .direct_execution_attempts
+                    .values()
+                    .filter(|attempt| attempt.admission_id == admission.admission_id)
+                    .map(|attempt| attempt.ordinal)
+                    .max()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("direct Task execution attempt ordinal overflow"))?;
+                let attempt = crate::TaskDirectExecutionAttemptV1::started(&admission, ordinal);
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::TaskDirectExecutionAttemptV1(attempt.clone()),
+                )?;
+                attempt
+            }
+        };
+        let checklist_revision = session
+            .task_state_projection()
+            .tasks
+            .get(&request.task_id)
+            .and_then(|task| task.checklist.as_ref())
+            .map_or(0, |checklist| checklist.revision);
+        let input = if recovering {
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_durable_provider_recovery_only()
+        } else {
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                direct_execution_prompt(&request.objective, guidance),
+            )])
+        }
+        .with_task_checklist_update(crate::TaskChecklistUpdateContextV1 {
+            task_id: request.task_id.clone(),
+            current_revision: checklist_revision,
+        })
+        .with_run_purpose(AgentRunPurpose::TaskDirectExecution(
+            TaskDirectExecutionContext {
+                task_id: request.task_id.clone(),
+                admission_id: admission.admission_id.clone(),
+                attempt_id: attempt.attempt_id.clone(),
+            },
+        ))
+        .with_logical_run_id(crate::task_direct_execution_logical_run_id(
+            &attempt.attempt_id,
+        ));
+        let input = self.bind_cancellation(input);
+        let output = self
+            .child_runner
+            .run_direct_execution_session(
+                session,
+                TaskDirectExecutionSessionRunRequest {
+                    task: request.clone(),
+                    admission,
+                    attempt: attempt.clone(),
+                    input,
+                    options: executor_options,
+                },
+                handler,
+                approval_handler,
+            )
+            .await;
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                let recovery_terminal = error
+                    .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+                    .is_some();
+                let cancelled = self.cancellation_requested();
+                if cancelled {
+                    return Err(error.context(
+                        "direct Task execution stopped after cancellation won terminal authority",
+                    ));
+                }
+                let mut terminal = attempt;
+                terminal.status = if recovery_terminal {
+                    TaskParticipantAttemptStatus::Blocked
+                } else {
+                    TaskParticipantAttemptStatus::Failed
+                };
+                terminal.reason = Some(crate::safe_persistence_text(&format!("{error:#}")));
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::TaskDirectExecutionAttemptV1(terminal),
+                )?;
+                let status = if recovery_terminal {
+                    TaskRunStatus::Paused
+                } else {
+                    TaskRunStatus::Failed
+                };
+                append_task_run(
+                    session,
+                    handler,
+                    &request,
+                    status,
+                    Some(if recovery_terminal {
+                        format!("direct execution is blocked pending provider recovery: {error:#}")
+                    } else {
+                        format!("direct execution failed: {error:#}")
+                    }),
+                )?;
+                return Ok(SequentialTaskRunOutput {
+                    task_id: request.task_id,
+                    plan_version: None,
+                    steps: Vec::new(),
+                    status,
+                    pending_user_input: None,
+                });
+            }
+        };
+        if output.attempt_id != attempt.attempt_id {
+            bail!("direct execution runtime returned another attempt identity");
+        }
+        if self.cancellation_requested() {
+            bail!("direct Task execution stopped after cancellation won terminal authority");
+        }
+        let mut status = match output.disposition {
+            crate::AgentRunDisposition::FinalAnswer => TaskRunStatus::Completed,
+            crate::AgentRunDisposition::AwaitingUserInput(_) => TaskRunStatus::Paused,
+            crate::AgentRunDisposition::Interrupted | crate::AgentRunDisposition::Blocked => {
+                TaskRunStatus::Paused
+            }
+            _ => TaskRunStatus::Paused,
+        };
+        let final_text = crate::safe_persistence_text(&output.final_text);
+        if status == TaskRunStatus::Completed
+            && (final_text.trim().is_empty() || output.final_message_id.is_none())
+        {
+            status = TaskRunStatus::Paused;
+        }
+        let mut terminal = attempt;
+        terminal.status = if status == TaskRunStatus::Completed {
+            TaskParticipantAttemptStatus::Completed
+        } else {
+            TaskParticipantAttemptStatus::Blocked
+        };
+        terminal.reason = Some(crate::safe_persistence_text(
+            &if final_text.trim().is_empty() {
+                "direct execution produced no final text".to_owned()
+            } else {
+                bounded_task_participant_summary(&final_text)
+            },
+        ));
+        if status == TaskRunStatus::Completed {
+            terminal.final_message_id = output.final_message_id;
+            terminal.output_hash = Some(format!("sha256:{}", hash_task_text(&final_text)));
+        }
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::TaskDirectExecutionAttemptV1(terminal),
+        )?;
+        if status == TaskRunStatus::Completed {
+            let projection = session.task_state_projection();
+            if let Some(update) = projection
+                .tasks
+                .get(&request.task_id)
+                .and_then(|task| task.checklist.as_ref())
+                .and_then(crate::task_checklist_completed_update)
+            {
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::TaskChecklistUpdatedV1(update),
+                )?;
+            }
+        }
+        append_task_run(
+            session,
+            handler,
+            &request,
+            status,
+            Some(if status == TaskRunStatus::Completed {
+                "direct Task objective completed".to_owned()
+            } else {
+                "direct Task execution paused before completion".to_owned()
+            }),
+        )?;
+        Ok(SequentialTaskRunOutput {
+            task_id: request.task_id,
+            plan_version: None,
+            steps: Vec::new(),
+            status,
+            pending_user_input: None,
+        })
     }
 
     /// Resumes an initial task planner from its exact durable child-session user-input frontier.
@@ -1297,11 +1685,13 @@ where
                 None,
                 None,
                 AgentRole::Planner,
+                None,
             )?;
             let planner_input = self.bind_cancellation(
-                AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                AgentRunInput::user_with_message_id(
                     assessment_prompt.clone(),
-                )])
+                    task_participant_input_message_id(&attempt.attempt_id),
+                )
                 .with_task_plan_update(TaskPlanUpdateContext {
                     task_id: request.task_id.clone(),
                     max_plan_steps,
@@ -1556,6 +1946,7 @@ where
             )
         })?;
         let (plan_version, steps) = latest_executable_plan(task)?;
+        let started_recovery = started_step_participant_recovery(task, plan_version, &steps)?;
         let guidance = normalize_task_guidance(guidance);
         append_task_run(
             session,
@@ -1566,6 +1957,44 @@ where
         )?;
 
         let mut step_outputs = Vec::new();
+        if let Some((step, attempt)) = started_recovery {
+            // Keep this restart-only path heap-backed: application continuations already carry
+            // a large task/runtime future, and a provider recovery must not make their polling
+            // thread overflow its fixed test/worker stack.
+            let output = Box::pin(self.resume_started_step_provider_recovery(
+                session,
+                &request,
+                plan_version,
+                &steps,
+                step.clone(),
+                attempt,
+                &executor_options,
+                &subagent_read_options,
+                &subagent_write_options,
+                handler,
+                approval_handler,
+            ))
+            .await?;
+            let status = output.status;
+            step_outputs.push(output);
+            if status != TaskStepStatus::Completed {
+                let task_status = task_status_from_step_status(status);
+                append_task_run(
+                    session,
+                    handler,
+                    &request,
+                    task_status,
+                    Some(step_terminal_reason(&step.step_id, status)),
+                )?;
+                return Ok(SequentialTaskRunOutput {
+                    task_id: request.task_id,
+                    plan_version: Some(plan_version),
+                    steps: step_outputs,
+                    status: task_status,
+                    pending_user_input: None,
+                });
+            }
+        }
         let max_scheduler_batches = steps
             .len()
             .saturating_mul(MAX_TASK_PARTICIPANT_AUTO_RETRIES.saturating_add(1))
@@ -1718,6 +2147,7 @@ where
                         Some(plan_version),
                         Some(&step.step_id),
                         step.role,
+                        None,
                     )?;
                     bind_task_step_intent_execution(
                         session,
@@ -1753,19 +2183,17 @@ where
                             ),
                         )
                     };
-                    let child_input =
-                        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                            prompt,
-                        )])
-                        .with_run_purpose(AgentRunPurpose::TaskParticipant(
-                            TaskParticipantContext {
-                                task_id: request.task_id.clone(),
-                                plan_version,
-                                step_id: step.step_id.clone(),
-                                attempt_id: attempt.attempt_id.clone(),
-                            },
-                        ))
-                        .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id));
+                    let child_input = AgentRunInput::user_with_message_id(
+                        prompt,
+                        task_participant_input_message_id(&attempt.attempt_id),
+                    )
+                    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+                        task_id: request.task_id.clone(),
+                        plan_version,
+                        step_id: step.step_id.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                    }))
+                    .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id));
                     let child_input = if changeset_batch_base_snapshot_id.is_some() {
                         with_changeset_only_child_contract(child_input)
                     } else {
@@ -1949,6 +2377,12 @@ where
             }
 
             for step in runnable.steps {
+                let segment_child_session_ref =
+                    crate::task::execution_segment_continuation_session_ref(
+                        task,
+                        plan_version,
+                        &step,
+                    );
                 let step_options = match step.role {
                     AgentRole::Planner | AgentRole::Executor => executor_options.clone(),
                     AgentRole::SubagentRead => subagent_read_options.clone(),
@@ -1972,6 +2406,7 @@ where
                     Some(plan_version),
                     Some(&step.step_id),
                     step.role,
+                    segment_child_session_ref,
                 )?;
                 bind_task_step_intent_execution(session, &request, plan_version, &step, &attempt)?;
                 let write_lease_id = acquire_task_write_lease(
@@ -2136,6 +2571,9 @@ where
                 .is_some()
             || error
                 .downcast_ref::<crate::ProviderProtocolViolation>()
+                .is_some()
+            || error
+                .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
                 .is_some();
         let step_status = if recoverable {
             TaskStepStatus::Blocked
@@ -2166,14 +2604,13 @@ where
             Some(format!("{error:#}")),
         )?;
         if !recoverable {
-            append_cancelled_dependent_steps(
+            append_blocked_dependent_steps(
                 session,
                 handler,
                 &request.task_id,
                 plan_version,
                 plan_steps,
                 &step.step_id,
-                TaskStepStatus::Failed,
             )?;
         }
         append_task_readiness(session, handler, readiness.clone())?;
@@ -2259,7 +2696,17 @@ where
     where
         H: EventHandler + Send,
     {
-        let initial_status = step_status_from_outcome(&output);
+        let initial_status = if synchronize_step_recovery_blockers(
+            session,
+            &request.task_id,
+            &step.step_id,
+            attempt,
+            &output,
+        )? {
+            TaskStepStatus::Blocked
+        } else {
+            step_status_from_outcome(&output)
+        };
         let participant_status = participant_status_from_step_output(initial_status, &output);
         let participant_result = participant_result_entry(
             attempt,
@@ -2338,7 +2785,16 @@ where
             Some(bounded_task_participant_summary(&output.final_text)),
             step_reason_after_readiness(status, &output, &readiness),
         )?;
-        if cancels_dependent_steps(status) {
+        if status == TaskStepStatus::Failed {
+            append_blocked_dependent_steps(
+                session,
+                handler,
+                &request.task_id,
+                plan_version,
+                plan_steps,
+                &step.step_id,
+            )?;
+        } else if cancels_dependent_steps(status) {
             append_cancelled_dependent_steps(
                 session,
                 handler,
@@ -2443,6 +2899,7 @@ where
             Some(plan_version),
             Some(&step.step_id),
             step.role,
+            None,
         )?;
         let synthesis_options = subagent_read_options.clone();
 
@@ -2497,12 +2954,34 @@ where
                     write_lease_id,
                     WriteLeaseReleaseStatus::Interrupted,
                 )?;
+                let recovery_terminal = error
+                    .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+                    .is_some();
+                let participant_status = if recovery_terminal {
+                    TaskParticipantAttemptStatus::Blocked
+                } else {
+                    TaskParticipantAttemptStatus::Failed
+                };
+                let step_status = if recovery_terminal {
+                    TaskStepStatus::Blocked
+                } else {
+                    TaskStepStatus::Failed
+                };
+                let task_status = if recovery_terminal {
+                    TaskRunStatus::Paused
+                } else {
+                    TaskRunStatus::Failed
+                };
                 append_participant_terminal(
                     session,
                     handler,
                     &attempt,
-                    TaskParticipantAttemptStatus::Failed,
-                    Some(format!("step failed: {error:#}")),
+                    participant_status,
+                    Some(if recovery_terminal {
+                        format!("step requires provider recovery: {error:#}")
+                    } else {
+                        format!("step failed: {error:#}")
+                    }),
                 )?;
                 let readiness = task_step_failure_readiness_nonblocking(
                     session,
@@ -2517,7 +2996,7 @@ where
                     &request.task_id,
                     plan_version,
                     &step,
-                    TaskStepStatus::Failed,
+                    step_status,
                     None,
                     Some(format!("{error:#}")),
                 )?;
@@ -2526,25 +3005,42 @@ where
                     session,
                     handler,
                     &request,
-                    TaskRunStatus::Failed,
-                    Some(format!("step {} failed: {error:#}", step.step_id.as_str())),
+                    task_status,
+                    Some(if recovery_terminal {
+                        format!(
+                            "step {} is blocked pending provider recovery: {error:#}",
+                            step.step_id.as_str()
+                        )
+                    } else {
+                        format!("step {} failed: {error:#}", step.step_id.as_str())
+                    }),
                 )?;
                 return Ok(SequentialTaskRunOutput {
                     task_id: request.task_id,
                     plan_version: Some(plan_version),
                     steps: vec![SequentialTaskStepOutput {
                         step_id: step.step_id,
-                        status: TaskStepStatus::Failed,
+                        status: step_status,
                         verification_verdict: readiness.evaluation.verification_verdict,
                         visible_state: readiness.evaluation.visible_state,
                         outcome: AgentRunOutcome::default(),
                     }],
-                    status: TaskRunStatus::Failed,
+                    status: task_status,
                     pending_user_input: None,
                 });
             }
         };
-        let initial_status = step_status_from_outcome(&output);
+        let initial_status = if synchronize_step_recovery_blockers(
+            session,
+            &request.task_id,
+            &step.step_id,
+            &attempt,
+            &output,
+        )? {
+            TaskStepStatus::Blocked
+        } else {
+            step_status_from_outcome(&output)
+        };
         let participant_result = participant_result_entry(
             &attempt,
             &output.final_text,
@@ -2708,15 +3204,17 @@ where
                 guidance,
             )
         };
-        let child_input =
-            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(prompt)])
-                .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
-                    task_id: request.task_id.clone(),
-                    plan_version,
-                    step_id: step.step_id.clone(),
-                    attempt_id: attempt.attempt_id.clone(),
-                }))
-                .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id));
+        let child_input = AgentRunInput::user_with_message_id(
+            prompt,
+            task_participant_input_message_id(&attempt.attempt_id),
+        )
+        .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+            task_id: request.task_id.clone(),
+            plan_version,
+            step_id: step.step_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+        }))
+        .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id));
         self.run_child_step_with_input(
             parent_session,
             request,
@@ -2986,6 +3484,101 @@ where
         append_integration_run_output(session, handler, output)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_started_step_provider_recovery<H, A>(
+        &self,
+        session: &mut Session,
+        request: &SequentialTaskRequest,
+        plan_version: u32,
+        plan_steps: &[TaskStepSpec],
+        step: TaskStepSpec,
+        attempt: TaskParticipantAttemptEntry,
+        executor_options: &AgentRunOptions,
+        subagent_read_options: &AgentRunOptions,
+        subagent_write_options: &AgentRunOptions,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskStepOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let step_options = match step.role {
+            AgentRole::Planner | AgentRole::Executor => executor_options.clone(),
+            AgentRole::SubagentRead => subagent_read_options.clone(),
+            AgentRole::SubagentWrite => subagent_write_options.clone(),
+        };
+        let write_lease_id = acquire_task_write_lease(
+            session,
+            handler,
+            request,
+            plan_version,
+            &step,
+            &step_options,
+        )?;
+        let child_input = AgentRunInput::without_persisted_user_message(Vec::new())
+            .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+                task_id: request.task_id.clone(),
+                plan_version,
+                step_id: step.step_id.clone(),
+                attempt_id: attempt.attempt_id.clone(),
+            }))
+            .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id))
+            .with_durable_provider_recovery_only();
+        let resumed = self
+            .run_child_step_with_input(
+                session,
+                request,
+                &attempt,
+                plan_version,
+                &step,
+                step_options.clone(),
+                child_input,
+                handler,
+                approval_handler,
+            )
+            .await;
+        match resumed {
+            Ok(output) => {
+                self.commit_step_output(
+                    session,
+                    handler,
+                    request,
+                    plan_version,
+                    plan_steps,
+                    &step,
+                    &attempt,
+                    &step_options,
+                    write_lease_id,
+                    output,
+                )
+                .await
+            }
+            Err(error) => {
+                let Some(output) = self
+                    .commit_step_failure(
+                        session,
+                        handler,
+                        request,
+                        plan_version,
+                        plan_steps,
+                        &step,
+                        &attempt,
+                        &step_options,
+                        write_lease_id,
+                        &error,
+                    )
+                    .await?
+                else {
+                    unreachable!(
+                        "a durable provider-turn recovery cannot schedule participant replacement"
+                    )
+                };
+                Ok(output)
+            }
+        }
+    }
+
     async fn complete_task_with_synthesis<H, A>(
         &self,
         session: &mut Session,
@@ -3055,6 +3648,50 @@ where
             return Ok(TaskRunStatus::Completed);
         }
 
+        if let Some(attempt) = started_synthesis_participant_recovery(task, plan_version)? {
+            // A restarted final synthesis is allowed to re-enter only at a durable provider-turn
+            // schedule. The child session owns the exact envelope/frontier proof; this parent
+            // deliberately does not rebuild or resend a prompt.
+            let child_input = self.bind_cancellation(
+                AgentRunInput::without_persisted_user_message(Vec::new())
+                    .with_run_purpose(AgentRunPurpose::TaskSynthesis(TaskSynthesisContext {
+                        task_id: request.task_id.clone(),
+                        plan_version,
+                        attempt_id: attempt.attempt_id.clone(),
+                    }))
+                    .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id))
+                    .with_durable_provider_recovery_only(),
+            );
+            let output = self
+                .child_runner
+                .run_synthesis_session(
+                    session,
+                    TaskSynthesisSessionRunRequest {
+                        task: request.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                        child_session_ref: attempt.child_session_ref.clone(),
+                        plan_version,
+                        child_input,
+                        options: synthesis_options.clone(),
+                    },
+                    handler,
+                    approval_handler,
+                )
+                .await;
+            return match output {
+                Ok(output) => settle_synthesis_success(
+                    session,
+                    handler,
+                    request,
+                    plan_version,
+                    &attempt,
+                    output,
+                    self.cancellation.as_ref(),
+                ),
+                Err(error) => settle_synthesis_failure(session, handler, request, &attempt, &error),
+            };
+        }
+
         loop {
             let projection = session.task_state_projection();
             let task = projection
@@ -3086,12 +3723,14 @@ where
                 Some(plan_version),
                 None,
                 AgentRole::Planner,
+                None,
             )?;
             let synthesis_prompt = task_synthesis_prompt(session, request, plan_version)?;
             let child_input = self.bind_cancellation(
-                AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                AgentRunInput::user_with_message_id(
                     synthesis_prompt,
-                )])
+                    task_participant_input_message_id(&attempt.attempt_id),
+                )
                 .with_run_purpose(AgentRunPurpose::TaskSynthesis(TaskSynthesisContext {
                     task_id: request.task_id.clone(),
                     plan_version,
@@ -3138,102 +3777,172 @@ where
                     )? {
                         continue;
                     }
+                    let recovery_terminal = error
+                        .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+                        .is_some();
                     append_participant_terminal(
                         session,
                         handler,
                         &attempt,
-                        TaskParticipantAttemptStatus::Failed,
-                        Some(format!("final synthesis failed: {error:#}")),
+                        if recovery_terminal {
+                            TaskParticipantAttemptStatus::Blocked
+                        } else {
+                            TaskParticipantAttemptStatus::Failed
+                        },
+                        Some(if recovery_terminal {
+                            format!("final synthesis requires provider recovery: {error:#}")
+                        } else {
+                            format!("final synthesis failed: {error:#}")
+                        }),
                     )?;
                     append_task_run(
                         session,
                         handler,
                         request,
                         TaskRunStatus::Paused,
-                        Some(format!(
-                            "final synthesis failed and may be retried: {error:#}"
-                        )),
+                        Some(if recovery_terminal {
+                            format!(
+                                "final synthesis is blocked pending provider recovery: {error:#}"
+                            )
+                        } else {
+                            format!("final synthesis failed and may be retried: {error:#}")
+                        }),
                     )?;
                     return Ok(TaskRunStatus::Paused);
                 }
             };
-            validate_participant_output_identity(
-                &attempt,
-                &output.attempt_id,
-                &output.child_session_ref,
-            )?;
-            let final_text = crate::safe_persistence_text(&output.final_text);
-            if final_text.is_empty() {
-                append_participant_terminal(
-                    session,
-                    handler,
-                    &attempt,
-                    TaskParticipantAttemptStatus::Failed,
-                    Some("final synthesis returned an empty result".to_owned()),
-                )?;
-                append_task_run(
-                    session,
-                    handler,
-                    request,
-                    TaskRunStatus::Paused,
-                    Some("final synthesis returned an empty result and may be retried".to_owned()),
-                )?;
-                return Ok(TaskRunStatus::Paused);
-            }
-            let result = participant_result_entry(
-                &attempt,
-                &final_text,
-                Some(output.final_answer_ref),
-                output.artifact_refs,
-                output.outcome.changed_files,
-                Vec::new(),
-            )?;
-            append_participant_result_and_terminal(
-                session,
-                handler,
-                &attempt,
-                result,
-                TaskParticipantAttemptStatus::Completed,
-                None,
-            )?;
-            commit_task_final_answer(
+            return settle_synthesis_success(
                 session,
                 handler,
                 request,
+                plan_version,
                 &attempt,
-                &final_text,
+                output,
                 self.cancellation.as_ref(),
-            )?;
-            append_task_run(
-                session,
-                handler,
-                request,
-                TaskRunStatus::Completed,
-                Some(task_completion_reason(
-                    &session
-                        .task_state_projection()
-                        .tasks
-                        .get(&request.task_id)
-                        .cloned()
-                        .ok_or_else(|| anyhow!("task disappeared after final synthesis"))?,
-                    format!("completed plan v{plan_version} after final synthesis"),
-                )),
-            )?;
-            return Ok(TaskRunStatus::Completed);
+            );
         }
     }
 }
 
-fn task_completion_reason(task: &TaskRunProjection, base: String) -> String {
-    if task.steps.values().any(|step| {
-        step.reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("completed with warnings"))
-    }) {
-        format!("{base} with warnings")
-    } else {
-        base
+fn settle_synthesis_success<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    attempt: &TaskParticipantAttemptEntry,
+    output: TaskSynthesisSessionRunOutput,
+    cancellation: Option<&RunCancellationHandle>,
+) -> Result<TaskRunStatus>
+where
+    H: EventHandler + Send,
+{
+    validate_participant_output_identity(attempt, &output.attempt_id, &output.child_session_ref)?;
+    let final_text = crate::safe_persistence_text(&output.final_text);
+    if final_text.is_empty() {
+        append_participant_terminal(
+            session,
+            handler,
+            attempt,
+            TaskParticipantAttemptStatus::Failed,
+            Some("final synthesis returned an empty result".to_owned()),
+        )?;
+        append_task_run(
+            session,
+            handler,
+            request,
+            TaskRunStatus::Paused,
+            Some("final synthesis returned an empty result and may be retried".to_owned()),
+        )?;
+        return Ok(TaskRunStatus::Paused);
     }
+    let result = participant_result_entry(
+        attempt,
+        &final_text,
+        Some(output.final_answer_ref),
+        output.artifact_refs,
+        output.outcome.changed_files,
+        Vec::new(),
+    )?;
+    append_participant_result_and_terminal(
+        session,
+        handler,
+        attempt,
+        result,
+        TaskParticipantAttemptStatus::Completed,
+        None,
+    )?;
+    commit_task_final_answer(
+        session,
+        handler,
+        request,
+        attempt,
+        &final_text,
+        cancellation,
+    )?;
+    append_task_run(
+        session,
+        handler,
+        request,
+        TaskRunStatus::Completed,
+        Some(task_completion_reason(
+            &session
+                .task_state_projection()
+                .tasks
+                .get(&request.task_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("task disappeared after final synthesis"))?,
+            format!("completed plan v{plan_version} after final synthesis"),
+        )),
+    )?;
+    Ok(TaskRunStatus::Completed)
+}
+
+fn settle_synthesis_failure<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    attempt: &TaskParticipantAttemptEntry,
+    error: &anyhow::Error,
+) -> Result<TaskRunStatus>
+where
+    H: EventHandler + Send,
+{
+    let recovery_terminal = error
+        .downcast_ref::<crate::ProviderTurnRecoveryTerminalError>()
+        .is_some();
+    append_participant_terminal(
+        session,
+        handler,
+        attempt,
+        if recovery_terminal {
+            TaskParticipantAttemptStatus::Blocked
+        } else {
+            TaskParticipantAttemptStatus::Failed
+        },
+        Some(if recovery_terminal {
+            format!("final synthesis requires provider recovery: {error:#}")
+        } else {
+            format!("final synthesis failed: {error:#}")
+        }),
+    )?;
+    append_task_run(
+        session,
+        handler,
+        request,
+        TaskRunStatus::Paused,
+        Some(if recovery_terminal {
+            format!("final synthesis is blocked pending provider recovery: {error:#}")
+        } else {
+            format!("final synthesis failed and may be retried: {error:#}")
+        }),
+    )?;
+    Ok(TaskRunStatus::Paused)
+}
+
+fn task_completion_reason(_task: &TaskRunProjection, base: String) -> String {
+    // Completion facts are already represented by settled effects, acceptance receipts and
+    // verification. Do not reconstruct a recovery decision from presentation text.
+    base
 }
 
 pub(super) fn reconcile_promoted_integration_steps<H>(
@@ -3518,10 +4227,10 @@ pub fn reconcile_task_step_projections(session: &mut Session, task_id: &TaskId) 
 /// only when the durable readiness projection has no required action and has a non-failing
 /// verification verdict; a final answer by itself must not erase a current readiness blocker.
 fn participant_result_proves_completed_step(
-    verification: &crate::VerificationStateProjection,
-    task_id: &TaskId,
-    step: &TaskStepSpec,
-    attempt: &TaskParticipantAttemptEntry,
+    _verification: &crate::VerificationStateProjection,
+    _task_id: &TaskId,
+    _step: &TaskStepSpec,
+    _attempt: &TaskParticipantAttemptEntry,
     result: &TaskParticipantResultEntry,
 ) -> bool {
     if result.summary.trim().is_empty()
@@ -3529,26 +4238,7 @@ fn participant_result_proves_completed_step(
     {
         return false;
     }
-    if result.terminal_status == Some(TaskParticipantAttemptStatus::Completed) {
-        return true;
-    }
-    if result.terminal_status != Some(TaskParticipantAttemptStatus::Blocked)
-        || attempt.status != TaskParticipantAttemptStatus::Blocked
-        || result.final_answer_ref.is_none()
-    {
-        return false;
-    }
-    let scope = EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step.step_id.as_str()));
-    let Some(readiness) = verification.latest_readiness(&scope) else {
-        return false;
-    };
-    readiness.evaluation.required_actions.is_empty()
-        && matches!(
-            readiness.evaluation.verification_verdict,
-            VerificationVerdict::NotApplicable
-                | VerificationVerdict::Passed
-                | VerificationVerdict::Skipped
-        )
+    result.terminal_status == Some(TaskParticipantAttemptStatus::Completed)
 }
 
 fn append_reprojected_readiness_if_needed(
@@ -3934,6 +4624,7 @@ fn begin_participant_attempt<H>(
     plan_version: Option<u32>,
     step_id: Option<&TaskStepId>,
     role: AgentRole,
+    continued_child_session_ref: Option<SessionRef>,
 ) -> Result<TaskParticipantAttemptEntry>
 where
     H: EventHandler + Send,
@@ -3962,8 +4653,27 @@ where
     {
         bail!("pending task participant retry identity conflicts with next attempt admission");
     }
+    if let Some(child_session_ref) = continued_child_session_ref.as_ref() {
+        let (Some(plan_version), Some(step_id)) = (plan_version, step_id) else {
+            bail!("only a task step may continue an execution-segment child session");
+        };
+        let step = task
+            .plans
+            .get(&plan_version)
+            .and_then(|plan| plan.steps.iter().find(|step| &step.step_id == step_id))
+            .context("execution-segment continuation references a missing accepted step")?;
+        if crate::task::execution_segment_continuation_session_ref(task, plan_version, step)
+            .as_ref()
+            != Some(child_session_ref)
+        {
+            bail!("execution-segment child-session continuation is not currently admissible");
+        }
+    }
     let entry = TaskParticipantAttemptEntry {
-        child_session_ref: task_participant_session_ref(&request.task_id, &attempt_id)?,
+        child_session_ref: match continued_child_session_ref {
+            Some(child_session_ref) => child_session_ref,
+            None => task_participant_session_ref(&request.task_id, &attempt_id)?,
+        },
         attempt_id,
         task_id: request.task_id.clone(),
         purpose,
@@ -3981,6 +4691,146 @@ where
         ControlEntry::TaskParticipantAttempt(entry.clone()),
     )?;
     Ok(entry)
+}
+
+/// Returns the sole step participant that may be continued after a process restart without
+/// allocating a replacement child session. The caller still gives its child agent a
+/// recovery-only input, so an absent/mismatched provider schedule becomes `Blocked` rather than
+/// a newly dispatched request.
+fn started_step_participant_recovery(
+    task: &TaskRunProjection,
+    plan_version: u32,
+    steps: &[TaskStepSpec],
+) -> Result<Option<(TaskStepSpec, TaskParticipantAttemptEntry)>> {
+    let mut started = task
+        .participant_attempts
+        .values()
+        .filter(|attempt| {
+            attempt.status == TaskParticipantAttemptStatus::Started
+                && attempt.purpose == TaskParticipantPurpose::Step
+                && attempt.plan_version == Some(plan_version)
+        })
+        .cloned();
+    let Some(attempt) = started.next() else {
+        return Ok(None);
+    };
+    if started.next().is_some() {
+        bail!(
+            "task {} has multiple started step participants; restart recovery is ambiguous",
+            task.task_id.as_str()
+        );
+    }
+    let step_id = attempt
+        .step_id
+        .as_ref()
+        .context("started step participant is missing a step identity")?;
+    let step = steps
+        .iter()
+        .find(|step| &step.step_id == step_id)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "started participant references missing step {} in accepted plan v{plan_version}",
+                step_id.as_str()
+            )
+        })?;
+    if step.role != attempt.role {
+        bail!(
+            "started participant role does not match accepted step {}",
+            step_id.as_str()
+        );
+    }
+    let step_status = task
+        .steps
+        .get(&(plan_version, step_id.clone()))
+        .map(|state| state.status)
+        .unwrap_or(TaskStepStatus::Pending);
+    if step_status != TaskStepStatus::Running {
+        bail!(
+            "started participant step {} is not running during restart recovery",
+            step_id.as_str()
+        );
+    }
+    Ok(Some((step, attempt)))
+}
+
+/// Returns the sole final-synthesis participant that may resume its own child session after a
+/// process loss. It shares the provider-turn guard used by step recovery: without an exact
+/// durable schedule the child will block before it can send any new provider bytes.
+fn started_synthesis_participant_recovery(
+    task: &TaskRunProjection,
+    plan_version: u32,
+) -> Result<Option<TaskParticipantAttemptEntry>> {
+    let mut started = task
+        .participant_attempts
+        .values()
+        .filter(|attempt| {
+            attempt.status == TaskParticipantAttemptStatus::Started
+                && attempt.purpose == TaskParticipantPurpose::Synthesis
+                && attempt.plan_version == Some(plan_version)
+        })
+        .cloned();
+    let Some(attempt) = started.next() else {
+        return Ok(None);
+    };
+    if started.next().is_some()
+        || task.participant_attempts.values().any(|other| {
+            other.status == TaskParticipantAttemptStatus::Started
+                && other.attempt_id != attempt.attempt_id
+        })
+    {
+        bail!(
+            "task {} has ambiguous in-flight participants during synthesis recovery",
+            task.task_id.as_str()
+        );
+    }
+    if task.participant_results.contains_key(&attempt.attempt_id)
+        || task
+            .steps
+            .values()
+            .any(|step| step.status != TaskStepStatus::Completed)
+    {
+        bail!(
+            "task {} has inconsistent synthesis recovery state",
+            task.task_id.as_str()
+        );
+    }
+    Ok(Some(attempt))
+}
+
+/// Returns the original planner participant when its child session is the only in-flight task
+/// owner. Planner recovery has no accepted plan yet, so it must retain the old child/session
+/// identity rather than opening a fresh planning request.
+fn started_planner_participant_recovery(
+    task: &TaskRunProjection,
+) -> Result<Option<TaskParticipantAttemptEntry>> {
+    let mut started = task
+        .participant_attempts
+        .values()
+        .filter(|attempt| {
+            attempt.status == TaskParticipantAttemptStatus::Started
+                && attempt.purpose == TaskParticipantPurpose::Planner
+                && attempt.plan_version.is_none()
+                && attempt.step_id.is_none()
+        })
+        .cloned();
+    let Some(attempt) = started.next() else {
+        return Ok(None);
+    };
+    if started.next().is_some()
+        || task.latest_plan_version.is_some()
+        || task.participant_results.contains_key(&attempt.attempt_id)
+        || task.participant_attempts.values().any(|other| {
+            other.status == TaskParticipantAttemptStatus::Started
+                && other.attempt_id != attempt.attempt_id
+        })
+    {
+        bail!(
+            "task {} has inconsistent planner recovery state",
+            task.task_id.as_str()
+        );
+    }
+    Ok(Some(attempt))
 }
 
 fn bind_task_step_intent_execution(
@@ -4016,6 +4866,185 @@ fn unix_time_ms() -> u64 {
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(1)
         .max(1)
+}
+
+/// Persists the recovery lifecycle that owns an active step-level tool boundary.
+///
+/// `AgentRunOutcome::tool_errors` remains attempt history only. A result can finish only after
+/// this durable projection has no active blocker for the step; a bounded successful tool receipt
+/// is what closes the prior blocker, never the participant's final prose.
+pub(super) fn synchronize_step_recovery_blockers(
+    session: &mut Session,
+    task_id: &TaskId,
+    step_id: &TaskStepId,
+    attempt: &TaskParticipantAttemptEntry,
+    output: &StepRunOutput,
+) -> Result<bool> {
+    let active_error = output.outcome.tool_errors.iter().rev().find(|error| {
+        error.kind.is_recovery_blocker()
+            && error
+                .details
+                .get("active")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+    });
+    let projection = session.try_recovery_blocker_projection_from_durable()?;
+    let active_for_step = projection.as_ref().map_or_else(Vec::new, |projection| {
+        projection
+            .active()
+            .into_iter()
+            .filter(|blocker| {
+                matches!(
+                    &blocker.scope,
+                    crate::FailureScopeV1::Step {
+                        task_id: blocker_task_id,
+                        step_id: blocker_step_id,
+                    } if blocker_task_id == task_id && blocker_step_id == step_id
+                )
+            })
+            .map(|blocker| {
+                (
+                    blocker.blocker_id.clone(),
+                    blocker
+                        .available_actions
+                        .first()
+                        .copied()
+                        .unwrap_or(crate::RecoveryActionV1::Cancel),
+                    projection.resolution_started(&blocker.blocker_id).is_some(),
+                )
+            })
+            .collect()
+    });
+
+    if let Some(error) = active_error {
+        let evidence_digest = crate::stable_event_hash(format!(
+            "task={};step={};attempt={};tool_error={};call={}",
+            task_id.as_str(),
+            step_id.as_str(),
+            attempt.attempt_id.as_str(),
+            error.kind.as_str(),
+            error
+                .details
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+        ));
+        let blocker_id =
+            crate::stable_event_uuid("sigil-task-step-recovery-blocker-v1", &evidence_digest);
+        if !active_for_step.iter().any(|(id, _, _)| id == &blocker_id) {
+            let (domain, recoverability, settlement, actions) = match error.kind {
+                crate::ToolErrorKind::StalePreparedMutation
+                | crate::ToolErrorKind::WorkspaceConflict => (
+                    crate::RecoveryDomainV1::WorkspaceMutation,
+                    crate::RecoverabilityV1::RebaseWorkspace,
+                    crate::EffectSettlementV1::NotStarted,
+                    vec![
+                        crate::RecoveryActionV1::RebaseWorkspace,
+                        crate::RecoveryActionV1::Replan,
+                        crate::RecoveryActionV1::Cancel,
+                    ],
+                ),
+                crate::ToolErrorKind::EffectReconciliationRequired => (
+                    crate::RecoveryDomainV1::EffectReconciliation,
+                    crate::RecoverabilityV1::ReconcileEffect,
+                    crate::EffectSettlementV1::OutcomeUncertain,
+                    vec![
+                        crate::RecoveryActionV1::ReconcileEffect,
+                        crate::RecoveryActionV1::Cancel,
+                    ],
+                ),
+                crate::ToolErrorKind::ResourceExhausted => (
+                    crate::RecoveryDomainV1::TaskExecution,
+                    crate::RecoverabilityV1::AwaitResource,
+                    crate::EffectSettlementV1::NotStarted,
+                    vec![
+                        crate::RecoveryActionV1::RefreshResource,
+                        crate::RecoveryActionV1::Retry,
+                        crate::RecoveryActionV1::Cancel,
+                    ],
+                ),
+                crate::ToolErrorKind::DurabilityRequired => (
+                    crate::RecoveryDomainV1::TaskExecution,
+                    crate::RecoverabilityV1::RetrySameBoundary,
+                    crate::EffectSettlementV1::NotStarted,
+                    vec![
+                        crate::RecoveryActionV1::Retry,
+                        crate::RecoveryActionV1::Cancel,
+                    ],
+                ),
+                _ => return Ok(true),
+            };
+            session.append_recovery_blocker_raised(crate::RecoveryBlockerRaisedV1 {
+                blocker: crate::RecoveryBlockerV1 {
+                    schema_version: crate::RECOVERY_BLOCKER_SCHEMA_VERSION,
+                    blocker_id,
+                    domain,
+                    scope: crate::FailureScopeV1::Step {
+                        task_id: task_id.clone(),
+                        step_id: step_id.clone(),
+                    },
+                    recoverability,
+                    settlement,
+                    reason_code: error.kind.as_str().to_owned(),
+                    safe_summary: format!(
+                        "Task step {} is blocked pending {} recovery.",
+                        step_id.as_str(),
+                        error.kind.as_str()
+                    ),
+                    evidence_digest,
+                    effect_id: None,
+                    available_actions: actions,
+                    created_at_ms: unix_time_ms(),
+                },
+            })?;
+        }
+        return Ok(true);
+    }
+
+    // `record_tool_run_outcome` only changes its in-memory error marker after a later successful
+    // receipt from the same tool generation. Persist that receipt as the explicit closure before
+    // a Step can become completed. A missing error entry or final prose is not a receipt.
+    let has_resolution_receipt = output.outcome.tool_errors.iter().any(|error| {
+        error.kind.is_recovery_blocker()
+            && !error
+                .details
+                .get("active")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            && error
+                .details
+                .get("resolved_by_call_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|call_id| !call_id.is_empty())
+    });
+    if !active_for_step.is_empty() && !has_resolution_receipt {
+        return Ok(true);
+    }
+    for (blocker_id, action, resolution_already_started) in active_for_step {
+        let started_at_ms = unix_time_ms();
+        if !resolution_already_started {
+            session.append_recovery_blocker_resolution_started(
+                crate::RecoveryBlockerResolutionStartedV1 {
+                    blocker_id: blocker_id.clone(),
+                    action,
+                    attempt_id: format!("{}-recovery", attempt.attempt_id.as_str()),
+                    started_at_ms,
+                },
+            )?;
+        }
+        session.append_recovery_blocker_resolved(crate::RecoveryBlockerResolvedV1 {
+            blocker_id,
+            resolution_receipt_digest: crate::stable_event_hash(format!(
+                "task={};step={};attempt={};output={}",
+                task_id.as_str(),
+                step_id.as_str(),
+                attempt.attempt_id.as_str(),
+                output.final_text
+            )),
+            resolved_at_ms: unix_time_ms(),
+        })?;
+    }
+    Ok(false)
 }
 
 fn append_participant_terminal<H>(
@@ -4373,8 +5402,8 @@ fn task_step_prompt_context(
     let projection = session.task_state_projection();
     let task = projection.tasks.get(task_id);
     let objective = task
-        .and_then(|task| task.title.as_deref())
-        .filter(|title| !title.trim().is_empty())
+        .map(|task| task.objective.as_str())
+        .filter(|objective| !objective.trim().is_empty())
         .unwrap_or(fallback_objective)
         .to_owned();
     let contract = task
@@ -4768,11 +5797,30 @@ fn hash_task_text(value: &str) -> String {
     format!("{:x}", digest.finalize())
 }
 
+/// Stable child-session source identity for a task participant prompt.
+///
+/// The prompt itself is safely persisted in the child session. Reconstructing the same
+/// participant after a process loss therefore validates this identity and reuses the existing
+/// message rather than appending an equivalent transient prompt a second time.
+pub(super) fn task_participant_input_message_id(attempt_id: &TaskParticipantAttemptId) -> String {
+    format!(
+        "task-participant-input-{}",
+        hash_task_text(attempt_id.as_str())
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TaskExecutionAdmissionState {
+    NeedsPlanning,
+    Planned,
+    Direct(crate::TaskDirectExecutionAdmittedV1),
+}
+
 fn admit_or_validate_task_run<H>(
     session: &mut Session,
     handler: &mut H,
     request: &SequentialTaskRequest,
-) -> Result<bool>
+) -> Result<TaskExecutionAdmissionState>
 where
     H: EventHandler + Send,
 {
@@ -4786,7 +5834,7 @@ where
             TaskRunStatus::Started,
             Some("planning started".to_owned()),
         )?;
-        return Ok(false);
+        return Ok(TaskExecutionAdmissionState::NeedsPlanning);
     };
     if task.parent_session_ref != request.parent_session_ref {
         bail!(
@@ -4804,5 +5852,29 @@ where
         .latest_plan_version
         .and_then(|version| task.plans.get(&version))
         .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted);
-    Ok(has_accepted_plan)
+    if has_accepted_plan {
+        return Ok(TaskExecutionAdmissionState::Planned);
+    }
+    if let Some(admission) = task.direct_execution_admission.as_ref() {
+        admission.validate()?;
+        if !admission.matches_objective(&task.objective) {
+            bail!("direct execution admission does not match the durable Task objective");
+        }
+        return Ok(TaskExecutionAdmissionState::Direct(admission.clone()));
+    }
+    Ok(TaskExecutionAdmissionState::NeedsPlanning)
+}
+
+pub(super) fn direct_execution_prompt(objective: &str, guidance: Option<&str>) -> String {
+    let follow_up = guidance
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            format!(
+                "\n\nThe user supplied this follow-up while the same Task was active. Address it as part of the same execution, keep the existing checklist, and then continue or finish the approved objective:\n\n{value}"
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "Execute the following complete, user-approved Task objective now. Use the available tools, keep the optional display checklist current when it helps the user, verify the result, and finish with a concise outcome. Checklist updates are progress reporting only and never execution authority.\n\n{objective}{follow_up}"
+    )
 }
