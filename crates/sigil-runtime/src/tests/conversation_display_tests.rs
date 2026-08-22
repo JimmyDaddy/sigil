@@ -1784,10 +1784,10 @@ fn legacy_session_5aeeb257_restores_the_base_plan_and_failed_revision() -> Resul
             .contains(&sigil_kernel::PublicPlanAction::Revise)
     );
     assert!(
-        !review
+        review
             .allowed_actions
             .contains(&sigil_kernel::PublicPlanAction::Run),
-        "legacy plans without an executable candidate must never offer Run"
+        "RFC-0069 keeps a legacy readable plan runnable; materialization owns the missing candidate"
     );
     assert!(fixture.expected.retry_requires_guidance);
     let revision = review

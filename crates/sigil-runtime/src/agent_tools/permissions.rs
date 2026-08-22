@@ -179,18 +179,20 @@ pub(crate) fn revalidate_agent_invocation_grant(
     if root_cancellation.is_cancel_requested() {
         bail!("root run cancelled before child provider admission");
     }
-    grant.validate_invocation(
-        &context.source,
-        &context.authority,
-        root_logical_run_id,
-        profile_id,
-        role,
-        isolation,
-        &resolved_tool_contract_fingerprint(child_registry)?,
-        &sigil_kernel::agent_invocation_workspace_snapshot_id(workspace_root)?,
-        root_cancellation.scope_id(),
-        now_ms,
-    )
+    grant
+        .validate_invocation(
+            &context.source,
+            &context.authority,
+            root_logical_run_id,
+            profile_id,
+            role,
+            isolation,
+            &resolved_tool_contract_fingerprint(child_registry)?,
+            &sigil_kernel::agent_invocation_workspace_snapshot_id(workspace_root)?,
+            root_cancellation.scope_id(),
+            now_ms,
+        )
+        .map(|_| ())
 }
 
 pub(super) fn apply_child_permission_constraints(

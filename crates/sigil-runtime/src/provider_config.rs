@@ -315,6 +315,7 @@ pub fn set_model_request_config_fields(
         request_timeout_secs,
         stream_idle_timeout_secs,
         stream_total_timeout_secs: root_config.model_request.stream_total_timeout_secs,
+        provider_turn_recovery: root_config.model_request.provider_turn_recovery.clone(),
     };
     root_config.model_request.to_timeouts()?;
     Ok(())

@@ -1,16 +1,51 @@
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    AgentRole, ControlEntry, RunCancellationOwner, RunCancellationTarget, Session, SessionLogEntry,
-    SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
-    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepStatus,
+    AgentRole, ControlEntry, ConversationTurnRef, PlanId,
+    ProviderTurnRecoveryTerminalDispositionV1, ProviderTurnRecoveryTerminalError,
+    RunCancellationOwner, RunCancellationTarget, Session, SessionLogEntry, SessionRef,
+    TaskContinuationControlKind, TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1,
+    TaskDirectExecutionAttemptV1, TaskId, TaskParticipantAttemptStatus, TaskPauseRequest,
+    TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepStatus, project_conversation_prompt_for_persistence,
 };
 
 use super::{
-    TaskPauseValidationError, TaskStopDisposition, append_explicit_task_run_target,
-    append_task_stop_state, finalize_task_root, prepare_task_run_cancellation,
-    resolve_task_continuation, validate_task_pause_request,
+    ResolvedTaskExecutionRoute, TaskExecutionPreflightError, TaskPauseValidationError,
+    TaskStopDisposition, append_explicit_task_run_target, append_task_stop_state,
+    finalize_task_root, prepare_task_run_cancellation, resolve_task_continuation,
+    validate_continuation_guidance_authority, validate_task_pause_request,
 };
+
+#[test]
+fn direct_task_accepts_exact_typed_follow_up_guidance() -> Result<()> {
+    let guidance = "What is the current verification doing?";
+    let projected = project_conversation_prompt_for_persistence(guidance);
+    let selection = TaskContinuationSelectedEntry {
+        task_id: TaskId::new("task-direct-guidance")?,
+        source_turn: ConversationTurnRef::new(
+            "session-direct-guidance",
+            "message-direct-guidance",
+            "run-direct-guidance",
+        )?,
+        plan_version: None,
+        task_status: TaskRunStatus::Paused,
+        plan_status: None,
+        route_contract_fingerprint: "sha256:direct-guidance-route".to_owned(),
+        control: TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
+        prompt_hash: projected.prompt_hash,
+        exact_prompt_required: projected.exact_prompt_required,
+        guidance: projected.safe_prompt,
+        selected_at_ms: 1,
+    };
+
+    assert!(!validate_continuation_guidance_authority(
+        ResolvedTaskExecutionRoute::Direct,
+        Some(guidance),
+        None,
+        Some(&selection),
+    )?);
+    Ok(())
+}
 
 #[test]
 fn shared_task_continuation_resolves_exact_or_latest_non_terminal_task() -> Result<()> {
@@ -34,7 +69,7 @@ fn shared_task_continuation_resolves_exact_or_latest_non_terminal_task() -> Resu
     assert_eq!(latest.task_id.as_str(), "task-2");
     assert_eq!(latest.parent_session_ref, parent_session_ref);
     assert_eq!(latest.objective, "objective task-2");
-    assert!(latest.needs_planning);
+    assert!(latest.needs_planning());
 
     let exact = resolve_task_continuation(&session, Some("task-2"))?;
     assert_eq!(exact, latest);
@@ -200,7 +235,73 @@ fn shared_task_pause_validation_binds_exact_plan_and_active_scope() -> Result<()
             scope_id,
             session.entries(),
         ),
-        Err(TaskPauseValidationError::PlanChanged)
+        Err(TaskPauseValidationError::ExecutionAuthorityChanged)
+    );
+    Ok(())
+}
+
+#[test]
+fn direct_task_pause_and_continuation_bind_the_admission_without_a_plan() -> Result<()> {
+    let task_id = TaskId::new("task-direct-pause")?;
+    let objective = "execute directly";
+    let scope_id = "scope-direct";
+    let admission = TaskDirectExecutionAdmittedV1::approved_plan(
+        task_id.clone(),
+        objective,
+        PlanId::new("plan-direct")?,
+        format!("sha256:{}", "a".repeat(64)),
+        1,
+    );
+    let attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
+    let mut session = Session::new("provider", "model");
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission.clone()),
+        ControlEntry::TaskDirectExecutionAttemptV1(attempt.clone()),
+        ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {
+            task_id: task_id.clone(),
+            run_scope_id: scope_id.to_owned(),
+        }),
+    ])?;
+
+    let continuation = resolve_task_continuation(&session, Some(task_id.as_str()))?;
+    assert!(continuation.is_direct());
+    assert!(!continuation.needs_planning());
+
+    let request = TaskPauseRequest::direct(task_id.clone(), admission.admission_id.clone());
+    validate_task_pause_request(
+        &request,
+        &RunCancellationTarget::Run,
+        scope_id,
+        session.entries(),
+    )?;
+    let stopped = append_task_stop_state(
+        &mut session,
+        Some(&task_id),
+        TaskStopDisposition::Paused,
+        "paused from test",
+    )?
+    .expect("direct task stop should append");
+    assert_eq!(stopped.status(), TaskRunStatus::Paused);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("direct task remains durable");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(
+        task.direct_execution_attempts
+            .get(&attempt.attempt_id)
+            .map(|attempt| attempt.status),
+        Some(TaskParticipantAttemptStatus::Interrupted)
     );
     Ok(())
 }
@@ -314,6 +415,92 @@ fn failed_shared_task_execution_closes_started_task_once() -> Result<()> {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("planner failed"))
+    );
+    Ok(())
+}
+
+#[test]
+fn zero_dispatch_task_preflight_blocker_pauses_without_persisting_private_error() -> Result<()> {
+    let task_id = TaskId::new("task-preflight")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let mut session = Session::new("provider", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "execute after repairing provider configuration".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    let cancellation = RunCancellationOwner::new().handle();
+
+    let status = finalize_task_root(
+        &mut session,
+        &task_id,
+        &parent_session_ref,
+        "execute after repairing provider configuration",
+        &cancellation,
+        Err(anyhow::Error::new(
+            TaskExecutionPreflightError::RoleRuntimeConstruction(anyhow!(
+                "private endpoint and credential detail"
+            )),
+        )),
+    )?;
+
+    assert_eq!(status, TaskRunStatus::Paused);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("preflight-blocked task remains durable");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(
+        task.reason.as_deref(),
+        Some("task_role_runtime_preflight_blocked")
+    );
+    assert!(!format!("{task:?}").contains("private endpoint"));
+    Ok(())
+}
+
+#[test]
+fn recovery_blocker_does_not_collapse_root_task_to_failed() -> Result<()> {
+    let task_id = TaskId::new("task-recovery")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let mut session = Session::new("provider", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "resume exact provider frontier".to_owned(),
+        title: None,
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    let cancellation = RunCancellationOwner::new().handle();
+
+    let status = finalize_task_root(
+        &mut session,
+        &task_id,
+        &parent_session_ref,
+        "resume exact provider frontier",
+        &cancellation,
+        Err(anyhow::Error::new(ProviderTurnRecoveryTerminalError {
+            disposition: ProviderTurnRecoveryTerminalDispositionV1::Paused,
+            reason_code: "provider_retry_budget_exhausted",
+        })),
+    )?;
+
+    assert_eq!(status, TaskRunStatus::Paused);
+    let task_projection = session.task_state_projection();
+    let task = task_projection
+        .tasks
+        .get(&task_id)
+        .expect("task remains durable");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert!(
+        task.steps
+            .values()
+            .all(|step| step.status != TaskStepStatus::Cancelled)
     );
     Ok(())
 }

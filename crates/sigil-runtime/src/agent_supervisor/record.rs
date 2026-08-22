@@ -223,6 +223,33 @@ impl AgentSupervisor {
         Ok(())
     }
 
+    /// Records a task-child stop that has an actionable recovery path. This is deliberately
+    /// distinct from `record_task_child_failure`: the task orchestrator will project the same
+    /// durable provider-turn terminal into `TaskStepStatus::Blocked`.
+    pub fn record_task_child_blocked<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        thread: &AgentTaskChildThread,
+        reason: String,
+    ) -> Result<()>
+    where
+        H: EventHandler + Send + ?Sized,
+    {
+        append_control(
+            session,
+            handler,
+            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+                thread_id: thread.thread_id.clone(),
+                status: AgentThreadStatus::Blocked,
+                reason: Some(reason),
+                updated_at_ms: None,
+            }),
+        )?;
+        self.release_thread(&thread.thread_id);
+        Ok(())
+    }
+
     pub fn record_chat_child_failure<H>(
         &self,
         session: &mut Session,

@@ -15,10 +15,10 @@ use sigil_kernel::{
     DeclaredToolPermissionFacts, Tool, ToolAccess, ToolAnalysisStatus, ToolArtifactDescriptorV1,
     ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolConcurrencyClass, ToolContext,
     ToolErrorKind, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
-    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolResult,
-    ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubjectScope, declared_tool_permission_plan,
-    delete_file_with_mutation, safe_persistence_json_value, safe_persistence_text, sha256_hex,
-    write_file_with_mutation,
+    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolReplayContractV1, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec,
+    ToolSubjectScope, declared_tool_permission_plan, delete_file_with_mutation,
+    safe_persistence_json_value, safe_persistence_text, sha256_hex, write_file_with_mutation,
 };
 
 use crate::{
@@ -98,6 +98,10 @@ impl Tool for ReadFileTool {
 
     fn concurrency_class(&self) -> ToolConcurrencyClass {
         ToolConcurrencyClass::ParallelReadOnly
+    }
+
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::pure_read()
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -521,6 +525,10 @@ impl Tool for WriteFileTool {
         }
     }
 
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::reconciliable("prepared_workspace_mutation_v1")
+    }
+
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let content = required_string(args, "content")?;
         let operation = write_file_permission_operation(ctx, args)?;
@@ -659,6 +667,10 @@ impl Tool for EditFileTool {
             network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
+    }
+
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::reconciliable("prepared_workspace_mutation_v1")
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -807,6 +819,10 @@ impl Tool for DeleteFileTool {
         }
     }
 
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::reconciliable("prepared_workspace_mutation_v1")
+    }
+
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         Ok(ToolPermissionPlanDraft {
             access: ToolAccess::Write,
@@ -925,6 +941,10 @@ impl Tool for ListTool {
         ToolConcurrencyClass::ParallelReadOnly
     }
 
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::pure_read()
+    }
+
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let path = optional_string(args, "path").unwrap_or(".");
         let spec = self.spec();
@@ -1016,6 +1036,10 @@ impl Tool for GlobTool {
         }
     }
 
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::pure_read()
+    }
+
     fn concurrency_class(&self) -> ToolConcurrencyClass {
         ToolConcurrencyClass::ParallelReadOnly
     }
@@ -1104,6 +1128,10 @@ impl Tool for GrepTool {
 
     fn concurrency_class(&self) -> ToolConcurrencyClass {
         ToolConcurrencyClass::ParallelReadOnly
+    }
+
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::pure_read()
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {

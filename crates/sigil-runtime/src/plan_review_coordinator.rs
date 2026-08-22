@@ -5,18 +5,19 @@ use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     Agent, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunPurpose,
     AgentRunTerminalReason, ControlEntry, ConversationRoute, ConversationRouteDecisionProjection,
-    ConversationTurnRef, EventHandler, ModelMessage, PlanApprovalPermission, PlanCompileInputV1,
-    PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId,
-    PlanReadyCommittedV1Entry, PlanReviewAttemptEntry, PlanReviewAttemptId,
-    PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection, PlanReviewSource,
-    PlanReviewTerminalReason, PlanSourceRef, PlanTaskStartMode, ProviderPhysicalAttemptOutcome,
-    RunEvent, Session, SessionLogEntry, SessionRef, StartPlanReviewAction, TaskId, TaskRunStatus,
+    ConversationTurnRef, EventHandler, ModelMessage, PlanApprovalPermission, PlanApprovalScope,
+    PlanCompileInputV1, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry,
+    PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry, PlanReviewAttemptEntry,
+    PlanReviewAttemptId, PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection,
+    PlanReviewSource, PlanReviewTerminalReason, PlanSourceRef, PlanTaskStartMode,
+    ProviderPhysicalAttemptOutcome, RunEvent, Session, SessionLogEntry, SessionRef,
+    StartPlanReviewAction, TaskCreatedFromPlanEntry, TaskId, TaskRunEntry, TaskRunStatus,
     TaskStepId, build_workspace_snapshot, plan_review_attempt_id_for_review,
     plan_review_attempt_id_for_revision_ordinal, plan_review_child_session_ref,
     plan_review_finalizer_session_ref, plan_review_id_for_explicit_command,
     plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
-    plan_review_system_prompt_contract_material, safe_persistence_text, stable_event_uuid,
-    stable_workspace_id,
+    plan_review_system_prompt_contract_material, plan_task_input_from_draft, safe_persistence_text,
+    stable_event_uuid, stable_workspace_id, task_id_from_plan_draft,
 };
 
 use sigil_kernel::ApprovalHandler;
@@ -24,10 +25,9 @@ use sigil_kernel::ApprovalHandler;
 #[cfg(test)]
 use sigil_kernel::{
     IntentAcceptanceAuthorityV1, IntentAdmissionContextV1, IntentStackId, PlanApprovalExpiry,
-    PlanApprovalScope, PlanPermissionGrantedEntry, TaskCreatedFromPlanEntry, TaskPlanEntry,
-    TaskPlanStatus, TaskRunEntry, admit_suggested_decomposition,
+    TaskPlanEntry, TaskPlanStatus, admit_suggested_decomposition,
     append_task_intent_plan_admission_with_step_contracts, bind_task_plan_intents,
-    plan_task_input_from_draft, task_id_from_plan_draft, task_plan_from_plan_draft,
+    task_plan_from_plan_draft,
 };
 
 use crate::{RootConfig, attach_session_url_capability_store};
@@ -47,6 +47,8 @@ pub enum PlanReviewRunOutcome {
     CompletedWithoutDraft,
     Cancelled,
     Interrupted(String),
+    Blocked(String),
+    Paused(String),
     Failed(String),
     SubmitOnlyProtocolViolation(String),
 }
@@ -533,7 +535,7 @@ impl PlanReviewCoordinator {
                         AgentRunDisposition::Blocked => {
                             return complete_plan_review_run(
                                 &cancellation,
-                                PlanReviewRunOutcome::Failed(
+                                PlanReviewRunOutcome::Blocked(
                                     "plan review run was blocked before a draft".to_owned(),
                                 ),
                             );
@@ -690,6 +692,15 @@ impl PlanReviewCoordinator {
                     ))?;
                     continue;
                 }
+                if let Some(outcome) =
+                    plain_text_plan_review_outcome(request, &output.result.final_text, now_ms())?
+                {
+                    handler.handle(RunEvent::Notice(
+                        "The model could not satisfy the structured Plan schema; preserved its complete text as the reviewable Plan instead."
+                            .to_owned(),
+                    ))?;
+                    return complete_plan_review_run(&cancellation, outcome);
+                }
                 return complete_plan_review_run(
                     &cancellation,
                     PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
@@ -699,7 +710,10 @@ impl PlanReviewCoordinator {
                 AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
                     plan_review_draft_ready_outcome(&finalizer_session, &action.plan_id)?
                 }
-                AgentRunDisposition::FinalAnswer => PlanReviewRunOutcome::CompletedWithoutDraft,
+                AgentRunDisposition::FinalAnswer => {
+                    plain_text_plan_review_outcome(request, &output.result.final_text, now_ms())?
+                        .unwrap_or(PlanReviewRunOutcome::CompletedWithoutDraft)
+                }
                 AgentRunDisposition::AwaitingUserInput(_) => PlanReviewRunOutcome::Failed(
                     "plan review finalization exposed an unsupported user-input suspension"
                         .to_owned(),
@@ -707,7 +721,7 @@ impl PlanReviewCoordinator {
                 AgentRunDisposition::Interrupted => PlanReviewRunOutcome::Interrupted(
                     "plan review finalization was interrupted before a draft".to_owned(),
                 ),
-                AgentRunDisposition::Blocked => PlanReviewRunOutcome::Failed(
+                AgentRunDisposition::Blocked => PlanReviewRunOutcome::Blocked(
                     "plan review finalization was blocked before a draft".to_owned(),
                 ),
                 AgentRunDisposition::StartDurableTask(_)
@@ -733,11 +747,8 @@ impl PlanReviewCoordinator {
 
     /// Commits a validated draft from the plan review child session into the parent session.
     ///
-    /// The draft is first compiled into an [`ExecutablePlanCandidateV1`]; the parent append is
-    /// idempotent: identical drafts are skipped, conflicting durable facts fail closed. The
-    /// attempt transitions to `DraftReady` only when candidate and ready marker are in the same
-    /// atomic batch; compile failures transition to `CompileFailed` with a typed reason and the
-    /// plan never becomes adoptable (RFC-0067 6.1, 8.1).
+    /// The readable draft is the complete review authority. No Task candidate is compiled here:
+    /// structured fields may improve presentation, but cannot become an execution prerequisite.
     ///
     /// # Errors
     ///
@@ -747,7 +758,7 @@ impl PlanReviewCoordinator {
         parent: &mut Session,
         draft: &PlanDraftCreatedEntry,
         request: &PlanReviewRunRequest,
-        compile_input: &PlanCompileInputV1,
+        _compile_input: &PlanCompileInputV1,
         now_ms: u64,
     ) -> Result<()> {
         validate_plan_review_child_draft(draft, request)?;
@@ -766,104 +777,38 @@ impl PlanReviewCoordinator {
         if draft_missing {
             controls.push(ControlEntry::PlanDraftCreated(draft.clone()));
         }
-        match sigil_kernel::compile_executable_plan_candidate(draft, compile_input) {
-            Ok(candidate) => {
-                // RFC-0067 8.2: an existing candidate/marker must be the exact same content;
-                // mismatches mean the durable facts drifted and must fail closed instead of
-                // silently keeping a stale Ready.
-                if let Some(existing) = projection.candidates.get(&candidate.plan_id) {
-                    if existing != &candidate {
-                        bail!(
-                            "plan {} already has a conflicting executable candidate (expected {}, current {})",
-                            candidate.plan_id.as_str(),
-                            candidate.candidate_hash,
-                            existing.candidate_hash
-                        );
-                    }
-                } else {
-                    controls.push(ControlEntry::ExecutablePlanCandidatePreparedV1(Box::new(
-                        candidate.clone(),
-                    )));
-                }
-                if let Some(existing) = projection.ready_markers.get(&candidate.plan_id) {
-                    if existing.plan_hash != candidate.plan_hash
-                        || existing.candidate_hash != candidate.candidate_hash
-                        || existing.attempt_id != request.attempt_id.as_str()
-                    {
-                        bail!(
-                            "plan {} already has a conflicting ready marker (expected candidate {}, current candidate {}, attempt {})",
-                            candidate.plan_id.as_str(),
-                            candidate.candidate_hash,
-                            existing.candidate_hash,
-                            existing.attempt_id
-                        );
-                    }
-                } else {
-                    controls.push(ControlEntry::PlanReadyCommittedV1(
-                        PlanReadyCommittedV1Entry {
-                            plan_id: candidate.plan_id.clone(),
-                            plan_hash: candidate.plan_hash.clone(),
-                            candidate_hash: candidate.candidate_hash.clone(),
-                            attempt_id: request.attempt_id.as_str().to_owned(),
-                            committed_at_ms: now_ms,
+        if let Some(attempt_entry) = plan_review_attempt_status_entry(
+            parent,
+            request,
+            PlanReviewAttemptStatus::DraftReady,
+            None,
+            now_ms,
+        )? {
+            controls.push(ControlEntry::PlanReviewAttempt(attempt_entry));
+        }
+        if let (Some(base_plan_id), Some(base_plan_hash)) = (
+            request.base_plan_id.as_ref(),
+            request.base_plan_hash.as_ref(),
+        ) {
+            let latest = projection.latest_decision(base_plan_id);
+            match latest.map(|entry| entry.decision) {
+                Some(PlanDecision::RevisionSucceeded) => {}
+                Some(PlanDecision::RevisionRequested) => {
+                    controls.push(ControlEntry::PlanDecisionRecorded(
+                        PlanDecisionRecordedEntry {
+                            plan_id: base_plan_id.clone(),
+                            plan_hash: base_plan_hash.clone(),
+                            decision: PlanDecision::RevisionSucceeded,
+                            decided_by: PlanDecisionActor::System,
+                            decided_at_ms: now_ms,
+                            reason: Some(format!(
+                                "superseded by revised plan {}",
+                                request.plan_id.as_str()
+                            )),
                         },
                     ));
                 }
-                if let Some(attempt_entry) = plan_review_attempt_status_entry(
-                    parent,
-                    request,
-                    PlanReviewAttemptStatus::DraftReady,
-                    None,
-                    now_ms,
-                )? {
-                    controls.push(ControlEntry::PlanReviewAttempt(attempt_entry));
-                }
-                if let (Some(base_plan_id), Some(base_plan_hash)) = (
-                    request.base_plan_id.as_ref(),
-                    request.base_plan_hash.as_ref(),
-                ) {
-                    let latest = projection.latest_decision(base_plan_id);
-                    match latest.map(|entry| entry.decision) {
-                        Some(PlanDecision::RevisionSucceeded) => {}
-                        Some(PlanDecision::RevisionRequested) => {
-                            controls.push(ControlEntry::PlanDecisionRecorded(
-                                PlanDecisionRecordedEntry {
-                                    plan_id: base_plan_id.clone(),
-                                    plan_hash: base_plan_hash.clone(),
-                                    decision: PlanDecision::RevisionSucceeded,
-                                    decided_by: PlanDecisionActor::System,
-                                    decided_at_ms: now_ms,
-                                    reason: Some(format!(
-                                        "superseded by revised plan {}",
-                                        request.plan_id.as_str()
-                                    )),
-                                },
-                            ));
-                        }
-                        other => {
-                            bail!("revision base plan is not awaiting success: {:?}", other)
-                        }
-                    }
-                }
-            }
-            Err(failure) => {
-                // Stamp the transient compiler failure with the durable record time; the pure
-                // compiler itself has no clock.
-                controls.push(ControlEntry::PlanCompileFailedV1(
-                    sigil_kernel::PlanCompileFailureV1 {
-                        failed_at_ms: now_ms,
-                        ..*failure
-                    },
-                ));
-                if let Some(attempt_entry) = plan_review_attempt_status_entry(
-                    parent,
-                    request,
-                    PlanReviewAttemptStatus::CompileFailed,
-                    None,
-                    now_ms,
-                )? {
-                    controls.push(ControlEntry::PlanReviewAttempt(attempt_entry));
-                }
+                other => bail!("revision base plan is not awaiting success: {:?}", other),
             }
         }
         if controls.is_empty() {
@@ -903,6 +848,70 @@ impl PlanReviewCoordinator {
                 "task-step-contract-v2",
             ),
             intent_schema_hash: Some(sigil_kernel::stable_event_uuid(
+                "sigil-intent-schema-v1",
+                "intent-contract-v1",
+            )),
+            max_plan_steps: root_config.task.max_plan_steps,
+            workspace_id: stable_workspace_id(workspace_root).ok(),
+            session_scope_id: Some(session.session_scope_id().to_owned()),
+        })
+    }
+
+    /// Rebuilds deterministic compiler facts for post-approval Task materialization.
+    pub fn plan_compile_input_for_approved_plan(
+        session: &Session,
+        root_config: &RootConfig,
+        workspace_root: &Path,
+        plan_id: &PlanId,
+    ) -> Result<PlanCompileInputV1> {
+        let draft = session
+            .plan_artifact_projection()
+            .plans
+            .get(plan_id)
+            .cloned()
+            .context("approved Plan is missing its durable draft")?;
+        let attempt = PlanReviewProjection::from_entries(session.entries())
+            .attempt_for_plan(plan_id)
+            .cloned();
+        Ok(PlanCompileInputV1 {
+            source_attempt_id: attempt.as_ref().map_or_else(
+                || {
+                    stable_event_uuid(
+                        "sigil-plan-materialization-attempt-v1",
+                        &format!("{}:{}", plan_id.as_str(), draft.plan_hash),
+                    )
+                },
+                |attempt| attempt.attempt_id.as_str().to_owned(),
+            ),
+            source_turn_id: attempt
+                .as_ref()
+                .map(|attempt| attempt.source_turn.message_id.clone())
+                .or_else(|| {
+                    draft
+                        .source
+                        .source_turn
+                        .as_ref()
+                        .map(|turn| turn.message_id.clone())
+                })
+                .unwrap_or_else(|| {
+                    stable_event_uuid(
+                        "sigil-plan-materialization-source-v1",
+                        &format!("{}:{}", plan_id.as_str(), draft.plan_hash),
+                    )
+                }),
+            task_config_contract_hash: stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                &format!("max_plan_steps={}", root_config.task.max_plan_steps),
+            ),
+            planner_schema_hash: stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "submit_plan_draft-v2",
+            ),
+            task_contract_schema_hash: stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "task-step-contract-v2",
+            ),
+            intent_schema_hash: Some(stable_event_uuid(
                 "sigil-intent-schema-v1",
                 "intent-contract-v1",
             )),
@@ -952,6 +961,20 @@ impl PlanReviewCoordinator {
                 Some(PlanReviewTerminalReason::RunInterrupted),
                 now_ms,
             ),
+            PlanReviewRunOutcome::Blocked(_) => append_attempt_status(
+                session,
+                request,
+                PlanReviewAttemptStatus::Blocked,
+                Some(PlanReviewTerminalReason::RunBlocked),
+                now_ms,
+            ),
+            PlanReviewRunOutcome::Paused(_) => append_attempt_status(
+                session,
+                request,
+                PlanReviewAttemptStatus::Paused,
+                Some(PlanReviewTerminalReason::RunPaused),
+                now_ms,
+            ),
             PlanReviewRunOutcome::Failed(_) => append_attempt_status(
                 session,
                 request,
@@ -980,6 +1003,8 @@ impl PlanReviewCoordinator {
                 PlanReviewRunOutcome::CompletedWithoutDraft => "revision completed without draft",
                 PlanReviewRunOutcome::Cancelled => "revision cancelled",
                 PlanReviewRunOutcome::Interrupted(_) => "revision interrupted",
+                PlanReviewRunOutcome::Blocked(_) => "revision blocked",
+                PlanReviewRunOutcome::Paused(_) => "revision paused",
                 PlanReviewRunOutcome::Failed(_) => "revision failed",
                 PlanReviewRunOutcome::SubmitOnlyProtocolViolation(_) => {
                     "revision submit-only protocol violation"
@@ -1625,6 +1650,11 @@ impl PlanReviewCoordinator {
         command: &PlanDecisionCommand,
         now_ms: u64,
     ) -> Result<PlanDecisionRecordedEntry> {
+        if command.decision == PlanDecision::Accepted {
+            bail!(
+                "Accepted decisions must use PlanExecutionService::approve so Plan approval and the stable Task shell commit together"
+            );
+        }
         let plan_id = PlanId::new(command.plan_id.clone())
             .map_err(|error| anyhow!("invalid plan id for decision: {error}"))?;
         let projection = session.plan_artifact_projection();
@@ -2583,6 +2613,23 @@ fn plan_review_draft_ready_outcome(
     })
 }
 
+fn plain_text_plan_review_outcome(
+    request: &PlanReviewRunRequest,
+    final_text: &str,
+    created_at_ms: u64,
+) -> Result<Option<PlanReviewRunOutcome>> {
+    Ok(sigil_kernel::plain_text_plan_draft_entry_with_plan_id(
+        request.plan_id.clone(),
+        final_text,
+        request.plan_source_ref(),
+        created_at_ms,
+        request.workspace_snapshot_id.clone(),
+    )?
+    .map(|draft| PlanReviewRunOutcome::DraftReady {
+        draft: Box::new(draft),
+    }))
+}
+
 fn complete_plan_review_run(
     cancellation: &sigil_kernel::RunCancellationHandle,
     outcome: PlanReviewRunOutcome,
@@ -2981,19 +3028,530 @@ pub fn application_record_revision_failure(
     )
 }
 
-/// RFC-0067: the single application service that turns one typed Run command into the single
-/// atomic adoption authority (RFC-0067 6.5, 9).
+/// RFC-0069 application service for atomic Plan approval and direct Task execution. The legacy
+/// materialization and RFC-0067 adoption APIs remain test/replay compatibility only.
 ///
 /// TUI keyboard/mouse, Desktop IPC, HTTP commands, CLI automation and the model-selected
 /// `run_pending_plan` route all construct a [`PlanRunCommandV1`] and drive this service. The
-/// service never calls the provider, reads the workspace, parses the Plan, enumerates the tool
-/// registry or starts a child process. Run success produces exactly one
-/// `PlanExecutionAdoptedV1` durable record; environment problems become Task admission blockers.
+/// service never calls the provider, reads the workspace, parses prose, enumerates the tool
+/// registry or starts a child process. Approval atomically creates a stable Task plus first-class
+/// direct execution authority. Typed Plan steps may seed a display-only checklist, but never
+/// execution authority.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PlanExecutionService;
 
+/// Durable result of approving readable Plan text and creating its stable Task shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanApprovalReceiptV2 {
+    pub command_id: String,
+    pub receipt_id: String,
+    pub plan_id: PlanId,
+    pub plan_hash: String,
+    pub task_id: TaskId,
+    pub task_title: String,
+    pub start_mode: PlanTaskStartMode,
+    pub permission_grant: Option<PlanApprovalPermission>,
+    pub approved_at_ms: u64,
+    pub already_approved: bool,
+}
+
+/// Post-approval materialization result. A compiler problem is a Task-local blocker, not a
+/// rejected approval and not a missing Task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanTaskMaterializationOutcomeV1 {
+    Prepared {
+        candidate: Box<sigil_kernel::ExecutablePlanCandidateV1>,
+        receipt: sigil_kernel::PlanRunReceiptV1,
+    },
+    Blocked {
+        failure: Box<sigil_kernel::PlanCompileFailureV1>,
+        blocker: Box<sigil_kernel::TaskBlockerV1>,
+    },
+}
+
 impl PlanExecutionService {
-    /// Adopts the exact candidate named by the command (RFC-0067 9.2, 9.3).
+    /// Commits exact Plan approval together with a stable, directly executable Task.
+    ///
+    /// This is the product authority boundary. It never asks a model to compile a DAG, activates
+    /// intents, probes the workspace, invokes a provider or starts a child. Retrying the same
+    /// approved plan returns the same Task identity and exact direct-execution authority.
+    pub fn approve(
+        session: &mut Session,
+        parent_session_ref: SessionRef,
+        command: &sigil_kernel::PlanRunCommandV1,
+        now_ms: u64,
+    ) -> std::result::Result<PlanApprovalReceiptV2, sigil_kernel::PlanRunRejectionV1> {
+        if command.session_id != session.session_scope_id() {
+            return Err(sigil_kernel::PlanRunRejectionV1::CommandIdentityConflict);
+        }
+        let projection = session.plan_artifact_projection();
+        let draft = projection
+            .plans
+            .get(&command.plan_id)
+            .cloned()
+            .ok_or(sigil_kernel::PlanRunRejectionV1::PlanMissing)?;
+        if draft.plan_hash != command.expected_plan_hash {
+            return Err(sigil_kernel::PlanRunRejectionV1::PlanHashStale {
+                expected: command.expected_plan_hash.clone(),
+                current: draft.plan_hash,
+            });
+        }
+        if projection.plan_is_rejected(&command.plan_id) {
+            return Err(sigil_kernel::PlanRunRejectionV1::PlanRejected);
+        }
+        // RFC-0069: readable Plan reviewability, rather than the old precompiled candidate,
+        // authorizes approval. A legacy Ready marker is accepted for replay compatibility, but
+        // new Plan review paths reach this boundary with a DraftReady attempt even when their
+        // advisory precompile failed or was produced under another compiler contract.
+        let reviewable = PlanReviewProjection::from_entries(session.entries())
+            .attempt_for_plan(&command.plan_id)
+            .is_some_and(|attempt| attempt.status == PlanReviewAttemptStatus::DraftReady)
+            || projection.plan_ready_state(&command.plan_id)
+                == sigil_kernel::PlanReadyStateV1::Ready;
+        if !reviewable
+            && projection
+                .latest_decision(&command.plan_id)
+                .is_none_or(|decision| decision.decision != PlanDecision::Accepted)
+        {
+            return Err(sigil_kernel::PlanRunRejectionV1::PlanNotReady {
+                plan_state: projection.plan_ready_state(&command.plan_id),
+            });
+        }
+        let permission_grant = match command.permission {
+            sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy => None,
+            sigil_kernel::PlanRunPermissionChoiceV1::GrantScopedEditsOnce => {
+                if draft.target_paths.is_empty() {
+                    return Err(
+                        sigil_kernel::PlanRunRejectionV1::PermissionChoiceUnavailable {
+                            reason: "the approved plan has no concrete target paths".to_owned(),
+                        },
+                    );
+                }
+                Some(PlanApprovalPermission::WorkspaceEdits)
+            }
+        };
+        let task_id = task_id_from_plan_draft(&draft).map_err(|error| {
+            sigil_kernel::PlanRunRejectionV1::SessionWriterUnavailable {
+                reason: format!("failed to derive approved Task identity: {error:#}"),
+            }
+        })?;
+        let task_title = sigil_kernel::task_semantic_title(&draft.summary);
+        let objective = safe_persistence_text(&plan_task_input_from_draft(&draft));
+        let grant_time_ms = projection
+            .latest_decision(&command.plan_id)
+            .filter(|decision| decision.decision == PlanDecision::Accepted)
+            .map_or(now_ms, |decision| decision.decided_at_ms);
+        let direct_execution = sigil_kernel::TaskDirectExecutionAdmittedV1::approved_plan(
+            task_id.clone(),
+            &objective,
+            draft.plan_id.clone(),
+            draft.plan_hash.clone(),
+            grant_time_ms,
+        );
+        let checklist = sigil_kernel::task_checklist_from_plan_steps(task_id.clone(), &draft.steps);
+        let permission_grant_entry =
+            permission_grant.map(|permission| PlanPermissionGrantedEntry {
+                plan_id: draft.plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                task_id: task_id.clone(),
+                workspace_snapshot_id: draft.workspace_snapshot_id.clone(),
+                permission,
+                scope: PlanApprovalScope {
+                    summary: format!("scoped edits for task {}", task_id.as_str()),
+                    workspace_paths: draft.target_paths.clone(),
+                },
+                expires: sigil_kernel::PlanApprovalExpiry::Session,
+                granted_at_ms: grant_time_ms,
+            });
+        let existing_task = session.task_state_projection().tasks.get(&task_id).cloned();
+        let accepted = projection
+            .latest_decision(&command.plan_id)
+            .filter(|decision| decision.decision == PlanDecision::Accepted);
+        let existing_link = projection
+            .tasks_created
+            .get(&command.plan_id)
+            .and_then(|entries| entries.first());
+        if let (Some(decision), Some(task)) = (accepted, existing_task.as_ref()) {
+            if decision.plan_hash == command.expected_plan_hash
+                && task.parent_session_ref == parent_session_ref
+                && task.objective == objective
+                && existing_link
+                    .is_some_and(|link| link.task_id == task_id && link.task_plan_version == 0)
+                && task.direct_execution_admission.as_ref() == Some(&direct_execution)
+                && task.checklist.as_ref() == checklist.as_ref()
+                && projection
+                    .permission_grants
+                    .get(&command.plan_id)
+                    .and_then(|grants| grants.iter().find(|grant| grant.task_id == task_id))
+                    == permission_grant_entry.as_ref()
+            {
+                return Ok(Self::approval_receipt(
+                    command,
+                    task_id,
+                    task_title,
+                    permission_grant,
+                    decision.decided_at_ms,
+                    true,
+                ));
+            }
+            return Err(sigil_kernel::PlanRunRejectionV1::CommandIdentityConflict);
+        }
+        if accepted.is_some() || existing_task.is_some() || existing_link.is_some() {
+            return Err(sigil_kernel::PlanRunRejectionV1::CommandIdentityConflict);
+        }
+        let decision = PlanDecisionRecordedEntry {
+            plan_id: command.plan_id.clone(),
+            plan_hash: command.expected_plan_hash.clone(),
+            decision: PlanDecision::Accepted,
+            decided_by: PlanDecisionActor::User,
+            decided_at_ms: now_ms,
+            reason: Some(format!(
+                "approved for direct Task execution via command {}",
+                command.command_id
+            )),
+        };
+        let task_run = TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref,
+            objective,
+            title: Some(task_title.clone()),
+            status: if command.start_mode == PlanTaskStartMode::CreatePaused {
+                TaskRunStatus::Paused
+            } else {
+                TaskRunStatus::Started
+            },
+            reason: Some(format!(
+                "directly executable Task created from approved plan {}",
+                command.plan_id.as_str()
+            )),
+        };
+        let task_link = TaskCreatedFromPlanEntry {
+            plan_id: command.plan_id.clone(),
+            plan_hash: command.expected_plan_hash.clone(),
+            task_id: task_id.clone(),
+            task_plan_version: 0,
+            step_mapping: Vec::new(),
+            stale_reason: None,
+            created_at_ms: now_ms,
+        };
+        let commit = sigil_kernel::append_plan_approval_task_shell_at_frontier(
+            session,
+            &decision,
+            &task_run,
+            &task_link,
+            &direct_execution,
+            checklist.as_ref(),
+            permission_grant_entry.as_ref(),
+            command.expected_durable_frontier,
+        )
+        .map_err(
+            |error| sigil_kernel::PlanRunRejectionV1::SessionWriterUnavailable {
+                reason: format!("{error:#}"),
+            },
+        )?;
+        if commit == sigil_kernel::PlanExecutionAdoptionCommit::CasSkipped {
+            let current = session.plan_artifact_projection();
+            let current_task = session.task_state_projection();
+            if current
+                .latest_decision(&command.plan_id)
+                .is_some_and(|entry| {
+                    entry.decision == PlanDecision::Accepted
+                        && entry.plan_hash == command.expected_plan_hash
+                })
+                && current_task.tasks.get(&task_id).is_some_and(|task| {
+                    task.parent_session_ref == task_run.parent_session_ref
+                        && task.objective == task_run.objective
+                })
+                && current
+                    .tasks_created
+                    .get(&command.plan_id)
+                    .and_then(|entries| entries.first())
+                    .is_some_and(|link| link.task_id == task_id && link.task_plan_version == 0)
+                && current_task.tasks.get(&task_id).is_some_and(|task| {
+                    task.direct_execution_admission.as_ref() == Some(&direct_execution)
+                        && task.checklist.as_ref() == checklist.as_ref()
+                })
+                && current
+                    .permission_grants
+                    .get(&command.plan_id)
+                    .and_then(|grants| grants.iter().find(|grant| grant.task_id == task_id))
+                    == permission_grant_entry.as_ref()
+            {
+                return Ok(Self::approval_receipt(
+                    command,
+                    task_id,
+                    task_title,
+                    permission_grant,
+                    now_ms,
+                    true,
+                ));
+            }
+            return Err(sigil_kernel::PlanRunRejectionV1::FrontierStale {
+                expected: command.expected_durable_frontier,
+                current: session.durable_frontier_sequence(),
+            });
+        }
+        Ok(Self::approval_receipt(
+            command,
+            task_id,
+            task_title,
+            permission_grant,
+            now_ms,
+            false,
+        ))
+    }
+
+    /// Returns the immediate transport-facing outcome for an atomically approved direct Task.
+    ///
+    /// No environment probe or model-authored contract is needed at this boundary. Concrete
+    /// provider, permission and tool failures remain recoverable within the normal runner.
+    #[must_use]
+    pub fn direct_execution_outcome(
+        approval: &PlanApprovalReceiptV2,
+        now_ms: u64,
+    ) -> sigil_kernel::TaskAdmissionOutcomeV1 {
+        if approval.start_mode == PlanTaskStartMode::CreatePaused {
+            return sigil_kernel::TaskAdmissionOutcomeV1::Paused(
+                sigil_kernel::TaskPauseReasonV1::CreatePaused,
+            );
+        }
+        sigil_kernel::TaskAdmissionOutcomeV1::Ready(sigil_kernel::TaskRuntimeLeaseBindingV1 {
+            lease_id: sigil_kernel::stable_event_uuid(
+                "sigil-direct-task-execution-lease-v1",
+                &format!(
+                    "{}:{}:{}",
+                    approval.task_id.as_str(),
+                    approval.plan_hash,
+                    approval.command_id
+                ),
+            ),
+            granted_at_ms: now_ms,
+        })
+    }
+
+    /// Idempotently materializes one legacy already-approved Plan into an executable candidate.
+    ///
+    /// New Plan Run commands do not call this compatibility path.
+    pub fn materialize_approved_plan(
+        session: &mut Session,
+        approval: &PlanApprovalReceiptV2,
+        compile_input: &PlanCompileInputV1,
+        now_ms: u64,
+    ) -> Result<PlanTaskMaterializationOutcomeV1> {
+        let (draft, generation) = {
+            let projection = session.plan_artifact_projection();
+            let draft = projection
+                .plans
+                .get(&approval.plan_id)
+                .cloned()
+                .context("approved plan disappeared before Task materialization")?;
+            if draft.plan_hash != approval.plan_hash
+                || !projection
+                    .latest_decision(&approval.plan_id)
+                    .is_some_and(|decision| {
+                        decision.decision == PlanDecision::Accepted
+                            && decision.plan_hash == approval.plan_hash
+                    })
+                || !session
+                    .task_state_projection()
+                    .tasks
+                    .contains_key(&approval.task_id)
+            {
+                bail!("Task materialization does not bind an approved Plan and stable Task shell");
+            }
+            if let Some(existing) = projection
+                .materialization_for_task(&approval.task_id)
+                .cloned()
+            {
+                return Ok(PlanTaskMaterializationOutcomeV1::Prepared {
+                    candidate: existing.adopted_candidate.clone(),
+                    receipt: Self::receipt_from_adoption(existing, now_ms, true),
+                });
+            }
+            (
+                draft,
+                projection.next_materialization_generation(&approval.task_id),
+            )
+        };
+        let compiler_contract_fingerprint =
+            materialization_compiler_contract_fingerprint(compile_input);
+        session.append_control(ControlEntry::TaskMaterializationAttemptStartedV1(
+            sigil_kernel::TaskMaterializationAttemptStartedV1 {
+                task_id: approval.task_id.clone(),
+                generation,
+                plan_hash: approval.plan_hash.clone(),
+                compiler_contract_fingerprint,
+                started_at_ms: now_ms,
+            },
+        ))?;
+        let candidate = match sigil_kernel::compile_executable_plan_candidate(&draft, compile_input)
+        {
+            Ok(candidate) => candidate,
+            Err(failure) => {
+                let failure = sigil_kernel::PlanCompileFailureV1 {
+                    failed_at_ms: now_ms,
+                    ..*failure
+                };
+                let blocker = sigil_kernel::TaskBlockerV1 {
+                    reason_code: sigil_kernel::TaskBlockerReasonCodeV1::ContractRecompileRequired,
+                    summary: safe_persistence_text(&format!(
+                        "Plan approved; Task preparation is blocked: {}",
+                        failure.reason
+                    )),
+                    affected_step: failure
+                        .affected_step
+                        .as_ref()
+                        .and_then(|step| TaskStepId::new(step.clone()).ok()),
+                    affected_capability: None,
+                    retryable: true,
+                    available_actions: vec![
+                        sigil_kernel::TaskBlockerActionV1::RetryAdmission,
+                        sigil_kernel::TaskBlockerActionV1::Replan,
+                        sigil_kernel::TaskBlockerActionV1::Cancel,
+                    ],
+                    evidence_digest: failure.plan_hash.clone(),
+                    created_at_ms: now_ms,
+                    resolved_at_ms: None,
+                };
+                let snapshot = draft.workspace_snapshot_id.clone();
+                let observation = sigil_kernel::TaskAdmissionObservationV1 {
+                    base_workspace_snapshot_id: snapshot.clone(),
+                    current_workspace_snapshot_id: snapshot.clone(),
+                    workspace_state: if snapshot.is_some() {
+                        sigil_kernel::WorkspaceAdmissionStateV1::ExactMatch
+                    } else {
+                        sigil_kernel::WorkspaceAdmissionStateV1::SnapshotUnavailable
+                    },
+                    missing_capabilities: Vec::new(),
+                    provider_route_available: true,
+                    credential_available: true,
+                    permission_profile_ok: true,
+                    disk_space_bytes: None,
+                    external_writer_active: false,
+                    verification_runner_available: true,
+                    observed_at_ms: now_ms,
+                };
+                let ordinal = session
+                    .task_state_projection()
+                    .next_admission_ordinal(&approval.task_id);
+                let materialization_blocker = sigil_kernel::TaskMaterializationBlockedV1 {
+                    task_id: approval.task_id.clone(),
+                    generation,
+                    plan_hash: approval.plan_hash.clone(),
+                    blocker_id: stable_event_uuid(
+                        "sigil-task-materialization-blocker-v1",
+                        &format!(
+                            "{}:{}:{}:{}",
+                            approval.task_id.as_str(),
+                            generation,
+                            approval.plan_hash,
+                            failure.reason_code
+                        ),
+                    ),
+                    blocker: blocker.clone(),
+                    blocked_at_ms: now_ms,
+                };
+                session.append_controls(vec![
+                    ControlEntry::PlanCompileFailedV1(failure.clone()),
+                    ControlEntry::TaskMaterializationBlockedV1(materialization_blocker),
+                    ControlEntry::TaskAdmissionAttemptedV1(sigil_kernel::TaskAdmissionAttemptV1 {
+                        task_id: approval.task_id.clone(),
+                        plan_version: 1,
+                        ordinal,
+                        candidate_hash: approval.plan_hash.clone(),
+                        observed_environment: observation,
+                        outcome: sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker.clone()),
+                    }),
+                ])?;
+                return Ok(PlanTaskMaterializationOutcomeV1::Blocked {
+                    failure: Box::new(failure),
+                    blocker: Box::new(blocker),
+                });
+            }
+        };
+        if candidate.task_id != approval.task_id {
+            bail!("Task materializer changed the approved stable Task identity");
+        }
+        // `ExecutablePlanCandidatePreparedV1` and `PlanReadyCommittedV1` can exist from the
+        // RFC-0067 precompile cache. They are deliberately not an authority for this new
+        // materialization: compiler/configuration facts may legitimately differ after approval.
+        // The following TaskMaterializationPrepared receipt is the only new authoritative
+        // candidate binding and carries the exact candidate it compiled.
+        let materialization = sigil_kernel::PlanExecutionAdoptedV1Entry {
+            command_id: approval.command_id.clone(),
+            plan_id: approval.plan_id.clone(),
+            plan_hash: approval.plan_hash.clone(),
+            candidate_hash: candidate.candidate_hash.clone(),
+            task_id: approval.task_id.clone(),
+            task_title: approval.task_title.clone(),
+            parent_session_ref: session
+                .task_state_projection()
+                .tasks
+                .get(&approval.task_id)
+                .context("approved Task shell disappeared")?
+                .parent_session_ref
+                .clone(),
+            start_mode: approval.start_mode,
+            permission_grant: approval.permission_grant,
+            adopted_candidate: Box::new(candidate.clone()),
+            execution_segments: Some(sigil_kernel::materialize_execution_segments(&candidate)),
+            initial_phase: sigil_kernel::TaskExecutionPhaseV1::Preparing,
+            adopted_at_ms: approval.approved_at_ms,
+        };
+        let commit = sigil_kernel::append_task_materialization_prepared_at_frontier(
+            session,
+            &materialization,
+            session.durable_frontier_sequence(),
+        )?;
+        let settled = match commit {
+            sigil_kernel::PlanExecutionAdoptionCommit::Appended => materialization,
+            sigil_kernel::PlanExecutionAdoptionCommit::CasSkipped => session
+                .plan_artifact_projection()
+                .materialization_for_task(&approval.task_id)
+                .cloned()
+                .context("Task materialization lost its idempotent prepared receipt")?,
+        };
+        Ok(PlanTaskMaterializationOutcomeV1::Prepared {
+            candidate: Box::new(candidate),
+            receipt: Self::receipt_from_adoption(
+                settled,
+                now_ms,
+                commit == sigil_kernel::PlanExecutionAdoptionCommit::CasSkipped,
+            ),
+        })
+    }
+
+    fn approval_receipt(
+        command: &sigil_kernel::PlanRunCommandV1,
+        task_id: TaskId,
+        task_title: String,
+        permission_grant: Option<PlanApprovalPermission>,
+        approved_at_ms: u64,
+        already_approved: bool,
+    ) -> PlanApprovalReceiptV2 {
+        PlanApprovalReceiptV2 {
+            command_id: command.command_id.clone(),
+            receipt_id: sigil_kernel::stable_event_uuid(
+                "sigil-plan-approval-receipt-v2",
+                &format!(
+                    "{}:{}:{}",
+                    command.command_id,
+                    command.expected_plan_hash,
+                    task_id.as_str()
+                ),
+            ),
+            plan_id: command.plan_id.clone(),
+            plan_hash: command.expected_plan_hash.clone(),
+            task_id,
+            task_title,
+            start_mode: command.start_mode,
+            permission_grant,
+            approved_at_ms,
+            already_approved,
+        }
+    }
+
+    /// Replays the legacy RFC-0067 adoption record for compatibility tests only.
     ///
     /// Idempotency: retrying the same `command_id` returns the same receipt; adopting the same
     /// candidate with another command returns the same Task identity with `already_adopted`.
@@ -3003,6 +3561,7 @@ impl PlanExecutionService {
     ///
     /// Returns `Err` only for rejections that are not `PlanRunRejectionV1`-typed (for example an
     /// adoption payload that cannot be serialized).
+    #[cfg(test)]
     pub fn adopt(
         session: &mut Session,
         parent_session_ref: SessionRef,
@@ -3066,6 +3625,7 @@ impl PlanExecutionService {
             start_mode: command.start_mode,
             permission_grant,
             adopted_candidate: Box::new(candidate),
+            execution_segments: None,
             initial_phase: sigil_kernel::TaskExecutionPhaseV1::Preparing,
             adopted_at_ms: now_ms,
         };
@@ -3208,6 +3768,21 @@ pub fn build_task_admission_probes(
 /// Route availability only proves the connection configuration is valid; credential
 /// availability separately resolves the configured source (environment variable or stored
 /// record) so a missing API key is discovered at admission instead of at provider startup.
+fn materialization_compiler_contract_fingerprint(input: &PlanCompileInputV1) -> String {
+    let material = format!(
+        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+        input.source_attempt_id,
+        input.source_turn_id,
+        input.task_config_contract_hash,
+        input.planner_schema_hash,
+        input.task_contract_schema_hash,
+        input.intent_schema_hash.as_deref().unwrap_or("-"),
+        input.max_plan_steps,
+        input.workspace_id.as_deref().unwrap_or("-"),
+    );
+    format!("sha256:{}", sigil_kernel::sha256_hex(material.as_bytes()))
+}
+
 fn route_and_credential_probe(root_config: &RootConfig) -> (bool, bool) {
     let loaded = crate::provider_connections::load_provider_connections(root_config);
     if loaded.mode != crate::provider_connections::ConfigMode::V2 {
@@ -3571,20 +4146,14 @@ pub fn application_plan_decision(
         ApplicationPlanAction::Run => {
             let plan_id = PlanId::new(command.plan_id.clone())
                 .map_err(|error| anyhow!("invalid plan id for decision: {error}"))?;
-            let candidate_hash = session
-                .plan_artifact_projection()
-                .latest_candidate(&plan_id)
-                .map(|candidate| candidate.candidate_hash.clone())
-                .ok_or_else(|| anyhow!("plan {} has no executable candidate", plan_id.as_str()))?;
             let run_command = sigil_kernel::PlanRunCommandV1 {
                 command_id: sigil_kernel::stable_event_uuid(
                     "sigil-plan-run-command-v1",
                     &format!(
-                        "{}:{}:{}:{}:run:{}",
+                        "{}:{}:{}:run:{}",
                         session.session_scope_id(),
                         command.plan_id,
                         command.expected_plan_hash,
-                        candidate_hash,
                         match command.permission_grant {
                             Some(PlanApprovalPermission::WorkspaceEdits) => "scoped_edits",
                             Some(PlanApprovalPermission::Ask) | None => "current_policy",
@@ -3594,7 +4163,7 @@ pub fn application_plan_decision(
                 session_id: session.session_scope_id().to_owned(),
                 plan_id: plan_id.clone(),
                 expected_plan_hash: command.expected_plan_hash.clone(),
-                expected_candidate_hash: candidate_hash,
+                expected_candidate_hash: String::new(),
                 expected_durable_frontier: session.durable_frontier_sequence(),
                 start_mode: PlanTaskStartMode::CreateAndRun,
                 permission: match command.permission_grant {
@@ -3607,7 +4176,7 @@ pub fn application_plan_decision(
                 },
                 source: sigil_kernel::PlanRunCommandSource::Http,
             };
-            let adopted = PlanExecutionService::adopt(
+            let approved = PlanExecutionService::approve(
                 &mut session,
                 parent_session_ref,
                 &run_command,
@@ -3619,52 +4188,27 @@ pub fn application_plan_decision(
                     plan_run_rejection_message(&rejection)
                 )
             })?;
-            // RFC-0067 10.2: admission runs immediately after adoption with every probe this
-            // surface can observe (the exact registry is attached when a runner actually
-            // executes the Task, which re-admits with a higher ordinal).
-            let candidate = session
-                .plan_artifact_projection()
-                .latest_candidate(&plan_id)
-                .cloned()
-                .context("adopted candidate disappeared from the session")?;
-            let probes = build_task_admission_probes(
-                root_config,
-                workspace_root,
-                None,
-                &session,
-                &adopted.task_id,
-                &candidate,
-            );
-            let outcome = admit_adopted_task(
-                &mut session,
-                root_config,
-                workspace_root,
-                &adopted.task_id,
-                &candidate,
-                &probes,
-                now_ms(),
-            )?;
-            let (task_phase, task_blocker) = match &outcome {
-                sigil_kernel::TaskAdmissionOutcomeV1::Ready(_) => {
-                    (Some(sigil_kernel::TaskExecutionPhaseV1::Ready), None)
-                }
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker) => (
-                    Some(sigil_kernel::TaskExecutionPhaseV1::Blocked),
-                    Some(blocker.clone()),
-                ),
-                sigil_kernel::TaskAdmissionOutcomeV1::Paused(_) => {
-                    (Some(sigil_kernel::TaskExecutionPhaseV1::Paused), None)
-                }
-            };
+            let task_phase =
+                match PlanExecutionService::direct_execution_outcome(&approved, now_ms()) {
+                    sigil_kernel::TaskAdmissionOutcomeV1::Ready(_) => {
+                        Some(sigil_kernel::TaskExecutionPhaseV1::Ready)
+                    }
+                    sigil_kernel::TaskAdmissionOutcomeV1::Paused(_) => {
+                        Some(sigil_kernel::TaskExecutionPhaseV1::Paused)
+                    }
+                    sigil_kernel::TaskAdmissionOutcomeV1::Blocked(_) => unreachable!(
+                        "first-class direct Plan execution has no materialization blocker"
+                    ),
+                };
             ApplicationPlanDecisionReceipt {
                 plan_id: command.plan_id.clone(),
                 plan_hash: draft.plan_hash,
                 action: ApplicationPlanAction::Run,
-                task_id: Some(adopted.task_id.as_str().to_owned()),
-                task_title: Some(adopted.task_title),
-                candidate_hash: Some(adopted.candidate_hash),
+                task_id: Some(approved.task_id.as_str().to_owned()),
+                task_title: Some(approved.task_title),
+                candidate_hash: None,
                 task_phase,
-                task_blocker,
+                task_blocker: None,
                 user_input_request: None,
                 revision_request: None,
             }

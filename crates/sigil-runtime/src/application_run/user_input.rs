@@ -642,7 +642,13 @@ pub async fn prepare_application_user_input_decision(
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
+    let events = ApplicationRunEventSequence::with_outbox(
+        session_id.clone(),
+        run_id.clone(),
+        PublicEventOutboxRecorder::new(
+            JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
+        ),
+    );
     let terminal_control = ApplicationTerminalTaskControl::new(
         workspace_root,
         surface.terminal_control,
@@ -662,7 +668,10 @@ pub async fn prepare_application_user_input_decision(
     let continuation = PreparedApplicationRun {
         execution: ApplicationRunExecution {
             kind: ApplicationRunExecutionKind::Main {
-                agent: Box::new(Agent::new(provider, surface.registry)),
+                agent: Box::new(
+                    crate::configured_agent(&root_config, provider, surface.registry)
+                        .map_err(ApplicationRunPrepareError::execution)?,
+                ),
                 input: Box::new(input),
             },
             task_execution: None,

@@ -125,6 +125,7 @@ pub enum ConversationDisplayStatusV1 {
     Failed,
     Cancelled,
     Interrupted,
+    Paused,
     Blocked,
     AwaitingUserInput,
 }
@@ -333,12 +334,16 @@ pub struct ConversationTaskControlV1 {
     pub phase: PublicTaskPhase,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<sigil_kernel::TaskExecutionBindingV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_status: Option<String>,
     #[serde(default)]
     pub steps: Vec<ConversationTaskPlanStepV1>,
     pub steps_truncated: bool,
+    #[serde(default)]
+    pub checklist: Vec<sigil_kernel::PublicTaskChecklistItemV1>,
     pub active_children: u32,
     pub completed_children: u32,
     pub failed_children: u32,
@@ -608,6 +613,18 @@ impl ConversationTaskControlProjection {
                     })
                     .collect();
             }
+            PublicRunEventKind::TaskExecutionAdmitted { task_id, execution } => {
+                let task = self.task(&task_id);
+                if !matches!(task.status.as_str(), "completed" | "cancelled") {
+                    task.execution = Some(execution);
+                }
+            }
+            PublicRunEventKind::TaskChecklistUpdated { task_id, items, .. } => {
+                let task = self.task(&task_id);
+                if !matches!(task.status.as_str(), "completed" | "cancelled") {
+                    task.checklist = items;
+                }
+            }
             PublicRunEventKind::TaskBatchChanged {
                 task_id,
                 plan_version,
@@ -719,10 +736,12 @@ impl ConversationTaskControlProjection {
                 task_id: task_id.to_owned(),
                 phase: PublicTaskPhase::Planning,
                 status: "started".to_owned(),
+                execution: None,
                 plan_version: None,
                 plan_status: None,
                 steps: Vec::new(),
                 steps_truncated: false,
+                checklist: Vec::new(),
                 active_children: 0,
                 completed_children: 0,
                 failed_children: 0,
@@ -1947,6 +1966,7 @@ fn map_terminal_status(
         ConversationRunTerminalStatusV1::Failed => ConversationDisplayStatusV1::Failed,
         ConversationRunTerminalStatusV1::Cancelled => ConversationDisplayStatusV1::Cancelled,
         ConversationRunTerminalStatusV1::Interrupted => ConversationDisplayStatusV1::Interrupted,
+        ConversationRunTerminalStatusV1::Paused => ConversationDisplayStatusV1::Paused,
         ConversationRunTerminalStatusV1::Blocked => ConversationDisplayStatusV1::Blocked,
         ConversationRunTerminalStatusV1::AwaitingUserInput => {
             ConversationDisplayStatusV1::AwaitingUserInput
@@ -2008,11 +2028,10 @@ struct PlanReviewDisplayProjection {
         sigil_kernel::PlanId,
         Vec<sigil_kernel::TaskCreatedFromPlanEntry>,
     >,
-    // RFC-0067: durable executable candidate + ready marker; Run is only offered when both exist.
-    candidates:
-        std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::ExecutablePlanCandidateV1>,
-    ready_markers:
-        std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::PlanReadyCommittedV1Entry>,
+    materialization_blockers: std::collections::BTreeMap<
+        sigil_kernel::TaskId,
+        sigil_kernel::TaskMaterializationBlockedV1,
+    >,
     revision_guidance:
         std::collections::BTreeMap<sigil_kernel::UserInputIdentityV1, sigil_kernel::PlanId>,
     pending_revision_guidance: std::collections::BTreeSet<sigil_kernel::PlanId>,
@@ -2069,15 +2088,16 @@ impl PlanReviewDisplayProjection {
                 .or_default()
                 .push(created),
             sigil_kernel::SessionLogEntry::Control(
-                sigil_kernel::ControlEntry::ExecutablePlanCandidatePreparedV1(candidate),
+                sigil_kernel::ControlEntry::TaskMaterializationBlockedV1(blocked),
             ) => {
-                self.candidates
-                    .insert(candidate.plan_id.clone(), (*candidate).clone());
+                self.materialization_blockers
+                    .insert(blocked.task_id.clone(), blocked);
             }
             sigil_kernel::SessionLogEntry::Control(
-                sigil_kernel::ControlEntry::PlanReadyCommittedV1(marker),
+                sigil_kernel::ControlEntry::TaskMaterializationPreparedV1(materialization),
             ) => {
-                self.ready_markers.insert(marker.plan_id.clone(), marker);
+                self.materialization_blockers
+                    .remove(&materialization.task_id);
             }
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::PlanExecutionAdoptedV1(adoption),
@@ -2179,20 +2199,25 @@ impl PlanReviewDisplayProjection {
         } else {
             latest
         };
-        if self
+        let latest_decision = self
             .decisions
             .get(&active_attempt.plan_id)
             .and_then(|entries| entries.last())
-            .is_some_and(|decision| {
-                matches!(
-                    decision.decision,
-                    sigil_kernel::PlanDecision::Accepted | sigil_kernel::PlanDecision::Rejected
-                )
-            })
+            .map(|entry| entry.decision);
+        let materialization_blocker = self
+            .tasks_created
+            .get(&active_attempt.plan_id)
+            .and_then(|entries| entries.last())
+            .and_then(|link| self.materialization_blockers.get(&link.task_id));
+        let materialization_recovery = latest_decision
+            == Some(sigil_kernel::PlanDecision::Accepted)
+            && materialization_blocker.is_some();
+        if !materialization_recovery
+            && (matches!(
+                latest_decision,
+                Some(sigil_kernel::PlanDecision::Accepted | sigil_kernel::PlanDecision::Rejected)
+            ) || self.tasks_created.contains_key(&active_attempt.plan_id))
         {
-            return None;
-        }
-        if self.tasks_created.contains_key(&active_attempt.plan_id) {
             return None;
         }
         // The attempt status always projects; draft-specific details exist only when the latest
@@ -2207,11 +2232,6 @@ impl PlanReviewDisplayProjection {
                 )
             })
             .is_some();
-        let latest_decision = self
-            .decisions
-            .get(&active_attempt.plan_id)
-            .and_then(|entries| entries.last())
-            .map(|entry| entry.decision);
         let revision_running = latest.revision_request_id.is_some()
             && matches!(
                 latest.status,
@@ -2222,38 +2242,45 @@ impl PlanReviewDisplayProjection {
         let guidance_pending = self
             .pending_revision_guidance
             .contains(&active_attempt.plan_id);
-        // RFC-0067 6.1/15.1: Run is only offered when the exact candidate and ready marker are
-        // durable. Legacy or crash-incomplete DraftReady plans stay actionable through
-        // Revise/Reject (explicit recompile) but never pretend to be runnable.
-        let executable = self.plan_is_executable(&active_attempt.plan_id);
-        let allowed_actions = if active_attempt.status
-            == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+        // Plan review is text approval, not Task compilation. A missing/failed preflight
+        // candidate does not hide Run; post-approval materialization owns any blocker.
+        let allowed_actions = if let Some(blocker) = materialization_blocker {
+            let mut actions = Vec::new();
+            if blocker
+                .blocker
+                .available_actions
+                .contains(&sigil_kernel::TaskBlockerActionV1::RetryAdmission)
+            {
+                actions.push(sigil_kernel::PublicPlanAction::Run);
+            }
+            if blocker
+                .blocker
+                .available_actions
+                .contains(&sigil_kernel::TaskBlockerActionV1::Replan)
+            {
+                actions.push(sigil_kernel::PublicPlanAction::Revise);
+            }
+            actions
+        } else if active_attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
             && draft.is_some()
             && !revision_running
             && !guidance_pending
         {
-            if !executable {
-                vec![
+            match legacy_recovery.map_or(latest_decision, |_| {
+                Some(sigil_kernel::PlanDecision::RevisionFailed)
+            }) {
+                Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
+                Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
+                    sigil_kernel::PublicPlanAction::Run,
                     sigil_kernel::PublicPlanAction::Revise,
                     sigil_kernel::PublicPlanAction::Reject,
-                ]
-            } else {
-                match legacy_recovery.map_or(latest_decision, |_| {
-                    Some(sigil_kernel::PlanDecision::RevisionFailed)
-                }) {
-                    Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
-                    Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
-                        sigil_kernel::PublicPlanAction::Run,
-                        sigil_kernel::PublicPlanAction::Revise,
-                        sigil_kernel::PublicPlanAction::Reject,
-                    ],
-                    _ => vec![
-                        sigil_kernel::PublicPlanAction::Run,
-                        sigil_kernel::PublicPlanAction::Save,
-                        sigil_kernel::PublicPlanAction::Revise,
-                        sigil_kernel::PublicPlanAction::Reject,
-                    ],
-                }
+                ],
+                _ => vec![
+                    sigil_kernel::PublicPlanAction::Run,
+                    sigil_kernel::PublicPlanAction::Save,
+                    sigil_kernel::PublicPlanAction::Revise,
+                    sigil_kernel::PublicPlanAction::Reject,
+                ],
             }
         } else if active_attempt.status == sigil_kernel::PlanReviewAttemptStatus::CompileFailed
             && draft.is_some()
@@ -2297,6 +2324,8 @@ impl PlanReviewDisplayProjection {
                             sigil_kernel::PublicPlanRevisionStatusV1::Cancelled
                         }
                         sigil_kernel::PlanReviewAttemptStatus::CompletedWithoutDraft
+                        | sigil_kernel::PlanReviewAttemptStatus::Blocked
+                        | sigil_kernel::PlanReviewAttemptStatus::Paused
                         | sigil_kernel::PlanReviewAttemptStatus::Failed
                         | sigil_kernel::PlanReviewAttemptStatus::Interrupted => {
                             sigil_kernel::PublicPlanRevisionStatusV1::Failed
@@ -2333,6 +2362,10 @@ impl PlanReviewDisplayProjection {
                             sigil_kernel::PublicPlanRevisionStatusV1::Succeeded
                         }
                         sigil_kernel::PlanReviewAttemptStatus::CompileFailed => {
+                            sigil_kernel::PublicPlanRevisionStatusV1::Failed
+                        }
+                        sigil_kernel::PlanReviewAttemptStatus::Blocked
+                        | sigil_kernel::PlanReviewAttemptStatus::Paused => {
                             sigil_kernel::PublicPlanRevisionStatusV1::Failed
                         }
                         sigil_kernel::PlanReviewAttemptStatus::Cancelled => {
@@ -2390,14 +2423,6 @@ impl PlanReviewDisplayProjection {
                         }),
                     })
             },
-        })
-    }
-
-    fn plan_is_executable(&self, plan_id: &sigil_kernel::PlanId) -> bool {
-        self.ready_markers.get(plan_id).is_some_and(|marker| {
-            self.candidates
-                .get(plan_id)
-                .is_some_and(|candidate| candidate.candidate_hash == marker.candidate_hash)
         })
     }
 

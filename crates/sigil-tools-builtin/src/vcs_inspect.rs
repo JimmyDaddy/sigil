@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use sigil_kernel::{
     DeclaredToolPermissionFacts, Tool, ToolAccess, ToolCapability, ToolCategory,
     ToolConcurrencyClass, ToolContext, ToolErrorKind, ToolMutationTracking, ToolOperation,
-    ToolPermissionPlanDraft, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolResultStatus,
-    ToolSpec, declared_tool_permission_plan,
+    ToolPermissionPlanDraft, ToolPreviewCapability, ToolReplayContractV1, ToolResult,
+    ToolResultMeta, ToolResultStatus, ToolSpec, declared_tool_permission_plan,
 };
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
@@ -174,6 +174,10 @@ impl Tool for VcsInspectTool {
 
     fn concurrency_class(&self) -> ToolConcurrencyClass {
         ToolConcurrencyClass::ParallelReadOnly
+    }
+
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::pure_read()
     }
 
     fn capabilities(&self) -> BTreeSet<ToolCapability> {

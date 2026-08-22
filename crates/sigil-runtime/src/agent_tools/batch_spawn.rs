@@ -365,11 +365,25 @@ impl AgentToolRuntime {
                 display_name_hint: spawn.display_name_hint,
             };
             prepared.push(PreparedBatchSpawnMember {
-                request_key,
+                request_key: request_key.clone(),
                 batch_id: batch_id.clone(),
                 call: member_call,
                 start,
-                child_agent: Agent::new(child_provider, child_registry),
+                child_agent: match crate::configured_agent(
+                    &self.root_config,
+                    child_provider,
+                    child_registry,
+                ) {
+                    Ok(agent) => agent,
+                    Err(error) => {
+                        return batch_spawn_error(
+                            call,
+                            ToolErrorKind::Internal,
+                            Some(&request_key),
+                            format!("failed to configure child agent recovery: {error:#}"),
+                        );
+                    }
+                },
                 child_session,
                 child_input,
                 child_options,

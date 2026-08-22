@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 use sigil_kernel::{
-    AgentRole, AgentRunOptions, ExecutionBackend, InteractionMode, McpServerConfig,
+    Agent, AgentRole, AgentRunOptions, ExecutionBackend, InteractionMode, McpServerConfig,
     McpServerStartup, MutationEventRecorder, NetworkEffect, NetworkPolicy,
     PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
     ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig,
@@ -44,6 +44,21 @@ use sigil_provider_openai_responses::{
 /// Session-scoped scratch lease registry shared by built-in tools and maintenance GC.
 pub use sigil_tools_builtin::ScratchNamespaceControl as RuntimeScratchNamespaceControl;
 use tokio::process::Command;
+
+/// Constructs a runtime-owned agent with the root-configured policy for future durable
+/// provider-turn schedules. Existing schedules carry their own durable policy fingerprint.
+pub(crate) fn configured_agent<P>(
+    root_config: &RootConfig,
+    provider: P,
+    tools: ToolRegistry,
+) -> Result<Agent<P>>
+where
+    P: Provider,
+{
+    Agent::new(provider, tools).with_provider_turn_recovery_policy(
+        root_config.model_request.provider_turn_recovery_policy()?,
+    )
+}
 
 #[cfg(test)]
 #[macro_use]
@@ -99,6 +114,7 @@ pub mod conversation_coordinator;
 pub mod conversation_display;
 mod definition_file_io;
 pub mod doctor;
+pub mod effect_reconciliation;
 pub mod egress_ordering;
 mod exa_text_v1;
 pub mod hosted_finalizer;
@@ -234,8 +250,9 @@ pub use paths::{
 };
 pub use plan_review_coordinator::{
     ApplicationPlanAction, ApplicationPlanDecisionCommand, ApplicationPlanDecisionReceipt,
-    PlanDecisionCommand, PlanExecutionService, PlanReviewCoordinator, PlanReviewRunOutcome,
-    PlanReviewRunRequest, RejectPlanRequest, RejectedPlan, TASK_ADMISSION_MIN_DISK_SPACE_BYTES,
+    PlanApprovalReceiptV2, PlanDecisionCommand, PlanExecutionService, PlanReviewCoordinator,
+    PlanReviewRunOutcome, PlanReviewRunRequest, PlanTaskMaterializationOutcomeV1,
+    RejectPlanRequest, RejectedPlan, TASK_ADMISSION_MIN_DISK_SPACE_BYTES,
     TaskAdmissionProbeContext, admit_adopted_task, application_plan_decision,
     application_plan_review_research_input_decision, application_plan_revision_guidance_decision,
     application_record_revision_failure, build_task_admission_probes, now_ms,

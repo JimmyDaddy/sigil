@@ -216,6 +216,12 @@ pub(super) fn check_cache_runtime_invariants(report: &mut DoctorReport, session_
     let mut duplicate_tool_call_ids = 0usize;
     let mut duplicate_tool_result_ids = 0usize;
     let mut mismatched_tool_result_names = 0usize;
+    let mut recovery_schedules = 0usize;
+    let mut recovery_waiting = 0usize;
+    let mut recovery_started_without_physical_attempt = 0usize;
+    let mut recovery_terminals = 0usize;
+    let mut malformed_recovery_streams = 0usize;
+    let mut zero_effect_transient_upgraded_to_failed = 0usize;
     for path in paths {
         if session_stream_too_large_for_doctor(&path) {
             continue;
@@ -240,6 +246,73 @@ pub(super) fn check_cache_runtime_invariants(report: &mut DoctorReport, session_
                 return;
             }
         };
+        let recovery = match sigil_kernel::ProviderTurnRecoveryProjection::from_records(&records) {
+            Ok(projection) => projection,
+            Err(error) => {
+                malformed_recovery_streams += 1;
+                report.push_with_remediation(
+                    DoctorStatus::Error,
+                    "session:runtime_invariants",
+                    format!("provider-turn recovery lifecycle is invalid: {error:#}"),
+                    Some(
+                        "preserve the affected session and inspect recovery schedule/start facts before resuming",
+                    ),
+                );
+                continue;
+            }
+        };
+        let logical_run_ids = projection
+            .attempts()
+            .into_iter()
+            .map(|attempt| attempt.entry.logical_run_id.clone())
+            .collect::<BTreeSet<_>>();
+        for logical_run_id in logical_run_ids {
+            for state in recovery.recoveries_for_logical_run_id(&logical_run_id) {
+                recovery_schedules += 1;
+                if state.started.is_none() && state.exhausted.is_none() {
+                    recovery_waiting += 1;
+                }
+                if let Some(started) = &state.started
+                    && projection.attempt(&started.physical_attempt_id).is_none()
+                {
+                    recovery_started_without_physical_attempt += 1;
+                }
+            }
+            recovery_terminals += usize::from(
+                recovery
+                    .terminal_for_logical_run_id(&logical_run_id)
+                    .is_some(),
+            );
+        }
+        let failed_run_finalized = records.iter().any(|record| {
+            let event = record.stored_event();
+            event.event_kind() == Some(sigil_kernel::DurableEventType::RunFinalized)
+                && event
+                    .payload
+                    .get("run_status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("failed")
+        });
+        if failed_run_finalized
+            && projection.attempts().iter().any(|attempt| {
+                matches!(
+                    attempt.terminal.as_ref(),
+                    Some(terminal)
+                        if matches!(
+                            terminal.outcome,
+                            sigil_kernel::ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain
+                                | sigil_kernel::ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+                        )
+                            && terminal.durable_output_event_ids.is_empty()
+                            && terminal.durable_side_effect_event_ids.is_empty()
+                            && recovery
+                                .terminal_for_logical_run_id(&attempt.entry.logical_run_id)
+                                .is_none()
+                )
+            })
+        {
+            zero_effect_transient_upgraded_to_failed += 1;
+        }
         let durable_bytes = fs::metadata(&path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
@@ -348,9 +421,13 @@ pub(super) fn check_cache_runtime_invariants(report: &mut DoctorReport, session_
     }
 
     let message = format!(
-        "provider_attempts={provider_attempts}, current_envelopes={current_envelopes}, durable_frontiers_proven={durable_frontiers_proven}, process_local_overlay_required={process_local_overlay_required}, legacy_without_envelope={legacy_without_envelope}, unfinished_attempts={unfinished_attempts}, open_tool_executions={open_tool_executions}, unclosed_tool_calls={unclosed_tool_calls}, orphan_tool_results={orphan_tool_results}, duplicate_tool_call_ids={duplicate_tool_call_ids}, duplicate_tool_result_ids={duplicate_tool_result_ids}, mismatched_tool_result_names={mismatched_tool_result_names}"
+        "provider_attempts={provider_attempts}, current_envelopes={current_envelopes}, durable_frontiers_proven={durable_frontiers_proven}, process_local_overlay_required={process_local_overlay_required}, legacy_without_envelope={legacy_without_envelope}, unfinished_attempts={unfinished_attempts}, recovery_schedules={recovery_schedules}, recovery_waiting={recovery_waiting}, recovery_started_without_physical_attempt={recovery_started_without_physical_attempt}, recovery_terminals={recovery_terminals}, malformed_recovery_streams={malformed_recovery_streams}, zero_effect_transient_upgraded_to_failed={zero_effect_transient_upgraded_to_failed}, open_tool_executions={open_tool_executions}, unclosed_tool_calls={unclosed_tool_calls}, orphan_tool_results={orphan_tool_results}, duplicate_tool_call_ids={duplicate_tool_call_ids}, duplicate_tool_result_ids={duplicate_tool_result_ids}, mismatched_tool_result_names={mismatched_tool_result_names}"
     );
     if unfinished_attempts > 0
+        || recovery_waiting > 0
+        || recovery_started_without_physical_attempt > 0
+        || malformed_recovery_streams > 0
+        || zero_effect_transient_upgraded_to_failed > 0
         || open_tool_executions > 0
         || unclosed_tool_calls > 0
         || orphan_tool_results > 0

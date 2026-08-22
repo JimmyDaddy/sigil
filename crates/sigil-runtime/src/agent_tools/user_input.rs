@@ -88,7 +88,8 @@ impl AgentToolRuntime {
             .build_provider(&self.root_config, role, &route.profile_id)
             .await
             .context("failed to rebuild background child provider")?;
-        let child_agent = Agent::new(provider, child_registry);
+        let child_agent = crate::configured_agent(&self.root_config, provider, child_registry)
+            .context("failed to configure recovered child agent recovery")?;
         let mut child_options = build_role_run_options(
             &self.root_config,
             parent_options.workspace_root.clone(),

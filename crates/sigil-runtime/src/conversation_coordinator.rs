@@ -4,21 +4,22 @@ use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ContinueDurableTaskAction,
-    ControlEntry, ConversationPurposeContext, ConversationTurnRef, MessageRole, ModelMessage,
-    PendingPlanHandoffBinding, PlanReviewAttemptStatus, PlanReviewHandoffBinding,
-    RecoverableTaskGuidanceReviewAuthority, Session, SessionLogEntry, SessionRef,
-    StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationControl,
-    TaskContinuationHandoffBinding, TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry,
-    TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskPlanStatus, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepStatus, WriteLeaseReleaseStatus, WriteLeaseReleased,
-    conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
-    conversation_route_routing_contract_material, durable_task_cancellation_requested,
-    plan_review_attempt_id_for_review, plan_review_id_for_source, plan_review_plan_id_for_attempt,
-    plan_review_policy_snapshot_hash, reconcile_task_final_answer_prefix,
-    reconcile_task_step_projections, recoverable_task_guidance_review,
-    route_surface_tool_specs_for_bound_context, route_surface_tool_specs_with_memory,
-    safe_persistence_text, task_planner_logical_run_id,
+    ControlEntry, ConversationPurposeContext, ConversationTurnRef, JsonlSessionStore, MessageRole,
+    ModelMessage, PendingPlanHandoffBinding, PlanReviewAttemptStatus, PlanReviewHandoffBinding,
+    ProviderTurnRecoveryProjection, RecoverableTaskGuidanceReviewAuthority, Session,
+    SessionLogEntry, SessionRef, StartDurableTaskAction, TaskAdmissionTrigger,
+    TaskContinuationControl, TaskContinuationHandoffBinding, TaskHandoffDecision, TaskHandoffId,
+    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptStatus,
+    TaskParticipantPurpose, TaskPlanStatus, TaskPlanningHandoffBinding, TaskRoutingPolicy,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus, WriteLeaseReleaseStatus,
+    WriteLeaseReleased, conversation_route_contract_fingerprint,
+    conversation_route_decision_id_for_source, conversation_route_routing_contract_material,
+    durable_task_cancellation_requested, plan_review_attempt_id_for_review,
+    plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
+    reconcile_task_final_answer_prefix, reconcile_task_step_projections,
+    recoverable_task_guidance_review, route_surface_tool_specs_for_bound_context,
+    route_surface_tool_specs_with_memory, safe_persistence_text, task_participant_logical_run_id,
+    task_planner_logical_run_id,
 };
 
 const TASK_HANDOFF_ID_DOMAIN: &str = "sigil-task-handoff-v1";
@@ -609,9 +610,11 @@ impl ConversationCoordinator {
                 .get(&task_id)
                 .cloned()
                 .ok_or_else(|| anyhow!("reconciled task is missing from task projection"))?;
+            let resumable_started_participant =
+                single_started_participant_provider_recovery(session, &task);
             let safe_to_resume = if task_was_created {
                 true
-            } else if task.status == TaskRunStatus::Started {
+            } else if matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
                 let has_uncertain_participant = task
                     .participant_attempts
                     .values()
@@ -625,12 +628,19 @@ impl ConversationCoordinator {
                         .get(&version)
                         .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
                 });
-                !has_uncertain_participant
-                    && (accepted_plan || !task_planner_dispatch_seen(session, &task_id)?)
+                resumable_started_participant
+                    || (!has_uncertain_participant
+                        && (accepted_plan || !task_planner_dispatch_seen(session, &task_id)?))
             } else {
                 false
             };
             if safe_to_resume {
+                if resumable_started_participant {
+                    // Reconciliation runs after process loss, so no local holder remains. The
+                    // original participant is preserved, while its deterministic workspace lease
+                    // is released before the recovery-only child is admitted again.
+                    release_active_task_write_leases(session, &task_id)?;
+                }
                 actions.push(StartDurableTaskAction {
                     handoff_id,
                     task_id,
@@ -1109,7 +1119,9 @@ fn task_continuation_candidate(
     if projection.focus_conflicts != 0 {
         return None;
     }
-    let task = projection.current_task()?;
+    let task = projection
+        .current_task()
+        .or_else(|| projection.latest_unfinished_task())?;
     if !matches!(
         task.status,
         TaskRunStatus::Started
@@ -1122,7 +1134,10 @@ fn task_continuation_candidate(
     let plan_status = task
         .latest_plan_version
         .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
-    if plan_status != Some(TaskPlanStatus::Accepted) {
+    let has_accepted_plan = plan_status == Some(TaskPlanStatus::Accepted);
+    let has_direct_execution_authority =
+        task.latest_plan_version.is_none() && task.direct_execution_admission.is_some();
+    if !has_accepted_plan && !has_direct_execution_authority {
         return None;
     }
     Some(TaskContinuationCandidate {
@@ -1305,6 +1320,106 @@ fn pause_uncertain_task(
                 .to_owned(),
         ),
     }))
+}
+
+/// A single in-flight planner, step, or final-synthesis participant can re-enter only through the kernel's
+/// `with_durable_provider_recovery_only` guard. This predicate intentionally does not inspect a
+/// child prompt or infer a provider error: the child session verifies its own schedule, request
+/// envelope, frontier, and CAS claim before opening a new send barrier. Missing evidence is
+/// converted to a durable `Blocked` participant by the normal owner.
+fn single_started_participant_provider_recovery(
+    session: &Session,
+    task: &sigil_kernel::TaskRunProjection,
+) -> bool {
+    let all_started = task
+        .participant_attempts
+        .values()
+        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
+        .collect::<Vec<_>>();
+    if all_started.len() != 1 {
+        return false;
+    }
+    let Some(attempt) = all_started.first() else {
+        return false;
+    };
+    match attempt.purpose {
+        TaskParticipantPurpose::Planner => {
+            attempt.plan_version.is_none()
+                && attempt.step_id.is_none()
+                && task.latest_plan_version.is_none()
+                && !task.participant_results.contains_key(&attempt.attempt_id)
+                && participant_has_durable_provider_recovery_authority(session, attempt)
+        }
+        TaskParticipantPurpose::Step => {
+            let Some(plan_version) = task.latest_plan_version else {
+                return false;
+            };
+            if attempt.plan_version != Some(plan_version)
+                || !task
+                    .plans
+                    .get(&plan_version)
+                    .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
+            {
+                return false;
+            }
+            let Some(step_id) = attempt.step_id.as_ref() else {
+                return false;
+            };
+            task.steps
+                .get(&(plan_version, step_id.clone()))
+                .is_some_and(|step| step.status == TaskStepStatus::Running)
+                && participant_has_durable_provider_recovery_authority(session, attempt)
+        }
+        TaskParticipantPurpose::Synthesis => {
+            let Some(plan_version) = task.latest_plan_version else {
+                return false;
+            };
+            attempt.plan_version == Some(plan_version)
+                && task
+                    .plans
+                    .get(&plan_version)
+                    .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
+                && attempt.step_id.is_none()
+                && !task.participant_results.contains_key(&attempt.attempt_id)
+                && task
+                    .steps
+                    .iter()
+                    .filter(|((version, _), _)| *version == plan_version)
+                    .all(|(_, step)| step.status == TaskStepStatus::Completed)
+                && participant_has_durable_provider_recovery_authority(session, attempt)
+        }
+    }
+}
+
+/// Confirms that the original child session contains the recovery authority needed for the
+/// recovery-only send barrier. A missing child stream, malformed projection, terminal logical
+/// turn, or ordinary started participant intentionally remains fail-closed and is paused by the
+/// existing crash repair path.
+fn participant_has_durable_provider_recovery_authority(
+    session: &Session,
+    attempt: &sigil_kernel::TaskParticipantAttemptEntry,
+) -> bool {
+    let Some(parent_path) = session.store_path() else {
+        return false;
+    };
+    let Some(parent_dir) = parent_path.parent() else {
+        return false;
+    };
+    let child_path = attempt.child_session_ref.resolve(parent_dir);
+    let Ok(records) = JsonlSessionStore::read_event_records(&child_path) else {
+        return false;
+    };
+    let Ok(recovery) = ProviderTurnRecoveryProjection::from_records(&records) else {
+        return false;
+    };
+    let logical_run_id = task_participant_logical_run_id(&attempt.attempt_id);
+    recovery
+        .terminal_for_logical_run_id(&logical_run_id)
+        .is_none()
+        && recovery
+            .recoveries_for_logical_run_id(&logical_run_id)
+            .iter()
+            .any(|state| state.exhausted.is_none())
 }
 
 fn release_active_task_write_leases(session: &mut Session, task_id: &TaskId) -> Result<()> {

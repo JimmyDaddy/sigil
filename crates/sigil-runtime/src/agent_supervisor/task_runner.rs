@@ -23,9 +23,10 @@ use sigil_kernel::{
     SessionLogEntry, SessionRef, SessionStats, TaskApprovalRouteBinding,
     TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
     TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskId, TaskIntegrationRunOutput, TaskIntegrationRunRequest,
-    TaskIsolationMode, TaskOrchestratorPhase, TaskParticipantAttemptId, TaskParticipantRetryError,
-    TaskParticipantRetryProof, TaskParticipantRetryRouteDriftError,
+    TaskChildSessionStatus, TaskDirectExecutionSessionRunOutput,
+    TaskDirectExecutionSessionRunRequest, TaskId, TaskIntegrationRunOutput,
+    TaskIntegrationRunRequest, TaskIsolationMode, TaskOrchestratorPhase, TaskParticipantAttemptId,
+    TaskParticipantRetryError, TaskParticipantRetryProof, TaskParticipantRetryRouteDriftError,
     TaskPlannerSessionAwaitingUserInput, TaskPlannerSessionResumeRequest,
     TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
     TaskPlannerWorktreeAvailability, TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId,
@@ -1192,6 +1193,14 @@ impl AgentSupervisorTaskChildRunner {
         child_session: &Session,
         error: anyhow::Error,
     ) -> anyhow::Error {
+        // Provider-turn recovery owns its exact physical-attempt boundary. Never wrap an
+        // actionable recovery terminal in the older whole-participant replacement retry proof.
+        if error
+            .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+            .is_some()
+        {
+            return error;
+        }
         if retry_safe_step(&request.step)
             && let Some(proof) = provider_protocol_retry_proof(&request.attempt_id, child_session)
         {
@@ -1319,6 +1328,27 @@ impl AgentSupervisorTaskChildRunner {
         let success = match result {
             Ok(success) => success,
             Err(error) => {
+                let recovery_terminal = error
+                    .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+                    .map(|recovery| (recovery.disposition, recovery.reason_code));
+                if let Some((disposition, reason_code)) = recovery_terminal {
+                    append_task_child_session(
+                        parent_session,
+                        handler,
+                        &prepared.request,
+                        &prepared.child_task_id,
+                        &prepared.child_session_ref,
+                        TaskChildSessionStatus::Interrupted,
+                        None,
+                    )?;
+                    supervisor.record_task_child_blocked(
+                        parent_session,
+                        handler,
+                        &prepared.child_thread,
+                        format!("provider_turn_recovery_{disposition:?}:{reason_code}"),
+                    )?;
+                    return Err(error);
+                }
                 append_task_child_session(
                     parent_session,
                     handler,
@@ -2158,6 +2188,48 @@ where
 
 #[async_trait]
 impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
+    async fn run_direct_execution_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskDirectExecutionSessionRunRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<TaskDirectExecutionSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        request.admission.validate()?;
+        request.attempt.validate()?;
+        if request.task.task_id != request.admission.task_id
+            || request.attempt.task_id != request.task.task_id
+            || request.attempt.admission_id != request.admission.admission_id
+            || !request.admission.matches_objective(&request.task.objective)
+        {
+            anyhow::bail!("direct execution request does not match its durable Task authority");
+        }
+        let executor = self
+            .executor
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("task executor role is not configured"))?;
+        let output = executor
+            .run_with_approval_input(
+                parent_session,
+                request.input,
+                request.options,
+                handler,
+                approval_handler,
+            )
+            .await?;
+        Ok(TaskDirectExecutionSessionRunOutput {
+            attempt_id: request.attempt.attempt_id,
+            final_text: output.result.final_text,
+            final_message_id: output.result.final_message_id,
+            outcome: output.outcome,
+            disposition: output.disposition,
+        })
+    }
+
     async fn planner_worktree_availability(
         &self,
         options: &AgentRunOptions,
@@ -2492,6 +2564,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let output = match planner_run {
             Ok(output) => output,
             Err(error) => {
+                let recovery_terminal = error
+                    .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+                    .map(|recovery| (recovery.disposition, recovery.reason_code));
                 let error = self.retryable_zero_effect_error(
                     &request.attempt_id,
                     &request.child_input,
@@ -2499,6 +2574,15 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     &child_session,
                     error,
                 );
+                if let Some((disposition, reason_code)) = recovery_terminal {
+                    self.supervisor.record_task_child_blocked(
+                        parent_session,
+                        handler,
+                        &child_thread,
+                        format!("provider_turn_recovery_{disposition:?}:{reason_code}"),
+                    )?;
+                    return Err(error);
+                }
                 self.supervisor.record_task_child_failure(
                     parent_session,
                     handler,
@@ -3131,7 +3215,28 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             let output = match child_run {
                 Ok(output) => output,
                 Err(error) => {
+                    let recovery_terminal = error
+                        .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+                        .map(|recovery| (recovery.disposition, recovery.reason_code));
                     let error = self.retryable_child_error(&request, &agent, &child_session, error);
+                    if let Some((disposition, reason_code)) = recovery_terminal {
+                        append_task_child_session(
+                            route_handler.parent_session,
+                            handler,
+                            &request,
+                            &child_task_id,
+                            &child_session_ref,
+                            TaskChildSessionStatus::Interrupted,
+                            None,
+                        )?;
+                        self.supervisor.record_task_child_blocked(
+                            route_handler.parent_session,
+                            handler,
+                            &child_thread,
+                            format!("provider_turn_recovery_{disposition:?}:{reason_code}"),
+                        )?;
+                        return Err(error);
+                    }
                     append_task_child_session(
                         route_handler.parent_session,
                         handler,
@@ -3458,6 +3563,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let output = match synthesis_run {
             Ok(output) => output,
             Err(error) => {
+                let recovery_terminal = error
+                    .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+                    .map(|recovery| (recovery.disposition, recovery.reason_code));
                 let error = self.retryable_zero_effect_error(
                     &request.attempt_id,
                     &request.child_input,
@@ -3465,6 +3573,15 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     &child_session,
                     error,
                 );
+                if let Some((disposition, reason_code)) = recovery_terminal {
+                    self.supervisor.record_task_child_blocked(
+                        parent_session,
+                        handler,
+                        &child_thread,
+                        format!("provider_turn_recovery_{disposition:?}:{reason_code}"),
+                    )?;
+                    return Err(error);
+                }
                 self.supervisor.record_task_child_failure(
                     parent_session,
                     handler,
@@ -4491,6 +4608,33 @@ pub(crate) fn inherit_task_plan_permission_grant(
                     },
                     expires: sigil_kernel::PlanApprovalExpiry::Session,
                     granted_at_ms: adoption.adopted_at_ms,
+                })
+            }
+            // RFC-0069 carries the scoped grant in the post-approval materialization receipt.
+            // Copy only this exact Task's durable scope into the child session; the child still
+            // resolves subjects relative to its isolated workspace.
+            SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(
+                materialization,
+            )) if &materialization.task_id == task_id
+                && materialization.permission_grant.is_some() =>
+            {
+                let candidate = &materialization.adopted_candidate;
+                let scope = candidate.permission_scope_candidate.as_ref()?;
+                Some(sigil_kernel::PlanPermissionGrantedEntry {
+                    plan_id: materialization.plan_id.clone(),
+                    plan_hash: materialization.plan_hash.clone(),
+                    task_id: materialization.task_id.clone(),
+                    workspace_snapshot_id: candidate
+                        .compile_binding
+                        .base_workspace_snapshot_id
+                        .clone(),
+                    permission: materialization.permission_grant?,
+                    scope: sigil_kernel::PlanApprovalScope {
+                        summary: scope.summary.clone(),
+                        workspace_paths: scope.workspace_paths.clone(),
+                    },
+                    expires: sigil_kernel::PlanApprovalExpiry::Session,
+                    granted_at_ms: materialization.adopted_at_ms,
                 })
             }
             _ => None,

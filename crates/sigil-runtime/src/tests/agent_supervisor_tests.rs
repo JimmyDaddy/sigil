@@ -5066,7 +5066,8 @@ async fn synthesis_rate_limit_preserves_zero_consumption_retry_proof() -> Result
 }
 
 #[tokio::test]
-async fn task_rate_limit_retry_proof_survives_a_confirmed_connect_retry_prefix() -> Result<()> {
+async fn task_rate_limit_retries_inside_the_original_logical_turn_after_connect_retry() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
     let starts = Arc::new(AtomicUsize::new(0));
@@ -5113,28 +5114,24 @@ async fn task_rate_limit_retry_proof_survives_a_confirmed_connect_retry_prefix()
     let error = runner
         .run_child_session(&mut session, request, &mut handler, &mut approval)
         .await
-        .expect_err("the final rate-limit attempt should remain retryable");
+        .expect_err("the bounded logical-turn recovery eventually pauses");
 
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     assert!(
         error
-            .downcast_ref::<TaskParticipantRetryError>()
-            .is_some_and(|retry| matches!(
-                retry.proof(),
-                TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
-                    zero_output: true,
-                    zero_tool: true,
-                    zero_effect: true,
-                    ..
-                }
-            ))
+            .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+            .is_some_and(|terminal| {
+                terminal.disposition
+                    == sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Paused
+                    && terminal.reason_code == "provider_retry_budget_exhausted"
+            })
     );
     let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
     let child = Session::load_from_store("deepseek", "deepseek-v4-flash", child_store)?;
     let projection = child.provider_physical_attempt_projection()?;
     let attempts =
         projection.attempts_for_logical_run_id(&task_participant_logical_run_id(&attempt_id));
-    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts.len(), 3);
     assert_eq!(
         attempts[0]
             .terminal
@@ -5149,11 +5146,27 @@ async fn task_rate_limit_retry_proof_survives_a_confirmed_connect_retry_prefix()
             .and_then(|terminal| terminal.rejection),
         Some(ProviderRequestRejection::RateLimited)
     );
+    assert_eq!(
+        attempts[2]
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.rejection),
+        Some(ProviderRequestRejection::RateLimited)
+    );
+    assert_eq!(
+        child
+            .provider_turn_recovery_projection()?
+            .terminal_for_logical_run_id(&task_participant_logical_run_id(&attempt_id))
+            .expect("logical turn is durably paused")
+            .terminal_disposition,
+        sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Paused
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch() -> Result<()> {
+async fn task_provider_rate_limit_exhausts_the_original_logical_turn_before_replacement()
+-> Result<()> {
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
     let starts = Arc::new(AtomicUsize::new(0));
@@ -5211,75 +5224,12 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
     assert_eq!(first.len(), 1);
     assert!(
         first[0].as_ref().err().is_some_and(|error| {
-            error
-                .downcast_ref::<TaskParticipantRetryError>()
-                .is_some_and(|retry| {
-                    retry.retry_after_ms() > 0
-                        && matches!(
-                            retry.proof(),
-                            TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
-                                zero_output: true,
-                                zero_tool: true,
-                                zero_effect: true,
-                                ..
-                            }
-                        )
-                })
-                && format!("{error:#}").contains("test provider rate limited")
+            let message = format!("{error:#}");
+            message.contains("provider-turn recovery Paused")
+                && message.contains("provider route is cooling down")
         }),
         "first error: {:#}",
         first[0].as_ref().expect_err("first request should fail")
-    );
-    assert_eq!(starts.load(Ordering::SeqCst), 1);
-
-    let resumed_runner = AgentSupervisorTaskChildRunner::new(
-        supervisor.clone(),
-        Agent::new(
-            Box::new(RateLimitedTaskChildProvider {
-                starts: Arc::clone(&starts),
-                rate_limits_remaining: Arc::new(AtomicUsize::new(0)),
-            }),
-            ToolRegistry::new(),
-        ),
-        Agent::new(
-            Box::new(TextProvider {
-                text: "writer done",
-            }),
-            ToolRegistry::new(),
-        ),
-    );
-    let blocked = resumed_runner
-        .run_child_session_batch(
-            &mut session,
-            vec![request_for("read_b")?, request_for("read_c")?],
-            &mut handler,
-            &mut approval,
-        )
-        .await?;
-
-    assert_eq!(blocked.len(), 2);
-    assert!(
-        blocked.iter().all(|output| {
-            output.as_ref().err().is_some_and(|error| {
-                let message = format!("{error:#}");
-                error
-                    .downcast_ref::<TaskParticipantRetryError>()
-                    .is_some_and(|retry| {
-                        retry.retry_after_ms() > 0
-                            && matches!(
-                                retry.proof(),
-                                TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
-                                    zero_output: true,
-                                    zero_tool: true,
-                                    zero_effect: true,
-                                }
-                            )
-                    })
-                    && message.contains("provider route is cooling down")
-                    && message.contains("rejected before provider dispatch")
-            })
-        }),
-        "blocked errors: {blocked:#?}"
     );
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     assert_eq!(session.agent_thread_state_projection().threads.len(), 1);
@@ -5302,7 +5252,8 @@ async fn task_provider_rate_limit_blocks_rebuilt_runner_before_provider_dispatch
 }
 
 #[tokio::test]
-async fn read_only_task_provider_protocol_rejection_after_output_is_retryable() -> Result<()> {
+async fn read_only_task_partial_output_is_discarded_once_then_paused_without_effect_replay()
+-> Result<()> {
     let temp = tempfile::tempdir()?;
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
     let runner = AgentSupervisorTaskChildRunner::new(
@@ -5350,35 +5301,47 @@ async fn read_only_task_provider_protocol_rejection_after_output_is_retryable() 
 
     assert!(
         error
-            .downcast_ref::<TaskParticipantRetryError>()
-            .is_some_and(|retry| matches!(
-                retry.proof(),
-                TaskParticipantRetryProof::ProviderProtocolRejectedAfterOutput {
-                    read_only_step: true,
-                    zero_effect: true,
-                    ..
-                }
-            )),
-        "a read-only participant should receive a bounded new-attempt recovery proof: {error:#}"
+            .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+            .is_some_and(|terminal| {
+                terminal.disposition
+                    == sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Paused
+                    && terminal.reason_code == "provider_partial_output_retry_budget_exhausted"
+            }),
+        "partial provider output may receive exactly one durable replacement attempt: {error:#}"
     );
     let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
     let child = Session::load_from_store("deepseek", "deepseek-v4-flash", child_store)?;
     let projection = child.provider_physical_attempt_projection()?;
     let attempts =
         projection.attempts_for_logical_run_id(&task_participant_logical_run_id(&attempt_id));
-    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts.iter().all(|attempt| {
+        attempt.terminal.as_ref().is_some_and(|terminal| {
+            terminal.outcome == ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
+        })
+    }));
+    let recovery = child.provider_turn_recovery_projection()?;
+    assert!(attempts.iter().all(|attempt| {
+        recovery
+            .discarded_partial_for_physical_attempt(&attempt.entry.physical_attempt_id)
+            .is_some_and(|discarded| {
+                discarded.text_bytes > 0
+                    && discarded.reasoning_bytes == 0
+                    && discarded.streamed_tool_call_count == 0
+            })
+    }));
     assert_eq!(
-        attempts[0]
-            .terminal
-            .as_ref()
-            .map(|terminal| terminal.outcome),
-        Some(ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput)
+        recovery
+            .terminal_for_logical_run_id(&task_participant_logical_run_id(&attempt_id))
+            .expect("logical turn has a durable pause")
+            .terminal_disposition,
+        sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Paused
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn task_orchestrator_recovers_protocol_rejection_and_preserves_the_dag() -> Result<()> {
+async fn task_orchestrator_blocks_protocol_rejection_and_preserves_the_dag() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let starts = Arc::new(AtomicUsize::new(0));
     let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
@@ -5481,25 +5444,30 @@ async fn task_orchestrator_recovers_protocol_rejection_and_preserves_the_dag() -
 
     assert_eq!(
         output.status,
-        TaskRunStatus::Completed,
+        TaskRunStatus::Paused,
         "unexpected task output: {output:#?}; entries: {:#?}",
         session.entries()
     );
-    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
     let projection = session.task_state_projection();
     let task = projection.tasks.get(&task_id).expect("task projection");
-    assert_eq!(task.participant_retry_schedules.len(), 1);
+    assert!(task.participant_retry_schedules.is_empty());
     assert_eq!(
         task.steps
-            .get(&(1, inspect.step_id))
+            .get(&(1, inspect.step_id.clone()))
             .map(|step| step.status),
-        Some(sigil_kernel::TaskStepStatus::Completed)
+        Some(sigil_kernel::TaskStepStatus::Blocked)
     );
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(output.steps.len(), 1);
+    assert_eq!(output.steps[0].step_id, inspect.step_id);
     assert_eq!(
-        task.steps
-            .get(&(1, summarize.step_id))
-            .map(|step| step.status),
-        Some(sigil_kernel::TaskStepStatus::Completed)
+        output.steps[0].status,
+        sigil_kernel::TaskStepStatus::Blocked
+    );
+    assert!(
+        !task.steps.contains_key(&(1, summarize.step_id.clone())),
+        "downstream work remains pending rather than being cancelled or re-run"
     );
     Ok(())
 }

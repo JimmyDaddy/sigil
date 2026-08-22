@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sigil_kernel::{
-    Agent, AgentRole, AgentRouteStatus, AgentRunOptions, AgentUserInputRouteEntryV1, ControlEntry,
+    AgentRole, AgentRouteStatus, AgentRunOptions, AgentUserInputRouteEntryV1, ControlEntry,
     Provider, RootConfig, SequentialTaskOrchestrator, Session, TaskConfig,
     TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskRunStatus, ToolRegistry,
     UserInputDecisionCommandV1, UserInputDecisionReceiptV1, UserInputSourceV1,
@@ -271,11 +271,15 @@ pub async fn build_task_role_runtime(
         .context("failed to build task verification execution backend")?;
     let child_runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
-        Agent::new(planner_provider, planner_registry),
-        Agent::new(executor_provider, executor_registry),
-        Agent::new(subagent_read_provider, subagent_read_registry),
-        Agent::new(subagent_write_provider, subagent_write_registry),
-        Agent::new(synthesis_provider, ToolRegistry::new()),
+        crate::configured_agent(root_config, planner_provider, planner_registry)?,
+        crate::configured_agent(root_config, executor_provider, executor_registry)?,
+        crate::configured_agent(root_config, subagent_read_provider, subagent_read_registry)?,
+        crate::configured_agent(
+            root_config,
+            subagent_write_provider,
+            subagent_write_registry,
+        )?,
+        crate::configured_agent(root_config, synthesis_provider, ToolRegistry::new())?,
     )
     .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
         &root_config.task,

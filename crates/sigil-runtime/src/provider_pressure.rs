@@ -14,7 +14,8 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, CompletionRequest, FrozenProviderRequestMaterial, HostedWebSearchCapability,
     ImageInputCapability, PortableTargetRequestMaterial, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderRequestRejection, ProviderRouteCooldownError, TaskParticipantAttemptId,
+    ProviderChunk, ProviderFailureClassV1, ProviderFailureObservationV1, ProviderRequestRejection,
+    ProviderRetryHintV1, ProviderRouteCooldownError, ProviderWireStateV1, TaskParticipantAttemptId,
     ToolRegistry, provider_rate_limit_from_error,
 };
 use tokio::sync::Notify;
@@ -554,15 +555,21 @@ pub(crate) fn wrap_task_agent_provider(
     pressure: TaskProviderPressure,
     consumer: TaskProviderRouteConsumer,
 ) -> Agent<Box<dyn Provider>> {
-    let (provider, tools): (Box<dyn Provider>, ToolRegistry) = agent.into_parts();
+    let (provider, tools, recovery_policy): (
+        Box<dyn Provider>,
+        ToolRegistry,
+        sigil_kernel::ProviderTurnRecoveryPolicyV1,
+    ) = agent.into_parts_with_provider_turn_recovery_policy();
     Agent::new(
         Box::new(PressureAwareTaskProvider {
             inner: provider,
             pressure,
             consumer,
-        }),
+        }) as Box<dyn Provider>,
         tools,
     )
+    .with_provider_turn_recovery_policy(recovery_policy)
+    .expect("agent recovery policy was validated before provider-pressure wrapping")
 }
 
 struct PressureAwareTaskProvider {
@@ -599,6 +606,39 @@ impl Provider for PressureAwareTaskProvider {
             return Some(ProviderRequestRejection::RateLimited);
         }
         self.inner.classify_pre_generation_rejection(error)
+    }
+
+    fn observe_failure(
+        &self,
+        error: &anyhow::Error,
+        wire_state: ProviderWireStateV1,
+    ) -> ProviderFailureObservationV1 {
+        if let Some(cooldown) = error.downcast_ref::<ProviderRouteCooldownError>() {
+            let retry_after_ms = cooldown.retry_after_ms();
+            return ProviderFailureObservationV1 {
+                class: ProviderFailureClassV1::RateLimited,
+                retry_after_ms: Some(retry_after_ms),
+                wire_state,
+                provider_retry_hint: ProviderRetryHintV1::RetryAfterMs(retry_after_ms),
+                safe_diagnostic_code: "provider_route_cooldown".to_owned(),
+            };
+        }
+        self.inner.observe_failure(error, wire_state)
+    }
+
+    fn transport_fallback_candidate(
+        &self,
+        request: &CompletionRequest,
+        failure: &ProviderFailureObservationV1,
+    ) -> Option<sigil_kernel::ProviderTransportFallbackCandidateV1> {
+        self.inner.transport_fallback_candidate(request, failure)
+    }
+
+    fn activate_transport_fallback(
+        &self,
+        candidate: &sigil_kernel::ProviderTransportFallbackCandidateV1,
+    ) -> Result<()> {
+        self.inner.activate_transport_fallback(candidate)
     }
 
     async fn prove_portable_compaction_target(

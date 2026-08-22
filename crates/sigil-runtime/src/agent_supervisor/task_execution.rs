@@ -8,10 +8,10 @@ use sigil_kernel::{
     RootConfig, RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
     RunCancellationTarget, RunEvent, RunTaskGuard, SandboxProfileRequirement,
     SequentialTaskRequest, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus,
-    TaskContinuationSelectedEntry, TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptStatus,
-    TaskPauseRequest, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus, ToolRegistry, VerificationPolicy,
-    VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
+    TaskContinuationSelectedEntry, TaskExecutionBindingV1, TaskGuidancePromotedEntry, TaskId,
+    TaskParticipantAttemptStatus, TaskPauseRequest, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus,
+    ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
     discover_candidate_checks_with_user_config, recoverable_task_guidance,
     recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
     safe_persistence_text, stable_workspace_id,
@@ -44,7 +44,29 @@ pub struct ResolvedTaskContinuation {
     pub task_id: TaskId,
     pub parent_session_ref: SessionRef,
     pub objective: String,
-    pub needs_planning: bool,
+    pub execution_route: ResolvedTaskExecutionRoute,
+}
+
+/// First-class execution route selected by durable Task authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedTaskExecutionRoute {
+    NeedsPlanning,
+    Planned,
+    Direct,
+}
+
+impl ResolvedTaskContinuation {
+    /// Returns whether this Task has no admitted execution authority yet.
+    #[must_use]
+    pub fn needs_planning(&self) -> bool {
+        self.execution_route == ResolvedTaskExecutionRoute::NeedsPlanning
+    }
+
+    /// Returns whether this Task executes from a direct admission rather than a TaskPlan.
+    #[must_use]
+    pub fn is_direct(&self) -> bool {
+        self.execution_route == ResolvedTaskExecutionRoute::Direct
+    }
 }
 
 /// Complete host-owned material needed to continue one durable Task.
@@ -61,6 +83,27 @@ pub struct ContinuedTaskExecution<'a, H> {
     pub handler: &'a mut H,
     pub cancellation_handle: RunCancellationHandle,
     pub tool_artifact_read_budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
+}
+
+/// Typed zero-dispatch blocker raised while preparing an admitted Task execution.
+///
+/// These failures happen before any participant provider request or tool effect. The durable
+/// Task therefore remains resumable after the user repairs configuration or the environment.
+#[derive(Debug, Error)]
+pub enum TaskExecutionPreflightError {
+    #[error("task verification preflight failed")]
+    VerificationMaterialization(#[source] anyhow::Error),
+    #[error("task role runtime preflight failed")]
+    RoleRuntimeConstruction(#[source] anyhow::Error),
+}
+
+impl TaskExecutionPreflightError {
+    const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::VerificationMaterialization(_) => "task_verification_preflight_blocked",
+            Self::RoleRuntimeConstruction(_) => "task_role_runtime_preflight_blocked",
+        }
+    }
 }
 
 /// Root cancellation authority and durable recorder for one Task execution.
@@ -143,8 +186,8 @@ pub enum TaskPauseValidationError {
     TargetMismatch,
     #[error("task is no longer available")]
     TaskUnavailable,
-    #[error("task plan changed since the pause action was rendered")]
-    PlanChanged,
+    #[error("task execution authority changed since the pause action was rendered")]
+    ExecutionAuthorityChanged,
     #[error("task is no longer running")]
     TaskNotRunning,
 }
@@ -242,12 +285,18 @@ pub fn validate_task_pause_request(
         .tasks
         .get(&request.task_id)
         .ok_or(TaskPauseValidationError::TaskUnavailable)?;
-    if task.latest_plan_version != Some(request.plan_version)
-        || task
-            .superseded_plan_versions
-            .contains(&request.plan_version)
-    {
-        return Err(TaskPauseValidationError::PlanChanged);
+    let authority_matches = match &request.execution {
+        TaskExecutionBindingV1::Plan { plan_version } => {
+            task.latest_plan_version == Some(*plan_version)
+                && !task.superseded_plan_versions.contains(plan_version)
+        }
+        TaskExecutionBindingV1::Direct { admission_id } => task
+            .direct_execution_admission
+            .as_ref()
+            .is_some_and(|admission| admission.admission_id == *admission_id),
+    };
+    if !authority_matches {
+        return Err(TaskPauseValidationError::ExecutionAuthorityChanged);
     }
     if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
         return Err(TaskPauseValidationError::TaskNotRunning);
@@ -352,7 +401,15 @@ pub fn append_task_stop_state(
     let _ = task;
 
     let safe_reason = safe_persistence_text(reason);
-    let mut controls = Vec::with_capacity(active_steps.len() + active_children.len() + 1);
+    let active_direct_attempts = task
+        .direct_execution_attempts
+        .values()
+        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut controls = Vec::with_capacity(
+        active_steps.len() + active_children.len() + active_direct_attempts.len() + 1,
+    );
     for step in active_steps {
         controls.push(ControlEntry::TaskStep(TaskStepEntry {
             task_id: task_id.clone(),
@@ -368,6 +425,16 @@ pub fn append_task_stop_state(
     for mut child in active_children {
         child.status = disposition.child_status();
         controls.push(ControlEntry::TaskChildSession(child));
+    }
+    for mut attempt in active_direct_attempts {
+        attempt.status = match disposition {
+            TaskStopDisposition::Cancelled => TaskParticipantAttemptStatus::Cancelled,
+            TaskStopDisposition::Paused | TaskStopDisposition::Interrupted => {
+                TaskParticipantAttemptStatus::Interrupted
+            }
+        };
+        attempt.reason = Some(safe_reason.clone());
+        controls.push(ControlEntry::TaskDirectExecutionAttemptV1(attempt));
     }
     let status = disposition.task_status();
     controls.push(ControlEntry::TaskRun(TaskRunEntry {
@@ -427,11 +494,18 @@ pub fn resolve_task_continuation(
         | TaskRunStatus::Failed
         | TaskRunStatus::Interrupted => {}
     }
+    let execution_route = if task.latest_plan_version.is_some() {
+        ResolvedTaskExecutionRoute::Planned
+    } else if task.direct_execution_admission.is_some() {
+        ResolvedTaskExecutionRoute::Direct
+    } else {
+        ResolvedTaskExecutionRoute::NeedsPlanning
+    };
     Ok(ResolvedTaskContinuation {
         task_id: task.task_id.clone(),
         parent_session_ref: task.parent_session_ref.clone(),
         objective: task.objective.clone(),
-        needs_planning: task.latest_plan_version.is_none(),
+        execution_route,
     })
 }
 
@@ -468,7 +542,8 @@ where
         &root_config,
         &options.workspace_root,
         &task_id,
-    )?;
+    )
+    .map_err(TaskExecutionPreflightError::VerificationMaterialization)?;
     let TaskRoleRuntime {
         orchestrator,
         planner_options,
@@ -482,7 +557,8 @@ where
         agent_supervisor,
         role_provider_builder,
     )
-    .await?;
+    .await
+    .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
     let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     let orchestrator = match tool_artifact_read_budget {
         Some(budget) => orchestrator.with_tool_artifact_read_budget(budget),
@@ -547,7 +623,7 @@ where
         });
     let task = resolve_task_continuation(session, requested_task_id.as_ref().map(TaskId::as_str))?;
     let mut explicit_focus_required = validate_continuation_guidance_authority(
-        task.needs_planning,
+        task.execution_route,
         guidance.as_deref(),
         guidance_promotion.as_ref(),
         continuation_guidance_receipt.as_ref(),
@@ -560,21 +636,24 @@ where
         // already-validated Task before any provider executes.
         explicit_focus_required = true;
     }
-    let recoverable_materialization = if !task.needs_planning && !resume_receipt {
-        // Every continuation entry point resolves unfinished durable guidance before it creates a
-        // new authority or performs provider I/O. This pure admission check prevents direct,
-        // typed, queued, and slash continuations from forking an already-accepted review after a
-        // crash. Sensitive, incomplete, or conflicting materializations fail before focus moves.
-        recoverable_task_guidance(session, &task.task_id, guidance.as_deref())?
-    } else {
-        None
-    };
-    let recoverable_review =
-        if !task.needs_planning && recoverable_materialization.is_none() && !resume_receipt {
-            recoverable_task_guidance_review(session, &task.task_id, guidance.as_deref())?
+    let recoverable_materialization =
+        if task.execution_route == ResolvedTaskExecutionRoute::Planned && !resume_receipt {
+            // Every continuation entry point resolves unfinished durable guidance before it creates a
+            // new authority or performs provider I/O. This pure admission check prevents direct,
+            // typed, queued, and slash continuations from forking an already-accepted review after a
+            // crash. Sensitive, incomplete, or conflicting materializations fail before focus moves.
+            recoverable_task_guidance(session, &task.task_id, guidance.as_deref())?
         } else {
             None
         };
+    let recoverable_review = if task.execution_route == ResolvedTaskExecutionRoute::Planned
+        && recoverable_materialization.is_none()
+        && !resume_receipt
+    {
+        recoverable_task_guidance_review(session, &task.task_id, guidance.as_deref())?
+    } else {
+        None
+    };
     if let Some(recovered) = recoverable_materialization.as_ref() {
         let incoming_matches = match (
             guidance_promotion.as_ref(),
@@ -656,7 +735,8 @@ where
         &root_config,
         &options.workspace_root,
         &task.task_id,
-    )?;
+    )
+    .map_err(TaskExecutionPreflightError::VerificationMaterialization)?;
     let TaskRoleRuntime {
         orchestrator,
         planner_options,
@@ -670,7 +750,8 @@ where
         agent_supervisor,
         role_provider_builder,
     )
-    .await?;
+    .await
+    .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
     let task_request = SequentialTaskRequest {
         task_id: task.task_id,
         parent_session_ref: task.parent_session_ref,
@@ -681,7 +762,7 @@ where
         Some(budget) => orchestrator.with_tool_artifact_read_budget(budget),
         None => orchestrator,
     };
-    let output = if task.needs_planning {
+    let output = if task.execution_route == ResolvedTaskExecutionRoute::NeedsPlanning {
         if guidance_promotion.is_some() || continuation_guidance_receipt.is_some() {
             return Err(anyhow!(
                 "recovered task has no accepted plan; guidance receipt is not applicable"
@@ -696,6 +777,17 @@ where
                 subagent_read_options,
                 subagent_write_options,
                 root_config.task.max_plan_steps,
+                handler,
+                approval_handler,
+            )
+            .await
+    } else if task.execution_route == ResolvedTaskExecutionRoute::Direct {
+        orchestrator
+            .continue_direct_run(
+                session,
+                task_request,
+                executor_options,
+                guidance.as_deref(),
                 handler,
                 approval_handler,
             )
@@ -842,12 +934,12 @@ where
 }
 
 fn validate_continuation_guidance_authority(
-    needs_planning: bool,
+    execution_route: ResolvedTaskExecutionRoute,
     guidance: Option<&str>,
     guidance_promotion: Option<&TaskGuidancePromotedEntry>,
     continuation_guidance_receipt: Option<&TaskContinuationSelectedEntry>,
 ) -> Result<bool> {
-    if needs_planning {
+    if execution_route == ResolvedTaskExecutionRoute::NeedsPlanning {
         if guidance.is_some() {
             return Err(anyhow!(
                 "recovered task has no accepted plan; continue it without guidance to rerun the planner"
@@ -983,6 +1075,72 @@ pub fn finalize_task_root(
     let Err(error) = &result else {
         return result;
     };
+    // A provider-turn terminal has already been classified from durable physical-attempt and
+    // effect evidence.  It is deliberately an error to stop the current async owner, but it is
+    // not a Task failure unless the policy explicitly called it irrecoverable.  Keep this
+    // guard at the root terminal so a future orchestration path cannot accidentally collapse a
+    // recoverable blocker back into `TaskRunStatus::Failed`.
+    if let Some(recovery) = error.downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+    {
+        let status = match recovery.disposition {
+            sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Blocked
+            | sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Paused => {
+                TaskRunStatus::Paused
+            }
+            sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Cancelled => {
+                TaskRunStatus::Cancelled
+            }
+            sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Irrecoverable => {
+                TaskRunStatus::Failed
+            }
+        };
+        let current_status = session
+            .task_state_projection()
+            .tasks
+            .get(task_id)
+            .map(|task| task.status);
+        if matches!(
+            current_status,
+            Some(TaskRunStatus::Started | TaskRunStatus::Running)
+        ) {
+            session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: parent_session_ref.clone(),
+                objective: safe_persistence_text(objective),
+                title: None,
+                status,
+                reason: Some(safe_persistence_text(&format!(
+                    "provider turn recovery {:?}: {}",
+                    recovery.disposition, recovery.reason_code
+                ))),
+            }))?;
+        }
+        return Ok(status);
+    }
+    // Verification and role-runtime preparation are zero-dispatch boundaries: no participant
+    // provider request or tool effect has started. Keep the admitted Task resumable so repairing
+    // configuration or credentials and pressing Continue can retry the same durable authority.
+    if let Some(preflight) = error.downcast_ref::<TaskExecutionPreflightError>() {
+        let current_status = session
+            .task_state_projection()
+            .tasks
+            .get(task_id)
+            .map(|task| task.status);
+        if matches!(
+            current_status,
+            Some(TaskRunStatus::Started | TaskRunStatus::Running)
+        ) {
+            session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: parent_session_ref.clone(),
+                objective: safe_persistence_text(objective),
+                title: None,
+                status: TaskRunStatus::Paused,
+                reason: Some(preflight.reason_code().to_owned()),
+            }))?;
+        }
+        return Ok(TaskRunStatus::Paused);
+    }
     let status = session
         .task_state_projection()
         .tasks

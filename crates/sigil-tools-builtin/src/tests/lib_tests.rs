@@ -7766,6 +7766,49 @@ async fn apply_changeset_first_apply_failure_reports_failed_without_artifacts() 
 }
 
 #[tokio::test]
+async fn apply_changeset_rejects_same_target_drift_after_preview_without_overwriting_it()
+-> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let target = workspace.path().join("note.txt");
+    fs::write(&target, "before\n")?;
+    let plan = super::build_apply_changeset_plan(
+        workspace.path(),
+        &json!({
+            "id": "change-target-cas",
+            "files": [{
+                "path": "note.txt",
+                "action": "update",
+                "content": "planned\n"
+            }]
+        }),
+    )?
+    .expect("preview plan should be valid");
+
+    // An unrelated path can change freely, but changing this exact target invalidates the
+    // reviewed before-body and must not be absorbed by a second prepare call.
+    fs::write(workspace.path().join("unrelated.txt"), "concurrent\n")?;
+    fs::write(&target, "external writer\n")?;
+    let result = super::apply_changeset_plan(
+        workspace.path(),
+        &workspace.path().join("state/artifacts/changesets"),
+        PathBuf::from("state/artifacts/changesets"),
+        "apply-target-cas".to_owned(),
+        Some(MutationEventRecorder::new(store)),
+        plan,
+    )?;
+
+    assert!(result.is_error());
+    assert_eq!(fs::read_to_string(&target)?, "external writer\n");
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("same-target drift must return a typed error")
+    };
+    assert_eq!(error.kind, ToolErrorKind::WorkspaceConflict);
+    assert_eq!(result.metadata.changed_files, Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
 async fn apply_changeset_apply_stage_failure_records_failed_mutation_batch() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
@@ -7793,6 +7836,7 @@ async fn apply_changeset_apply_stage_failure_records_failed_mutation_batch() -> 
             path: "rename.txt".to_owned(),
             absolute_path: workspace.path().join("rename.txt"),
             action: ChangeSetFileAction::Rename,
+            expected_before_hash: None,
             after_content: None,
             preview_diff: String::new(),
             reverse_diff: String::new(),

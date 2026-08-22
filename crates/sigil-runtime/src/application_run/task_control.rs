@@ -220,7 +220,7 @@ pub async fn prepare_application_task_continuation(
         Some(request.task_id.as_str()),
     )
     .map_err(ApplicationRunPrepareError::execution)?;
-    if task.needs_planning && request.guidance.is_some() {
+    if task.needs_planning() && request.guidance.is_some() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message:
                 "recovered Task has no accepted plan; continue it without guidance to rerun the planner"
@@ -283,7 +283,13 @@ pub async fn prepare_application_task_continuation(
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
+    let events = ApplicationRunEventSequence::with_outbox(
+        session_id.clone(),
+        run_id.clone(),
+        PublicEventOutboxRecorder::new(
+            JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
+        ),
+    );
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
         workspace_root: workspace_root.clone(),
@@ -471,6 +477,9 @@ impl ApplicationTaskContinuationExecution {
             application_task_continuation_terminal(&self.session, &self.task.task_id, task_status)?;
         let terminal_summary = match &terminal_event {
             PublicRunEventKind::RunFailed { error } => Some(error.as_str()),
+            PublicRunEventKind::RunBlocked { reason }
+            | PublicRunEventKind::RunPaused { reason }
+            | PublicRunEventKind::RunInterrupted { reason } => Some(reason.as_str()),
             _ => None,
         };
         append_application_conversation_terminal(
@@ -530,22 +539,35 @@ fn application_task_continuation_terminal(
             ApplicationRunTerminalStatus::Interrupted,
             ConversationRunTerminalStatusV1::Interrupted,
             None,
-            PublicRunEventKind::RunFailed {
-                error: "Task continuation was interrupted".to_owned(),
+            PublicRunEventKind::RunInterrupted {
+                reason: "Task continuation was interrupted".to_owned(),
             },
         )),
-        TaskRunStatus::Started
-        | TaskRunStatus::Running
-        | TaskRunStatus::Paused
-        | TaskRunStatus::Failed => Ok((
+        TaskRunStatus::Paused => Ok((
             ApplicationRunTerminalStatus::Blocked,
             ConversationRunTerminalStatusV1::Blocked,
             None,
-            PublicRunEventKind::RunFailed {
-                error: format!(
+            PublicRunEventKind::RunPaused {
+                reason: "Task continuation is durably paused".to_owned(),
+            },
+        )),
+        TaskRunStatus::Started | TaskRunStatus::Running => Ok((
+            ApplicationRunTerminalStatus::Blocked,
+            ConversationRunTerminalStatusV1::Blocked,
+            None,
+            PublicRunEventKind::RunBlocked {
+                reason: format!(
                     "Task continuation stopped with durable status {}",
                     task_status_label(status)
                 ),
+            },
+        )),
+        TaskRunStatus::Failed => Ok((
+            ApplicationRunTerminalStatus::Blocked,
+            ConversationRunTerminalStatusV1::Failed,
+            None,
+            PublicRunEventKind::RunFailed {
+                error: "Task continuation failed".to_owned(),
             },
         )),
     }

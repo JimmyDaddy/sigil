@@ -17,8 +17,9 @@ use sigil_kernel::{
     MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject, Tool, ToolAccess,
     ToolAnalysisStatus, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation,
     ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta, ToolSemanticScope,
-    ToolSpec, delete_file_with_mutation_in_batch, write_file_with_mutation_in_batch,
+    ToolPreviewCapability, ToolPreviewFile, ToolReplayContractV1, ToolResult, ToolResultMeta,
+    ToolSemanticScope, ToolSpec, delete_file_with_mutation_expected_in_batch,
+    write_file_with_mutation_expected_in_batch,
 };
 
 use crate::{
@@ -300,6 +301,9 @@ pub(crate) struct PlannedChangeSetFile {
     pub(crate) path: String,
     pub(crate) absolute_path: PathBuf,
     pub(crate) action: ChangeSetFileAction,
+    /// Exact path-local source ownership captured while rendering the reviewed diff. It is used
+    /// again at durable prepare time so a later same-target writer cannot be overwritten.
+    pub(crate) expected_before_hash: Option<String>,
     pub(crate) after_content: Option<String>,
     pub(crate) preview_diff: String,
     pub(crate) reverse_diff: String,
@@ -372,6 +376,10 @@ impl Tool for ApplyChangeSetTool {
             network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
+    }
+
+    fn replay_contract(&self) -> ToolReplayContractV1 {
+        ToolReplayContractV1::reconciliable("prepared_workspace_mutation_v1")
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
@@ -830,6 +838,9 @@ pub(crate) fn plan_changeset_file(
             path: resolved.normalized,
             absolute_path: resolved.absolute,
             action,
+            expected_before_hash: before_snapshot
+                .as_ref()
+                .map(|snapshot| format!("sha256:{}", snapshot.hash)),
             after_content,
             preview_diff,
             reverse_diff,
@@ -854,6 +865,7 @@ pub(crate) fn apply_changeset_plan(
     let mut committed_operations = Vec::new();
     let mut failed_operations = Vec::new();
     let mut failed = false;
+    let mut failure_kind = ToolErrorKind::Io;
     let batch_id: MutationBatchId = format!("changeset:{}", plan.change_set.id.as_str());
     if let Some(recorder) = mutation_recorder.as_ref() {
         let expected_subjects = plan
@@ -907,6 +919,12 @@ pub(crate) fn apply_changeset_plan(
             }
             Err(error) => {
                 failed = true;
+                if error
+                    .to_string()
+                    .contains("prepared mutation source hash changed")
+                {
+                    failure_kind = ToolErrorKind::WorkspaceConflict;
+                }
                 failed_operations.push(format!(
                     "apply_changeset:{}:{}",
                     plan.change_set.id.as_str(),
@@ -1005,7 +1023,7 @@ pub(crate) fn apply_changeset_plan(
             apply_result,
             artifact_record,
             changed_files,
-            ToolErrorKind::Io,
+            failure_kind,
             "change set partially applied",
         ));
     }
@@ -1044,23 +1062,25 @@ pub(crate) fn apply_planned_changeset_file(
                 .after_content
                 .as_ref()
                 .ok_or_else(|| anyhow!("missing proposed content for {}", file.path))?;
-            write_file_with_mutation_in_batch(
+            write_file_with_mutation_expected_in_batch(
                 mutation_recorder,
                 workspace_root,
                 call_id,
                 batch_id,
                 PathBuf::from(&file.path),
                 file.absolute_path.clone(),
+                file.expected_before_hash.clone(),
                 content.as_bytes(),
             )
         }
-        ChangeSetFileAction::Delete => delete_file_with_mutation_in_batch(
+        ChangeSetFileAction::Delete => delete_file_with_mutation_expected_in_batch(
             mutation_recorder,
             workspace_root,
             call_id,
             batch_id,
             PathBuf::from(&file.path),
             file.absolute_path.clone(),
+            file.expected_before_hash.clone(),
         ),
         ChangeSetFileAction::Rename => bail!("rename is not supported by apply_changeset"),
     }

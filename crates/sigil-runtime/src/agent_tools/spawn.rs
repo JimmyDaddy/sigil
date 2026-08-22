@@ -258,7 +258,18 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let child_agent = Agent::new(child_provider, child_registry);
+        let child_agent =
+            match crate::configured_agent(&self.root_config, child_provider, child_registry) {
+                Ok(agent) => agent,
+                Err(error) => {
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        format!("failed to configure child agent recovery: {error:#}"),
+                    );
+                }
+            };
         let mut child_messages = Vec::new();
         if let Some(system_prompt) = agent_profile_system_prompt(&resolved_profile) {
             child_messages.push(ModelMessage::system(system_prompt));
@@ -974,7 +985,9 @@ impl AgentToolRuntime {
                 return Err(error);
             }
         };
-        let child_agent = Agent::new(child_provider, child_registry);
+        let child_agent =
+            crate::configured_agent(&self.root_config, child_provider, child_registry)
+                .context("failed to configure child agent recovery")?;
         let mut child_messages = Vec::new();
         if let Some(system_prompt) = agent_profile_system_prompt(&request.resolved_profile) {
             child_messages.push(ModelMessage::system(system_prompt));

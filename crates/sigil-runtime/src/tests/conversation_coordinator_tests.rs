@@ -3,18 +3,21 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentFinalAnswerRef, AgentRole, AgentRunInput, AgentRunPurpose, AssistantMessageKind,
     AutomaticRouteCapability, ContinueDurableTaskAction, ControlEntry, ConversationRoute,
-    ConversationRouteDecisionRecordedEntry, ConversationTurnRef, ImageAttachment, ImageMimeType,
-    JsonlSessionStore, ModelMessage, RunCancellationRequestedEntry, RunCancellationTarget,
-    SecretString, Session, SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
+    ConversationRouteDecisionRecordedEntry, ConversationTurnRef, DurableEventType, EventClass,
+    ImageAttachment, ImageMimeType, JsonlSessionStore, ModelMessage, PlanId,
+    ProviderFailureClassV1, ProviderTurnRecoveryRetryKindV1, ProviderTurnRecoveryScheduledEntry,
+    RecoveryBudgetProjectionV1, RunCancellationRequestedEntry, RunCancellationTarget, SecretString,
+    Session, SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
     TaskContinuationControl, TaskContinuationControlKind, TaskContinuationSelectedEntry,
-    TaskHandoffDecision, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId,
-    TaskParticipantAttemptEntry, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskParticipantResultEntry, TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy,
-    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry,
-    TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, WriteIsolationMode,
-    WriteLeaseAcquired, WriteLeaseId, WriteLeaseScope, conversation_route_decision_id_for_source,
+    TaskDirectExecutionAdmittedV1, TaskHandoffDecision, TaskHandoffRequestedEntry,
+    TaskHandoffResolvedEntry, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
+    TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId,
+    TaskStepSpec, TaskStepStatus, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
+    WriteLeaseScope, conversation_route_decision_id_for_source,
     durable_task_cancellation_requested, project_conversation_prompt_for_persistence,
-    task_participant_attempt_id, task_participant_session_ref,
+    task_participant_attempt_id, task_participant_logical_run_id, task_participant_session_ref,
 };
 use tempfile::tempdir;
 
@@ -50,6 +53,47 @@ fn append_requested(session: &mut Session, source: &ConversationTurnRef) -> Resu
             requested_at_ms: 42,
         },
     ))
+}
+
+fn append_durable_provider_recovery_schedule(
+    session: &Session,
+    attempt: &TaskParticipantAttemptEntry,
+) -> Result<()> {
+    let parent_path = session
+        .store_path()
+        .expect("recovery fixture uses a durable parent session");
+    let parent_dir = parent_path
+        .parent()
+        .expect("durable session path has a parent directory");
+    let child_store = JsonlSessionStore::new(attempt.child_session_ref.resolve(parent_dir))?;
+    let schedule = ProviderTurnRecoveryScheduledEntry {
+        schema_version: 1,
+        recovery_id: format!("recovery-{}", attempt.attempt_id.as_str()),
+        logical_run_id: task_participant_logical_run_id(&attempt.attempt_id),
+        failed_physical_attempt_id: "provider-attempt-fixture".to_owned(),
+        next_physical_attempt_ordinal: 2,
+        request_envelope_digest: format!("sha256:{}", "a".repeat(64)),
+        source_frontier: None,
+        failure_class: ProviderFailureClassV1::TransportInterrupted,
+        retry_kind: ProviderTurnRecoveryRetryKindV1::Transport,
+        not_before_unix_ms: 0,
+        retry_after_ms: 0,
+        budget_snapshot: RecoveryBudgetProjectionV1 {
+            retry_count: 1,
+            max_transport_retries: 2,
+            partial_output_retry_count: 0,
+            max_partial_output_retries: 1,
+            cumulative_delay_ms: 0,
+            max_cumulative_delay_ms: 120_000,
+        },
+        recovery_policy_fingerprint: "fixture-recovery-policy-v1".to_owned(),
+    };
+    child_store.append_event(
+        DurableEventType::ProviderTurnRecoveryScheduled,
+        EventClass::Critical,
+        serde_json::to_value(schedule)?,
+    )?;
+    Ok(())
 }
 
 fn sha256_prefixed(value: &str) -> String {
@@ -985,7 +1029,6 @@ fn step_result_only_crash_prefix_blocks_without_replaying_side_effects() -> Resu
             verification_refs: Vec::new(),
         },
     ))?;
-
     let actions = coordinator.reconcile(&mut session, &parent_ref()?, 20)?;
 
     assert!(actions.is_empty());
@@ -1115,6 +1158,158 @@ fn legacy_step_result_only_prefix_fails_closed() -> Result<()> {
             .expect("step remains projected")
             .status,
         TaskStepStatus::Blocked
+    );
+    Ok(())
+}
+
+#[test]
+fn reconcile_restarts_a_single_started_synthesis_participant_for_durable_recovery() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("mock", "model").with_store(store);
+    let source = append_source_turn(&mut session, "resume final synthesis safely")?;
+    append_requested(&mut session, &source)?;
+    let admitted = coordinator.reconcile(&mut session, &parent_ref()?, 10)?;
+    let task_id = admitted.first().expect("task is admitted").task_id.clone();
+    let step_id = TaskStepId::new("completed-step")?;
+    let step = TaskStepSpec {
+        step_id: step_id.clone(),
+        title: "Completed work".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::Executor,
+        depends_on: Vec::new(),
+        intent_refs: Vec::new(),
+        mode: None,
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_ref()?,
+        objective: "resume final synthesis safely".to_owned(),
+        title: None,
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![step.clone()],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id,
+        role: step.role,
+        status: TaskStepStatus::Completed,
+        title: Some(step.title),
+        summary: Some("completed before process loss".to_owned()),
+        reason: None,
+    }))?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Synthesis,
+        Some(1),
+        None,
+        1,
+    )?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Synthesis,
+            ordinal: 1,
+            plan_version: Some(1),
+            step_id: None,
+            role: AgentRole::Planner,
+            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        },
+    ))?;
+    let synthesis_attempt = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .and_then(|task| task.participant_attempts.get(&attempt_id))
+        .cloned()
+        .expect("started synthesis is projected");
+    append_durable_provider_recovery_schedule(&session, &synthesis_attempt)?;
+
+    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 20)?;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].task_id, task_id);
+    assert_eq!(
+        session
+            .task_state_projection()
+            .tasks
+            .get(&actions[0].task_id)
+            .expect("task is retained")
+            .status,
+        TaskRunStatus::Running
+    );
+    Ok(())
+}
+
+#[test]
+fn reconcile_restarts_a_single_started_planner_for_durable_recovery() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("mock", "model").with_store(store);
+    let source = append_source_turn(&mut session, "resume planner safely")?;
+    append_requested(&mut session, &source)?;
+    let admitted = coordinator.reconcile(&mut session, &parent_ref()?, 10)?;
+    let task_id = admitted.first().expect("task is admitted").task_id.clone();
+    let attempt_id =
+        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Planner,
+            ordinal: 1,
+            plan_version: None,
+            step_id: None,
+            role: AgentRole::Planner,
+            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        },
+    ))?;
+    let planner_attempt = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .and_then(|task| task.participant_attempts.get(&attempt_id))
+        .cloned()
+        .expect("started planner is projected");
+    append_durable_provider_recovery_schedule(&session, &planner_attempt)?;
+
+    let projected = session.task_state_projection();
+    let task = projected
+        .tasks
+        .get(&task_id)
+        .expect("started planner is projected");
+    assert!(
+        super::single_started_participant_provider_recovery(&session, task),
+        "planner recovery projection: {task:#?}"
+    );
+
+    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 20)?;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].task_id, task_id);
+    assert_eq!(
+        session
+            .task_state_projection()
+            .tasks
+            .get(&actions[0].task_id)
+            .expect("task is retained")
+            .status,
+        TaskRunStatus::Started
     );
     Ok(())
 }
@@ -1483,8 +1678,36 @@ fn seed_current_resumable_task(session: &mut Session) -> Result<TaskId> {
     Ok(task_id)
 }
 
+fn seed_current_resumable_direct_task(session: &mut Session) -> Result<TaskId> {
+    let task_id = TaskId::new("task-current-direct")?;
+    let objective = "execute the approved objective directly";
+    let run = |status| {
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("session.jsonl")
+                .expect("valid parent session ref"),
+            objective: objective.to_owned(),
+            title: None,
+            status,
+            reason: None,
+        })
+    };
+    session.append_control(run(TaskRunStatus::Started))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::approved_plan(
+            task_id.clone(),
+            objective,
+            PlanId::new("plan-current-direct")?,
+            format!("sha256:{}", "a".repeat(64)),
+            41,
+        ),
+    ))?;
+    session.append_control(run(TaskRunStatus::Paused))?;
+    Ok(task_id)
+}
+
 #[test]
-fn coordinator_exposes_continuation_only_for_the_exact_current_resumable_task() -> Result<()> {
+fn coordinator_keeps_latest_resumable_task_as_a_typed_continuation_candidate() -> Result<()> {
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
@@ -1525,8 +1748,53 @@ fn coordinator_exposes_continuation_only_for_the_exact_current_resumable_task() 
         coordinator
             .route_tool_specs_for_session(&session, capability)
             .iter()
-            .all(|spec| spec.name != sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME)
+            .any(|spec| spec.name == sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME),
+        "clearing execution focus must not make the host-owned resumable Task undiscoverable"
     );
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovers_direct_continuation_after_chat_clears_focus() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
+    let mut session = Session::new("direct-continuation-route", "model");
+    let task_id = seed_current_resumable_direct_task(&mut session)?;
+    let capability = coordinator.resolve_route_capability(&session);
+    session.append_user_message(ModelMessage::user(
+        "an older router admitted this interjection as ordinary Chat",
+    ))?;
+    assert!(session.task_state_projection().current_task().is_none());
+    assert!(
+        coordinator
+            .route_tool_specs_for_session(&session, capability)
+            .iter()
+            .any(|spec| spec.name == sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME),
+        "first-class direct Task authority must remain resumable after focus loss and without a synthetic TaskPlan"
+    );
+
+    let bound = coordinator.bind_conversation_input(
+        &session,
+        AgentRunInput::user("what is the current task doing?"),
+        parent_ref()?,
+        "continue-current-direct-run",
+        None,
+        42,
+    )?;
+    let AgentRunPurpose::Conversation(context) = bound.purpose.expect("conversation purpose")
+    else {
+        panic!("expected conversation purpose")
+    };
+    let continuation = context
+        .task_continuation
+        .expect("current direct Task should be host-bound");
+    assert_eq!(continuation.task_id, task_id);
+    assert_eq!(continuation.plan_version, None);
+    assert_eq!(continuation.task_status, TaskRunStatus::Paused);
+    assert_eq!(continuation.plan_status, None);
     Ok(())
 }
 
@@ -1722,7 +1990,7 @@ fn continuation_dispatch_accepts_reused_pending_selection_after_new_user_clears_
     let resolved = validate_task_continuation_action(&session, &action)?;
 
     assert_eq!(resolved.task_id, action.task_id);
-    assert!(!resolved.needs_planning);
+    assert!(!resolved.needs_planning());
     let run_scope_id = "scope-reused-pending-selection";
     session.append_controls(vec![
         ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {

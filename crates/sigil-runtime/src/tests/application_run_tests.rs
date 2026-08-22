@@ -320,11 +320,15 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
         .into_parts();
     let mut events = RecordingApplicationRunEvents::default();
     let mut approvals = AutoApproveHandler;
-    let error = execution
-        .execute(&mut events, &mut approvals)
-        .await
-        .expect_err("closed local endpoint should fail after continuation dispatch");
-    assert!(!error.to_string().is_empty());
+    let output = execution.execute(&mut events, &mut approvals).await?;
+    assert_eq!(
+        output.terminal_status,
+        ApplicationRunTerminalStatus::Blocked
+    );
+    assert!(matches!(
+        output.agent_output.disposition,
+        sigil_kernel::AgentRunDisposition::Blocked
+    ));
     drop(control);
 
     let recovered = Session::load_from_store("custom", "gpt-test", store)?;
@@ -2849,7 +2853,8 @@ fn public_event_sequence_seals_after_root_terminal() -> Result<()> {
 }
 
 #[test]
-fn failed_terminal_delivery_does_not_seal_the_public_event_sequence() -> Result<()> {
+fn failed_terminal_delivery_keeps_the_exact_event_pending_without_rewriting_domain_state()
+-> Result<()> {
     struct FailFirstTerminal {
         failed: bool,
         events: Vec<PublicRunEvent>,
@@ -2857,7 +2862,7 @@ fn failed_terminal_delivery_does_not_seal_the_public_event_sequence() -> Result<
 
     impl ApplicationRunEventHandler for FailFirstTerminal {
         fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-            if !self.failed && matches!(event.event, PublicRunEventKind::RunFailed { .. }) {
+            if !self.failed && matches!(event.event, PublicRunEventKind::RunInterrupted { .. }) {
                 self.failed = true;
                 anyhow::bail!("durable publication failed");
             }
@@ -2871,25 +2876,67 @@ fn failed_terminal_delivery_does_not_seal_the_public_event_sequence() -> Result<
         failed: false,
         events: Vec::new(),
     };
+    sequence.emit(
+        &mut handler,
+        PublicRunEventKind::RunInterrupted {
+            reason: "first terminal".to_owned(),
+        },
+    )?;
+    assert!(sequence.delivery_is_degraded()?);
     assert!(
         sequence
             .emit(
                 &mut handler,
-                PublicRunEventKind::RunFailed {
-                    error: "first terminal".to_owned(),
+                PublicRunEventKind::Notice {
+                    message: "late".to_owned(),
                 },
             )
             .is_err()
     );
+    assert!(handler.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn durable_outbox_replays_a_failed_terminal_with_its_original_public_event_id() -> Result<()> {
+    struct FailingAdapter;
+
+    impl ApplicationRunEventHandler for FailingAdapter {
+        fn handle_public_event(&mut self, _event: PublicRunEvent) -> Result<()> {
+            anyhow::bail!("adapter is temporarily unavailable")
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let sequence = ApplicationRunEventSequence::with_outbox(
+        "session-outbox".to_owned(),
+        "run-outbox".to_owned(),
+        sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?),
+    );
+    let mut adapter = FailingAdapter;
     sequence.emit(
-        &mut handler,
-        PublicRunEventKind::RunFailed {
-            error: "retry terminal".to_owned(),
+        &mut adapter,
+        PublicRunEventKind::RunBlocked {
+            reason: "provider route needs recovery".to_owned(),
         },
     )?;
 
-    assert_eq!(handler.events.len(), 1);
-    assert_eq!(handler.events[0].sequence, 1);
+    assert!(sequence.delivery_is_degraded()?);
+    assert!(!sequence.terminal_was_delivered()?);
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&path)?,
+    )?;
+    let pending = projection.pending_for_adapter("application");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].public_event_id,
+        "application-public:session-outbox:run-outbox:1"
+    );
+    assert!(matches!(
+        pending[0].event.event,
+        PublicRunEventKind::RunBlocked { .. }
+    ));
     Ok(())
 }
 
@@ -2924,7 +2971,16 @@ fn non_final_kernel_terminals_do_not_project_as_run_finished() {
         let (status, event) = application_terminal_projection(&output);
 
         assert_eq!(status, expected_status);
-        assert!(matches!(event, PublicRunEventKind::RunFailed { .. }));
+        assert!(matches!(
+            (terminal_reason, event),
+            (
+                AgentRunTerminalReason::MaxTurns,
+                PublicRunEventKind::RunInterrupted { .. }
+            ) | (
+                AgentRunTerminalReason::DelegationUnsatisfied,
+                PublicRunEventKind::RunBlocked { .. }
+            )
+        ));
     }
 }
 
@@ -2954,7 +3010,7 @@ fn durable_task_handoff_never_projects_as_application_success() -> Result<()> {
 
     let (status, event) = application_terminal_projection(&output);
     assert_eq!(status, ApplicationRunTerminalStatus::Blocked);
-    assert!(matches!(event, PublicRunEventKind::RunFailed { .. }));
+    assert!(matches!(event, PublicRunEventKind::RunBlocked { .. }));
     Ok(())
 }
 
@@ -3182,14 +3238,14 @@ credential = { source = "none" }
     let mut handler = NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
 
-    let output = continue_application_task_handoff(
+    let output = Box::pin(continue_application_task_handoff(
         &mut session,
         root_output,
         Some(task_execution),
         &mut handler,
         &mut approval_handler,
         &cancellation_handle,
-    )
+    ))
     .await?;
 
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
@@ -3635,14 +3691,14 @@ credential = { source = "none" }
     let mut handler = NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
 
-    let output = continue_application_task_handoff(
+    let output = Box::pin(continue_application_task_handoff(
         &mut session,
         root_output,
         Some(task_execution),
         &mut handler,
         &mut approval_handler,
         &cancellation_handle,
-    )
+    ))
     .await?;
 
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
@@ -5068,10 +5124,12 @@ async fn application_task_pause_writes_paused_only_after_quiescence() -> Result<
                 if task_id == "task-application-pause" && status == "paused"
         )
     }));
-    assert!(matches!(
-        events.0.last().map(|event| &event.event),
-        Some(PublicRunEventKind::RunCancelled)
-    ));
+    assert!(
+        events
+            .0
+            .iter()
+            .any(|event| { matches!(event.event, PublicRunEventKind::RunPaused { .. }) })
+    );
     let reopened =
         Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
     let task = reopened
@@ -5091,7 +5149,7 @@ async fn application_task_pause_writes_paused_only_after_quiescence() -> Result<
         [
             ConversationRunLifecycleRecordV1::ConversationRunStartedV1(_),
             ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
-        ] if finalized.status() == ConversationRunTerminalStatusV1::Blocked
+        ] if finalized.status() == ConversationRunTerminalStatusV1::Paused
     ));
     Ok(())
 }
@@ -5215,10 +5273,12 @@ async fn unaudited_application_task_pause_records_interrupted_before_failing() -
                 if task_id == "task-application-unaudited-pause" && status == "interrupted"
         )
     }));
-    assert!(matches!(
-        events.0.last().map(|event| &event.event),
-        Some(PublicRunEventKind::RunFailed { .. })
-    ));
+    assert!(
+        events
+            .0
+            .iter()
+            .any(|event| { matches!(event.event, PublicRunEventKind::RunInterrupted { .. }) })
+    );
     let reopened =
         Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
     assert_eq!(
@@ -5285,10 +5345,12 @@ async fn application_task_pause_records_interrupted_when_execution_did_not_join(
         outcome.cancellation_outcome,
         RunCancellationTerminalOutcome::Interrupted
     );
-    assert!(matches!(
-        events.0.last().map(|event| &event.event),
-        Some(PublicRunEventKind::RunFailed { .. })
-    ));
+    assert!(
+        events
+            .0
+            .iter()
+            .any(|event| { matches!(event.event, PublicRunEventKind::RunInterrupted { .. }) })
+    );
     let reopened =
         Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&store_path)?)?;
     assert_eq!(
@@ -5536,10 +5598,12 @@ async fn cancellation_without_execution_join_persists_interrupted_and_failed_eve
         .await?;
 
     assert_eq!(outcome, RunCancellationTerminalOutcome::Interrupted);
-    assert!(matches!(
-        events.0.last().map(|event| &event.event),
-        Some(PublicRunEventKind::RunFailed { .. })
-    ));
+    assert!(
+        events
+            .0
+            .iter()
+            .any(|event| { matches!(event.event, PublicRunEventKind::RunInterrupted { .. }) })
+    );
     let lifecycle = application_conversation_lifecycle(&store_path)?;
     assert!(matches!(
         lifecycle.as_slice(),
@@ -5607,10 +5671,12 @@ async fn cancellation_audit_failure_still_unblocks_and_requires_failed_terminal(
             .await
             .is_err()
     );
-    assert!(matches!(
-        events.0.last().map(|event| &event.event),
-        Some(PublicRunEventKind::RunFailed { .. })
-    ));
+    assert!(
+        events
+            .0
+            .iter()
+            .any(|event| { matches!(event.event, PublicRunEventKind::RunInterrupted { .. }) })
+    );
     Ok(())
 }
 
@@ -5962,35 +6028,42 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
     )
     .await?;
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    // The single adoption authority exists; the task ran through admission to a terminal.
+    // Approval atomically created one stable Task plus first-class direct execution authority.
     let artifacts = session.plan_artifact_projection();
-    let adoption = artifacts
-        .adoptions
+    assert!(artifacts.materializations.is_empty());
+    let task_link = artifacts
+        .tasks_created
         .get(&plan_id)
         .and_then(|entries| entries.first())
-        .expect("model route must adopt the plan");
-    assert_eq!(adoption.plan_hash, plan_hash);
+        .expect("model route must create the approved Task");
+    assert_eq!(task_link.plan_hash, plan_hash);
+    assert_eq!(task_link.task_plan_version, 0);
+    assert!(task_link.stale_reason.is_none());
     let tasks = session.task_state_projection();
     assert!(
         tasks
             .admission_attempts
-            .get(&adoption.task_id)
-            .is_some_and(|attempts| !attempts.is_empty()),
-        "model route must run admission before the runner"
+            .get(&task_link.task_id)
+            .is_none_or(Vec::is_empty),
+        "direct Plan execution must not require candidate admission"
     );
     assert_eq!(
-        tasks.tasks.get(&adoption.task_id).map(|task| task.status),
+        tasks.tasks.get(&task_link.task_id).map(|task| task.status),
         Some(TaskRunStatus::Completed)
     );
+    let task = tasks.tasks.get(&task_link.task_id).expect("direct Task");
+    assert!(task.plans.is_empty());
+    assert!(task.direct_execution_admission.is_some());
+    assert_eq!(task.direct_execution_attempts.len(), 1);
     assert!(output.result.final_message_id.is_some());
     Ok(())
 }
 
 #[tokio::test]
-async fn run_pending_plan_route_keeps_blocked_task_durable() -> Result<()> {
+async fn run_pending_plan_route_does_not_require_materialization_admission() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    // Config without any connection: the honest admission probes block with provider_unavailable
-    // after adoption; the Task stays durable with a typed blocker.
+    // A missing planner connection must not block a Plan that can execute through its already
+    // selected role provider. The old materialization admission incorrectly stopped here.
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
@@ -6138,27 +6211,19 @@ max_plan_steps = 64
     )
     .await?;
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert!(
-        output.result.final_text.contains("blocked"),
-        "blocked run must surface the blocker: {}",
-        output.result.final_text
-    );
+    assert_eq!(output.result.final_text, "application task step completed");
     let artifacts = session.plan_artifact_projection();
-    let adoption = artifacts
-        .adoptions
+    assert!(artifacts.materializations.is_empty());
+    let task_link = artifacts
+        .tasks_created
         .get(&plan_id)
         .and_then(|entries| entries.first())
-        .expect("model route must adopt the plan before blocking");
+        .expect("model route must create the approved Task");
     let tasks = session.task_state_projection();
     assert_eq!(
-        tasks.execution_phase(&adoption.task_id),
-        Some(sigil_kernel::TaskExecutionPhaseV1::Blocked)
+        tasks.execution_phase(&task_link.task_id),
+        Some(sigil_kernel::TaskExecutionPhaseV1::Completed)
     );
-    assert_eq!(
-        tasks
-            .active_blocker(&adoption.task_id)
-            .map(|blocker| blocker.reason_code),
-        Some(sigil_kernel::TaskBlockerReasonCodeV1::ProviderUnavailable)
-    );
+    assert!(tasks.active_blocker(&task_link.task_id).is_none());
     Ok(())
 }

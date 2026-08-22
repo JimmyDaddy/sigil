@@ -15,14 +15,16 @@ use sigil_kernel::{
     ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1,
     ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler,
     FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MessageRole, ModelMessage, ModelRef, MutationEventRecorder, NoopEventHandler, PermissionMode,
-    PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort,
-    ResolvedModelRoute, RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle,
-    RunCancellationOwner, RunCancellationRecorder, RunCancellationRequestedEntry,
-    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome,
-    RunTaskGuard, SecretString, Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest,
-    TaskRunStatus, TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView,
-    WorkspaceTrust, conversation_route_routing_contract_material, rerun_task_verification_check,
+    MessageRole, ModelMessage, ModelRef, MutationEventRecorder, NoopEventHandler,
+    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PermissionMode, PublicEventDeliveryReceiptV1,
+    PublicEventOutboxEntryV1, PublicEventOutboxRecorder, PublicRunEvent, PublicRunEventKind,
+    PublicTaskEventProjector, ReasoningEffort, ResolvedModelRoute, RootConfig,
+    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
+    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
+    Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskRunStatus,
+    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
+    conversation_route_routing_contract_material, rerun_task_verification_check,
     resolve_workspace_root, safe_persistence_text, verification_product_view,
     workspace_trust_from_entries,
 };
@@ -835,6 +837,13 @@ pub trait ApplicationRunEventHandler {
     ///
     /// Returns an error when the adapter cannot accept the event and execution should stop.
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()>;
+
+    /// Bounded durable adapter identity used by the public outbox receipt.  Implementations that
+    /// share an application bridge can keep the generic value; dedicated HTTP/Desktop/TUI
+    /// adapters may override it without changing domain terminal semantics.
+    fn public_event_adapter_id(&self) -> &'static str {
+        "application"
+    }
 }
 
 /// Prepared application run and its root cancellation authority.
@@ -1085,6 +1094,13 @@ impl ApplicationRunControl {
         self.events.terminal_was_delivered()
     }
 
+    /// Returns whether a public adapter or its durable outbox acknowledgement degraded while the
+    /// domain run continued. Callers must retry/replay delivery; they must not replace the domain
+    /// terminal with a generic failure.
+    pub fn public_delivery_is_degraded(&self) -> Result<bool> {
+        self.events.delivery_is_degraded()
+    }
+
     /// Durably requests cancellation, activates it, and unblocks adapter-owned approval waits.
     ///
     /// # Errors
@@ -1275,8 +1291,8 @@ impl ApplicationRunControl {
             }
             self.events.emit(
                 handler,
-                PublicRunEventKind::RunFailed {
-                    error: "run interrupted because its cancellation request could not be audited"
+                PublicRunEventKind::RunInterrupted {
+                    reason: "run interrupted because its cancellation request could not be audited"
                         .to_owned(),
                 },
             )?;
@@ -1329,8 +1345,8 @@ impl ApplicationRunControl {
         }
         let terminal = match outcome {
             RunCancellationTerminalOutcome::Cancelled => PublicRunEventKind::RunCancelled,
-            RunCancellationTerminalOutcome::Interrupted => PublicRunEventKind::RunFailed {
-                error: "run interrupted before cancellation cleanup could be confirmed".to_owned(),
+            RunCancellationTerminalOutcome::Interrupted => PublicRunEventKind::RunInterrupted {
+                reason: "run interrupted before cancellation cleanup could be confirmed".to_owned(),
             },
         };
         self.events.emit(handler, terminal)?;
@@ -1398,8 +1414,8 @@ impl ApplicationRunControl {
             }
             self.events.emit(
                 handler,
-                PublicRunEventKind::RunFailed {
-                    error: "Task interrupted because its pause request could not be audited"
+                PublicRunEventKind::RunInterrupted {
+                    reason: "Task interrupted because its pause request could not be audited"
                         .to_owned(),
                 },
             )?;
@@ -1448,15 +1464,17 @@ impl ApplicationRunControl {
         let task_status = task_stop.status();
         let (conversation_status, terminal_summary, terminal) = match task_status {
             TaskRunStatus::Paused => (
-                ConversationRunTerminalStatusV1::Blocked,
+                ConversationRunTerminalStatusV1::Paused,
                 "Task paused",
-                PublicRunEventKind::RunCancelled,
+                PublicRunEventKind::RunPaused {
+                    reason: "Task is durably paused".to_owned(),
+                },
             ),
             TaskRunStatus::Interrupted => (
                 ConversationRunTerminalStatusV1::Interrupted,
                 "Task pause could not be confirmed",
-                PublicRunEventKind::RunFailed {
-                    error: "Task interrupted before pause cleanup could be confirmed".to_owned(),
+                PublicRunEventKind::RunInterrupted {
+                    reason: "Task interrupted before pause cleanup could be confirmed".to_owned(),
                 },
             ),
             _ => bail!("application Task pause wrote an invalid terminal status"),
@@ -2240,6 +2258,9 @@ impl ApplicationRunExecution {
                 };
                 let summary = match &terminal_event {
                     PublicRunEventKind::RunFailed { error } => Some(error.as_str()),
+                    PublicRunEventKind::RunBlocked { reason }
+                    | PublicRunEventKind::RunPaused { reason }
+                    | PublicRunEventKind::RunInterrupted { reason } => Some(reason.as_str()),
                     _ => None,
                 };
                 let final_message_id = (terminal_status == ApplicationRunTerminalStatus::Succeeded)
@@ -2267,8 +2288,59 @@ impl ApplicationRunExecution {
                     post_run_maintenance,
                 })
             }
+            // Cancellation has precedence over a provider recovery terminal.  A transport
+            // wait can observe cancellation and return a recovery-specific error while the
+            // foreground owner is already closing the run.  Let the adapter finalize that
+            // cancellation instead of publishing a competing blocked terminal.
             Err(error) if self.cancellation_handle.is_cancel_requested() => Err(error)
                 .context("application run cancellation is pending terminal cleanup confirmation"),
+            Err(error)
+                if error
+                    .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+                    .is_some() =>
+            {
+                let recovery = error
+                    .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
+                    .expect("recovery error was checked by the match guard");
+                // The kernel already emitted the public recovery projection and durably paused
+                // the logical run.  Preserve that actionable terminal for every application
+                // adapter instead of allowing this outer async-error boundary to overwrite it
+                // with a generic failed conversation run.
+                let summary = format!(
+                    "provider turn recovery {:?}: {}",
+                    recovery.disposition, recovery.reason_code
+                );
+                append_application_conversation_terminal(
+                    &self.conversation_lifecycle,
+                    &self.run_id,
+                    ConversationRunTerminalStatusV1::Blocked,
+                    None,
+                    Some(&summary),
+                    &self.redactor,
+                )?;
+                Ok(ApplicationRunOutput {
+                    session_id: self.session_id,
+                    run_id: self.run_id,
+                    session_log_path: self.session_log_path,
+                    terminal_status: ApplicationRunTerminalStatus::Blocked,
+                    route_transition: self.route_transition,
+                    agent_output: AgentRunOutput {
+                        disposition: AgentRunDisposition::Blocked,
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: 0,
+                            final_message_id: None,
+                        },
+                        outcome: AgentRunOutcome {
+                            terminal_reason: AgentRunTerminalReason::DelegationUnsatisfied,
+                            ..AgentRunOutcome::default()
+                        },
+                    },
+                    post_run_maintenance: ApplicationPostRunMaintenance::from_session_title(
+                        self.pending_session_title.take(),
+                    ),
+                })
+            }
             Err(error) => {
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
                 append_application_conversation_terminal(
@@ -2342,36 +2414,30 @@ where
         if action.source_turn.session_scope_id != session.session_scope_id() {
             bail!("pending plan execution action belongs to another session");
         }
-        // RFC-0067 6.5: the shared model route drives the exact same single execution spine as
-        // every other surface: typed command -> atomic adoption -> admission -> runner.
+        // The shared model route uses the same direct execution spine as every other surface:
+        // typed command -> atomic approval plus host execution unit -> runner.
         let plan_id = sigil_kernel::PlanId::new(action.plan_id.as_str().to_owned())
             .map_err(|error| anyhow!("invalid plan id for pending plan execution: {error}"))?;
-        let candidate_hash = session
-            .plan_artifact_projection()
-            .latest_candidate(&plan_id)
-            .map(|candidate| candidate.candidate_hash.clone())
-            .unwrap_or_default();
         let command = sigil_kernel::PlanRunCommandV1 {
             command_id: sigil_kernel::stable_event_uuid(
                 "sigil-plan-run-command-v1",
                 &format!(
-                    "{}:{}:{}:{}:run:current_policy",
+                    "{}:{}:{}:run:current_policy",
                     session.session_scope_id(),
                     action.plan_id.as_str(),
-                    action.plan_hash,
-                    candidate_hash
+                    action.plan_hash
                 ),
             ),
             session_id: session.session_scope_id().to_owned(),
-            plan_id,
+            plan_id: plan_id.clone(),
             expected_plan_hash: action.plan_hash.clone(),
-            expected_candidate_hash: candidate_hash,
+            expected_candidate_hash: String::new(),
             expected_durable_frontier: session.durable_frontier_sequence(),
             start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
             permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
             source: sigil_kernel::PlanRunCommandSource::ModelTypedRoute,
         };
-        let receipt = crate::PlanExecutionService::adopt(
+        let receipt = crate::PlanExecutionService::approve(
             session,
             task_execution.parent_session_ref.clone(),
             &command,
@@ -2458,14 +2524,17 @@ where
         agent_supervisor,
         role_provider_builder,
     } = task_execution;
-    // RFC-0067 10.2: every run of an adopted Task goes through admission first; blockers keep
-    // the Task durable instead of failing mid-execution. Legacy (non-adopted) tasks skip this.
-    if let Some(adoption) = session
-        .plan_artifact_projection()
-        .adoption_for_task(&task_id)
-        .cloned()
-    {
-        let candidate = adoption.adopted_candidate;
+    // New approved Plans already carry first-class direct execution admission. Legacy sessions may
+    // still contain a materialized/adopted candidate, so preserve their historical admission
+    // checks during replay without imposing that boundary on new Plan runs.
+    let materialized_candidate = {
+        let artifacts = session.plan_artifact_projection();
+        artifacts
+            .materialization_for_task(&task_id)
+            .or_else(|| artifacts.adoption_for_task(&task_id))
+            .map(|receipt| receipt.adopted_candidate.clone())
+    };
+    if let Some(candidate) = materialized_candidate {
         let probes = crate::build_task_admission_probes(
             &root_config,
             &workspace_root,
@@ -2812,6 +2881,55 @@ where
                 disposition: AgentRunDisposition::Interrupted,
             })
         }
+        crate::PlanReviewRunOutcome::Blocked(reason) => {
+            crate::PlanReviewCoordinator::close_plan_review_run(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::Blocked(reason),
+                current_unix_time_ms(),
+            )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the plan review blocker terminal-state race");
+            }
+            Ok(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::Blocked,
+            })
+        }
+        crate::PlanReviewRunOutcome::Paused(reason) => {
+            crate::PlanReviewCoordinator::close_plan_review_run(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::Paused(reason),
+                current_unix_time_ms(),
+            )?;
+            emit_current_plan_review_attempt(session, &request, handler)?;
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the plan review pause terminal-state race");
+            }
+            Ok(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                // ApplicationRun currently has no independent PlanReview pause disposition. The
+                // durable plan-review status remains Paused; the enclosing run is blocked from
+                // advancing until the retry/resource boundary is resolved.
+                disposition: AgentRunDisposition::Blocked,
+            })
+        }
         crate::PlanReviewRunOutcome::Failed(error) => {
             crate::PlanReviewCoordinator::close_plan_review_run(
                 session,
@@ -2909,19 +3027,33 @@ fn application_task_final_answer(
     session: &Session,
     task_id: &TaskId,
 ) -> Result<ApplicationTaskFinalAnswer> {
-    let committed = session
-        .task_state_projection()
+    let projection = session.task_state_projection();
+    let task = projection
         .tasks
         .get(task_id)
-        .and_then(|task| task.final_answer.clone())
-        .ok_or_else(|| anyhow!("completed application task has no committed final answer"))?;
+        .ok_or_else(|| anyhow!("completed application task is missing"))?;
+    let (message_id, expected_hash) = if let Some(committed) = task.final_answer.as_ref() {
+        (committed.message_id.clone(), committed.content_hash.clone())
+    } else {
+        task.direct_execution_attempts
+            .values()
+            .filter(|attempt| {
+                attempt.status == sigil_kernel::TaskParticipantAttemptStatus::Completed
+            })
+            .max_by_key(|attempt| attempt.ordinal)
+            .and_then(|attempt| {
+                Some((
+                    attempt.final_message_id.clone()?,
+                    attempt.output_hash.clone()?,
+                ))
+            })
+            .ok_or_else(|| anyhow!("completed application task has no committed final answer"))?
+    };
     let message = session
         .entries()
         .iter()
         .find_map(|entry| match entry {
-            SessionLogEntry::Assistant(message) if message.id == committed.message_id => {
-                Some(message)
-            }
+            SessionLogEntry::Assistant(message) if message.id == message_id => Some(message),
             _ => None,
         })
         .ok_or_else(|| anyhow!("completed application task final message is missing"))?;
@@ -2932,10 +3064,10 @@ fn application_task_final_answer(
     if text.trim().is_empty() {
         bail!("completed application task final answer is empty");
     }
-    Ok(ApplicationTaskFinalAnswer {
-        message_id: committed.message_id,
-        text,
-    })
+    if format!("sha256:{}", sigil_kernel::sha256_hex(text.as_bytes())) != expected_hash {
+        bail!("completed application task final answer hash does not match durable authority");
+    }
+    Ok(ApplicationTaskFinalAnswer { message_id, text })
 }
 
 fn application_task_blocked_output<H: EventHandler + Send>(
@@ -3534,7 +3666,13 @@ async fn prepare_application_run_internal(
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
+    let events = ApplicationRunEventSequence::with_outbox(
+        session_id.clone(),
+        run_id.clone(),
+        PublicEventOutboxRecorder::new(
+            JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
+        ),
+    );
     let kind = if let Some(request) = explicit_plan_review_request {
         ApplicationRunExecutionKind::ExplicitPlanReview {
             request: Box::new(request),
@@ -3558,7 +3696,10 @@ async fn prepare_application_run_internal(
         }
     } else {
         ApplicationRunExecutionKind::Main {
-            agent: Box::new(Agent::new(provider, registry.clone())),
+            agent: Box::new(
+                crate::configured_agent(&root_config, provider, registry.clone())
+                    .map_err(ApplicationRunPrepareError::execution)?,
+            ),
             input: Box::new(input),
         }
     };
@@ -3568,12 +3709,17 @@ async fn prepare_application_run_internal(
                 options: options.clone(),
                 root_config: root_config.clone(),
                 workspace_snapshot_id: plan_review_workspace_snapshot_id,
-                agent: Box::new(Agent::new(
-                    crate::build_provider_for_model_ref_async(&root_config, &model_ref)
-                        .await
-                        .map_err(ApplicationRunPrepareError::provider_unavailable)?,
-                    crate::build_plan_review_tool_registry(&registry, &root_config).into_registry(),
-                )),
+                agent: Box::new(
+                    crate::configured_agent(
+                        &root_config,
+                        crate::build_provider_for_model_ref_async(&root_config, &model_ref)
+                            .await
+                            .map_err(ApplicationRunPrepareError::provider_unavailable)?,
+                        crate::build_plan_review_tool_registry(&registry, &root_config)
+                            .into_registry(),
+                    )
+                    .map_err(ApplicationRunPrepareError::execution)?,
+                ),
                 tool_registry: crate::build_plan_review_tool_registry(&registry, &root_config)
                     .into_registry(),
             }),
@@ -5650,6 +5796,7 @@ fn canonical_session_lease_path(path: &Path) -> Result<PathBuf> {
 struct ApplicationRunEventSequence {
     session_id: String,
     run_id: String,
+    outbox: Option<PublicEventOutboxRecorder>,
     state: Arc<Mutex<ApplicationRunEventState>>,
 }
 
@@ -5657,6 +5804,8 @@ struct ApplicationRunEventSequence {
 struct ApplicationRunEventState {
     sequence: u64,
     terminal: bool,
+    terminal_delivered: bool,
+    delivery_degraded: bool,
 }
 
 impl ApplicationRunEventSequence {
@@ -5664,6 +5813,16 @@ impl ApplicationRunEventSequence {
         Self {
             session_id,
             run_id,
+            outbox: None,
+            state: Arc::new(Mutex::new(ApplicationRunEventState::default())),
+        }
+    }
+
+    fn with_outbox(session_id: String, run_id: String, outbox: PublicEventOutboxRecorder) -> Self {
+        Self {
+            session_id,
+            run_id,
+            outbox: Some(outbox),
             state: Arc::new(Mutex::new(ApplicationRunEventState::default())),
         }
     }
@@ -5684,15 +5843,56 @@ impl ApplicationRunEventSequence {
             .checked_add(1)
             .context("application run event sequence exhausted")?;
         let terminal = is_terminal_public_run_event(&event);
-        handler.handle_public_event(PublicRunEvent::new(
+        let public = PublicRunEvent::new(
             self.session_id.clone(),
             self.run_id.clone(),
             sequence,
             event,
-        ))?;
+        );
+        let public_event_id = format!(
+            "application-public:{}:{}:{}",
+            self.session_id, self.run_id, sequence
+        );
+        let outbox_recorded = self.outbox.as_ref().is_none_or(|outbox| {
+            let entry = PublicEventOutboxEntryV1 {
+                schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                public_event_id: public_event_id.clone(),
+                domain_event_id: format!("application-domain:{}:{}", self.run_id, sequence),
+                run_id: self.run_id.clone(),
+                sequence,
+                payload_digest: serde_json::to_vec(&public).map_or_else(
+                    |_| sigil_kernel::stable_event_hash(b"unencodable-public-run-event"),
+                    |encoded| sigil_kernel::stable_event_hash(&encoded),
+                ),
+                event: public.clone(),
+            };
+            outbox.append_outbox(&entry).is_ok()
+        });
+        let delivered = handler.handle_public_event(public).is_ok();
+        let mut receipt_recorded = self.outbox.is_none();
+        if outbox_recorded && delivered {
+            if let Some(outbox) = self.outbox.as_ref() {
+                let receipt = PublicEventDeliveryReceiptV1 {
+                    schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                    public_event_id,
+                    adapter: handler.public_event_adapter_id().to_owned(),
+                    delivered_at_unix_ms: current_unix_time_ms(),
+                };
+                receipt_recorded = outbox.append_delivery(&receipt).is_ok();
+                if !receipt_recorded {
+                    state.delivery_degraded = true;
+                }
+            }
+        } else {
+            // Delivery and its journal are recoverable adapter boundaries.  Preserve the domain
+            // sequence and, when the outbox append succeeded, leave the exact event pending for
+            // replay instead of allowing an adapter error to manufacture a RunFailed terminal.
+            state.delivery_degraded = true;
+        }
         state.sequence = sequence;
         if terminal {
             state.terminal = true;
+            state.terminal_delivered = outbox_recorded && delivered && receipt_recorded;
         }
         Ok(())
     }
@@ -5700,7 +5900,14 @@ impl ApplicationRunEventSequence {
     fn terminal_was_delivered(&self) -> Result<bool> {
         self.state
             .lock()
-            .map(|state| state.terminal)
+            .map(|state| state.terminal_delivered)
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))
+    }
+
+    fn delivery_is_degraded(&self) -> Result<bool> {
+        self.state
+            .lock()
+            .map(|state| state.delivery_degraded)
             .map_err(|_| anyhow!("application run event sequence is unavailable"))
     }
 }
@@ -5710,6 +5917,9 @@ fn is_terminal_public_run_event(event: &PublicRunEventKind) -> bool {
         event,
         PublicRunEventKind::RunFinished { .. }
             | PublicRunEventKind::RunFailed { .. }
+            | PublicRunEventKind::RunBlocked { .. }
+            | PublicRunEventKind::RunPaused { .. }
+            | PublicRunEventKind::RunInterrupted { .. }
             | PublicRunEventKind::RunCancelled
     )
 }
@@ -5779,7 +5989,7 @@ where
             sigil_kernel::InteractionMode::Headless,
             None,
         );
-        let agent = sigil_kernel::Agent::new(provider, base_registry);
+        let agent = crate::configured_agent(root_config, provider, base_registry)?;
         let mut bridge = PublicApplicationEventBridge::new(
             ApplicationRunEventSequence::new(
                 session.session_scope_id().to_owned(),
@@ -5850,6 +6060,8 @@ where
             }
             crate::PlanReviewRunOutcome::Cancelled
             | crate::PlanReviewRunOutcome::Interrupted(_)
+            | crate::PlanReviewRunOutcome::Blocked(_)
+            | crate::PlanReviewRunOutcome::Paused(_)
             | crate::PlanReviewRunOutcome::Failed(_)
             | crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(_) => {
                 crate::PlanReviewCoordinator::close_plan_review_run(
@@ -5970,60 +6182,60 @@ fn application_terminal_projection(
         ),
         AgentRunDisposition::Interrupted => (
             ApplicationRunTerminalStatus::Interrupted,
-            PublicRunEventKind::RunFailed {
-                error: "run interrupted after reaching the configured turn limit".to_owned(),
+            PublicRunEventKind::RunInterrupted {
+                reason: "run interrupted after reaching the configured turn limit".to_owned(),
             },
         ),
         AgentRunDisposition::Blocked => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "run blocked because its required delegation was not satisfied".to_owned(),
+            PublicRunEventKind::RunBlocked {
+                reason: "run blocked because its required delegation was not satisfied".to_owned(),
             },
         ),
         AgentRunDisposition::StartDurableTask(_) => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "run requested a durable task handoff, but this application surface has not attached the task executor"
+            PublicRunEventKind::RunBlocked {
+                reason: "run requested a durable task handoff, but this application surface has not attached the task executor"
                     .to_owned(),
             },
         ),
         AgentRunDisposition::ContinueDurableTask(_) => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "run requested a durable task continuation, but this application surface has not attached the task executor"
+            PublicRunEventKind::RunBlocked {
+                reason: "run requested a durable task continuation, but this application surface has not attached the task executor"
                     .to_owned(),
             },
         ),
         AgentRunDisposition::RunPendingPlan(_) => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "run requested pending plan execution, but this application surface has not attached the task executor"
+            PublicRunEventKind::RunBlocked {
+                reason: "run requested pending plan execution, but this application surface has not attached the task executor"
                     .to_owned(),
             },
         ),
         AgentRunDisposition::PendingPlanDecisionRequired(_) => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "the current plan is still awaiting an explicit decision".to_owned(),
+            PublicRunEventKind::RunBlocked {
+                reason: "the current plan is still awaiting an explicit decision".to_owned(),
             },
         ),
         AgentRunDisposition::StartPlanReview(_) => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "run requested a plan review, but this application surface has not attached the plan review coordinator"
+            PublicRunEventKind::RunBlocked {
+                reason: "run requested a plan review, but this application surface has not attached the plan review coordinator"
                     .to_owned(),
             },
         ),
         AgentRunDisposition::PlanReviewDraftSubmitted(_) => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "plan review draft submitted outside an attached plan review coordinator".to_owned(),
+            PublicRunEventKind::RunBlocked {
+                reason: "plan review draft submitted outside an attached plan review coordinator".to_owned(),
             },
         ),
         AgentRunDisposition::TaskPlanAccepted => (
             ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunFailed {
-                error: "task planning completed outside an attached task executor".to_owned(),
+            PublicRunEventKind::RunBlocked {
+                reason: "task planning completed outside an attached task executor".to_owned(),
             },
         ),
     }
