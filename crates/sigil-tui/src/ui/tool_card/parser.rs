@@ -228,6 +228,8 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
         .and_then(|details| details.get("shell_analysis"))
         .or_else(|| details.and_then(|details| details.get("shell")));
     ToolCardMetadata {
+        bytes: object.get("bytes").and_then(Value::as_u64),
+        returned_bytes: object.get("returned_bytes").and_then(Value::as_u64),
         duration_ms: object.get("duration_ms").and_then(Value::as_u64),
         exit_code: object.get("exit_code").and_then(Value::as_i64),
         returned_lines: object.get("returned_lines").and_then(Value::as_u64),

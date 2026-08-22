@@ -335,6 +335,16 @@ impl AppState {
             {
                 Ok(self.click_thinking_block(entry_index, target))
             }
+            crate::mouse::HitTarget::TaskStripToggle if !self.approval.has_actionable_pending() => {
+                self.cancel_tool_card_body_click();
+                self.set_mouse_hover_target(Some(target));
+                self.clear_timeline_text_selection();
+                if self.toggle_task_strip_expansion() {
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
+            }
             crate::mouse::HitTarget::VerificationCard
                 if !self.approval.has_actionable_pending() =>
             {
@@ -400,6 +410,16 @@ impl AppState {
             }
             crate::mouse::HitTarget::ThinkingBlock { entry_index } => {
                 Ok(self.click_thinking_block(entry_index, target))
+            }
+            crate::mouse::HitTarget::TaskStripToggle => {
+                self.cancel_tool_card_body_click();
+                self.set_mouse_hover_target(Some(target));
+                self.clear_timeline_text_selection();
+                if self.toggle_task_strip_expansion() {
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
             }
             crate::mouse::HitTarget::Composer => Ok(self.click_composer(input, layout)),
             crate::mouse::HitTarget::InfoRailAgentRow { index } => {
@@ -609,6 +629,7 @@ impl AppState {
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::ThinkingBlock { .. }
+            | crate::mouse::HitTarget::TaskStripToggle
             | crate::mouse::HitTarget::VerificationCard
             | crate::mouse::HitTarget::LivePanel
             | crate::mouse::HitTarget::Background => {

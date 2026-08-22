@@ -32,8 +32,12 @@ where
         let Some(agent) = Arc::get_mut(agent) else {
             pending_mcp_refreshes.insert(server_name.clone());
             shared_registry_blocked = true;
-            let _ = message_tx.send(WorkerMessage::RunFailed(
-                "cannot refresh MCP while agent registry is shared".to_owned(),
+            let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                LocalOperationOutcome::deferred(
+                    "mcp.refresh",
+                    LocalOperationKind::McpRefresh,
+                    "cannot refresh MCP while agent registry is shared",
+                ),
             ));
             continue;
         };

@@ -263,6 +263,22 @@ impl AppState {
                     );
                 }
             }
+            WorkerMessage::LocalOperationOutcome(outcome) => {
+                let status = outcome.status.label();
+                let kind = outcome.kind.label();
+                self.last_notice = Some(outcome.safe_summary.clone());
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    format!("{kind} {status}: {}", outcome.safe_summary),
+                );
+                self.push_event(
+                    "operation:outcome",
+                    format!(
+                        "{} {} retryable={}",
+                        outcome.operation_id, status, outcome.retryable
+                    ),
+                );
+            }
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
                 self.start_worker_run_phase(
@@ -505,6 +521,28 @@ impl AppState {
                     ),
                 );
             }
+            WorkerMessage::PlanReviewBlocked {
+                reason,
+                paused,
+                entries,
+            } => {
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
+                self.sync_current_session_state(entries);
+                self.restore_durable_attention_surfaces();
+                self.refresh_session_history();
+                self.recompute_compaction_status(false);
+                self.schedule_balance_refresh();
+                self.last_notice = Some(reason.clone());
+                self.push_event(
+                    if paused {
+                        "plan:paused"
+                    } else {
+                        "plan:blocked"
+                    },
+                    reason,
+                );
+            }
             WorkerMessage::UserInputRequested { request, entries } => {
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
@@ -599,14 +637,24 @@ impl AppState {
                 self.runtime.is_busy = false;
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
-                self.last_notice =
-                    Some(format!("task {} is blocked: {}", task_id, blocker.summary));
+                let plan_reopened = self.reopen_plan_workbench_for_task_blocker(&task_id, &blocker);
+                let next_action = if plan_reopened {
+                    "Plan workbench reopened: R retries preparation; V revises the plan."
+                } else {
+                    "Review the task blocker before continuing."
+                };
+                self.last_notice = Some(format!(
+                    "task {} is blocked: {} {}",
+                    task_id, blocker.summary, next_action
+                ));
                 self.push_timeline(
                     TimelineRole::Notice,
                     format!(
-                        "Task {} is blocked ({}). The task is kept and can be retried once the environment is resolved.",
+                        "Task {} is blocked ({}): {} {}",
                         task_id,
-                        blocker.reason_code.as_str()
+                        blocker.reason_code.as_str(),
+                        blocker.summary,
+                        next_action
                     ),
                 );
                 self.push_event(

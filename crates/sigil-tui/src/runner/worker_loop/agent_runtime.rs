@@ -603,6 +603,7 @@ where
 pub(in crate::runner) enum PlanReviewExecutionResult {
     Finished(sigil_kernel::AgentRunResult),
     AwaitingUserInput(sigil_kernel::UserInputRequestRefV1),
+    Blocked { reason: String, paused: bool },
 }
 
 pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
@@ -819,6 +820,36 @@ where
                 format!("plan review interrupted ({error}) and its terminal closure also failed: {close_error:#}")
             })?;
             Err(error)
+        }
+        sigil_runtime::PlanReviewRunOutcome::Blocked(reason) => {
+            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::Blocked(reason.clone()),
+                current_unix_time_ms(),
+            )
+            .map_err(|close_error| format!(
+                "plan review blocked ({reason}) and its terminal closure also failed: {close_error:#}"
+            ))?;
+            Ok(PlanReviewExecutionResult::Blocked {
+                reason,
+                paused: false,
+            })
+        }
+        sigil_runtime::PlanReviewRunOutcome::Paused(reason) => {
+            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::Paused(reason.clone()),
+                current_unix_time_ms(),
+            )
+            .map_err(|close_error| format!(
+                "plan review paused ({reason}) and its terminal closure also failed: {close_error:#}"
+            ))?;
+            Ok(PlanReviewExecutionResult::Blocked {
+                reason,
+                paused: true,
+            })
         }
         sigil_runtime::PlanReviewRunOutcome::Failed(error) => {
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
@@ -1372,6 +1403,9 @@ where
                             Ok(PlanReviewExecutionResult::AwaitingUserInput(request)) => {
                                 RunTaskPayload::AwaitingUserInput { request }
                             }
+                            Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
+                                RunTaskPayload::PlanReviewBlocked { reason, paused }
+                            }
                             Err(error) => RunTaskPayload::Chat {
                                 result: Err(error),
                                 plan_mode: false,
@@ -1429,6 +1463,14 @@ where
                     queue_id,
                     provider_logical_run_id,
                     agent_result_continuation_thread_ids,
+                },
+                RunTaskPayload::PlanReviewBlocked { .. } => RunTaskPayload::Chat {
+                    result: Err(error),
+                    plan_mode: false,
+                    plan_review: true,
+                    queue_id: Some(queue_id.clone()),
+                    provider_logical_run_id: None,
+                    agent_result_continuation_thread_ids: Vec::new(),
                 },
                 RunTaskPayload::Task {
                     task_id, queue_id, ..

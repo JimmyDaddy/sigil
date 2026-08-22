@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 
 use crate::app::{
@@ -24,6 +24,10 @@ pub(super) fn render_user_input_form(
     if area.width == 0 || area.height == 0 {
         return;
     }
+    if is_plan_revision(form) && area.width >= 72 && area.height >= 14 {
+        render_plan_revision_form(frame, area, form, theme);
+        return;
+    }
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -32,13 +36,17 @@ pub(super) fn render_user_input_form(
             Constraint::Length(2),
         ])
         .split(area);
-    let title = match &form.source {
-        UserInputFormSource::DurableAgent if form.queue_length > 1 => format!(
-            "Input required {} of {} · Ctrl-N/P switch",
-            form.queue_position, form.queue_length
-        ),
-        UserInputFormSource::DurableAgent => "Input required".to_owned(),
-        UserInputFormSource::Mcp { .. } => "MCP input required".to_owned(),
+    let title = if is_plan_revision(form) {
+        "Plan revision · current plan stays active".to_owned()
+    } else {
+        match &form.source {
+            UserInputFormSource::DurableAgent if form.queue_length > 1 => format!(
+                "Input required {} of {} · Ctrl-N/P switch",
+                form.queue_position, form.queue_length
+            ),
+            UserInputFormSource::DurableAgent => "Input required".to_owned(),
+            UserInputFormSource::Mcp { .. } => "MCP input required".to_owned(),
+        }
     };
     let header = Text::from(vec![
         Line::from(Span::styled(
@@ -48,7 +56,9 @@ pub(super) fn render_user_input_form(
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            if form.recovery_command.is_some() {
+            if is_plan_revision(form) {
+                "Describe the change · Enter newline · Ctrl-Enter actions · Esc close"
+            } else if form.recovery_command.is_some() {
                 "An accepted answer is durable · Enter resumes the exact continuation · Esc close"
             } else if !form.focus_actions
                 && form
@@ -78,6 +88,220 @@ pub(super) fn render_user_input_form(
     );
     render_fields(frame, rows[1], form, theme);
     render_actions(frame, rows[2], form, theme);
+}
+
+fn render_plan_revision_form(
+    frame: &mut Frame,
+    area: Rect,
+    form: &PendingUserInputForm,
+    theme: &Theme,
+) {
+    let card = plan_revision_card_area(area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.palette.border_focus))
+        .style(styles::body(&theme.palette).bg(theme.palette.modal_bg))
+        .title(Line::from(Span::styled(
+            " PLAN REVISION ",
+            Style::default()
+                .fg(theme.palette.accent_info)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(card);
+    frame.render_widget(block, card);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let header_height = 5.min(inner.height.saturating_sub(5));
+    let footer_height = 3.min(inner.height.saturating_sub(header_height + 3));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(3),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+    render_plan_revision_header(frame, rows[0], form, theme);
+    render_plan_revision_editor(frame, rows[1], form, theme);
+    render_plan_revision_actions(frame, rows[2], form, theme);
+}
+
+fn plan_revision_card_area(area: Rect) -> Rect {
+    let width = area.width.min(110);
+    let height = area.height.min(20);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn render_plan_revision_header(
+    frame: &mut Frame,
+    area: Rect,
+    form: &PendingUserInputForm,
+    theme: &Theme,
+) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "CURRENT PLAN ",
+                Style::default()
+                    .fg(theme.palette.accent_success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "stays active while you revise it",
+                styles::muted(&theme.palette),
+            ),
+        ]),
+        Line::from(Span::styled(
+            form.view.prompt.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "Tell Sigil what to add, remove, reorder, or change.",
+            styles::muted(&theme.palette),
+        )),
+        Line::from(Span::styled(
+            "It will prepare a new draft for review; this plan stays available until that succeeds.",
+            styles::muted(&theme.palette),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(styles::body(&theme.palette).bg(theme.palette.modal_bg)),
+        area,
+    );
+}
+
+fn render_plan_revision_editor(
+    frame: &mut Frame,
+    area: Rect,
+    form: &PendingUserInputForm,
+    theme: &Theme,
+) {
+    let focused = !form.focus_actions;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if focused {
+            theme.palette.border_focus
+        } else {
+            theme.palette.border_subtle
+        }))
+        .style(styles::body(&theme.palette).bg(theme.palette.surface_input))
+        .title(Line::from(vec![
+            Span::styled(
+                " YOUR REVISION REQUEST ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("required", styles::muted(&theme.palette)),
+        ]));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines = plan_revision_editor_lines(form, theme);
+    lines = wrap_terminal_lines(lines, inner.width as usize);
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    form.scroll_extent.set(max_scroll);
+    let scroll = form.scroll.min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(Text::from(
+            lines
+                .into_iter()
+                .skip(scroll)
+                .take(inner.height as usize)
+                .collect::<Vec<_>>(),
+        ))
+        .style(styles::body(&theme.palette).bg(theme.palette.surface_input)),
+        inner,
+    );
+}
+
+fn plan_revision_editor_lines(form: &PendingUserInputForm, theme: &Theme) -> Vec<Line<'static>> {
+    let value = form.drafts.first().and_then(|draft| match draft {
+        UserInputDraftValue::Text(value) => Some(value.as_str()),
+        _ => None,
+    });
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return vec![
+            Line::from(vec![
+                Span::styled("› ", Style::default().fg(theme.palette.accent_primary)),
+                Span::styled(
+                    "Describe the change you want to make…",
+                    styles::muted(&theme.palette),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "Examples: add a verification step, change priority, or preserve a constraint.",
+                styles::muted(&theme.palette),
+            )),
+        ];
+    };
+    value
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            Line::from(vec![
+                Span::styled(
+                    if index == 0 { "› " } else { "  " },
+                    Style::default().fg(theme.palette.accent_primary),
+                ),
+                Span::styled(line.to_owned(), styles::body(&theme.palette)),
+            ])
+        })
+        .collect()
+}
+
+fn render_plan_revision_actions(
+    frame: &mut Frame,
+    area: Rect,
+    form: &PendingUserInputForm,
+    theme: &Theme,
+) {
+    let mut spans = Vec::new();
+    for action in UserInputFormAction::ORDER
+        .iter()
+        .filter(|action| action_available(form, **action))
+    {
+        let selected = form.focus_actions && *action == form.selected_action;
+        let style = if selected {
+            Style::default()
+                .fg(theme.palette.button_selected_fg)
+                .bg(theme.palette.button_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if *action == UserInputFormAction::Submit {
+            Style::default()
+                .fg(theme.palette.accent_primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.palette.button_inactive_fg)
+        };
+        spans.extend([
+            Span::raw(if spans.is_empty() { "" } else { "   " }),
+            Span::styled(action_label(form, *action), style),
+        ]);
+    }
+    let keyboard_hint = if form.focus_actions {
+        "← → choose an action · Enter confirm · ↑ return to editing"
+    } else {
+        "Enter adds a line · Ctrl-Enter or Tab opens actions · Esc close"
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(spans),
+            Line::from(Span::styled(keyboard_hint, styles::muted(&theme.palette))),
+        ]))
+        .style(styles::body(&theme.palette).bg(theme.palette.modal_bg)),
+        area,
+    );
 }
 
 fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, theme: &Theme) {
@@ -260,7 +484,10 @@ fn render_actions(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, th
             } else {
                 Style::default().fg(theme.palette.button_inactive_fg)
             };
-            [Span::raw("  "), Span::styled(action.label(), style)]
+            [
+                Span::raw("  "),
+                Span::styled(action_label(form, *action), style),
+            ]
         })
         .collect::<Vec<_>>();
     frame.render_widget(
@@ -284,3 +511,28 @@ fn action_available(form: &PendingUserInputForm, action: UserInputFormAction) ->
     };
     form.view.allowed_actions.contains(&expected)
 }
+
+fn is_plan_revision(form: &PendingUserInputForm) -> bool {
+    form.request.as_ref().is_some_and(|request| {
+        matches!(
+            &request.source,
+            sigil_kernel::UserInputSourceV1::PlanRevision { .. }
+        )
+    })
+}
+
+fn action_label(form: &PendingUserInputForm, action: UserInputFormAction) -> &'static str {
+    if is_plan_revision(form) {
+        return match action {
+            UserInputFormAction::Submit => "Prepare revised plan",
+            UserInputFormAction::Decline => "Keep current plan",
+            UserInputFormAction::Resume => "Resume revision",
+            UserInputFormAction::CancelRun => "Cancel plan run",
+        };
+    }
+    action.label()
+}
+
+#[cfg(test)]
+#[path = "tests/user_input_form_tests.rs"]
+mod tests;

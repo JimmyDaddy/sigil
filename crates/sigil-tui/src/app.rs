@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
@@ -40,6 +40,7 @@ mod slash_flow;
 mod state;
 mod submit_flow;
 pub(crate) mod task_sidebar;
+mod task_strip_flow;
 mod timeline_flow;
 mod timeline_render_store;
 mod tool_card_interaction;
@@ -274,18 +275,17 @@ struct SessionViewCache {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingPlanApproval {
     pub(crate) plan_id: Option<String>,
-    pub(crate) plan_text: String,
     pub(crate) plan_hash: String,
     pub(crate) summary: String,
     pub(crate) steps: Vec<String>,
-    pub(crate) target_paths: Vec<String>,
-    pub(crate) suggested_checks: Vec<String>,
     pub(crate) target_path_count: usize,
     pub(crate) suggested_check_count: usize,
     pub(crate) workspace_snapshot_id: Option<String>,
     pub(crate) stale: bool,
     pub(crate) stale_reason: Option<String>,
     pub(crate) last_run_failure: Option<String>,
+    /// This workbench is resuming the existing approved Task shell, not approving a new Plan.
+    pub(crate) retrying_materialization: bool,
     pub(crate) allowed_actions: Vec<sigil_kernel::PublicPlanAction>,
     pub(crate) revision: Option<sigil_kernel::PublicPlanRevisionSummaryV1>,
     pub(crate) detail: sigil_kernel::PlanReviewDetailV1,
@@ -293,7 +293,6 @@ pub(crate) struct PendingPlanApproval {
     pub(crate) workbench_scroll: usize,
     pub(crate) workbench_scroll_extent: ViewportScrollExtent,
     pub(crate) selected_action: PlanWorkbenchAction,
-    pub(crate) rendered_text_row_counts: PlanTextRowCountCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +411,15 @@ impl PlanWorkbenchAction {
             Self::Reject => "Reject",
         }
     }
+
+    pub(crate) fn shortcut(self) -> &'static str {
+        match self {
+            Self::Run => "R",
+            Self::Save => "S",
+            Self::Revise => "V",
+            Self::Reject => "X",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -450,18 +458,16 @@ impl PendingPlanApproval {
         let suggested_check_count = suggested_checks.len();
         Self {
             plan_id: Some(plan_id.to_owned()),
-            plan_text: plan_text.to_owned(),
             plan_hash: plan_hash.to_owned(),
             summary: summary.to_owned(),
             steps,
-            target_paths: target_paths.clone(),
-            suggested_checks,
             target_path_count,
             suggested_check_count,
             workspace_snapshot_id: None,
             stale: false,
             stale_reason: None,
             last_run_failure: None,
+            retrying_materialization: false,
             allowed_actions: vec![
                 sigil_kernel::PublicPlanAction::Run,
                 sigil_kernel::PublicPlanAction::Save,
@@ -488,7 +494,7 @@ impl PendingPlanApproval {
                 },
                 legacy_markdown: Some(plan_text.to_owned()),
                 compile: sigil_kernel::PlanCompileDetailV1 {
-                    state: sigil_kernel::PlanReadyStateV1::LegacyPlanNeedsRecompile,
+                    state: sigil_kernel::PlanReadyStateV1::Ready,
                     candidate_hash: None,
                     compiler_version: None,
                     failure: None,
@@ -498,7 +504,6 @@ impl PendingPlanApproval {
             workbench_scroll: 0,
             workbench_scroll_extent: Default::default(),
             selected_action: PlanWorkbenchAction::Run,
-            rendered_text_row_counts: Default::default(),
         }
     }
 }
@@ -523,32 +528,6 @@ impl PartialEq for ViewportScrollExtent {
 }
 
 impl Eq for ViewportScrollExtent {}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PlanTextRowCountCache(Rc<RefCell<BTreeMap<usize, usize>>>);
-
-impl PlanTextRowCountCache {
-    pub(crate) fn get(&self, width: usize) -> Option<usize> {
-        self.0.borrow().get(&width).copied()
-    }
-
-    pub(crate) fn insert(&self, width: usize, rows: usize) {
-        self.0.borrow_mut().insert(width, rows);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.0.borrow().len()
-    }
-}
-
-impl PartialEq for PlanTextRowCountCache {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
-impl Eq for PlanTextRowCountCache {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComposerPasteSpan {
@@ -1625,6 +1604,15 @@ impl AppState {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && !self.approval.has_actionable_pending() =>
             {
+                if self.active_pane == PaneFocus::Activity
+                    && self.timeline_state.selected_tool_activity_key.is_some()
+                    && self.toggle_selected_tool_card()
+                {
+                    return Ok(None);
+                }
+                if self.toggle_task_strip_expansion() {
+                    return Ok(None);
+                }
                 if self.active_pane != PaneFocus::Activity && self.has_collapsible_thinking_blocks()
                 {
                     self.toggle_thinking_block_mode();

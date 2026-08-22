@@ -170,12 +170,20 @@ impl AppState {
             && let Some(entry) = self.timeline.get_mut(index)
         {
             entry.text.push_str(delta);
+            self.timeline_state
+                .provisional_provider_output_indices
+                .insert(index);
             self.rerender_timeline_entry_deferred(index);
             return;
         }
 
         self.push_timeline(TimelineRole::Assistant, delta);
-        self.timeline_state.streaming_assistant_index = self.timeline.len().checked_sub(1);
+        if let Some(index) = self.timeline.len().checked_sub(1) {
+            self.timeline_state.streaming_assistant_index = Some(index);
+            self.timeline_state
+                .provisional_provider_output_indices
+                .insert(index);
+        }
     }
 
     pub(super) fn push_assistant_message_once(&mut self, content: String) {
@@ -209,12 +217,20 @@ impl AppState {
             && let Some(entry) = self.timeline.get_mut(index)
         {
             entry.text.push_str(delta);
+            self.timeline_state
+                .provisional_provider_output_indices
+                .insert(index);
             self.rerender_timeline_entry_deferred(index);
             return;
         }
 
         self.push_timeline(TimelineRole::Thinking, delta);
-        self.timeline_state.streaming_reasoning_index = self.timeline.len().checked_sub(1);
+        if let Some(index) = self.timeline.len().checked_sub(1) {
+            self.timeline_state.streaming_reasoning_index = Some(index);
+            self.timeline_state
+                .provisional_provider_output_indices
+                .insert(index);
+        }
     }
 
     pub(super) fn finish_streaming_reasoning_entry(&mut self) {
@@ -239,6 +255,36 @@ impl AppState {
         self.rebuild_timeline_projection_after_entry_removal(history_anchor, &[index]);
     }
 
+    /// Marks all current physical-attempt deltas as durable. Subsequent partial-output discard
+    /// events belong to a later attempt and must not erase this settled transcript prefix.
+    pub(super) fn commit_provisional_provider_output(&mut self) {
+        self.timeline_state
+            .provisional_provider_output_indices
+            .clear();
+    }
+
+    /// Removes every live text/reasoning entry from the interrupted provider physical attempt.
+    /// This is intentionally broader than the current streaming indices: the two channels can
+    /// interleave, which finishes one visual entry while it remains provisional for recovery.
+    pub(super) fn discard_provisional_provider_output(&mut self) {
+        let indices = std::mem::take(&mut self.timeline_state.provisional_provider_output_indices)
+            .into_iter()
+            .filter(|index| {
+                self.timeline.get(*index).is_some_and(|entry| {
+                    matches!(entry.role, TimelineRole::Assistant | TimelineRole::Thinking)
+                })
+            })
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            return;
+        }
+        let history_anchor = self.capture_timeline_history_anchor();
+        for index in indices.iter().rev() {
+            self.timeline.remove(*index);
+        }
+        self.rebuild_timeline_projection_after_entry_removal(history_anchor, &indices);
+    }
+
     pub(super) fn rebuild_timeline_projection_after_entry_removal(
         &mut self,
         history_anchor: Option<TimelineHistoryAnchor>,
@@ -249,6 +295,20 @@ impl AppState {
         self.remap_tool_activity_state_after_entry_removal(removed_indices);
         self.timeline_state.streaming_assistant_index = None;
         self.timeline_state.streaming_reasoning_index = None;
+        self.timeline_state.provisional_provider_output_indices = self
+            .timeline_state
+            .provisional_provider_output_indices
+            .iter()
+            .filter(|index| !removed_indices.contains(index))
+            .map(|index| {
+                index.saturating_sub(
+                    removed_indices
+                        .iter()
+                        .filter(|removed_index| **removed_index < *index)
+                        .count(),
+                )
+            })
+            .collect();
         self.timeline_state.expanded_thinking_entry_indices.clear();
         self.timeline_state.collapsed_thinking_entry_indices.clear();
         self.timeline_state.expanded_diagram_entry_indices.clear();

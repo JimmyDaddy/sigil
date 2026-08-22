@@ -2060,6 +2060,19 @@ where
                     .idle_auto
                     .request_after_successful_chat_run();
             }
+            RunTaskPayload::PlanReviewBlocked { reason, paused } => {
+                let entries = state
+                    .session
+                    .current
+                    .as_ref()
+                    .map(|session| session.entries().to_vec())
+                    .unwrap_or_default();
+                let _ = message_tx.send(WorkerMessage::PlanReviewBlocked {
+                    reason,
+                    paused,
+                    entries,
+                });
+            }
             RunTaskPayload::Agent {
                 profile_id,
                 result: Ok(run_result),
@@ -2362,7 +2375,12 @@ where
                     status,
                     entries,
                 });
-                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                // A provider-turn recovery terminal has already persisted the Task as paused
+                // with its actionable recovery projection. Emitting a second generic run failure
+                // would make the product surface contradict that durable state.
+                if status != TaskRunStatus::Paused {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                }
             }
         }
     }

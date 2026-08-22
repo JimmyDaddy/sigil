@@ -127,6 +127,7 @@ impl AppState {
             (None, Some(task)) => {
                 let title = sigil_kernel::task_semantic_title(&task.objective);
                 super::task_sidebar::TaskStripView {
+                    task_id: task.task_id.clone(),
                     title: title.clone(),
                     detail: "starting · loading plan steps".to_owned(),
                     verification: None,

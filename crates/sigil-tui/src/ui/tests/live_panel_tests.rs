@@ -192,20 +192,6 @@ fn status_band_allocation_keeps_the_focused_verification_action_visible() {
 }
 
 #[test]
-fn plan_text_row_projection_is_cached_by_render_width() {
-    let cache = crate::app::PlanTextRowCountCache::default();
-    let text = "a deliberately long plan row ".repeat(20);
-
-    let narrow = plan_text_rendered_rows(&text, 20, &cache);
-    let narrow_again = plan_text_rendered_rows(&text, 20, &cache);
-    let wide = plan_text_rendered_rows(&text, 80, &cache);
-
-    assert_eq!(narrow, narrow_again);
-    assert!(narrow >= wide);
-    assert_eq!(cache.len(), 2);
-}
-
-#[test]
 fn queue_action_layout_always_keeps_the_selected_button_complete() {
     let labels = ["Run next", "Interrupt", "Edit", "Delete"];
     for width in 16..=20 {
@@ -553,6 +539,7 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
         }),
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {
+            task_id: "task_1".to_owned(),
             verification: None,
             title: "Improve task status display".to_owned(),
             detail: "running · v1 · 1/2 done".to_owned(),
@@ -575,6 +562,7 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
                     active: true,
                 },
             ],
+            expanded: false,
         }),
         transcript_lines: vec![Line::from("visible tail")],
     };
@@ -621,6 +609,7 @@ fn render_live_panel_keeps_progress_and_task_rows_single_line_on_narrow_width() 
         }),
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {
+            task_id: "task_1".to_owned(),
             verification: None,
             title: "Task task_1".to_owned(),
             detail: "running with a deliberately long status description".to_owned(),
@@ -635,6 +624,7 @@ fn render_live_panel_keeps_progress_and_task_rows_single_line_on_narrow_width() 
                 label: "1. implement a deliberately long task label".to_owned(),
                 active: true,
             }],
+            expanded: false,
         }),
         transcript_lines: vec![Line::from("visible tail")],
     };
@@ -687,6 +677,7 @@ fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::R
         progress: None,
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {
+            task_id: "task_1".to_owned(),
             title: "Task task_1".to_owned(),
             detail: "paused · check failed".to_owned(),
             route_diagnostics: Vec::new(),
@@ -709,6 +700,7 @@ fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::R
                 label: "1. check failed · implement".to_owned(),
                 active: true,
             }],
+            expanded: false,
         }),
         transcript_lines: vec![Line::from("visible tail")],
     };
@@ -999,16 +991,12 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: Some(PlanApprovalViewModel {
-            plan_text: "summary text".to_owned(),
             summary: "inspect and edit with preview".to_owned(),
             steps: vec!["inspect and edit with preview".to_owned()],
-            target_paths: vec!["src/lib.rs".to_owned(), "README.md".to_owned()],
-            suggested_checks: vec!["cargo test".to_owned()],
             target_path_count: 2,
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
-            rendered_text_row_counts: Default::default(),
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("plan body")],
@@ -1027,7 +1015,7 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         .collect::<String>();
     assert!(rendered.contains("Plan"));
     assert!(rendered.contains("ready"));
-    assert!(rendered.contains("structured plan"));
+    assert!(rendered.contains("1 step"));
     assert!(rendered.contains("2 paths"));
     assert!(rendered.contains("1 check"));
     assert!(rendered.contains("inspect and edit"));
@@ -1049,16 +1037,12 @@ fn render_live_panel_one_row_plan_budget_discloses_hidden_plan_before_run() -> a
         queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: Some(PlanApprovalViewModel {
-            plan_text: "inspect the complete plan before approving".to_owned(),
             summary: "hidden on a one-row status budget".to_owned(),
             steps: vec!["inspect".to_owned(), "edit".to_owned()],
-            target_paths: vec!["src/lib.rs".to_owned()],
-            suggested_checks: vec!["cargo test".to_owned()],
             target_path_count: 1,
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
-            rendered_text_row_counts: Default::default(),
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("visible tail")],
@@ -1077,7 +1061,7 @@ fn render_live_panel_one_row_plan_budget_discloses_hidden_plan_before_run() -> a
 #[test]
 fn plan_one_row_compact_action_keeps_review_visible_at_16_columns() {
     let theme = Theme::default();
-    let action = render_plan_action_line(false, 16, &theme);
+    let action = render_plan_action_line(16, &theme);
     let compact = status_band_line(
         render_hidden_plan_action_line(action, &theme),
         16,
@@ -1095,12 +1079,6 @@ fn plan_one_row_compact_action_keeps_review_visible_at_16_columns() {
 #[test]
 fn render_live_panel_bounds_long_plan_and_keeps_actions_on_short_narrow_terminal()
 -> anyhow::Result<()> {
-    let plan_text = (0..30)
-        .map(|index| {
-            format!("- plan detail {index} with enough text to wrap on a narrow terminal width")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
         queue_rows: Vec::new(),
@@ -1109,26 +1087,22 @@ fn render_live_panel_bounds_long_plan_and_keeps_actions_on_short_narrow_terminal
         queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: Some(PlanApprovalViewModel {
-            plan_text,
             summary: "inspect a large change and keep the approval controls visible".to_owned(),
             steps: (0..8)
                 .map(|index| format!("step {index} with a deliberately long description"))
                 .collect(),
-            target_paths: vec!["src/one.rs".to_owned(), "src/two.rs".to_owned()],
-            suggested_checks: vec!["cargo test -p sigil-tui".to_owned()],
             target_path_count: 2,
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
-            rendered_text_row_counts: Default::default(),
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("visible tail")],
     };
     assert_eq!(
         live_status_rows(&view_model, 34),
-        LIVE_PLAN_APPROVAL_ROW_LIMIT as u16 + 1,
-        "long plan status height must stay bounded, including the separator"
+        7,
+        "large plans stay a compact overview, including the separator"
     );
     let backend = TestBackend::new(36, 8);
     let mut terminal = Terminal::new(backend)?;
@@ -1137,7 +1111,6 @@ fn render_live_panel_bounds_long_plan_and_keeps_actions_on_short_narrow_terminal
 
     let rows = rendered_rows(&terminal);
     assert!(rows.iter().any(|row| row.contains("Plan ready")));
-    assert!(rows.iter().any(|row| row.contains("compact preview")));
     assert!(rows.iter().any(|row| row.contains("Enter")));
     assert!(rows.last().is_some_and(|row| row.trim().is_empty()));
     Ok(())
@@ -1167,21 +1140,15 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
             detail: "a progress detail that is intentionally too wide for this terminal".to_owned(),
         }),
         plan_approval: Some(PlanApprovalViewModel {
-            plan_text: (0..20)
-                .map(|index| format!("plan line {index}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
             summary: "stacked plan".to_owned(),
             steps: vec!["inspect".to_owned(), "edit".to_owned(), "verify".to_owned()],
-            target_paths: vec!["src/lib.rs".to_owned()],
-            suggested_checks: vec!["cargo test".to_owned()],
             target_path_count: 1,
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
-            rendered_text_row_counts: Default::default(),
         }),
         task_strip: Some(TaskStripViewModel {
+            task_id: "task_1".to_owned(),
             verification: None,
             title: "Task task_1".to_owned(),
             detail: "running".to_owned(),
@@ -1192,6 +1159,7 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
                 label: "1. implement".to_owned(),
                 active: true,
             }],
+            expanded: false,
         }),
         transcript_lines: vec![Line::from("visible tail")],
     };
@@ -1204,7 +1172,6 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
     assert!(rendered.contains("queued follow-up"));
     assert!(rendered.contains("Actions"));
     assert!(rendered.contains("Thinking..."));
-    assert!(rendered.contains("compact preview"));
     assert!(rendered.contains("Enter review"));
     assert!(rendered.contains("Task task_1"));
     Ok(())
@@ -1221,6 +1188,7 @@ fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
         progress: None,
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {
+            task_id: "task_3".to_owned(),
             verification: None,
             title: "Task task_3".to_owned(),
             detail: "started".to_owned(),
@@ -1231,6 +1199,7 @@ fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
                 label: "1. 输出一个冷笑话2、解释一下这个冷笑话为什么好笑".to_owned(),
                 active: true,
             }],
+            expanded: false,
         }),
         transcript_lines: vec![Line::from("visible tail")],
     };
@@ -1248,5 +1217,78 @@ fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
         .collect::<String>();
     let compact = rendered.replace(' ', "");
     assert!(compact.contains("1.输出一个冷笑话2、解释一下这个冷笑话为什么好笑"));
+    Ok(())
+}
+
+#[test]
+fn render_live_panel_task_strip_expands_all_rows_and_keeps_active_row_visible_when_collapsed()
+-> anyhow::Result<()> {
+    let rows = (1..=12)
+        .map(|index| TaskStripRowViewModel {
+            kind: if index < 8 {
+                StatusKind::Success
+            } else if index == 8 {
+                StatusKind::Running
+            } else {
+                StatusKind::Pending
+            },
+            label: format!("{index}. task item {index}"),
+            active: index == 8,
+        })
+        .collect::<Vec<_>>();
+    let mut view_model = LivePanelViewModel {
+        phase: crate::timeline::RunPhase::Thinking,
+        queue_rows: Vec::new(),
+        queue_paused: false,
+        queue_panel_focused: false,
+        queue_action_buttons: Vec::new(),
+        progress: None,
+        plan_approval: None,
+        task_strip: Some(TaskStripViewModel {
+            task_id: "task_12".to_owned(),
+            verification: None,
+            title: "Twelve task items".to_owned(),
+            detail: "running · 7/12 done".to_owned(),
+            route_diagnostics: Vec::new(),
+            completion_progress: Vec::new(),
+            rows,
+            expanded: false,
+        }),
+        transcript_lines: vec![Line::from("visible tail")],
+    };
+
+    let backend = TestBackend::new(100, 12);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+    let collapsed = rendered_rows(&terminal).join("\n");
+    assert!(
+        collapsed.contains("6. task item 6"),
+        "rendered: {collapsed:?}"
+    );
+    assert!(
+        collapsed.contains("8. task item 8"),
+        "rendered: {collapsed:?}"
+    );
+    assert!(
+        collapsed.contains("9. task item 9"),
+        "rendered: {collapsed:?}"
+    );
+    assert!(!collapsed.contains("5. task item 5"));
+    assert!(collapsed.contains("+8 more tasks · click/Ctrl-T expand"));
+
+    view_model.task_strip.as_mut().expect("task strip").expanded = true;
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+    let expanded = rendered_rows(&terminal).join("\n");
+    assert!(
+        expanded.contains("1. task item 1"),
+        "rendered: {expanded:?}"
+    );
+    assert!(
+        expanded.contains("12. task item 12"),
+        "rendered: {expanded:?}"
+    );
+    assert!(expanded.contains("Show less · click/Ctrl-T collapse"));
     Ok(())
 }

@@ -55,6 +55,7 @@ pub(crate) enum HitTarget {
     ToolCardHiddenPreview { entry_index: usize },
     ToolCard { entry_index: usize },
     ThinkingBlock { entry_index: usize },
+    TaskStripToggle,
     VerificationCard,
     ComposerQueueItem { index: usize },
     ComposerQueueAction { action: ComposerQueueAction },

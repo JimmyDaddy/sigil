@@ -114,7 +114,10 @@ fn alt_p_pauses_only_the_exact_running_task_plan() -> Result<()> {
     };
     assert!(request.has_exact_identity());
     assert_eq!(request.task_id.as_str(), "task_1");
-    assert_eq!(request.plan_version, 2);
+    assert_eq!(
+        request.execution,
+        sigil_kernel::TaskExecutionBindingV1::Plan { plan_version: 2 }
+    );
     assert_eq!(app.last_notice(), Some("pausing task task_1"));
 
     app.runtime.is_busy = false;

@@ -2,8 +2,9 @@ use super::*;
 use crate::app::modal_flow::ModelCatalogState;
 use crate::app::tests::common::adaptive_test_compaction_preview;
 use crate::runner::{
-    TerminalTaskControlIdentity, ToolOutputShrinkPreview, V2CompactionAdmission,
-    V2CompactionPreviewState, V2CompactionReview, V2ContinuityPreview,
+    LocalOperationKind, LocalOperationOutcome, TerminalTaskControlIdentity,
+    ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview,
+    V2ContinuityPreview,
 };
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
@@ -1715,6 +1716,38 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     assert!(app.modal_state.is_none());
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("timeout"));
+    Ok(())
+}
+
+#[test]
+fn local_operation_outcome_does_not_clear_an_active_foreground_run() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::RunStarted {
+        prompt: "continue implementation".to_owned(),
+    })?;
+
+    app.handle_worker_message(WorkerMessage::LocalOperationOutcome(
+        LocalOperationOutcome::rejected(
+            "mcp.refresh",
+            LocalOperationKind::McpRefresh,
+            "cannot refresh MCP while the agent is running",
+        ),
+    ))?;
+
+    assert!(app.runtime.is_busy);
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(
+        app.last_notice(),
+        Some("cannot refresh MCP while the agent is running")
+    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry.text == "MCP refresh rejected: cannot refresh MCP while the agent is running"
+    }));
+    assert!(app.events.iter().any(|event| {
+        event.label == "operation:outcome" && event.detail == "mcp.refresh rejected retryable=false"
+    }));
+    assert!(!app.events.iter().any(|event| event.label == "run:error"));
     Ok(())
 }
 
@@ -4317,6 +4350,8 @@ fn bash_progress_and_production_final_merge_once_with_safe_command() -> Result<(
     let progress_timeline = app.timeline_plain_lines().join("\n");
     assert!(progress_timeline.contains("RUNNING"));
     assert!(!progress_timeline.contains("✓ OK"));
+    assert!(!progress_timeline.contains("foreground shell command is running"));
+    assert!(!progress_timeline.contains("1 line · 0 B"));
 
     app.handle(RunEvent::ToolResult(production_display_bash_result(
         call_id,
@@ -5520,7 +5555,187 @@ fn task_creation_failure_restores_the_same_actionable_plan() -> Result<()> {
 }
 
 #[test]
-fn pending_plan_printable_keys_edit_composer_and_workbench_confirms_save() -> Result<()> {
+fn materialization_blocker_reopens_the_plan_with_retry_and_revise_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text(
+            "Repair the materialization path",
+            "Correct the task contract",
+            "crates/sigil-tui/src/app/session_flow.rs",
+        ),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("plan draft");
+    let task_id = sigil_kernel::TaskId::new("plan-task-materialization-blocked")?;
+    let blocker = sigil_kernel::TaskBlockerV1 {
+        reason_code: sigil_kernel::TaskBlockerReasonCodeV1::ContractRecompileRequired,
+        summary: "Plan approved; Task preparation is blocked: plan step is missing its role, mode or isolation contract".to_owned(),
+        affected_step: Some(sigil_kernel::TaskStepId::new("step-1")?),
+        affected_capability: None,
+        retryable: true,
+        available_actions: vec![
+            sigil_kernel::TaskBlockerActionV1::RetryAdmission,
+            sigil_kernel::TaskBlockerActionV1::Replan,
+            sigil_kernel::TaskBlockerActionV1::Cancel,
+        ],
+        evidence_digest: sigil_kernel::stable_event_hash(b"materialization-blocker"),
+        created_at_ms: 20,
+        resolved_at_ms: None,
+    };
+    let review_attempt = sigil_kernel::PlanReviewAttemptEntry {
+        plan_review_id: sigil_kernel::PlanReviewId::new("review-materialization-blocked")?,
+        attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-materialization-blocked")?,
+        plan_id: draft.plan_id.clone(),
+        source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+        source_turn: sigil_kernel::ConversationTurnRef {
+            session_scope_id: "session-materialization-blocked".to_owned(),
+            message_id: "message-materialization-blocked".to_owned(),
+            logical_run_id: "run-materialization-blocked".to_owned(),
+        },
+        route_decision_id: None,
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "child-materialization-blocked.jsonl",
+        )?,
+        finalizer_session_ref: Some(sigil_kernel::SessionRef::new_relative(
+            "finalizer-materialization-blocked.jsonl",
+        )?),
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        workspace_snapshot_id: None,
+        pending_user_input: None,
+        status: sigil_kernel::PlanReviewAttemptStatus::DraftReady,
+        terminal_reason: None,
+        recorded_at_ms: 10,
+    };
+    let entries = vec![
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanReviewAttempt(
+            review_attempt,
+        )),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDraftCreated(
+            draft.clone(),
+        )),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDecisionRecorded(
+            sigil_kernel::PlanDecisionRecordedEntry {
+                plan_id: draft.plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                decision: sigil_kernel::PlanDecision::Accepted,
+                decided_by: sigil_kernel::PlanDecisionActor::User,
+                decided_at_ms: 11,
+                reason: Some("approved before materialization".to_owned()),
+            },
+        )),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskRun(
+            sigil_kernel::TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                objective: "Repair the materialization path".to_owned(),
+                title: Some("Repair the materialization path".to_owned()),
+                status: sigil_kernel::TaskRunStatus::Started,
+                reason: Some("Task shell created before materialization".to_owned()),
+            },
+        )),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskCreatedFromPlan(
+            sigil_kernel::TaskCreatedFromPlanEntry {
+                plan_id: draft.plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                task_id: task_id.clone(),
+                task_plan_version: 0,
+                step_mapping: Vec::new(),
+                stale_reason: Some("Task materialization pending".to_owned()),
+                created_at_ms: 11,
+            },
+        )),
+        sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::TaskMaterializationAttemptStartedV1(
+                sigil_kernel::TaskMaterializationAttemptStartedV1 {
+                    task_id: task_id.clone(),
+                    generation: 1,
+                    plan_hash: draft.plan_hash.clone(),
+                    compiler_contract_fingerprint: sigil_kernel::stable_event_hash(
+                        b"materialization-compiler-contract",
+                    ),
+                    started_at_ms: 20,
+                },
+            ),
+        ),
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanCompileFailedV1(
+            sigil_kernel::PlanCompileFailureV1 {
+                plan_id: draft.plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                reason_code: "incomplete_step_contract".to_owned(),
+                reason: "plan step is missing its role, mode or isolation contract".to_owned(),
+                affected_step: Some("step-1".to_owned()),
+                compile_binding: None,
+                failed_at_ms: 20,
+            },
+        )),
+        sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::TaskMaterializationBlockedV1(
+                sigil_kernel::TaskMaterializationBlockedV1 {
+                    task_id: task_id.clone(),
+                    generation: 1,
+                    plan_hash: draft.plan_hash.clone(),
+                    blocker_id: "materialization-blocked-1".to_owned(),
+                    blocker: blocker.clone(),
+                    blocked_at_ms: 20,
+                },
+            ),
+        ),
+    ];
+
+    app.handle_worker_message(WorkerMessage::TaskAdmissionBlocked {
+        task_id: task_id.as_str().to_owned(),
+        blocker,
+        entries,
+    })?;
+
+    let pending = app
+        .pending_plan_approval()
+        .expect("the materialization blocker should reopen its Plan workbench");
+    assert_eq!(pending.plan_id.as_deref(), Some(draft.plan_id.as_str()));
+    assert!(pending.workbench_open);
+    assert!(pending.retrying_materialization);
+    assert_eq!(
+        pending.last_run_failure.as_deref(),
+        Some(
+            "Plan approved; Task preparation is blocked: plan step is missing its role, mode or isolation contract"
+        )
+    );
+    assert_eq!(
+        pending.allowed_actions,
+        vec![
+            sigil_kernel::PublicPlanAction::Run,
+            sigil_kernel::PublicPlanAction::Revise,
+        ]
+    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry
+                .text
+                .contains("plan step is missing its role, mode or isolation contract")
+            && entry.text.contains("R retries preparation")
+            && !entry.text.contains("once the environment is resolved")
+    }));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::CreateTaskFromPlan {
+            plan_id,
+            expected_plan_hash,
+            start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+            permission_grant: None,
+        }) if plan_id == draft.plan_id.as_str() && expected_plan_hash == draft.plan_hash
+    ));
+    Ok(())
+}
+
+#[test]
+fn pending_plan_shortcuts_keep_composer_input_and_save_from_workbench() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
         &structured_plan_text("Update README", "Update README.md", "README.md"),
@@ -5544,9 +5759,32 @@ fn pending_plan_printable_keys_edit_composer_and_workbench_confirms_save() -> Re
         app.pending_plan_approval()
             .is_some_and(|plan| plan.workbench_open)
     );
-    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
     assert!(matches!(action, Some(AppAction::SavePlan { .. })));
+    Ok(())
+}
+
+#[test]
+fn pending_plan_run_shortcut_dispatches_create_and_run() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text("Update README", "Update README.md", "README.md"),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        Some("snapshot-1".to_owned()),
+    )?
+    .expect("non-empty plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft, Some("snapshot-1"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::CreateTaskFromPlan {
+            start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -5573,9 +5811,7 @@ fn plan_workbench_esc_only_closes_and_explicit_revise_emits_action() -> Result<(
             .is_some_and(|plan| !plan.workbench_open)
     );
     app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
-    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))?;
     assert!(matches!(action, Some(AppAction::RevisePlan { .. })));
     Ok(())
 }
@@ -5641,7 +5877,7 @@ fn stale_pending_plan_blocks_run_and_save_but_keeps_revise_and_reject() -> Resul
 
     let open = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(open.is_none(), "Enter opens review before any decision");
-    let run = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let run = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
     assert!(run.is_none(), "stale plan must not run");
     assert!(
         app.pending_plan_approval().is_some(),
@@ -5649,16 +5885,13 @@ fn stale_pending_plan_blocks_run_and_save_but_keeps_revise_and_reject() -> Resul
     );
     assert_eq!(app.last_notice(), Some(reason.as_str()));
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    let save = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let save = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
     assert!(save.is_none(), "stale plan must not save");
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    let revise = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let revise = app.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))?;
     assert!(matches!(revise, Some(AppAction::RevisePlan { .. })));
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    let reject = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let reject = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
     assert!(matches!(reject, Some(AppAction::RejectPlan { .. })));
     Ok(())
 }

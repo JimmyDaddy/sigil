@@ -15,7 +15,8 @@ use super::super::{
 };
 use super::{
     run_event_helpers::{
-        notice_is_timeline_worthy, notice_rejects_current_final_candidate, spawn_agent_profile_id,
+        notice_is_timeline_worthy, notice_rejects_current_final_candidate,
+        provider_turn_recovery_label, spawn_agent_profile_id,
     },
     tool_card_lifecycle::{
         agent_tool_name, attach_progress_execution_id, suppress_reasoning_before_tool_call,
@@ -427,7 +428,25 @@ impl EventHandler for AppState {
             RunEvent::ContinuationState(state) => {
                 self.push_event("continuation", state.state_kind);
             }
+            RunEvent::ProviderTurnRecovery(view) => {
+                let label = provider_turn_recovery_label(&view);
+                self.last_notice = Some(label.clone());
+                self.push_timeline(TimelineRole::Notice, label.clone());
+                self.push_event("provider:recovery", label);
+            }
+            RunEvent::ProviderTurnPartialOutputDiscarded(view) => {
+                self.discard_provisional_provider_output();
+                let label = if view.tool_request_discarded {
+                    "Discarded incomplete provider response before recovery".to_owned()
+                } else {
+                    "Discarded incomplete provider text before recovery".to_owned()
+                };
+                self.last_notice = Some(label.clone());
+                self.push_timeline(TimelineRole::Notice, label.clone());
+                self.push_event("provider:partial_discarded", label);
+            }
             RunEvent::AssistantMessage(message) => {
+                self.commit_provisional_provider_output();
                 for call in &message.tool_calls {
                     self.safe_tool_calls.insert(call.id.clone(), call.clone());
                 }

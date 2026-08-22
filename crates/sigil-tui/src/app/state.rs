@@ -40,6 +40,10 @@ pub(crate) struct TimelineState {
     pub(in crate::app) tool_activity_visible_rows: BTreeMap<String, usize>,
     pub(in crate::app) streaming_assistant_index: Option<usize>,
     pub(in crate::app) streaming_reasoning_index: Option<usize>,
+    /// Entries emitted by the current provider physical attempt but not yet confirmed by a
+    /// durable assistant message. A partial-output discard removes this complete set even when
+    /// text and reasoning interleaved and only one channel remains actively streaming.
+    pub(in crate::app) provisional_provider_output_indices: BTreeSet<usize>,
     pub(in crate::app) render_store: TimelineRenderStore,
     pub(in crate::app) text_selection: Option<TimelineTextSelection>,
     pub(in crate::app) text_selection_anchor: Option<usize>,
@@ -60,6 +64,7 @@ pub(crate) struct ReviewState {
     pub(in crate::app) readiness_sequences_by_scope: BTreeMap<EvidenceScope, u64>,
     pub(in crate::app) verification_card_focused: bool,
     pub(in crate::app) verification_inspect_open: bool,
+    pub(in crate::app) expanded_task_strip_task_id: Option<String>,
     pub(in crate::app) integration_review_request: Option<TaskIntegrationReviewRequest>,
     pub(in crate::app) integration_review_diff_lines: Vec<String>,
 }

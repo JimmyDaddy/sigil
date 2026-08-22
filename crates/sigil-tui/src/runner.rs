@@ -19,7 +19,8 @@ pub(crate) use protocol::{
     WorkerApprovalRouteState, WorkerCommandEnvelope,
 };
 pub use protocol::{
-    McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
+    LocalOperationKind, LocalOperationOutcome, LocalOperationStatus, McpActivationStatus,
+    McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
     ToolArtifactDisplayReadFailure, ToolOutputShrinkPreview, V2CompactionAdmission,
     V2CompactionApplySource, V2CompactionPreviewState, V2CompactionReview, V2ContinuityPreview,
     WorkerApprovalCommandReceipt, WorkerCommand, WorkerCommandSender, WorkerMessage,

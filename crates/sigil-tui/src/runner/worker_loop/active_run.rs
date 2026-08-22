@@ -433,6 +433,10 @@ pub(in crate::runner) enum RunTaskPayload {
         provider_logical_run_id: Option<String>,
         agent_result_continuation_thread_ids: Vec<AgentThreadId>,
     },
+    PlanReviewBlocked {
+        reason: String,
+        paused: bool,
+    },
     Agent {
         profile_id: String,
         result: std::result::Result<AgentRunResult, String>,

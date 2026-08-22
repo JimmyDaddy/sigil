@@ -1,13 +1,13 @@
 use sigil_kernel::{
     ChildVerificationReceiptLinked, EvidenceScope, MergeDecision, MergeReviewState,
-    ReadinessEvaluatedEntry, RequiredAction, RunStatus, SessionLogEntry, TaskChildSessionEntry,
-    TaskIntegrationReviewRequest, TaskPlanProjection, TaskRunProjection, TaskRunStatus,
-    TaskStateProjection, TaskStepId, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest,
-    TerminalTaskProjection, VerificationCheckRunEntry, VerificationCheckRunStatus,
-    VerificationProductAction, VerificationProductEvidence, VerificationRecommendationKind,
-    VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
-    WriteIsolationProjection, WriteIsolationRecordRef, task_integration_review_product,
-    verification_product_view,
+    ReadinessEvaluatedEntry, RequiredAction, RunStatus, SessionLogEntry, TaskChecklistItemStatusV1,
+    TaskChecklistUpdatedV1, TaskChildSessionEntry, TaskIntegrationReviewRequest,
+    TaskPlanProjection, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId,
+    TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest, TerminalTaskProjection,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationProductAction,
+    VerificationProductEvidence, VerificationRecommendationKind, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, WriteIsolationProjection, WriteIsolationRecordRef,
+    task_integration_review_product, verification_product_view,
 };
 
 use crate::ui::{StatusKind, status_symbol};
@@ -15,10 +15,11 @@ use crate::ui::{StatusKind, status_symbol};
 use super::formatting::{summarize_terminal_reason, truncate_session_view_text};
 
 const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
-const TASK_STRIP_STEP_LIMIT: usize = 4;
+pub(crate) const TASK_STRIP_COLLAPSED_ROW_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskStripView {
+    pub(crate) task_id: String,
     pub(crate) title: String,
     pub(crate) detail: String,
     pub(crate) verification: Option<VerificationCardView>,
@@ -216,7 +217,7 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let verification_projection = VerificationStateProjection::from_entries(entries);
     let write_projection = WriteIsolationProjection::from_entries(entries);
     let integration_review = task_integration_review_product(entries);
-    let Some(task) = projection.current_task() else {
+    let Some(task) = task_for_progress_display(&projection) else {
         return terminal_lines;
     };
     let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
@@ -273,6 +274,17 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
             step_lines =
                 task_sidebar_focus_lines(task, plan_version, plan, &verification_projection);
         }
+    } else if let Some(checklist) = task.checklist.as_ref() {
+        let completed = checklist
+            .items
+            .iter()
+            .filter(|item| item.status == TaskChecklistItemStatusV1::Completed)
+            .count();
+        lines.push(format!(
+            "progress: {completed}/{} done",
+            checklist.items.len()
+        ));
+        step_lines = task_checklist_sidebar_lines(checklist, TASK_SIDEBAR_STEP_LIMIT);
     }
     if task.active_steps.len() > 1 {
         lines.push(format!(
@@ -422,7 +434,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
     let verification_projection = VerificationStateProjection::from_entries(entries);
     let write_projection = WriteIsolationProjection::from_entries(entries);
     let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
-    let task = projection.current_task()?;
+    let task = task_for_progress_display(&projection)?;
     let verification = verification_card_view(entries);
     let mut rows = Vec::new();
     let mut detail = task_run_status_label(task.status).to_owned();
@@ -485,6 +497,18 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             }
         }
         rows = task_strip_step_rows(task, plan_version, plan, &verification_projection);
+    } else if let Some(checklist) = task.checklist.as_ref() {
+        let completed = checklist
+            .items
+            .iter()
+            .filter(|item| item.status == TaskChecklistItemStatusV1::Completed)
+            .count();
+        detail = format!(
+            "{} · {completed}/{} done",
+            task_run_status_label(task.status),
+            checklist.items.len()
+        );
+        rows = task_checklist_strip_rows(checklist);
     }
     if !detail.contains("review changes")
         && !detail.contains("run parent check")
@@ -506,7 +530,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
         detail.push_str(&summarize_terminal_reason(reason, 72));
     }
 
-    if rows.is_empty() {
+    if rows.is_empty() && task.direct_execution_admission.is_none() {
         rows.push(TaskStripRow {
             kind: task_run_status_kind(task.status),
             label: task.objective.clone(),
@@ -522,6 +546,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
     }
 
     Some(TaskStripView {
+        task_id: task.task_id.as_str().to_owned(),
         title: task
             .title
             .clone()
@@ -531,6 +556,74 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
         verification,
         rows,
     })
+}
+
+/// Selects passive Task progress without granting execution focus.
+///
+/// A Chat or PlanReview turn deliberately clears `current_task`; the latest recoverable Task and
+/// its display-only checklist still remain useful session progress and must not disappear. Task
+/// commands continue to use `current_task` and therefore cannot acquire authority through this
+/// view-only fallback.
+fn task_for_progress_display(projection: &TaskStateProjection) -> Option<&TaskRunProjection> {
+    projection
+        .current_task()
+        .or_else(|| projection.latest_unfinished_task())
+}
+
+fn task_checklist_sidebar_lines(checklist: &TaskChecklistUpdatedV1, limit: usize) -> Vec<String> {
+    let mut lines = checklist
+        .items
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, item)| {
+            format!(
+                "{} {}. {}",
+                task_checklist_marker(item.status),
+                index + 1,
+                item.text
+            )
+        })
+        .collect::<Vec<_>>();
+    let hidden = checklist.items.len().saturating_sub(lines.len());
+    if hidden > 0 {
+        lines.push(format!("+{hidden} more items"));
+    }
+    lines
+}
+
+fn task_checklist_strip_rows(checklist: &TaskChecklistUpdatedV1) -> Vec<TaskStripRow> {
+    checklist
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| TaskStripRow {
+            kind: match item.status {
+                TaskChecklistItemStatusV1::Pending => StatusKind::Unknown,
+                TaskChecklistItemStatusV1::InProgress => StatusKind::Running,
+                TaskChecklistItemStatusV1::Completed => StatusKind::Success,
+            },
+            label: format!("{}. {}", index + 1, item.text),
+            detail: task_checklist_status_label(item.status).to_owned(),
+            active: item.status == TaskChecklistItemStatusV1::InProgress,
+        })
+        .collect()
+}
+
+fn task_checklist_marker(status: TaskChecklistItemStatusV1) -> &'static str {
+    match status {
+        TaskChecklistItemStatusV1::Pending => "○",
+        TaskChecklistItemStatusV1::InProgress => "◐",
+        TaskChecklistItemStatusV1::Completed => "●",
+    }
+}
+
+fn task_checklist_status_label(status: TaskChecklistItemStatusV1) -> &'static str {
+    match status {
+        TaskChecklistItemStatusV1::Pending => "pending",
+        TaskChecklistItemStatusV1::InProgress => "in progress",
+        TaskChecklistItemStatusV1::Completed => "done",
+    }
 }
 
 fn verification_card_view(entries: &[SessionLogEntry]) -> Option<VerificationCardView> {
@@ -789,13 +882,10 @@ fn task_strip_step_rows(
     verification_projection: &VerificationStateProjection,
 ) -> Vec<TaskStripRow> {
     let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
-    let selected_indices =
-        task_step_window_indices(task, plan_version, plan, TASK_STRIP_STEP_LIMIT, focus_index);
-
-    let mut rows = selected_indices
+    plan.steps
         .iter()
-        .map(|index| {
-            let step = &plan.steps[*index];
+        .enumerate()
+        .map(|(index, step)| {
             let status = task_sidebar_step_status(task, plan_version, step);
             let readiness = task_step_readiness(task, step, verification_projection);
             let reason = task
@@ -816,25 +906,14 @@ fn task_strip_step_rows(
                 label,
                 detail: task_strip_step_detail(step, status, readiness, reason),
                 active: if task.active_steps.is_empty() {
-                    focus_index == Some(*index)
+                    focus_index == Some(index)
                 } else {
                     task.active_steps
                         .contains(&(plan_version, step.step_id.clone()))
                 },
             }
         })
-        .collect::<Vec<_>>();
-    let hidden_steps = plan.steps.len().saturating_sub(selected_indices.len());
-    if hidden_steps > 0 {
-        let summary = task_sidebar_hidden_step_summary(task, plan_version, plan, &selected_indices);
-        rows.push(TaskStripRow {
-            kind: StatusKind::Unknown,
-            label: format!("+{hidden_steps} more steps"),
-            detail: summary,
-            active: false,
-        });
-    }
-    rows
+        .collect()
 }
 
 fn task_sidebar_hidden_step_summary(

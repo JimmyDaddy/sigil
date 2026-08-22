@@ -1977,7 +1977,7 @@ fn task_sidebar_lines_focuses_first_pending_without_problem_step() -> Result<()>
 }
 
 #[test]
-fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()> {
+fn task_strip_view_projects_every_plan_step_and_fallback_row() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let steps = (1..=6)
@@ -2037,15 +2037,15 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
     let strip = app.task_strip_view().expect("task strip should render");
     assert_eq!(strip.title, "review workspace");
     assert_eq!(strip.detail, "running · v1 · 2/6 done · 1 active");
-    assert_eq!(strip.rows.len(), 5);
+    assert_eq!(strip.rows.len(), 6);
     assert_eq!(strip.rows[0].label, "1. step 1");
     assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Success);
     assert_eq!(strip.rows[2].label, "3. step 3");
     assert_eq!(strip.rows[2].kind, crate::ui::StatusKind::Error);
-    assert_eq!(strip.rows[3].label, "6. step 6");
-    assert!(strip.rows[3].active);
-    assert_eq!(strip.rows[4].label, "+2 more steps");
-    assert_eq!(strip.rows[4].detail, "2 pending");
+    assert_eq!(strip.rows[3].label, "4. step 4");
+    assert_eq!(strip.rows[4].label, "5. step 5");
+    assert_eq!(strip.rows[5].label, "6. step 6");
+    assert!(strip.rows[5].active);
 
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
         sigil_kernel::TaskRunEntry {

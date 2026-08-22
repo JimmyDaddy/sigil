@@ -15,7 +15,7 @@ use crate::runner::{
     event_bridge::ChannelEventHandler,
     protocol::WorkerMessage,
     worker_loop::{
-        VerificationCheckPromotionKind, VerificationCheckPromotionOutcome,
+        VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, append_plan_draft,
         chat_agent_run_input_with_repo_context, clean_mutation_artifacts,
         configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,
         configured_provider_route_concurrency_limit, delete_mutation_artifact,
@@ -23,6 +23,42 @@ use crate::runner::{
         promote_workspace_verification_check,
     },
 };
+
+#[test]
+fn append_plan_draft_preserves_plain_model_output_without_graph_contract() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root_config = root_config_with_checks(temp.path(), Vec::new());
+    let session_log_path = temp.path().join("session-plan-plain.jsonl");
+    let mut current_session = Some(Session::new("deepseek", "deepseek-v4-flash"));
+    let text = "# Implementation plan\n\n1. Inspect the live path.\n2. Apply and verify.";
+
+    let draft = append_plan_draft(
+        &root_config,
+        temp.path(),
+        &session_log_path,
+        &mut current_session,
+        text,
+        Some("message-1".to_owned()),
+        7,
+    )
+    .expect("plain output should create a durable Plan")
+    .expect("non-empty plain output should not be dropped");
+
+    assert_eq!(draft.summary, "Implementation plan");
+    assert_eq!(draft.inline_text.as_deref(), Some(text));
+    assert!(draft.steps.is_empty());
+    assert!(
+        current_session
+            .expect("session remains available")
+            .entries()
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanDraftCreated(entry))
+                    if entry.plan_id == draft.plan_id && entry.plan_hash == draft.plan_hash
+            ))
+    );
+}
 
 #[test]
 fn task_parallel_concurrency_uses_config_and_clamps_zero() {

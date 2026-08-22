@@ -102,8 +102,8 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ToggleThinking,
         keys: &[KeyBinding { label: "Ctrl-T" }],
         slash: None,
-        label: "Thinking view",
-        help: "Expand or collapse thinking blocks when no activity is focused.",
+        label: "Details view",
+        help: "Expand or collapse the current task list, focused activity, or thinking details.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {

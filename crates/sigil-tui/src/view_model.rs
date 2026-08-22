@@ -8,7 +8,7 @@ use sigil_kernel::{
 };
 
 use crate::{
-    app::{AppState, ComposerQueueAction, PaneFocus, PlanTextRowCountCache},
+    app::{AppState, ComposerQueueAction, PaneFocus},
     commands::{global_control_hints, tool_card_control_hints},
     timeline::{ComposerQueueRow, RunPhase, SidebarAgentRow},
     ui::StatusKind,
@@ -297,7 +297,7 @@ fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
         controls.insert(1, "Ctrl-L: copy selection or latest response".to_owned());
     }
     if app.has_tool_cards() {
-        controls.retain(|hint| !hint.starts_with("Ctrl-T: thinking"));
+        controls.retain(|hint| !hint.starts_with("Ctrl-T: details view"));
         controls.extend(tool_card_control_hints());
     }
     if detail {
@@ -409,12 +409,14 @@ fn format_attachment_bytes(bytes: u64) -> String {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TaskStripViewModel {
+    pub task_id: String,
     pub title: String,
     pub detail: String,
     pub route_diagnostics: Vec<String>,
     pub completion_progress: Vec<String>,
     pub verification: Option<VerificationCardViewModel>,
     pub rows: Vec<TaskStripRowViewModel>,
+    pub expanded: bool,
 }
 
 impl TaskStripViewModel {
@@ -429,6 +431,7 @@ impl TaskStripViewModel {
         inspect_open: bool,
     ) -> Self {
         Self {
+            task_id: view.task_id,
             title: view.title,
             detail: view.detail,
             route_diagnostics: Vec::new(),
@@ -466,6 +469,7 @@ impl TaskStripViewModel {
                     active: row.active,
                 })
                 .collect(),
+            expanded: false,
         }
     }
 }
@@ -974,6 +978,16 @@ fn footer_hints(app: &AppState) -> String {
     }
     if let Some(form) = app.pending_user_input() {
         if form.open {
+            if form.request.as_ref().is_some_and(|request| {
+                matches!(
+                    &request.source,
+                    sigil_kernel::UserInputSourceV1::PlanRevision { .. }
+                )
+            }) {
+                return format!(
+                    "{agent} · Plan revision · describe the change · Ctrl-Enter actions · Esc close"
+                );
+            }
             return format!(
                 "{agent} · Input required · Tab fields/actions · ↑↓ choose · Enter continue · Esc close"
             );
@@ -986,7 +1000,7 @@ fn footer_hints(app: &AppState) -> String {
             .is_some_and(|pending| pending.workbench_open)
         {
             return format!(
-                "{agent} · Plan review · ↑↓/Pg scroll · Tab/←→ action · Enter confirm · Esc close"
+                "{agent} · Plan review · ↑↓/Pg scroll · Tab action · R/S/V/X act · Enter confirm · Esc close"
             );
         }
         if app
@@ -1114,6 +1128,7 @@ impl LivePanelViewModel {
                     app.verification_card_focused(),
                     app.verification_inspect_open(),
                 );
+                task_strip.expanded = app.task_strip_expanded(&task_strip.task_id);
                 task_strip.route_diagnostics =
                     crate::app::task_sidebar::task_provider_route_live_lines(
                         &app.runtime.task_provider_route_diagnostics,
@@ -1144,30 +1159,22 @@ fn queue_action_buttons(selected: ComposerQueueAction) -> Vec<QueueActionButtonV
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanApprovalViewModel {
     pub summary: String,
-    pub plan_text: String,
     pub steps: Vec<String>,
-    pub target_paths: Vec<String>,
-    pub suggested_checks: Vec<String>,
     pub target_path_count: usize,
     pub suggested_check_count: usize,
     pub stale: bool,
     pub stale_reason: Option<String>,
-    pub rendered_text_row_counts: PlanTextRowCountCache,
 }
 
 impl PlanApprovalViewModel {
     fn from_pending(pending: &crate::app::PendingPlanApproval) -> Self {
         Self {
             summary: pending.summary.clone(),
-            plan_text: pending.plan_text.clone(),
             steps: pending.steps.clone(),
-            target_paths: pending.target_paths.clone(),
-            suggested_checks: pending.suggested_checks.clone(),
             target_path_count: pending.target_path_count,
             suggested_check_count: pending.suggested_check_count,
             stale: pending.stale,
             stale_reason: pending.stale_reason.clone(),
-            rendered_text_row_counts: pending.rendered_text_row_counts.clone(),
         }
     }
 }

@@ -303,6 +303,9 @@ where
                                 Ok(PlanReviewExecutionResult::AwaitingUserInput(request)) => {
                                     RunTaskPayload::AwaitingUserInput { request }
                                 }
+                                Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
+                                    RunTaskPayload::PlanReviewBlocked { reason, paused }
+                                }
                                 Err(error) => RunTaskPayload::Chat {
                                     result: Err(error),
                                     plan_mode: true,
@@ -697,6 +700,9 @@ where
                                         Ok(PlanReviewExecutionResult::AwaitingUserInput(
                                             request,
                                         )) => RunTaskPayload::AwaitingUserInput { request },
+                                        Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
+                                            RunTaskPayload::PlanReviewBlocked { reason, paused }
+                                        }
                                         Err(error) => RunTaskPayload::Chat {
                                             result: Err(error),
                                             plan_mode,
@@ -764,6 +770,16 @@ where
                                 provider_logical_run_id,
                                 agent_result_continuation_thread_ids,
                             },
+                            RunTaskPayload::PlanReviewBlocked { .. } => {
+                                RunTaskPayload::Chat {
+                                    result: Err(error),
+                                    plan_mode,
+                                    plan_review: true,
+                                    queue_id: None,
+                                    provider_logical_run_id: Some(provider_logical_run_id.clone()),
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                }
+                            }
                             RunTaskPayload::Task {
                                 task_id, queue_id, ..
                             } => RunTaskPayload::Task {
@@ -1689,6 +1705,9 @@ where
                             }
                             Ok(PlanReviewExecutionResult::AwaitingUserInput(request)) => {
                                 RunTaskPayload::AwaitingUserInput { request }
+                            }
+                            Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
+                                RunTaskPayload::PlanReviewBlocked { reason, paused }
                             }
                             Err(error) => RunTaskPayload::Chat {
                                 result: Err(error),

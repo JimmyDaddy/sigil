@@ -420,7 +420,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
         ),
         ControlEntry::TaskCreatedFromPlan(entry) => {
             let plan_state = if entry.task_plan_version == 0 {
-                "task_plan=pending".to_owned()
+                "task_plan=none".to_owned()
             } else {
                 format!(
                     "task_plan=v{} mappings={}",
@@ -436,6 +436,23 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 truncate_session_view_text(entry.stale_reason.as_deref().unwrap_or("-"), 48)
             )
         }
+        ControlEntry::TaskDirectExecutionAdmittedV1(entry) => format!(
+            "[ctl] task direct execution admitted task={} admission={}",
+            entry.task_id.as_str(),
+            truncate_session_view_text(&entry.admission_id, 24)
+        ),
+        ControlEntry::TaskDirectExecutionAttemptV1(entry) => format!(
+            "[ctl] task direct execution attempt task={} ordinal={} status={:?}",
+            entry.task_id.as_str(),
+            entry.ordinal,
+            entry.status
+        ),
+        ControlEntry::TaskChecklistUpdatedV1(entry) => format!(
+            "[ctl] task checklist task={} revision={} items={}",
+            entry.task_id.as_str(),
+            entry.revision,
+            entry.items.len()
+        ),
         ControlEntry::ExecutablePlanCandidatePreparedV1(candidate) => format!(
             "[ctl] plan candidate {} task={} steps={} hash={}",
             candidate.plan_id.as_str(),
@@ -462,6 +479,28 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             truncate_session_view_text(&adoption.candidate_hash, 16),
             adoption.command_id,
             adoption.start_mode
+        ),
+        ControlEntry::TaskMaterializationAttemptStartedV1(attempt) => format!(
+            "[ctl] task preparation started task={} generation={} plan={} compiler={}",
+            attempt.task_id.as_str(),
+            attempt.generation,
+            truncate_session_view_text(&attempt.plan_hash, 16),
+            truncate_session_view_text(&attempt.compiler_contract_fingerprint, 16)
+        ),
+        ControlEntry::TaskMaterializationPreparedV1(materialization) => format!(
+            "[ctl] task materialized {} task={} candidate={} command={} mode={:?}",
+            materialization.plan_id.as_str(),
+            materialization.task_id.as_str(),
+            truncate_session_view_text(&materialization.candidate_hash, 16),
+            materialization.command_id,
+            materialization.start_mode
+        ),
+        ControlEntry::TaskMaterializationBlockedV1(blocked) => format!(
+            "[ctl] task preparation blocked task={} generation={} code={} blocker={}",
+            blocked.task_id.as_str(),
+            blocked.generation,
+            blocked.blocker.reason_code.as_str(),
+            truncate_session_view_text(&blocked.blocker_id, 24)
         ),
         ControlEntry::TaskAdmissionAttemptedV1(attempt) => format!(
             "[ctl] task admission {} ordinal={} outcome={:?}",

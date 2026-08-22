@@ -19,7 +19,7 @@ use tempfile::tempdir;
 
 use super::{
     super::{
-        WorkerCommand, WorkerMessage,
+        LocalOperationKind, LocalOperationStatus, WorkerCommand, WorkerMessage,
         diagnostics::{
             attach_diagnostics_context, changed_source_files, check_changed_files_diagnostics,
             collect_nul_paths, diagnostics_paths_from_call, diagnostics_tool_event, duration_ms,
@@ -322,11 +322,16 @@ fn check_changed_files_reports_failure_outside_git_workspace() -> Result<()> {
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
 
     worker.send(WorkerCommand::CheckChangedFilesDiagnostics)?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let outcome =
+        worker.recv_until(|message| matches!(message, WorkerMessage::LocalOperationOutcome(_)))?;
 
     assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error) if error.contains("is not inside a git repository")
+        outcome,
+        WorkerMessage::LocalOperationOutcome(ref outcome)
+            if outcome.kind == LocalOperationKind::ChangedFilesDiagnostics
+                && outcome.status == LocalOperationStatus::Failed
+                && outcome.retryable
+                && outcome.safe_summary.contains("is not inside a git repository")
     ));
 
     worker.shutdown()?;
@@ -352,12 +357,16 @@ fn check_changed_files_is_rejected_while_run_is_active() -> Result<()> {
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
 
     worker.send(WorkerCommand::CheckChangedFilesDiagnostics)?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let outcome =
+        worker.recv_until(|message| matches!(message, WorkerMessage::LocalOperationOutcome(_)))?;
 
     assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error)
-            if error == "cannot check changes while the agent is running"
+        outcome,
+        WorkerMessage::LocalOperationOutcome(ref outcome)
+            if outcome.kind == LocalOperationKind::ChangedFilesDiagnostics
+                && outcome.status == LocalOperationStatus::Rejected
+                && !outcome.retryable
+                && outcome.safe_summary == "cannot check changes while the agent is running"
     ));
 
     worker.shutdown()?;

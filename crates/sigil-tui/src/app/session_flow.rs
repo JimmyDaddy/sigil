@@ -63,6 +63,94 @@ use restore_projection::{
     suppressed_reasoning_trace_indices,
 };
 impl AppState {
+    /// Reopens the exact approved Plan when post-approval materialization is blocked.
+    ///
+    /// The Task shell is already durable at this point, so this must not create a new Plan or
+    /// infer permissions from display data. The canonical plan-review projection grants the
+    /// surface its action authority; the durable materialization blocker then narrows that set to
+    /// the actions that can actually repair this Task.
+    pub(super) fn reopen_plan_workbench_for_task_blocker(
+        &mut self,
+        task_id: &str,
+        blocker: &sigil_kernel::TaskBlockerV1,
+    ) -> bool {
+        let Ok(task_id) = sigil_kernel::TaskId::new(task_id.to_owned()) else {
+            return false;
+        };
+        let plans = sigil_kernel::PlanArtifactProjection::from_entries(
+            &self.session_browser.current_entries,
+        );
+        let Some(materialization) = plans.materialization_blocker_for_task(&task_id) else {
+            return false;
+        };
+        if materialization.blocker != *blocker {
+            return false;
+        }
+        let Some(link) = plans
+            .tasks_created
+            .values()
+            .flat_map(|links| links.iter())
+            .find(|link| link.task_id == task_id && link.plan_hash == materialization.plan_hash)
+        else {
+            return false;
+        };
+        let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
+            sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &self.workspace_root)
+                .ok()
+                .flatten()
+        });
+        let Ok(detail) = sigil_kernel::plan_review_detail_from_entries(
+            &self.session_browser.current_entries,
+            &link.plan_id,
+            &link.plan_hash,
+        ) else {
+            return false;
+        };
+        let Some(review) = sigil_runtime::conversation_display::public_plan_review_from_entries(
+            &self.session_browser.current_entries,
+            current_snapshot.as_deref(),
+        ) else {
+            return false;
+        };
+        if review.plan_id != link.plan_id.as_str()
+            || review.plan_hash.as_deref() != Some(link.plan_hash.as_str())
+        {
+            return false;
+        }
+
+        self.set_pending_plan_approval_from_detail(&detail, current_snapshot.as_deref());
+        self.apply_pending_plan_public_review(&review);
+        let Some(pending) = self.composer.pending_plan_approval.as_mut() else {
+            return false;
+        };
+        let retry_preparation = materialization
+            .blocker
+            .available_actions
+            .contains(&sigil_kernel::TaskBlockerActionV1::RetryAdmission);
+        let revise_plan = materialization
+            .blocker
+            .available_actions
+            .contains(&sigil_kernel::TaskBlockerActionV1::Replan);
+        pending.allowed_actions.retain(|action| match action {
+            sigil_kernel::PublicPlanAction::Run => retry_preparation,
+            sigil_kernel::PublicPlanAction::Revise => revise_plan,
+            sigil_kernel::PublicPlanAction::Save | sigil_kernel::PublicPlanAction::Reject => false,
+        });
+        if pending.allowed_actions.is_empty() {
+            self.clear_pending_plan_approval();
+            return false;
+        }
+        pending.last_run_failure = Some(materialization.blocker.summary.clone());
+        pending.retrying_materialization = true;
+        pending.workbench_open = true;
+        pending.selected_action = if pending.action_allowed(super::PlanWorkbenchAction::Run) {
+            super::PlanWorkbenchAction::Run
+        } else {
+            super::PlanWorkbenchAction::Revise
+        };
+        true
+    }
+
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
         self.refresh_session_history();
         let Some(session_log_path) = self
@@ -346,6 +434,18 @@ impl AppState {
         let plans = sigil_kernel::PlanArtifactProjection::from_entries(
             &self.session_browser.current_entries,
         );
+        let current_task_id =
+            sigil_kernel::TaskStateProjection::from_entries(&self.session_browser.current_entries)
+                .current_task_id
+                .clone();
+        if let Some((task_id, blocker)) = current_task_id.and_then(|task_id| {
+            plans
+                .materialization_blocker_for_task(&task_id)
+                .map(|blocked| (task_id, blocked.blocker.clone()))
+        }) && self.reopen_plan_workbench_for_task_blocker(task_id.as_str(), &blocker)
+        {
+            return;
+        }
         let Some(draft) = plans.latest_pending_plan().cloned() else {
             return;
         };

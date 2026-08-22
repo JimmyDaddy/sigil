@@ -5,6 +5,10 @@ use crate::{
     ui::{LayoutMode, LayoutSnapshot},
 };
 use ratatui::{layout::Rect, text::Line};
+use sigil_kernel::{
+    AgentRole, ControlEntry, SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
+};
 
 fn mouse(kind: MouseInputKind, column: u16, row: u16) -> MouseInput {
     MouseInput {
@@ -30,6 +34,108 @@ fn rendered_plain(lines: Vec<Line<'static>>) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn expandable_task_list_app() -> AppState {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let task_id = TaskId::new("task_expandable").expect("task id");
+    let steps = (1..=12)
+        .map(|index| TaskStepSpec {
+            step_id: TaskStepId::new(format!("step_{index}")).expect("step id"),
+            title: format!("task item {index}"),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        })
+        .collect::<Vec<_>>();
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Twelve task items".to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps,
+            reason: None,
+        })),
+    ];
+    for index in 1..=4 {
+        entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+            TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: TaskStepId::new(format!("step_{index}")).expect("step id"),
+                role: AgentRole::Executor,
+                status: TaskStepStatus::Completed,
+                title: Some(format!("task item {index}")),
+                summary: None,
+                reason: None,
+            },
+        )));
+    }
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+        TaskStepEntry {
+            task_id,
+            plan_version: 1,
+            step_id: TaskStepId::new("step_5").expect("step id"),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Running,
+            title: Some("task item 5".to_owned()),
+            summary: None,
+            reason: None,
+        },
+    )));
+    app.sync_current_session_state(entries);
+    app.set_terminal_size(120, 32);
+    app
+}
+
+#[test]
+fn task_strip_overflow_row_supports_mouse_and_ctrl_t_expansion() -> Result<()> {
+    let mut app = expandable_task_list_app();
+    let screen = Rect::new(0, 0, 120, 32);
+    let layout = LayoutSnapshot::from_app(screen, &app);
+    let toggle = layout
+        .task_strip_toggle
+        .expect("collapsed task strip should expose an overflow target");
+    assert_eq!(
+        layout.hit_target(toggle.x, toggle.y),
+        HitTarget::TaskStripToggle
+    );
+
+    let outcome = app.handle_mouse_event(
+        MouseInput {
+            column: toggle.x,
+            row: toggle.y,
+            kind: MouseInputKind::LeftDown,
+            modifiers: KeyModifiers::NONE,
+        },
+        &layout,
+    )?;
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    let expanded = crate::view_model::LivePanelViewModel::from_app(&app, 4)
+        .task_strip
+        .expect("task strip");
+    assert!(expanded.expanded);
+    assert_eq!(expanded.rows.len(), 12);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    let collapsed = crate::view_model::LivePanelViewModel::from_app(&app, 4)
+        .task_strip
+        .expect("task strip");
+    assert!(!collapsed.expanded);
+    assert_eq!(collapsed.rows.len(), 12);
+    Ok(())
 }
 
 fn slash_candidate_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
@@ -1801,6 +1907,7 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(80, 20);
     let layout = LayoutSnapshot {
+        task_strip_toggle: None,
         verification_card: None,
         composer_queue_hit_areas: None,
         screen: Rect::new(0, 0, 80, 20),
@@ -1844,6 +1951,7 @@ fn mouse_scroll_composer_reaches_timeline_history() -> Result<()> {
             .join("\n"),
     ))?;
     let layout = LayoutSnapshot {
+        task_strip_toggle: None,
         verification_card: None,
         composer_queue_hit_areas: None,
         screen: Rect::new(0, 0, 80, 20),

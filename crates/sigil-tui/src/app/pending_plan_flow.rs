@@ -80,15 +80,33 @@ impl AppState {
                 self.select_adjacent_plan_action(current_action, -1);
                 Some(None)
             }
-            KeyCode::Enter if key.modifiers.is_empty() => Some(match current_action {
-                PlanWorkbenchAction::Run => {
-                    self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None)
-                }
-                PlanWorkbenchAction::Save => self.save_pending_plan(),
-                PlanWorkbenchAction::Revise => self.revise_pending_plan(),
-                PlanWorkbenchAction::Reject => self.reject_pending_plan(),
-            }),
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                Some(self.execute_plan_workbench_action(PlanWorkbenchAction::Run))
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                Some(self.execute_plan_workbench_action(PlanWorkbenchAction::Save))
+            }
+            KeyCode::Char('v') if key.modifiers.is_empty() => {
+                Some(self.execute_plan_workbench_action(PlanWorkbenchAction::Revise))
+            }
+            KeyCode::Char('x') if key.modifiers.is_empty() => {
+                Some(self.execute_plan_workbench_action(PlanWorkbenchAction::Reject))
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                Some(self.execute_plan_workbench_action(current_action))
+            }
             _ => Some(None),
+        }
+    }
+
+    fn execute_plan_workbench_action(&mut self, action: PlanWorkbenchAction) -> Option<AppAction> {
+        match action {
+            PlanWorkbenchAction::Run => {
+                self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None)
+            }
+            PlanWorkbenchAction::Save => self.save_pending_plan(),
+            PlanWorkbenchAction::Revise => self.revise_pending_plan(),
+            PlanWorkbenchAction::Reject => self.reject_pending_plan(),
         }
     }
 
@@ -201,7 +219,7 @@ impl AppState {
             self.last_notice = Some("run is unavailable in the current plan state".to_owned());
             return None;
         }
-        if pending.stale {
+        if pending.stale && !pending.retrying_materialization {
             self.last_notice = Some(
                 pending
                     .stale_reason
@@ -273,12 +291,12 @@ impl AppState {
             self.composer.pending_plan_approval = None;
             return;
         }
-        let plan_text = detail
+        let plan_preview = detail
             .legacy_markdown
-            .clone()
-            .unwrap_or_else(|| detail.summary.clone());
-        let plan_text = plan_text.trim();
-        if plan_text.is_empty() {
+            .as_deref()
+            .unwrap_or(&detail.summary)
+            .trim();
+        if plan_preview.is_empty() {
             self.composer.pending_plan_approval = None;
             return;
         }
@@ -287,34 +305,22 @@ impl AppState {
             .iter()
             .map(|step| step.title.clone())
             .collect::<Vec<_>>();
-        let suggested_checks = detail
-            .suggested_checks
-            .iter()
-            .map(|check| {
-                std::iter::once(check.command.command.as_str())
-                    .chain(check.command.args.iter().map(String::as_str))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect::<Vec<_>>();
         let stale_reason = sigil_runtime::plan_review_coordinator::plan_handoff_stale_reason(
             detail.workspace_snapshot_id.as_deref(),
             current_workspace_snapshot_id,
         );
         self.composer.pending_plan_approval = Some(PendingPlanApproval {
             plan_id: Some(detail.plan_id.as_str().to_owned()),
-            plan_text: plan_text.to_owned(),
             plan_hash: detail.plan_hash.clone(),
             summary: detail.summary.clone(),
             steps,
-            target_paths: detail.target_paths.clone(),
-            suggested_checks,
             target_path_count: detail.target_paths.len(),
             suggested_check_count: detail.suggested_checks.len(),
             workspace_snapshot_id: detail.workspace_snapshot_id.clone(),
             stale: stale_reason.is_some(),
             stale_reason,
             last_run_failure: None,
+            retrying_materialization: false,
             // Action authority comes only from the canonical public projection. A detail payload
             // is immutable display data and must never grant actions by itself.
             allowed_actions: Vec::new(),
@@ -324,7 +330,6 @@ impl AppState {
             workbench_scroll: 0,
             workbench_scroll_extent: Default::default(),
             selected_action: PlanWorkbenchAction::Run,
-            rendered_text_row_counts: Default::default(),
         });
     }
 

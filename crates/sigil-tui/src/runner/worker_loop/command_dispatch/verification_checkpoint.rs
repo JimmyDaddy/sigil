@@ -31,15 +31,26 @@ where
         match command_result {
             VerificationCheckpointCommand::CheckChangedFilesDiagnostics => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot check changes while the agent is running".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "changed-files-diagnostics",
+                            LocalOperationKind::ChangedFilesDiagnostics,
+                            "cannot check changes while the agent is running",
+                        ),
                     ));
                     continue;
                 }
                 let changed_paths = match changed_source_files(&options.workspace_root) {
                     Ok(paths) => paths,
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                            LocalOperationOutcome::failed(
+                                "changed-files-diagnostics",
+                                LocalOperationKind::ChangedFilesDiagnostics,
+                                true,
+                                format!("{error:#}"),
+                            ),
+                        ));
                         continue;
                     }
                 };
@@ -50,8 +61,13 @@ where
                     continue;
                 }
                 let Some(session) = state.session.current.as_mut() else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "session state is unavailable".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::failed(
+                            "changed-files-diagnostics",
+                            LocalOperationKind::ChangedFilesDiagnostics,
+                            true,
+                            "session state is unavailable",
+                        ),
                     ));
                     continue;
                 };
@@ -69,7 +85,14 @@ where
                         )));
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                            LocalOperationOutcome::failed(
+                                "changed-files-diagnostics",
+                                LocalOperationKind::ChangedFilesDiagnostics,
+                                true,
+                                format!("{error:#}"),
+                            ),
+                        ));
                     }
                 }
             }
@@ -216,8 +239,12 @@ where
             }
             VerificationCheckpointCommand::CleanMutationArtifacts { target } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before cleaning mutation artifacts".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "mutation-artifact-cleanup",
+                            LocalOperationKind::MutationArtifactCleanup,
+                            "wait for the active run before cleaning mutation artifacts",
+                        ),
                     ));
                     continue;
                 }
@@ -233,14 +260,25 @@ where
                         ));
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                            LocalOperationOutcome::failed(
+                                "mutation-artifact-cleanup",
+                                LocalOperationKind::MutationArtifactCleanup,
+                                true,
+                                error,
+                            ),
+                        ));
                     }
                 }
             }
             VerificationCheckpointCommand::DeleteMutationArtifact { artifact_id } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before deleting mutation artifacts".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "mutation-artifact-delete",
+                            LocalOperationKind::MutationArtifactDeletion,
+                            "wait for the active run before deleting mutation artifacts",
+                        ),
                     ));
                     continue;
                 }
@@ -255,14 +293,25 @@ where
                         ));
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                            LocalOperationOutcome::failed(
+                                "mutation-artifact-delete",
+                                LocalOperationKind::MutationArtifactDeletion,
+                                true,
+                                error,
+                            ),
+                        ));
                     }
                 }
             }
             VerificationCheckpointCommand::ApproveVerificationCheck { check_spec_id } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before approving verification checks".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "verification-check-approval",
+                            LocalOperationKind::VerificationCheckApproval,
+                            "wait for the active run before approving verification checks",
+                        ),
                     ));
                     continue;
                 }
@@ -288,14 +337,25 @@ where
                         )));
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                            LocalOperationOutcome::failed(
+                                "verification-check-approval",
+                                LocalOperationKind::VerificationCheckApproval,
+                                true,
+                                error,
+                            ),
+                        ));
                     }
                 }
             }
             VerificationCheckpointCommand::SandboxVerificationCheck { check_spec_id } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before sandboxing verification checks".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "verification-check-sandboxing",
+                            LocalOperationKind::VerificationCheckSandboxing,
+                            "wait for the active run before sandboxing verification checks",
+                        ),
                     ));
                     continue;
                 }
@@ -321,20 +381,36 @@ where
                         )));
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                            LocalOperationOutcome::failed(
+                                "verification-check-sandboxing",
+                                LocalOperationKind::VerificationCheckSandboxing,
+                                true,
+                                error,
+                            ),
+                        ));
                     }
                 }
             }
             VerificationCheckpointCommand::RerunTaskVerification { request } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before running verification".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "task-verification-rerun",
+                            LocalOperationKind::TaskVerificationRerun,
+                            "wait for the active run before running verification",
+                        ),
                     ));
                     continue;
                 }
                 let Some(session) = state.session.current.as_mut() else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "verification rerun requires an active session".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::failed(
+                            "task-verification-rerun",
+                            LocalOperationKind::TaskVerificationRerun,
+                            true,
+                            "verification rerun requires an active session",
+                        ),
                     ));
                     continue;
                 };
@@ -342,9 +418,16 @@ where
                     match sigil_runtime::build_configured_execution_backend(root_config) {
                         Ok(backend) => backend,
                         Err(error) => {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                "failed to build verification execution backend: {error:#}"
-                            )));
+                            let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                                LocalOperationOutcome::failed(
+                                    "task-verification-rerun",
+                                    LocalOperationKind::TaskVerificationRerun,
+                                    true,
+                                    format!(
+                                        "failed to build verification execution backend: {error:#}"
+                                    ),
+                                ),
+                            ));
                             continue;
                         }
                     };
@@ -374,9 +457,14 @@ where
                         )));
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                            "verification rerun failed: {error:#}"
-                        )));
+                        let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                            LocalOperationOutcome::failed(
+                                "task-verification-rerun",
+                                LocalOperationKind::TaskVerificationRerun,
+                                true,
+                                format!("verification rerun failed: {error:#}"),
+                            ),
+                        ));
                     }
                 }
             }

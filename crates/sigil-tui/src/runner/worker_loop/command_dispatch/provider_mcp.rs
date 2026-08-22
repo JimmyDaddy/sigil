@@ -78,14 +78,22 @@ where
             }
             ProviderMcpCommand::ActivateLazyMcp { server_name } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot activate MCP while the agent is running".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "mcp.activate",
+                            LocalOperationKind::McpActivation,
+                            "cannot activate MCP while the agent is running",
+                        ),
                     ));
                     continue;
                 }
                 let Some(agent) = Arc::get_mut(agent) else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot activate MCP while agent registry is shared".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::deferred(
+                            "mcp.activate",
+                            LocalOperationKind::McpActivation,
+                            "cannot activate MCP while agent registry is shared",
+                        ),
                     ));
                     continue;
                 };
@@ -175,8 +183,12 @@ where
             }
             ProviderMcpCommand::RefreshMcpServer { server_name } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot refresh MCP while the agent is running".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "mcp.refresh",
+                            LocalOperationKind::McpRefresh,
+                            "cannot refresh MCP while the agent is running",
+                        ),
                     ));
                     continue;
                 }
@@ -188,8 +200,12 @@ where
                 action,
             } => {
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot manage MCP authentication while the agent is running".to_owned(),
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::rejected(
+                            "mcp.authentication",
+                            LocalOperationKind::McpAuthentication,
+                            "cannot manage MCP authentication while the agent is running",
+                        ),
                     ));
                     continue;
                 }

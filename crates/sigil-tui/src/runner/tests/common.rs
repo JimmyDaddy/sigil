@@ -470,6 +470,23 @@ pub(super) fn planned_role_provider_builder(
     })
 }
 
+pub(super) fn failing_role_provider_builder() -> Arc<dyn TaskRoleProviderBuilder> {
+    Arc::new(FailingRoleProviderBuilder)
+}
+
+struct FailingRoleProviderBuilder;
+
+#[async_trait]
+impl TaskRoleProviderBuilder for FailingRoleProviderBuilder {
+    async fn build(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+    ) -> Result<Box<dyn Provider>> {
+        Err(anyhow!("injected task role provider construction failure"))
+    }
+}
+
 pub(super) fn planned_role_provider_builder_with_stream_start_signal(
     plans: Vec<StreamPlan>,
 ) -> (Arc<dyn TaskRoleProviderBuilder>, mpsc::Receiver<()>) {

@@ -1,12 +1,14 @@
 use sigil_kernel::{
     AgentRole, ChangeSetId, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, ControlEntry, EvidenceScope, MergeDecision, MergeReviewId,
-    MergeReviewRequested, MergeReviewResolved, ModelMessage, ReadinessEvaluatedEntry,
+    MergeReviewRequested, MergeReviewResolved, ModelMessage, PlanId, ReadinessEvaluatedEntry,
     ReadinessEvaluation, ReadinessReason, RequiredAction, RunStatus, SessionLogEntry, SessionRef,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolEffect, TrustedCheckSpec,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
+    TaskChecklistItemStatusV1, TaskChecklistItemV1, TaskChecklistUpdatedV1,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
+    TaskDirectExecutionAdmittedV1, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskStepStatus, ToolEffect, TrustedCheckSpec, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
     VerificationReceiptLinkRecorded, VerificationStaleCause, VerificationStaleReason,
     VerificationVerdict, VisibleCompletionState,
 };
@@ -18,6 +20,39 @@ use super::{
     verification_stale_reason_compact_label, verification_verdict_label,
 };
 use crate::app::task_sidebar::VerificationCardAction;
+
+#[test]
+fn direct_task_without_a_real_checklist_does_not_render_a_fake_task_list() {
+    let task_id = TaskId::new("task-direct-no-list").expect("task id");
+    let objective = "Execute the approved objective directly";
+    let admission = TaskDirectExecutionAdmittedV1::approved_plan(
+        task_id.clone(),
+        objective,
+        PlanId::new("plan-direct-no-list").expect("plan id"),
+        format!("sha256:{}", "a".repeat(64)),
+        1,
+    );
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission)),
+    ];
+
+    let strip = task_strip_view(&entries).expect("direct Task strip should project");
+    assert!(strip.rows.is_empty());
+    assert!(!strip.detail.contains("0/1"));
+    assert!(
+        !task_sidebar_lines(&entries)
+            .iter()
+            .any(|line| { line.contains("Execute task") || line.contains("execute ·") })
+    );
+}
 
 #[test]
 fn provider_route_diagnostics_format_live_attribution_and_audit_identity() {
@@ -702,7 +737,7 @@ fn task_sidebar_keeps_plain_completed_label_without_verification_action() {
 }
 
 #[test]
-fn task_strip_hides_historical_paused_task_after_unrelated_chat() {
+fn task_strip_keeps_historical_paused_task_visible_after_unrelated_chat() {
     let mut entries =
         task_entries_without_readiness(TaskRunStatus::Paused, TaskStepStatus::Interrupted);
     assert!(task_strip_view(&entries).is_some());
@@ -733,12 +768,82 @@ fn task_strip_hides_historical_paused_task_after_unrelated_chat() {
         },
     )));
 
-    assert!(task_strip_view(&entries).is_none());
+    assert!(
+        TaskStateProjection::from_entries(&entries)
+            .current_task()
+            .is_none()
+    );
+    assert!(task_strip_view(&entries).is_some());
     assert!(
         task_sidebar_lines(&entries)
             .iter()
-            .all(|line| !line.starts_with("task:"))
+            .any(|line| line.starts_with("task:"))
     );
+}
+
+#[test]
+fn direct_task_checklist_survives_an_interjected_chat_turn() {
+    let task_id = TaskId::new("task-direct-interjection").expect("task id");
+    let objective = "Finish the approved changes";
+    let run = |status| {
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: objective.to_owned(),
+            title: Some("Finish approved changes".to_owned()),
+            status,
+            reason: None,
+        }))
+    };
+    let mut entries = vec![
+        run(TaskRunStatus::Started),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            TaskDirectExecutionAdmittedV1::approved_plan(
+                task_id.clone(),
+                objective,
+                PlanId::new("plan-direct-interjection").expect("plan id"),
+                format!("sha256:{}", "b".repeat(64)),
+                1,
+            ),
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskChecklistUpdatedV1(
+            TaskChecklistUpdatedV1 {
+                task_id: task_id.clone(),
+                revision: 1,
+                items: vec![
+                    TaskChecklistItemV1 {
+                        item_id: "inspect".to_owned(),
+                        text: "Inspect the current changes".to_owned(),
+                        status: TaskChecklistItemStatusV1::Completed,
+                    },
+                    TaskChecklistItemV1 {
+                        item_id: "verify".to_owned(),
+                        text: "Verify the implementation".to_owned(),
+                        status: TaskChecklistItemStatusV1::InProgress,
+                    },
+                ],
+            },
+        )),
+        run(TaskRunStatus::Paused),
+    ];
+    entries.push(SessionLogEntry::User(ModelMessage::user(
+        "what is the current task doing?",
+    )));
+
+    let projection = TaskStateProjection::from_entries(&entries);
+    assert!(projection.current_task().is_none());
+    assert_eq!(
+        projection
+            .latest_unfinished_task()
+            .and_then(|task| task.checklist.as_ref())
+            .map(|checklist| checklist.revision),
+        Some(1)
+    );
+    let strip = task_strip_view(&entries).expect("paused direct Task remains visible");
+    assert_eq!(strip.detail, "paused · 1/2 done");
+    assert_eq!(strip.rows.len(), 2);
+    assert_eq!(strip.rows[0].label, "1. Inspect the current changes");
+    assert_eq!(strip.rows[1].label, "2. Verify the implementation");
 }
 
 #[test]

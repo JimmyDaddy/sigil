@@ -788,10 +788,14 @@ fn running_tool_card_uses_animated_running_status_instead_of_success() {
             "call_id": "call-running",
             "tool_name": "bash",
             "status": "running",
+            "summary": "1 line · 0 B",
             "preview_kind": "text",
-            "preview_lines": ["still working"],
+            "preview_lines": ["foreground shell command is running"],
             "hidden_lines": 0,
-            "metadata": {"details": {"call": {"summary": "command=cargo test"}}}
+            "metadata": {
+                "bytes": 0,
+                "details": {"call": {"summary": "command=cargo test"}}
+            }
         })
         .to_string(),
     };
@@ -809,6 +813,41 @@ fn running_tool_card_uses_animated_running_status_instead_of_success() {
     ));
     assert!(rendered.contains("RUNNING"));
     assert!(!rendered.contains(" OK "));
+    assert!(!rendered.contains("foreground shell command is running"));
+    assert!(!rendered.contains("1 line · 0 B"));
+}
+
+#[test]
+fn running_shell_card_keeps_real_output_in_the_terminal_rail() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "call_id": "call-running-output",
+            "tool_name": "bash",
+            "status": "running",
+            "summary": "1 line · 15 B",
+            "preview_kind": "text",
+            "preview_lines": ["Compiling sigil"],
+            "hidden_lines": 0,
+            "metadata": {
+                "bytes": 15,
+                "returned_bytes": 15,
+                "returned_lines": 1,
+                "details": {"call": {"summary": "command=cargo test"}}
+            }
+        })
+        .to_string(),
+    };
+
+    let rendered = plain_text(&render_tool_entry_lines(
+        &entry,
+        &TimelineRenderOptions::default(),
+        0,
+    ));
+
+    assert!(rendered.contains("RUNNING"));
+    assert!(rendered.contains("1 line · 15 B"));
+    assert!(rendered.contains("│ Compiling sigil"));
 }
 
 #[test]

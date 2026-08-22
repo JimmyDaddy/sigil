@@ -34,8 +34,8 @@ use sigil_kernel::{
     ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
     ToolSubjectAudit, UserUrlCapabilityRegistrar, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     build_workspace_snapshot, default_user_config_dir, discover_candidate_checks_with_user_config,
-    plan_draft_created_entry, rerun_task_verification_check, saturating_elapsed, stable_event_uuid,
-    stable_workspace_id,
+    plain_text_plan_draft_entry, plan_draft_created_entry, rerun_task_verification_check,
+    saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
 
 use sigil_kernel::session::{
@@ -55,10 +55,11 @@ use super::{
     event_bridge::ChannelEventHandler,
     mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
     protocol::{
-        McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
-        ToolArtifactDisplayReadFailure, V2CompactionApplySource, WORKER_COMMAND_PROTOCOL_VERSION,
-        WorkerApprovalCommand, WorkerApprovalCommandReceipt, WorkerApprovalDecision,
-        WorkerApprovalRouteState, WorkerCommand, WorkerMessage,
+        LocalOperationKind, LocalOperationOutcome, McpActivationStatus, McpOAuthUserAction,
+        QueueMoveDirection, TerminalTaskControlIdentity, ToolArtifactDisplayReadFailure,
+        V2CompactionApplySource, WORKER_COMMAND_PROTOCOL_VERSION, WorkerApprovalCommand,
+        WorkerApprovalCommandReceipt, WorkerApprovalDecision, WorkerApprovalRouteState,
+        WorkerCommand, WorkerMessage,
     },
     session_flow::{
         load_routed_session_with_runtime_attachments, load_session,

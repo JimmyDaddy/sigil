@@ -146,6 +146,11 @@ pub(super) fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
     {
         return Some(summary);
     }
+    if tool_name_matches(&summary.tool_name, "bash")
+        && bash_running_without_observed_output(summary)
+    {
+        return None;
+    }
     if let Some(diff) = &summary.diff {
         return Some(format!("diff {}", diff.summary));
     }

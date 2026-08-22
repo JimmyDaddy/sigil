@@ -255,6 +255,8 @@ fn format_tool_artifact_bytes(bytes: u64) -> String {
 
 #[derive(Clone, Default)]
 struct ToolCardMetadata {
+    bytes: Option<u64>,
+    returned_bytes: Option<u64>,
     duration_ms: Option<u64>,
     exit_code: Option<i64>,
     returned_lines: Option<u64>,

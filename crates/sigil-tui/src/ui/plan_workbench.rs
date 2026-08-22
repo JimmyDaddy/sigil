@@ -37,8 +37,8 @@ pub(super) fn render_plan_workbench(
 
 fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, theme: &Theme) {
     let stale = if pending.stale { " · stale" } else { "" };
-    // RFC-0067 13.1: compile facts drive the visible plan state; a compile-failed plan needs
-    // changes and cannot be run.
+    // Current Plans are runnable from their durable text. These labels only explain incomplete
+    // legacy compiler records and never grant or revoke Run authority.
     let compile_status = match pending.detail.compile.state {
         sigil_kernel::PlanReadyStateV1::Ready => None,
         sigil_kernel::PlanReadyStateV1::CompileFailed => Some(" · needs changes"),
@@ -54,7 +54,12 @@ fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, t
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" · {} steps{stale}", pending.detail.steps.len()),
+            format!(
+                " · {} steps · {} paths · {} checks{stale}",
+                pending.detail.steps.len(),
+                pending.detail.target_paths.len(),
+                pending.detail.suggested_checks.len(),
+            ),
             styles::muted(&theme.palette),
         ),
     ];
@@ -81,10 +86,13 @@ fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, t
         ));
     }
     let title = Line::from(title_spans);
-    let hint = Line::from(Span::styled(
-        "↑↓/Pg scroll · Tab/←→ action · Enter confirm · Esc close",
-        styles::muted(&theme.palette),
-    ));
+    let action_hint =
+        if pending.retrying_materialization && pending.action_allowed(PlanWorkbenchAction::Run) {
+            "↑↓/Pg scroll · Tab action · R retry task · V revise · Enter confirm · Esc close"
+        } else {
+            "↑↓/Pg scroll · Tab action · R/S/V/X act · Enter confirm · Esc close"
+        };
+    let hint = Line::from(Span::styled(action_hint, styles::muted(&theme.palette)));
     frame.render_widget(
         Paragraph::new(Text::from(vec![title, hint])).style(styles::body(&theme.palette)),
         area,
@@ -155,8 +163,13 @@ fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'
                 .add_modifier(Modifier::BOLD),
         )));
         push_multiline(&mut lines, "", error);
+        let recovery_hint = if pending.retrying_materialization {
+            "This legacy Task remains intact. Retry it after correcting the reported condition, or revise the plan."
+        } else {
+            "The plan remains available. Correct the reported condition and run it again."
+        };
         lines.push(Line::from(Span::styled(
-            "The plan remains available. Correct the reported condition and run it again.",
+            recovery_hint,
             styles::muted(&theme.palette),
         )));
         lines.push(Line::raw(String::new()));
@@ -285,13 +298,25 @@ fn render_actions(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, 
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let spans = PlanWorkbenchAction::ORDER
+    let actions = PlanWorkbenchAction::ORDER
         .iter()
-        .filter(|action| pending.action_allowed(**action))
-        .flat_map(|action| {
-            let selected = *action == pending.selected_action;
-            let disabled = pending.stale
-                && matches!(action, PlanWorkbenchAction::Run | PlanWorkbenchAction::Save);
+        .copied()
+        .filter(|action| pending.action_allowed(*action))
+        .collect::<Vec<_>>();
+    let full_width = actions
+        .iter()
+        .map(|action| action.label().len() + action.shortcut().len() + 5)
+        .sum::<usize>();
+    let compact_labels = full_width > usize::from(area.width);
+    let spans = actions
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, action)| {
+            let selected = action == pending.selected_action;
+            let disabled = pending.stale && matches!(action, PlanWorkbenchAction::Save)
+                || (pending.stale
+                    && !pending.retrying_materialization
+                    && action == PlanWorkbenchAction::Run);
             let style = if selected {
                 Style::default()
                     .fg(theme.palette.button_selected_fg)
@@ -306,7 +331,27 @@ fn render_actions(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, 
             } else {
                 Style::default().fg(theme.palette.button_inactive_fg)
             };
-            [Span::raw("  "), Span::styled(action.label(), style)]
+            let action_label =
+                if action == PlanWorkbenchAction::Run && pending.retrying_materialization {
+                    "Retry task"
+                } else {
+                    action.label()
+                };
+            let label = if compact_labels {
+                format!("{}:{action_label}", action.shortcut())
+            } else {
+                format!("{action_label} [{}]", action.shortcut())
+            };
+            [
+                Span::raw(if compact_labels && index == 0 {
+                    ""
+                } else if compact_labels {
+                    " "
+                } else {
+                    "  "
+                }),
+                Span::styled(label, style),
+            ]
         })
         .collect::<Vec<_>>();
     frame.render_widget(

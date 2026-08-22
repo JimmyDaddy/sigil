@@ -276,8 +276,7 @@ pub(in crate::runner) fn spawn_task_planner_input(
                 &mut approval_handler,
             )
             .await
-            .map(|output| output.status)
-            .map_err(|error| format!("{error:#}"));
+            .map(|output| output.status);
         let result = finalize_task_root(
             &mut session,
             &task_id,
@@ -445,7 +444,7 @@ pub(in crate::runner) struct TaskContinueOrchestration<'a> {
 pub(in crate::runner) async fn run_task_orchestration(
     session: &mut Session,
     request: TaskRunOrchestration<'_>,
-) -> std::result::Result<TaskRunStatus, String> {
+) -> anyhow::Result<TaskRunStatus> {
     let TaskRunOrchestration {
         task_id,
         parent_session_ref,
@@ -485,7 +484,7 @@ pub(in crate::runner) async fn run_admitted_task_orchestration<A>(
     session: &mut Session,
     request: AdmittedTaskRunOrchestration<'_>,
     approval_handler: &mut A,
-) -> std::result::Result<TaskRunStatus, String>
+) -> anyhow::Result<TaskRunStatus>
 where
     A: ApprovalHandler + Send,
 {
@@ -520,7 +519,6 @@ where
         approval_handler,
     )
     .await
-    .map_err(|error| format!("{error:#}"))
 }
 
 /// Runs an admitted handoff task and atomically claims the shared root cancellation terminal.
@@ -581,27 +579,28 @@ where
     let result = bind_task_run_cancellation_scope(session, &task_id, &cancellation_handle);
     let continuation_entry_frontier = session.entries().len();
     let result = match result {
-        Ok(()) => sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
-            session,
-            sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {
-                requested_task_id: Some(task_id.clone()),
-                guidance: Some(guidance.expose_secret().to_owned()),
-                guidance_promotion: None,
-                continuation_guidance_receipt: Some(guidance_receipt),
-                root_config,
-                options,
-                base_registry,
-                agent_supervisor,
-                role_provider_builder,
-                handler,
-                cancellation_handle: cancellation_handle.clone(),
-                tool_artifact_read_budget: Some(tool_artifact_read_budget),
-            },
-            approval_handler,
-        )
-        .await
-        .map_err(|error| format!("{error:#}")),
-        Err(error) => Err(error),
+        Ok(()) => {
+            sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
+                session,
+                sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {
+                    requested_task_id: Some(task_id.clone()),
+                    guidance: Some(guidance.expose_secret().to_owned()),
+                    guidance_promotion: None,
+                    continuation_guidance_receipt: Some(guidance_receipt),
+                    root_config,
+                    options,
+                    base_registry,
+                    agent_supervisor,
+                    role_provider_builder,
+                    handler,
+                    cancellation_handle: cancellation_handle.clone(),
+                    tool_artifact_read_budget: Some(tool_artifact_read_budget),
+                },
+                approval_handler,
+            )
+            .await
+        }
+        Err(error) => Err(anyhow::Error::msg(error)),
     };
     finalize_task_continuation_root(
         session,
@@ -621,7 +620,7 @@ fn finalize_task_continuation_root(
     objective: &str,
     terminal_cancellation: &RunCancellationHandle,
     continuation_entry_frontier: usize,
-    result: std::result::Result<TaskRunStatus, String>,
+    result: anyhow::Result<TaskRunStatus>,
 ) -> std::result::Result<TaskRunStatus, String> {
     sigil_runtime::agent_supervisor::task_execution::finalize_task_continuation_root(
         session,
@@ -630,7 +629,7 @@ fn finalize_task_continuation_root(
         objective,
         terminal_cancellation,
         continuation_entry_frontier,
-        result.map_err(anyhow::Error::msg),
+        result,
     )
     .map_err(|error| format!("{error:#}"))
 }
@@ -641,7 +640,7 @@ fn finalize_task_root(
     parent_session_ref: &SessionRef,
     objective: &str,
     terminal_cancellation: &RunCancellationHandle,
-    result: std::result::Result<TaskRunStatus, String>,
+    result: anyhow::Result<TaskRunStatus>,
 ) -> std::result::Result<TaskRunStatus, String> {
     sigil_runtime::agent_supervisor::task_execution::finalize_task_root(
         session,
@@ -649,7 +648,7 @@ fn finalize_task_root(
         parent_session_ref,
         objective,
         terminal_cancellation,
-        result.map_err(anyhow::Error::msg),
+        result,
     )
     .map_err(|error| format!("{error:#}"))
 }
@@ -657,7 +656,7 @@ fn finalize_task_root(
 pub(in crate::runner) async fn continue_task_orchestration(
     session: &mut Session,
     request: TaskContinueOrchestration<'_>,
-) -> std::result::Result<TaskRunStatus, String> {
+) -> anyhow::Result<TaskRunStatus> {
     let TaskContinueOrchestration {
         task_id,
         guidance,
@@ -692,7 +691,6 @@ pub(in crate::runner) async fn continue_task_orchestration(
         &mut approval_handler,
     )
     .await
-    .map_err(|error| format!("{error:#}"))
 }
 
 pub(in crate::runner) async fn run_skill_child_orchestration(
@@ -1275,16 +1273,33 @@ pub(in crate::runner) fn append_plan_draft(
         final_message_id,
         ..PlanSourceRef::default()
     };
-    let workspace_snapshot_id = plan_handoff_workspace_snapshot_id(root_config, workspace_root)
-        .map_err(|error| format!("failed to build plan workspace snapshot: {error}"))?;
-    let Some(entry) = plan_draft_created_entry(
+    let created_at_ms = current_unix_time_ms();
+    let workspace_snapshot_id = match plan_handoff_workspace_snapshot_id(
+        root_config,
+        workspace_root,
+    ) {
+        Ok(workspace_snapshot_id) => workspace_snapshot_id,
+        Err(error) => {
+            tracing::warn!(%error, "plan workspace snapshot unavailable; continuing without it");
+            None
+        }
+    };
+    let structured_entry = plan_draft_created_entry(
         final_text,
-        source,
-        current_unix_time_ms(),
-        workspace_snapshot_id,
+        source.clone(),
+        created_at_ms,
+        workspace_snapshot_id.clone(),
     )
-    .map_err(|error| format!("failed to build plan artifact: {error:#}"))?
-    else {
+    .map_err(|error| format!("failed to build structured plan artifact: {error:#}"))?;
+    let plain_entry = || {
+        plain_text_plan_draft_entry(final_text, source, created_at_ms, workspace_snapshot_id)
+            .map_err(|error| format!("failed to build plain-text plan artifact: {error:#}"))
+    };
+    let entry = match structured_entry {
+        Some(entry) => Some(entry),
+        None => plain_entry()?,
+    };
+    let Some(entry) = entry else {
         return Ok(None);
     };
     session
@@ -1297,7 +1312,7 @@ pub(in crate::runner) type RejectPlanRequest = sigil_runtime::RejectPlanRequest;
 
 /// RFC-0067 result of one typed Run command plus its first admission attempt.
 pub(in crate::runner) struct AdoptedPlanRun {
-    pub(in crate::runner) receipt: sigil_kernel::PlanRunReceiptV1,
+    pub(in crate::runner) receipt: sigil_runtime::PlanApprovalReceiptV2,
     pub(in crate::runner) admission: sigil_kernel::TaskAdmissionOutcomeV1,
     pub(in crate::runner) entry: sigil_kernel::TaskCreatedFromPlanEntry,
     pub(in crate::runner) entries: Vec<sigil_kernel::SessionLogEntry>,
@@ -1305,9 +1320,9 @@ pub(in crate::runner) struct AdoptedPlanRun {
 
 /// RFC-0067 single execution spine entry for every TUI Run surface (RFC-0067 6.5, 9).
 ///
-/// Constructs the typed command, performs the single atomic adoption, then runs the first
-/// admission attempt. The service never touches provider, workspace, registry or child processes
-/// during adoption; environment problems become a durable typed blocker.
+/// Constructs the typed command and atomically creates the approved Task's first-class direct
+/// execution admission. The runner starts immediately; no placeholder TaskPlan or model-authored
+/// materialization is part of the Run action.
 fn start_mode_str(mode: sigil_kernel::PlanTaskStartMode) -> &'static str {
     match mode {
         sigil_kernel::PlanTaskStartMode::CreatePaused => "paused",
@@ -1323,8 +1338,8 @@ fn permission_choice_str(permission: Option<sigil_kernel::PlanApprovalPermission
 }
 
 pub(in crate::runner) fn adopt_plan_run(
-    root_config: &RootConfig,
-    workspace_root: &Path,
+    _root_config: &RootConfig,
+    _workspace_root: &Path,
     session_log_path: &Path,
     session: &mut Session,
     plan_id: String,
@@ -1332,24 +1347,18 @@ pub(in crate::runner) fn adopt_plan_run(
     start_mode: sigil_kernel::PlanTaskStartMode,
     permission_grant: Option<sigil_kernel::PlanApprovalPermission>,
     source: sigil_kernel::PlanRunCommandSource,
-    tool_contracts: Option<Vec<sigil_kernel::ToolRuntimeContract>>,
+    _tool_contracts: Option<Vec<sigil_kernel::ToolRuntimeContract>>,
 ) -> std::result::Result<AdoptedPlanRun, String> {
     let parent_session_ref = session_ref_for_log_path(session_log_path)?;
     let plan_id = PlanId::new(plan_id).map_err(|error| format!("invalid plan id: {error}"))?;
-    let candidate_hash = session
-        .plan_artifact_projection()
-        .latest_candidate(&plan_id)
-        .map(|candidate| candidate.candidate_hash.clone())
-        .unwrap_or_default();
     let command = sigil_kernel::PlanRunCommandV1 {
         command_id: sigil_kernel::stable_event_uuid(
             "sigil-plan-run-command-v1",
             &format!(
-                "{}:{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}",
                 session.session_scope_id(),
                 plan_id.as_str(),
                 expected_plan_hash,
-                candidate_hash,
                 start_mode_str(start_mode),
                 permission_choice_str(permission_grant),
             ),
@@ -1357,7 +1366,8 @@ pub(in crate::runner) fn adopt_plan_run(
         session_id: session.session_scope_id().to_owned(),
         plan_id: plan_id.clone(),
         expected_plan_hash,
-        expected_candidate_hash: candidate_hash,
+        // RFC-0069 approval binds the reviewable Plan, not an advisory precompile cache.
+        expected_candidate_hash: String::new(),
         expected_durable_frontier: session.durable_frontier_sequence(),
         start_mode,
         permission: match permission_grant {
@@ -1370,36 +1380,17 @@ pub(in crate::runner) fn adopt_plan_run(
         },
         source,
     };
-    let receipt = sigil_runtime::PlanExecutionService::adopt(
+    let receipt = sigil_runtime::PlanExecutionService::approve(
         session,
         parent_session_ref,
         &command,
         current_unix_time_ms(),
     )
     .map_err(|rejection| sigil_runtime::plan_run_rejection_message(&rejection))?;
-    let candidate = session
-        .plan_artifact_projection()
-        .latest_candidate(&plan_id)
-        .cloned()
-        .ok_or_else(|| "the adopted candidate disappeared from the session".to_owned())?;
-    let probes = sigil_runtime::build_task_admission_probes(
-        root_config,
-        workspace_root,
-        tool_contracts,
-        session,
-        &receipt.task_id,
-        &candidate,
-    );
-    let admission = sigil_runtime::admit_adopted_task(
-        session,
-        root_config,
-        workspace_root,
-        &receipt.task_id,
-        &candidate,
-        &probes,
+    let admission = sigil_runtime::PlanExecutionService::direct_execution_outcome(
+        &receipt,
         current_unix_time_ms(),
-    )
-    .map_err(|error| format!("task admission failed: {error:#}"))?;
+    );
     let entry = session
         .plan_artifact_projection()
         .tasks_created
@@ -1577,10 +1568,11 @@ pub(in crate::runner) fn resolve_continue_task(
         requested_task_id.as_deref(),
     )
     .map_err(|error| format!("{error:#}"))?;
+    let needs_planning = task.needs_planning();
     Ok((
         task.task_id.clone(),
         task.task_id.as_str().to_owned(),
         task.objective,
-        task.needs_planning,
+        needs_planning,
     ))
 }

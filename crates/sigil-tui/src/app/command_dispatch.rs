@@ -25,12 +25,18 @@ impl AppState {
             ));
             return None;
         }
-        let Some(plan_version) = task.latest_plan_version else {
+        let request = if let Some(plan_version) = task.latest_plan_version {
+            sigil_kernel::TaskPauseRequest::new(task.task_id.clone(), plan_version)
+        } else if let Some(admission) = task.direct_execution_admission.as_ref() {
+            sigil_kernel::TaskPauseRequest::direct(
+                task.task_id.clone(),
+                admission.admission_id.clone(),
+            )
+        } else {
             self.last_notice =
-                Some("task planning is still in progress; use Ctrl-C to cancel".to_owned());
+                Some("task execution has not been admitted yet; use Ctrl-C to cancel".to_owned());
             return None;
         };
-        let request = sigil_kernel::TaskPauseRequest::new(task.task_id.clone(), plan_version);
         self.last_notice = Some(format!("pausing task {}", task.task_id.as_str()));
         self.push_timeline(
             super::TimelineRole::Notice,

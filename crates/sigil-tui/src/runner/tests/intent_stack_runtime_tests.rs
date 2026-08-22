@@ -4,11 +4,10 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use futures::{Stream, stream};
 use sigil_kernel::{
-    Agent, CompletionRequest, ControlEntry, IntegrationPromotionStatus, IntentApplicationState,
-    IntentDigest, IntentDropRequestV1, IntentOperationId, IntentOperationResolution,
+    Agent, CompletionRequest, ControlEntry, IntentDigest, IntentDropRequestV1, IntentOperationId,
     IntentStackVersion, JsonlSessionStore, MessageRole, PermissionMode, PlanApprovalPermission,
     PlanArtifactProjection, PlanTaskStartMode, Provider, ProviderCapabilities, ProviderChunk,
-    PublicIntentStackStateV1, ReasoningEffort, ReasoningStreamSupport, RunEvent, SessionLogEntry,
+    PublicIntentStackStateV1, ReasoningEffort, ReasoningStreamSupport, SessionLogEntry,
     TaskRunStatus, ToolCall, ToolRegistry, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     stable_workspace_id,
 };
@@ -16,7 +15,7 @@ use sigil_runtime::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
 use tempfile::tempdir;
 
 use super::{
-    super::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerMessage},
+    super::{WorkerCommand, WorkerMessage},
     common::{
         PlannedProvider, StreamPlan, routed_unauthenticated_test_root_config, spawn_test_worker,
         spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
@@ -157,6 +156,16 @@ impl Provider for IntentDogfoodRoleProvider {
                 ProviderChunk::Done,
             ]));
         }
+        if latest_user_prompt
+            .contains("Execute the following complete, user-approved Task objective now")
+        {
+            return Ok(chunks(vec![
+                ProviderChunk::TextDelta(
+                    "Direct executor received the complete approved Plan.".to_owned(),
+                ),
+                ProviderChunk::Done,
+            ]));
+        }
 
         let mapping = [
             (
@@ -223,8 +232,7 @@ fn chunks(values: Vec<ProviderChunk>) -> Pin<Box<dyn Stream<Item = Result<Provid
 }
 
 #[test]
-fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_loop() -> Result<()>
-{
+fn approved_plan_intent_proposals_do_not_become_execution_authority() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().join("workspace");
     std::fs::create_dir(&workspace_root)?;
@@ -386,61 +394,27 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
     else {
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
-    // RFC-0067: the accepted plan is derived from the single adoption authority.
+    // Model-authored intent/DAG metadata remains Plan content, not Task execution authority.
     let task_projection = sigil_kernel::TaskStateProjection::from_entries(&entries);
-    let accepted_plan = task_projection
+    let task = task_projection
         .tasks
         .get(&created_task.task_id)
-        .and_then(|task| task.plans.get(&1))
-        .context("accepted task plan should be durable")?;
-    assert_eq!(accepted_plan.steps.len(), 3);
-    assert!(
-        accepted_plan
-            .steps
-            .iter()
-            .all(|step| step.intent_refs.len() == 1)
-    );
+        .context("direct Task execution authority should be durable")?;
+    assert!(task.plans.is_empty());
+    assert!(task.latest_plan_version.is_none());
+    assert!(task.direct_execution_admission.is_some());
 
     let _ = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
         matches!(message, WorkerMessage::TaskRunStarted { .. })
     })?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let mut unexpected_approvals = Vec::new();
-    let finished = loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(anyhow!("timed out waiting for Intent dogfood task"));
-        }
-        let message = worker.recv_with_timeout(remaining)?;
-        match &message {
-            WorkerMessage::Event(event) => {
-                if let RunEvent::ToolApprovalRequested {
-                    approval_identity,
-                    call,
-                    subjects,
-                    operation,
-                    ..
-                } = event.as_ref()
-                {
-                    unexpected_approvals.push(format!("{}:{operation:?}:{subjects:?}", call.id));
-                    worker.send(WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
-                        format!("intent-dogfood-{}", approval_identity.approval_request_id),
-                        "sigil-tui-test",
-                        session_log_path.display().to_string(),
-                        WorkerApprovalCommand::Decision {
-                            call_id: call.id.clone(),
-                            approval_request_id: approval_identity.approval_request_id.clone(),
-                            approved: true,
-                        },
-                    )))?;
-                }
-            }
-            WorkerMessage::TaskRunFinished { .. } | WorkerMessage::RunFailed(_) => break message,
-            _ => {}
-        }
-    };
+    let finished = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
+        matches!(
+            message,
+            WorkerMessage::TaskRunFinished { .. } | WorkerMessage::RunFailed(_)
+        )
+    })?;
     if let WorkerMessage::RunFailed(error) = finished {
-        return Err(anyhow!("Intent dogfood task failed: {error}"));
+        return Err(anyhow!("direct Plan task failed: {error}"));
     }
     let WorkerMessage::TaskRunFinished {
         status, entries, ..
@@ -448,211 +422,32 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
     else {
         unreachable!("terminal task message checked above");
     };
-    if status != TaskRunStatus::Paused {
-        return Err(anyhow!(
-            "Intent dogfood task ended as {status:?}; durable entries: {entries:#?}"
-        ));
-    }
-    if !unexpected_approvals.is_empty() {
-        return Err(anyhow!(
-            "accepted plan workspace grant did not cover child writes: {unexpected_approvals:#?}"
-        ));
-    }
-    let review = sigil_kernel::task_integration_review_product(&entries).ok_or_else(|| {
-        let relevant = entries
-            .iter()
-            .filter_map(|entry| {
-                let debug = format!("{entry:?}");
-                (debug.contains("Integration") || debug.contains("TaskRun")).then_some(debug)
-            })
-            .collect::<Vec<_>>();
-        anyhow!(
-            "parallel changesets should produce an exact integration review; relevant entries: {relevant:#?}"
-        )
-    })?;
-    assert!(
-        review.preview.intent_binding.is_some(),
-        "promotion preview must bind the accepted task intents"
-    );
-
-    worker.send(WorkerCommand::AcceptTaskIntegration {
-        request: review.request.clone(),
-    })?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let mut integration_notices = Vec::new();
-    let accepted = loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(anyhow!("timed out waiting for Intent dogfood promotion"));
-        }
-        let message = worker.recv_with_timeout(remaining)?;
-        match message {
-            WorkerMessage::Notice(notice) => integration_notices.push(notice),
-            WorkerMessage::Event(event) => {
-                if let RunEvent::Notice(notice) = event.as_ref() {
-                    integration_notices.push(notice.clone());
-                }
-            }
-            WorkerMessage::TaskIntegrationAccepted { .. }
-            | WorkerMessage::TaskIntegrationAcceptanceFailed { .. } => break message,
-            _ => {}
-        }
-    };
-    let WorkerMessage::TaskIntegrationAccepted {
-        promotion_status,
-        entries,
-        ..
-    } = accepted
-    else {
-        let WorkerMessage::TaskIntegrationAcceptanceFailed { error, .. } = accepted else {
-            unreachable!("terminal integration message checked above");
-        };
-        return Err(anyhow!("Intent dogfood promotion failed: {error}"));
-    };
-    assert_eq!(promotion_status, IntegrationPromotionStatus::Promoted);
+    assert_eq!(status, TaskRunStatus::Completed);
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
+    )));
+    assert!(matches!(
+        sigil_kernel::Session::load_from_store(
+            "planned",
+            "planned-model",
+            JsonlSessionStore::new(&session_log_path)?,
+        )?
+        .public_intent_stack_state_for_workspace(&workspace_root)?,
+        PublicIntentStackStateV1::NotCreated { .. }
+    ));
     assert_eq!(
         std::fs::read_to_string(workspace_root.join("retry.txt"))?,
-        "retry policy: bounded exponential backoff\n"
+        "retry policy: none\n"
     );
-    assert_eq!(
-        std::fs::read_to_string(workspace_root.join("telemetry.txt"))?,
-        "telemetry: retry attempts and terminal outcome\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(workspace_root.join("operations.md"))?,
-        "# Operations\n\nRetry alerts and rollback guidance.\n"
-    );
-    assert!(
-        !entries.is_empty(),
-        "promotion should return the reloaded durable session"
-    );
-    let applied_changesets = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::ChangeSetApplied(result)) => {
-                Some((result.id.as_str(), result.status))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        applied_changesets.len(),
-        3,
-        "promotion should record one applied result per Intent-bound ChangeSet: {applied_changesets:?}"
-    );
-    worker.shutdown()?;
-
-    let worker = spawn_test_worker(
-        root_config,
-        session_log_path.clone(),
-        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
-        workspace_root.clone(),
-    )?;
-    worker.send(WorkerCommand::LoadIntentStack { request_id: 10 })?;
-    let loaded = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
-        matches!(
-            message,
-            WorkerMessage::IntentStackLoaded { request_id: 10, .. }
-        )
-    })?;
-    let WorkerMessage::IntentStackLoaded {
-        stack_state: PublicIntentStackStateV1::Available { stack, .. },
-        ..
-    } = loaded
-    else {
-        return Err(anyhow!("restarted worker should reload the Intent Stack"));
-    };
-    assert_eq!(stack.intents.len(), 3);
-    assert!(
-        stack
-            .intents
-            .iter()
-            .all(|intent| intent.application_state == IntentApplicationState::Applied),
-        "promoted Intent layers were not all applied: {:?}; notices: {integration_notices:?}",
-        stack
-            .intents
-            .iter()
-            .map(|intent| (
-                intent.title.as_str(),
-                intent.application_state,
-                intent.exclusive_artifact_count,
-                intent.shared_artifact_count,
-                intent.drifted_artifact_count,
-            ))
-            .collect::<Vec<_>>()
-    );
-    let telemetry = stack
-        .intents
-        .iter()
-        .find(|intent| intent.title == "Retry telemetry")
-        .context("telemetry intent should be present")?;
-    let telemetry_ref = telemetry.intent_ref.clone();
-    let retry_ref = stack
-        .intents
-        .iter()
-        .find(|intent| intent.title == "Retry behavior")
-        .context("retry intent should be present")?
-        .intent_ref
-        .clone();
-
-    worker.send(WorkerCommand::PreviewIntentDrop {
-        request_id: 11,
-        intent_ref: telemetry_ref.clone(),
-    })?;
-    let previewed = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
-        matches!(
-            message,
-            WorkerMessage::IntentDropPreviewed { request_id: 11, .. }
-        )
-    })?;
-    let WorkerMessage::IntentDropPreviewed { preview, .. } = previewed else {
-        unreachable!("recv_until only returns IntentDropPreviewed");
-    };
-    assert!(preview.target_is_leaf);
-    assert_eq!(preview.target_intents, vec![telemetry_ref]);
-    worker.send(WorkerCommand::ExecuteIntentDrop {
-        request_id: 12,
-        request: IntentDropRequestV1 {
-            operation_id: preview.operation_id.clone(),
-            stack_version: preview.stack_version,
-            preview_digest: preview.preview_digest.clone(),
-        },
-    })?;
-    let dropped = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
-        matches!(
-            message,
-            WorkerMessage::IntentDropCompleted { request_id: 12, .. }
-                | WorkerMessage::IntentStackOperationFailed { request_id: 12, .. }
-        )
-    })?;
-    let WorkerMessage::IntentDropCompleted {
-        execution,
-        stack_state: PublicIntentStackStateV1::Available { stack, .. },
-        ..
-    } = dropped
-    else {
-        let WorkerMessage::IntentStackOperationFailed { error, .. } = dropped else {
-            unreachable!("terminal Intent drop message checked above");
-        };
-        return Err(anyhow!("Intent dogfood drop failed: {error}"));
-    };
-    assert_eq!(execution.resolution, IntentOperationResolution::Committed);
     assert_eq!(
         std::fs::read_to_string(workspace_root.join("telemetry.txt"))?,
         "telemetry: none\n"
     );
     assert_eq!(
-        std::fs::read_to_string(workspace_root.join("retry.txt"))?,
-        "retry policy: bounded exponential backoff\n"
+        std::fs::read_to_string(workspace_root.join("operations.md"))?,
+        "# Operations\n\nNone.\n"
     );
-    assert!(stack.intents.iter().any(|intent| {
-        intent.intent_ref == retry_ref
-            && intent.application_state == IntentApplicationState::Applied
-    }));
-    assert!(stack.intents.iter().any(|intent| {
-        intent.intent_ref == execution.preview.target_intents[0]
-            && intent.application_state == IntentApplicationState::Dropped
-    }));
     worker.shutdown()
 }
 

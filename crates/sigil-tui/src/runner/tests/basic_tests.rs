@@ -7,15 +7,16 @@ use sigil_kernel::{
     ConversationInputTarget, ImageAttachment, ImageMimeType, JsonlSessionStore, McpServerConfig,
     McpServerStartup, PlanApprovalPermission, PlanArtifactProjection, PlanDecision,
     PlanTaskStartMode, ProviderChunk, ReasoningEffort, RunEvent, SessionLogEntry, SkillDescriptor,
-    SkillRunMode, SkillSource, SkillTrustState, TaskRunStatus, ToolCall, ToolErrorKind,
-    ToolExecutionStatus, ToolRegistry, ToolResultStatus,
+    SkillRunMode, SkillSource, SkillTrustState, TaskId, TaskRunStatus, TaskStepId,
+    TaskVerificationRerunRequest, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolRegistry,
+    ToolResultStatus,
 };
 use tempfile::tempdir;
 
 use super::{
     super::{
-        McpActivationStatus, WorkerCommand, WorkerMessage, spawn_agent_worker,
-        worker_loop::skill_child_agent_role,
+        LocalOperationKind, LocalOperationStatus, McpActivationStatus, WorkerCommand,
+        WorkerMessage, spawn_agent_worker, worker_loop::skill_child_agent_role,
     },
     common::{
         PlannedProvider, StreamPlan, WriteTool, planned_role_provider_builder,
@@ -427,53 +428,54 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     assert_eq!(start_mode, PlanTaskStartMode::CreatePaused);
     assert_eq!(entry.plan_id, draft.plan_id);
     assert_eq!(entry.plan_hash, draft.plan_hash);
-    assert_eq!(entry.task_plan_version, 1);
+    // Approval atomically persists the stable Task and first-class direct execution authority.
+    assert_eq!(entry.task_plan_version, 0);
     assert!(entry.stale_reason.is_none());
-    assert_eq!(entry.step_mapping.len(), 1);
+    assert!(entry.step_mapping.is_empty());
     let created_task_id = entry.task_id.clone();
-    // RFC-0067: the single adoption event is the only authority; every Task/plan view derives
-    // from it, so the old multi-record promotion artifacts must not exist.
-    let adoption = entries
-        .iter()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(adoption)) => {
-                Some(adoption.as_ref())
-            }
-            _ => None,
-        })
-        .expect("run must append the single adoption authority");
-    assert_eq!(adoption.task_id, created_task_id);
-    assert_eq!(adoption.start_mode, PlanTaskStartMode::CreatePaused);
-    assert_eq!(
-        adoption.initial_phase,
-        sigil_kernel::TaskExecutionPhaseV1::Preparing
-    );
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
+    )));
     let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
     let task = tasks
         .tasks
-        .get(&adoption.task_id)
-        .expect("adopted task must project");
+        .get(&created_task_id)
+        .expect("direct task must project");
     assert_eq!(task.status, TaskRunStatus::Paused);
     assert!(
         task.objective
-            .contains("Execute the following user-approved structured plan")
+            .contains("Execute the following user-approved Plan")
     );
-    assert_eq!(task.latest_plan_version, Some(1));
+    assert!(task.latest_plan_version.is_none());
+    assert!(task.plans.is_empty());
+    assert!(task.direct_execution_admission.is_some());
     let artifacts = PlanArtifactProjection::from_entries(&entries);
     assert_eq!(
         artifacts
             .latest_decision(&draft.plan_id)
-            .expect("adoption must derive the accepted decision")
+            .expect("direct execution must derive the accepted decision")
             .decision,
         PlanDecision::Accepted
     );
     assert!(artifacts.task_created_for_plan(&draft.plan_id));
-    assert!(!entries.iter().any(|entry| matches!(
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskRun(_))))
+    );
+    assert!(entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::TaskRun(_))
-            | SessionLogEntry::Control(ControlEntry::TaskPlan(_))
-            | SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(_))
-            | SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
+        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(_))
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))
+            if admission.task_id == created_task_id
     )));
     assert!(!entries.iter().any(|entry| matches!(
         entry,
@@ -545,7 +547,7 @@ fn reject_plan_command_appends_rejected_decision_and_clears_pending_projection()
 }
 
 #[test]
-fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_plan() -> Result<()> {
+fn create_task_from_plan_run_now_starts_direct_executor_without_model_dag() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -606,14 +608,18 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
     assert_eq!(start_mode, PlanTaskStartMode::CreateAndRun);
-    assert_eq!(entry.task_plan_version, 1);
-    assert_eq!(entry.step_mapping.len(), 1);
-    assert!(entries.iter().any(|entry| matches!(
+    assert_eq!(entry.task_plan_version, 0);
+    assert!(entry.step_mapping.is_empty());
+    assert!(entry.stale_reason.is_none());
+    assert!(!entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(_))
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
     )));
     let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
-    assert!(tasks.tasks.contains_key(&entry.task_id));
+    let task = tasks.tasks.get(&entry.task_id).expect("direct task");
+    assert!(task.latest_plan_version.is_none());
+    assert!(task.plans.is_empty());
+    assert!(task.direct_execution_admission.is_some());
 
     let started = worker.recv_until(|message| {
         matches!(message, WorkerMessage::TaskRunStarted { .. })
@@ -629,7 +635,7 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
             blocker.summary
         );
     };
-    assert!(objective.contains("Execute the following user-approved structured plan"));
+    assert!(objective.contains("Execute the following user-approved Plan"));
     assert!(objective.contains("Update the approved README typo"));
 
     worker.shutdown()?;
@@ -637,7 +643,7 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
 }
 
 #[test]
-fn create_task_from_plan_after_workspace_change_adopts_then_blocks() -> Result<()> {
+fn create_task_from_plan_after_workspace_change_starts_direct_execution() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     fs::write(workspace_root.join("README.md"), "before\n")?;
@@ -675,7 +681,8 @@ fn create_task_from_plan_after_workspace_change_adopts_then_blocks() -> Result<(
         .clone();
     assert!(draft.workspace_snapshot_id.is_some());
 
-    // RFC-0067 14.2: workspace drift never prevents Task identity; it becomes a typed blocker.
+    // The Plan remains the approved instruction after workspace drift; the executor observes the
+    // live workspace and adapts instead of a stale compile snapshot blocking Run.
     fs::write(workspace_root.join("README.md"), "after\n")?;
     worker.send(WorkerCommand::CreateTaskFromPlan {
         plan_id: draft.plan_id.as_str().to_owned(),
@@ -688,24 +695,17 @@ fn create_task_from_plan_after_workspace_change_adopts_then_blocks() -> Result<(
     let WorkerMessage::TaskCreatedFromPlan { entry, entries, .. } = created else {
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
-    assert!(
-        entry.stale_reason.is_none(),
-        "adoption must not depend on current workspace state"
-    );
-    let blocked = worker
-        .recv_until(|message| matches!(message, WorkerMessage::TaskAdmissionBlocked { .. }))?;
-    let WorkerMessage::TaskAdmissionBlocked { blocker, .. } = blocked else {
-        unreachable!("recv_until only returns TaskAdmissionBlocked");
-    };
-    assert_eq!(
-        blocker.reason_code,
-        sigil_kernel::TaskBlockerReasonCodeV1::WorkspaceChanged
-    );
-    assert!(blocker.retryable);
+    assert_eq!(entry.task_plan_version, 0);
+    assert!(entry.stale_reason.is_none());
+    let started = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::TaskRunStarted { .. })
+            || matches!(message, WorkerMessage::TaskAdmissionBlocked { .. })
+    })?;
+    assert!(matches!(started, WorkerMessage::TaskRunStarted { .. }));
     let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
     assert_eq!(
         tasks.execution_phase(&entry.task_id),
-        Some(sigil_kernel::TaskExecutionPhaseV1::Blocked)
+        Some(sigil_kernel::TaskExecutionPhaseV1::Ready)
     );
 
     worker.shutdown()?;
@@ -757,32 +757,22 @@ fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
 
-    let adoption = entries
-        .iter()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(adoption)) => {
-                Some(adoption.as_ref())
-            }
-            _ => None,
-        })
-        .expect("run must append the single adoption authority");
-    assert_eq!(adoption.plan_id, draft.plan_id);
-    assert_eq!(adoption.plan_hash, draft.plan_hash);
-    assert_eq!(adoption.task_id, entry.task_id);
-    assert_eq!(
-        adoption.permission_grant,
-        Some(PlanApprovalPermission::WorkspaceEdits)
-    );
-    let scope = adoption
-        .adopted_candidate
-        .permission_scope_candidate
-        .as_ref()
-        .expect("candidate must prove its permission scope");
-    assert_eq!(scope.workspace_paths, vec!["README.md".to_owned()]);
     assert!(!entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(_))
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
     )));
+    let grant = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => Some(grant),
+            _ => None,
+        })
+        .expect("direct approval must persist the scoped Task grant");
+    assert_eq!(grant.plan_id, draft.plan_id);
+    assert_eq!(grant.plan_hash, draft.plan_hash);
+    assert_eq!(grant.task_id, entry.task_id);
+    assert_eq!(grant.permission, PlanApprovalPermission::WorkspaceEdits);
+    assert_eq!(grant.scope.workspace_paths, vec!["README.md".to_owned()]);
 
     worker.shutdown()?;
     Ok(())
@@ -1226,12 +1216,16 @@ fn activate_lazy_mcp_is_rejected_while_run_is_active() -> Result<()> {
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
     worker.send(WorkerCommand::ActivateLazyMcp { server_name: None })?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let outcome =
+        worker.recv_until(|message| matches!(message, WorkerMessage::LocalOperationOutcome(_)))?;
 
     assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error)
-            if error == "cannot activate MCP while the agent is running"
+        outcome,
+        WorkerMessage::LocalOperationOutcome(ref outcome)
+            if outcome.kind == LocalOperationKind::McpActivation
+                && outcome.status == LocalOperationStatus::Rejected
+                && !outcome.retryable
+                && outcome.safe_summary == "cannot activate MCP while the agent is running"
     ));
 
     worker.shutdown()?;
@@ -1366,12 +1360,58 @@ fn check_changed_files_diagnostics_is_rejected_while_run_is_active() -> Result<(
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
     worker.send(WorkerCommand::CheckChangedFilesDiagnostics)?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let outcome =
+        worker.recv_until(|message| matches!(message, WorkerMessage::LocalOperationOutcome(_)))?;
 
     assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error)
-            if error == "cannot check changes while the agent is running"
+        outcome,
+        WorkerMessage::LocalOperationOutcome(ref outcome)
+            if outcome.kind == LocalOperationKind::ChangedFilesDiagnostics
+                && outcome.status == LocalOperationStatus::Rejected
+                && !outcome.retryable
+                && outcome.safe_summary == "cannot check changes while the agent is running"
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn task_verification_rerun_is_rejected_while_run_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "hold".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    worker.send(WorkerCommand::RerunTaskVerification {
+        request: TaskVerificationRerunRequest::new(
+            TaskId::new("task_1")?,
+            1,
+            TaskStepId::new("step_1")?,
+            "test-check".to_owned(),
+            "test-check-hash".to_owned(),
+            "test-policy-hash".to_owned(),
+            "test-snapshot".to_owned(),
+        ),
+    })?;
+    let outcome =
+        worker.recv_until(|message| matches!(message, WorkerMessage::LocalOperationOutcome(_)))?;
+
+    assert!(matches!(
+        outcome,
+        WorkerMessage::LocalOperationOutcome(ref outcome)
+            if outcome.kind == LocalOperationKind::TaskVerificationRerun
+                && outcome.status == LocalOperationStatus::Rejected
+                && !outcome.retryable
+                && outcome.safe_summary == "wait for the active run before running verification"
     ));
 
     worker.shutdown()?;
@@ -1720,7 +1760,9 @@ fn uncertain_failed_queued_run_becomes_stale_without_replay() -> Result<()> {
             ))
     ));
     let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
-    assert!(matches!(failure, WorkerMessage::RunFailed(ref error) if error == "queued failure"));
+    assert!(
+        matches!(failure, WorkerMessage::RunFailed(ref error) if error.contains("provider-turn recovery"))
+    );
 
     let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
@@ -1751,7 +1793,10 @@ fn send_queued_input_now_promotes_follow_up_without_interrupting_the_active_run(
     let (provider, stream_started) = PlannedProvider::new_with_stream_start_signal(vec![
         StreamPlan::GatedChunks {
             gate: Arc::clone(&gate),
-            chunks: vec![ProviderChunk::TextDelta("first answer".to_owned())],
+            chunks: vec![
+                ProviderChunk::TextDelta("first answer".to_owned()),
+                ProviderChunk::Done,
+            ],
         },
         StreamPlan::Chunks(vec![
             ProviderChunk::TextDelta("urgent done".to_owned()),

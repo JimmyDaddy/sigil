@@ -14,6 +14,9 @@ pub(in crate::ui::tool_card) fn render_bash_preview_with_palette(
     accent: Color,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    if bash_running_without_output_preview(summary) {
+        return Vec::new();
+    }
     if summary.preview_lines.is_empty() {
         return vec![timeline_content_line(
             accent,
@@ -30,6 +33,20 @@ pub(in crate::ui::tool_card) fn render_bash_preview_with_palette(
         palette,
     ));
     lines
+}
+
+pub(in crate::ui::tool_card) fn bash_running_without_output_preview(
+    summary: &ToolCardRender,
+) -> bool {
+    status_kind_from_label(&summary.status) == StatusKind::Running
+        && summary.metadata.returned_bytes.unwrap_or(0) == 0
+        && summary.metadata.returned_lines.unwrap_or(0) == 0
+}
+
+pub(in crate::ui::tool_card) fn bash_running_without_observed_output(
+    summary: &ToolCardRender,
+) -> bool {
+    bash_running_without_output_preview(summary) && summary.metadata.bytes.unwrap_or(0) == 0
 }
 
 pub(in crate::ui::tool_card) fn render_bash_command_section_with_palette(

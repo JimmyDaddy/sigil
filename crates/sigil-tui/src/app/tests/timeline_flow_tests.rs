@@ -824,6 +824,36 @@ fn batched_streaming_text_deltas_rerender_once_after_drain() -> Result<()> {
 }
 
 #[test]
+fn partial_provider_output_discard_replaces_tui_live_text_and_reasoning() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::TextDelta("discarded visible text".to_owned()))?;
+    app.handle(RunEvent::ReasoningDelta(
+        "discarded visible reasoning".to_owned(),
+    ))?;
+    assert!(
+        app.timeline_plain_lines()
+            .join("\n")
+            .contains("discarded visible text")
+    );
+
+    app.handle(RunEvent::ProviderTurnPartialOutputDiscarded(
+        sigil_kernel::PublicProviderTurnPartialOutputDiscardedViewV1 {
+            text_discarded: true,
+            reasoning_discarded: true,
+            tool_request_discarded: false,
+        },
+    ))?;
+    app.handle(RunEvent::TextDelta("replacement answer".to_owned()))?;
+
+    let rendered = app.timeline_plain_lines().join("\n");
+    assert!(!rendered.contains("discarded visible text"));
+    assert!(!rendered.contains("discarded visible reasoning"));
+    assert!(rendered.contains("Discarded incomplete provider text before recovery"));
+    assert!(rendered.contains("replacement answer"));
+    Ok(())
+}
+
+#[test]
 fn streaming_assistant_defers_code_highlight_until_finished() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let plain_code_style = Style::default()

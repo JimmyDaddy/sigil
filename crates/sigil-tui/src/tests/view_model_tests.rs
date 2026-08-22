@@ -702,6 +702,7 @@ fn ui_view_model_hides_compact_task_lines_when_task_strip_is_available() -> anyh
 fn task_strip_view_model_preserves_task_strip_rows() {
     let view_model =
         TaskStripViewModel::from_task_strip_view(crate::app::task_sidebar::TaskStripView {
+            task_id: "task_1".to_owned(),
             verification: None,
             title: "Task task_1".to_owned(),
             detail: "running · v1 · 1/2 done".to_owned(),
@@ -1230,7 +1231,7 @@ fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
             .info_rail
             .controls
             .iter()
-            .any(|hint| hint == "Ctrl-T: thinking view")
+            .any(|hint| hint == "Ctrl-T: details view")
     );
     Ok(())
 }

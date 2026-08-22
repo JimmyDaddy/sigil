@@ -1,7 +1,7 @@
 use sigil_kernel::RunEvent;
 
 use super::{
-    run_event_helpers::notice_is_timeline_worthy,
+    run_event_helpers::{notice_is_timeline_worthy, provider_turn_recovery_label},
     tool_card_lifecycle::{attach_progress_execution_id, tool_progress_result},
 };
 use crate::app::{
@@ -137,6 +137,15 @@ impl AppState {
                 } else {
                     false
                 }
+            }
+            RunEvent::ProviderTurnRecovery(view) => self
+                .push_live_child_entry(TimelineRole::Notice, provider_turn_recovery_label(&view)),
+            RunEvent::ProviderTurnPartialOutputDiscarded(_) => {
+                self.reload_active_agent_child_transcript();
+                self.push_live_child_entry(
+                    TimelineRole::Notice,
+                    "Discarded incomplete provider response before recovery".to_owned(),
+                )
             }
             RunEvent::ToolApprovalRequested { call, .. } => self.push_live_child_entry(
                 TimelineRole::Notice,

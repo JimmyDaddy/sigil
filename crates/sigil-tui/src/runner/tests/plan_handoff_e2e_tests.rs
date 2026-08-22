@@ -20,7 +20,7 @@ use tempfile::tempdir;
 use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
-        PlannedProvider, StreamPlan, planned_role_provider_builder,
+        PlannedProvider, StreamPlan, failing_role_provider_builder, planned_role_provider_builder,
         planned_role_provider_builder_with_stream_start_signal, routed_test_root_config,
         routed_unauthenticated_test_root_config, spawn_test_worker,
         spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
@@ -1316,7 +1316,7 @@ fn run_next_resumes_paused_task_guidance_after_its_initial_wake_was_consumed() -
 }
 
 #[test]
-fn auto_handoff_preflight_failure_persists_and_projects_failed_task_state() -> Result<()> {
+fn auto_handoff_preflight_failure_pauses_task_with_recovery_state() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -1341,11 +1341,12 @@ fn auto_handoff_preflight_failure_persists_and_projects_failed_task_state() -> R
         }),
         ProviderChunk::Done,
     ])]);
-    let worker = spawn_test_worker(
+    let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
         Agent::new(provider, ToolRegistry::new()),
         workspace_root,
+        failing_role_provider_builder(),
     )?;
 
     worker.send(WorkerCommand::SubmitPrompt {
@@ -1361,13 +1362,12 @@ fn auto_handoff_preflight_failure_persists_and_projects_failed_task_state() -> R
     else {
         unreachable!("recv_until only returns TaskRunFinished");
     };
-    assert_eq!(status, TaskRunStatus::Failed);
+    assert_eq!(status, TaskRunStatus::Paused);
     assert!(entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::TaskRun(run))
-            if run.status == TaskRunStatus::Failed
+            if run.status == TaskRunStatus::Paused
     )));
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
     worker.shutdown()?;
     Ok(())
 }
@@ -1822,7 +1822,7 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
 }
 
 #[test]
-fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()> {
+fn plan_handoff_run_now_uses_host_direct_execution_without_replanning() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -1946,27 +1946,28 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
     assert_eq!(start_mode, PlanTaskStartMode::CreateAndRun);
     assert_eq!(created_task.plan_id, draft.plan_id);
     assert_eq!(created_task.plan_hash, draft.plan_hash);
-    assert_eq!(created_task.task_plan_version, 1);
-    assert_eq!(created_task.step_mapping.len(), 2);
-    // RFC-0067: the single adoption authority carries the accepted plan; old multi-record
-    // promotion artifacts no longer exist.
-    assert!(entries.iter().any(|entry| matches!(
+    assert_eq!(created_task.task_plan_version, 0);
+    assert!(created_task.step_mapping.is_empty());
+    assert!(created_task.stale_reason.is_none());
+    assert!(!entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(_))
+        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
     )));
     let projection = sigil_kernel::TaskStateProjection::from_entries(&entries);
-    let adopted_plan = projection
+    let adopted_task = projection
         .tasks
         .get(&created_task.task_id)
-        .and_then(|task| task.plans.get(&1))
-        .expect("approved plan should be promoted to an executable task plan");
-    assert_eq!(adopted_plan.status, TaskPlanStatus::Accepted);
-    assert_eq!(adopted_plan.steps.len(), 2);
+        .expect("approved plan should have direct execution authority");
+    assert!(adopted_task.plans.is_empty());
+    assert!(adopted_task.latest_plan_version.is_none());
+    assert!(adopted_task.direct_execution_admission.is_some());
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
+    )));
     assert!(!entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(_))
-            | SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_))
-            | SessionLogEntry::Control(ControlEntry::TaskPlan(_))
     )));
 
     let started = worker
@@ -1975,7 +1976,7 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
     assert!(matches!(
         started,
         WorkerMessage::TaskRunStarted { ref objective, .. }
-            if objective.contains("Execute the following user-approved structured plan")
+            if objective.contains("Execute the following user-approved Plan")
                 && objective.contains("Inspect README.md")
     ));
 
@@ -2009,32 +2010,21 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
     assert_eq!(status, TaskRunStatus::Completed);
 
     let task_projection = sigil_kernel::TaskStateProjection::from_entries(&entries);
-    let task_plan = task_projection
+    let task = task_projection
         .tasks
         .get(&created_task.task_id)
-        .and_then(|task| task.plans.get(&1))
-        .expect("approved plan should be promoted to an executable task plan");
-    assert_eq!(task_plan.status, TaskPlanStatus::Accepted);
-    assert_eq!(task_plan.steps.len(), 2);
-    let step = &task_plan.steps[0];
-    assert_eq!(step.title, "Inspect README.md");
-    assert_eq!(step.role, AgentRole::Executor);
-    assert_eq!(step.effective_mode(), TaskStepMode::Read);
-    assert_eq!(
-        step.effective_isolation(),
-        TaskIsolationMode::SharedReadOnly
+        .expect("approved plan should retain direct execution authority");
+    assert!(task.plans.is_empty());
+    assert!(task.latest_plan_version.is_none());
+    assert!(task.direct_execution_admission.is_some());
+    assert!(task.direct_execution_attempts.values().any(|attempt| {
+        attempt.status == sigil_kernel::TaskParticipantAttemptStatus::Completed
+    }));
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskStep(_))))
     );
-    assert_eq!(
-        task_plan.steps[1].depends_on,
-        vec![task_plan.steps[0].step_id.clone()]
-    );
-
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskStep(step))
-            if step.step_id.as_str() == "inspect-approved-plan"
-                && step.status == TaskStepStatus::Completed
-    )));
     assert!(!entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(attempt))
@@ -2043,10 +2033,8 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
     let plan_artifacts = sigil_kernel::PlanArtifactProjection::from_entries(&entries);
     assert!(
         plan_artifacts
-            .adoptions
-            .values()
-            .flatten()
-            .any(|adoption| adoption.task_id == created_task.task_id)
+            .materialization_for_task(&created_task.task_id)
+            .is_none()
     );
     assert!(!entries.iter().any(|entry| matches!(
         entry,
@@ -2059,6 +2047,167 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
             })
             .is_err(),
         "a naturally completed task must not emit a trailing RunFailed"
+    );
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn approved_plan_direct_execution_can_pause_and_resume_without_a_task_plan() -> Result<()> {
+    let timeout = Duration::from_secs(20);
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-plan-direct-pause-resume.jsonl");
+    let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
+    let draft_args = r#"{
+      "schema_version": 2,
+      "summary": "Pause and resume direct execution",
+      "steps": [{
+        "step_id": "inspect",
+        "title": "Inspect the approved objective",
+        "role": "executor",
+        "depends_on": [],
+        "mode": "read",
+        "isolation": "shared_read_only",
+        "target_paths": []
+      }],
+      "target_paths": [],
+      "suggested_checks": []
+    }"#;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(submit_plan_draft_chunks(
+        "direct-pause-plan",
+        draft_args,
+    ))]);
+    let (role_provider_builder, role_stream_started_rx) =
+        planned_role_provider_builder_with_stream_start_signal(vec![
+            StreamPlan::Pending,
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("resumed direct execution completed".to_owned()),
+                ProviderChunk::Done,
+            ]),
+        ]);
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, task_workspace_read_registry()),
+        workspace_root,
+        role_provider_builder,
+    )?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "plan a pausable direct execution".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker
+        .recv_until_with_timeout(timeout, |message| {
+            matches!(message, WorkerMessage::PlanRunFinished { .. })
+        })
+        .context("waiting for direct pause plan review")?;
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    let draft = PlanArtifactProjection::from_entries(&entries)
+        .latest_pending_plan()
+        .context("direct pause test plan should be reviewable")?
+        .clone();
+
+    worker.send(WorkerCommand::CreateTaskFromPlan {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash,
+        start_mode: PlanTaskStartMode::CreateAndRun,
+        permission_grant: None,
+    })?;
+    let created = worker
+        .recv_until_with_timeout(timeout, |message| {
+            matches!(message, WorkerMessage::TaskCreatedFromPlan { .. })
+        })
+        .context("waiting for direct pause Task adoption")?;
+    let WorkerMessage::TaskCreatedFromPlan { entry, entries, .. } = created else {
+        unreachable!("recv_until only returns TaskCreatedFromPlan");
+    };
+    let task = sigil_kernel::TaskStateProjection::from_entries(&entries)
+        .tasks
+        .get(&entry.task_id)
+        .cloned()
+        .context("direct Task should project")?;
+    let admission = task
+        .direct_execution_admission
+        .context("direct execution admission should be durable")?;
+    assert!(task.plans.is_empty());
+    let _ = worker
+        .recv_until_with_timeout(timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunStarted { .. })
+        })
+        .context("waiting for direct pause Task start")?;
+    role_stream_started_rx
+        .recv_timeout(timeout)
+        .context("waiting for direct executor stream")?;
+    wait_for_session_entry(&session_log_path, |candidate| {
+        matches!(
+            candidate,
+            SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAttemptV1(attempt))
+                if attempt.task_id == entry.task_id
+                    && attempt.status == sigil_kernel::TaskParticipantAttemptStatus::Started
+        )
+    })
+    .context("waiting for direct execution attempt admission")?;
+
+    worker.send(WorkerCommand::PauseTask {
+        request: TaskPauseRequest::direct(entry.task_id.clone(), admission.admission_id),
+    })?;
+    let paused = worker
+        .recv_until_with_timeout(timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunPaused { .. })
+        })
+        .context("waiting for direct Task pause")?;
+    let WorkerMessage::TaskRunPaused { entries, .. } = paused else {
+        unreachable!("recv_until only returns TaskRunPaused");
+    };
+    let paused_task = sigil_kernel::TaskStateProjection::from_entries(&entries)
+        .tasks
+        .get(&entry.task_id)
+        .cloned()
+        .context("paused direct Task should remain durable")?;
+    assert_eq!(paused_task.status, TaskRunStatus::Paused);
+    assert!(
+        paused_task
+            .direct_execution_attempts
+            .values()
+            .any(|attempt| {
+                attempt.status == sigil_kernel::TaskParticipantAttemptStatus::Interrupted
+            })
+    );
+
+    worker.send(WorkerCommand::ContinueTask {
+        task_id: Some(entry.task_id.as_str().to_owned()),
+        guidance: None,
+    })?;
+    let finished = worker
+        .recv_until_with_timeout(timeout, |message| {
+            matches!(message, WorkerMessage::TaskRunFinished { .. })
+        })
+        .context("waiting for resumed direct Task completion")?;
+    let WorkerMessage::TaskRunFinished {
+        status, entries, ..
+    } = finished
+    else {
+        unreachable!("recv_until only returns TaskRunFinished");
+    };
+    assert_eq!(status, TaskRunStatus::Completed);
+    let completed_task = sigil_kernel::TaskStateProjection::from_entries(&entries)
+        .tasks
+        .get(&entry.task_id)
+        .cloned()
+        .context("completed direct Task should project")?;
+    assert!(completed_task.plans.is_empty());
+    assert!(
+        completed_task
+            .direct_execution_attempts
+            .values()
+            .any(|attempt| {
+                attempt.status == sigil_kernel::TaskParticipantAttemptStatus::Completed
+            })
     );
 
     worker.shutdown()?;

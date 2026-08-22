@@ -1,4 +1,43 @@
-use sigil_kernel::ToolCall;
+use sigil_kernel::{PublicProviderTurnRecoveryPhaseV1, PublicProviderTurnRecoveryViewV1, ToolCall};
+
+/// Renders the shared recovery DTO without exposing physical attempt ids or provider internals.
+pub(super) fn provider_turn_recovery_label(view: &PublicProviderTurnRecoveryViewV1) -> String {
+    match view.phase {
+        PublicProviderTurnRecoveryPhaseV1::Waiting => format!(
+            "Reconnecting · retry {}/{} scheduled",
+            view.active_retry_count, view.active_max_retries
+        ),
+        PublicProviderTurnRecoveryPhaseV1::Recovering => format!(
+            "Reconnecting · retry {}/{}",
+            view.active_retry_count, view.active_max_retries
+        ),
+        PublicProviderTurnRecoveryPhaseV1::Blocked => format!(
+            "Provider recovery needs attention · {}",
+            provider_turn_recovery_reason_label(view.reason_code.as_deref())
+        ),
+        PublicProviderTurnRecoveryPhaseV1::Paused => format!(
+            "Provider retry paused · {}",
+            provider_turn_recovery_reason_label(view.reason_code.as_deref())
+        ),
+    }
+}
+
+fn provider_turn_recovery_reason_label(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("provider_retry_budget_exhausted") => "retry limit reached",
+        Some("provider_retry_delay_budget_exhausted") => "retry wait limit reached",
+        Some("provider_configuration_or_capacity_required") => "check connection or model settings",
+        Some("provider_request_requires_attention") => "request needs review",
+        Some("effect_reconciliation_required") => "review an external operation",
+        Some("provider_output_or_effect_committed") => "review the interrupted response",
+        Some("partial_provider_output_requires_review") => "review the interrupted response",
+        Some("recovery_material_unavailable") => "recovery material is unavailable",
+        Some("recovery_started_without_safe_completion") => "an interrupted request needs review",
+        Some("provider_recovery_claimed_elsewhere") => "another recovery owner is active",
+        Some("provider_recovery_cancelled") => "cancelled",
+        _ => "action required",
+    }
+}
 
 pub(super) fn notice_is_timeline_worthy(note: &str) -> bool {
     let normalized = note.to_ascii_lowercase();

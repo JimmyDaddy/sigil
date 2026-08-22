@@ -186,7 +186,7 @@ fn task_pause_validation_rejects_stale_plan_and_wrong_active_target() -> Result<
     assert!(
         validate_task_pause_request(&stale, &target, "scope_1", &entries)
             .expect_err("stale plan must fail")
-            .contains("plan changed")
+            .contains("execution authority changed")
     );
     let wrong_target = RunCancellationTarget::Task {
         task_id: "task_2".to_owned(),

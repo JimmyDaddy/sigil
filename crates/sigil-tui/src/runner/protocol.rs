@@ -629,6 +629,7 @@ pub enum WorkerMessage {
     },
     Event(Box<RunEvent>),
     ApprovalCommandReceipt(WorkerApprovalCommandReceipt),
+    LocalOperationOutcome(LocalOperationOutcome),
     Notice(String),
     RunStarted {
         prompt: String,
@@ -684,6 +685,13 @@ pub enum WorkerMessage {
     },
     PlanRunFinished {
         result: AgentRunResult,
+        entries: Vec<SessionLogEntry>,
+    },
+    /// A plan-review-local terminal that deliberately does not own the foreground run's
+    /// generic failure state. The durable attempt remains the source of truth.
+    PlanReviewBlocked {
+        reason: String,
+        paused: bool,
         entries: Vec<SessionLogEntry>,
     },
     UserInputRequested {
@@ -938,6 +946,127 @@ pub enum WorkerMessage {
         receipt_tx: EgressDisclosureReceiptTx,
     },
     RunFailed(String),
+}
+
+/// A bounded outcome for a user-triggered operation that does not own run terminal authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalOperationOutcome {
+    pub operation_id: String,
+    pub kind: LocalOperationKind,
+    pub status: LocalOperationStatus,
+    pub retryable: bool,
+    pub safe_summary: String,
+}
+
+impl LocalOperationOutcome {
+    pub(crate) fn rejected(
+        operation_id: impl Into<String>,
+        kind: LocalOperationKind,
+        safe_summary: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            operation_id,
+            kind,
+            LocalOperationStatus::Rejected,
+            false,
+            safe_summary,
+        )
+    }
+
+    pub(crate) fn deferred(
+        operation_id: impl Into<String>,
+        kind: LocalOperationKind,
+        safe_summary: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            operation_id,
+            kind,
+            LocalOperationStatus::Deferred,
+            true,
+            safe_summary,
+        )
+    }
+
+    pub(crate) fn failed(
+        operation_id: impl Into<String>,
+        kind: LocalOperationKind,
+        retryable: bool,
+        safe_summary: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            operation_id,
+            kind,
+            LocalOperationStatus::Failed,
+            retryable,
+            safe_summary,
+        )
+    }
+
+    fn new(
+        operation_id: impl Into<String>,
+        kind: LocalOperationKind,
+        status: LocalOperationStatus,
+        retryable: bool,
+        safe_summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            kind,
+            status,
+            retryable,
+            safe_summary: safe_summary.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalOperationKind {
+    McpActivation,
+    McpRefresh,
+    McpAuthentication,
+    ChangedFilesDiagnostics,
+    MutationArtifactCleanup,
+    MutationArtifactDeletion,
+    VerificationCheckApproval,
+    VerificationCheckSandboxing,
+    TaskVerificationRerun,
+}
+
+impl LocalOperationKind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::McpActivation => "MCP activation",
+            Self::McpRefresh => "MCP refresh",
+            Self::McpAuthentication => "MCP authentication",
+            Self::ChangedFilesDiagnostics => "changed-files diagnostics",
+            Self::MutationArtifactCleanup => "mutation artifact cleanup",
+            Self::MutationArtifactDeletion => "mutation artifact deletion",
+            Self::VerificationCheckApproval => "verification check approval",
+            Self::VerificationCheckSandboxing => "verification check sandboxing",
+            Self::TaskVerificationRerun => "task verification rerun",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalOperationStatus {
+    Succeeded,
+    Rejected,
+    Deferred,
+    Retrying,
+    Failed,
+}
+
+impl LocalOperationStatus {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Rejected => "rejected",
+            Self::Deferred => "deferred",
+            Self::Retrying => "retrying",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

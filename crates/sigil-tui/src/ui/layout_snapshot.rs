@@ -19,7 +19,8 @@ use super::{
     geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
     live_panel::{
         LIVE_PANEL_BOTTOM_PADDING, live_status_row_allocation_for_app, live_status_rows_for_app,
-        queue_action_button_layout_for_budget, queue_item_window, verification_card_area_for_app,
+        queue_action_button_layout_for_budget, queue_item_window, task_strip_toggle_area_for_app,
+        verification_card_area_for_app,
     },
     setup_config::{
         CONFIG_DETAIL_PANEL_WIDTH, CONFIG_DETAIL_SPLIT_MIN_WIDTH, CONFIG_FOOTER_COMPACT_WIDTH,
@@ -46,6 +47,7 @@ pub struct LayoutSnapshot {
     pub composer_input: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
+    pub task_strip_toggle: Option<Rect>,
     pub verification_card: Option<Rect>,
     pub(crate) composer_queue_hit_areas: Option<ComposerQueueHitAreas>,
     pub live_text_rows: Vec<LiveTextRowHitArea>,
@@ -274,6 +276,7 @@ impl LayoutSnapshot {
             ),
             footer: shell.footer,
             info_rail: shell.info_rail,
+            task_strip_toggle: task_strip_toggle_area_for_app(live_content, app),
             verification_card: verification_card_area_for_app(live_content, app),
             composer_queue_hit_areas: composer_queue_hit_areas(live_content, app),
             live_text_rows: live_text_row_hit_areas(live_content, app),
@@ -308,6 +311,7 @@ impl LayoutSnapshot {
             composer_input: Rect::default(),
             footer: Rect::default(),
             info_rail: Rect::default(),
+            task_strip_toggle: None,
             verification_card: None,
             composer_queue_hit_areas: None,
             live_text_rows: Vec::new(),
@@ -444,6 +448,11 @@ impl LayoutSnapshot {
 
         if self.mode != LayoutMode::Main {
             return HitTarget::Background;
+        }
+        if let Some(area) = self.task_strip_toggle
+            && contains(area, column, row)
+        {
+            return HitTarget::TaskStripToggle;
         }
         if let Some(area) = self.verification_card
             && contains(area, column, row)
