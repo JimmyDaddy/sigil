@@ -2023,6 +2023,24 @@ async fn messages_stream_surfaces_body_decode_failure_after_emitting_output() ->
     assert!(message.contains("deepseek messages stream read failed"));
     assert!(message.contains("response_body_decode"));
     assert!(message.contains("error decoding response body"));
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some()),
+        "the typed transport source must survive provider context wrapping"
+    );
+    let observed = DeepSeekProvider::new(
+        crate::DeepSeekProviderConfig {
+            api_key: Some("test".to_owned()),
+            ..crate::DeepSeekProviderConfig::default()
+        },
+        ModelRequestTimeouts::default(),
+    )?
+    .observe_failure(&error, sigil_kernel::ProviderWireStateV1::ResponseStarted);
+    assert_eq!(
+        observed.class,
+        sigil_kernel::ProviderFailureClassV1::TransportInterrupted
+    );
     Ok(())
 }
 

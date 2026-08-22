@@ -10,9 +10,8 @@ use tracing::debug;
 use sigil_kernel::{
     CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
     ProviderCapabilities, ProviderChunk, ProviderContextCapabilities, ProviderRequestRejection,
-    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor,
-    provider_status_error, read_provider_error_body, timeout_provider_request,
-    timeout_provider_stream_next,
+    ProviderStreamTimeoutState, ProviderTimeoutPhase, SecretRedactor, provider_status_error,
+    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
@@ -21,7 +20,7 @@ use crate::{
     client::build_http_client,
     config::{DeepSeekProviderConfig, DeepSeekProviderProfile},
     endpoint::DeepSeekEndpointClass,
-    errors::DeepSeekProviderError,
+    errors::{DeepSeekMessagesStreamReadError, DeepSeekProviderError},
     fim::DeepSeekFimCompletionRequest,
     hosted_search::{hosted_web_search_request, is_hosted_web_search_model},
     mapper::StreamMapper,
@@ -197,6 +196,62 @@ impl Provider for DeepSeekProvider {
                 .filter(|error| error.is_connect())
                 .map(|_| ProviderRequestRejection::ConnectFailedBeforeDispatch)
         })
+    }
+
+    fn observe_failure(
+        &self,
+        error: &anyhow::Error,
+        wire_state: sigil_kernel::ProviderWireStateV1,
+    ) -> sigil_kernel::ProviderFailureObservationV1 {
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<DeepSeekProviderError>(),
+                Some(DeepSeekProviderError::RetryableStatus(_))
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::TransientServer,
+                wire_state,
+                "provider_transient_server",
+            );
+        }
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<DeepSeekProviderError>(),
+                Some(DeepSeekProviderError::Authentication(_))
+                    | Some(DeepSeekProviderError::MissingApiKey)
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::Authentication,
+                wire_state,
+                "provider_authentication",
+            );
+        }
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<DeepSeekProviderError>(),
+                Some(DeepSeekProviderError::Billing(_))
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::BillingOrQuota,
+                wire_state,
+                "provider_billing_or_quota",
+            );
+        }
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|transport| transport.status().is_none())
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::transport_interrupted(wire_state);
+        }
+        sigil_kernel::ProviderFailureObservationV1::from_known_error(
+            error,
+            self.classify_pre_generation_rejection(error),
+            wire_state,
+        )
     }
 
     async fn stream(
@@ -457,10 +512,11 @@ fn messages_response_stream(
                         }
                     }
                     Ok(Some(Err(error))) => {
-                        return Err(anyhow::anyhow!(
-                            "deepseek messages stream read failed [{}]: {error}",
-                            response_body_stream_error_kind(&error)
-                        ));
+                        return Err(DeepSeekMessagesStreamReadError {
+                            kind: response_body_stream_error_kind(&error),
+                            source: error,
+                        }
+                        .into());
                     }
                     Ok(None) => {
                         for frame in decoder.finish()? {
@@ -524,18 +580,10 @@ fn truncate_event_payload(payload: &str) -> String {
 fn provider_timeout_error(
     phase: ProviderTimeoutPhase,
     timeouts: ModelRequestTimeouts,
-    provider: &str,
-    model: &str,
+    _provider: &str,
+    _model: &str,
 ) -> anyhow::Error {
-    let metadata =
-        ProviderTimeoutMetadata::new(phase, timeout_for_phase(phase, timeouts), provider, model);
-    anyhow::anyhow!(
-        "provider timeout: phase={} provider={} model={} timeout_ms={}",
-        metadata.phase,
-        metadata.provider,
-        metadata.model,
-        metadata.timeout_ms
-    )
+    sigil_kernel::ProviderTimeoutError::new(phase, timeout_for_phase(phase, timeouts)).into()
 }
 
 fn timeout_for_phase(phase: ProviderTimeoutPhase, timeouts: ModelRequestTimeouts) -> Duration {

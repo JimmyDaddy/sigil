@@ -10,9 +10,9 @@ use sigil_kernel::{
     HostedCustomToolCompatibility, HostedQueryVisibility, HostedRequestWireState,
     HostedSourceFidelity, HostedToolSupport, HostedWebSearchCapability, ImageInputCapability,
     ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderContextCapabilities, ProviderStreamTimeoutState,
-    ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor, provider_status_error,
-    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
+    ProviderChunk, ProviderContextCapabilities, ProviderStreamTimeoutState, ProviderTimeoutPhase,
+    SecretRedactor, provider_status_error, read_provider_error_body, timeout_provider_request,
+    timeout_provider_stream_next,
 };
 
 use crate::{
@@ -127,6 +127,46 @@ impl Provider for GeminiProvider {
         } else {
             HostedWebSearchCapability::default()
         }
+    }
+
+    fn observe_failure(
+        &self,
+        error: &anyhow::Error,
+        wire_state: sigil_kernel::ProviderWireStateV1,
+    ) -> sigil_kernel::ProviderFailureObservationV1 {
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<GeminiProviderError>(),
+                Some(GeminiProviderError::RetryableStatus(_))
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::TransientServer,
+                wire_state,
+                "provider_transient_server",
+            );
+        }
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<GeminiProviderError>(),
+                Some(GeminiProviderError::Authentication(_))
+                    | Some(GeminiProviderError::MissingApiKey)
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::Authentication,
+                wire_state,
+                "provider_authentication",
+            );
+        }
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|transport| transport.status().is_none())
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::transport_interrupted(wire_state);
+        }
+        sigil_kernel::ProviderFailureObservationV1::from_known_error(error, None, wire_state)
     }
 
     async fn stream(
@@ -316,18 +356,10 @@ fn response_stream(
 fn provider_timeout_error(
     phase: ProviderTimeoutPhase,
     timeouts: ModelRequestTimeouts,
-    provider: &str,
-    model: &str,
+    _provider: &str,
+    _model: &str,
 ) -> anyhow::Error {
-    let metadata =
-        ProviderTimeoutMetadata::new(phase, timeout_for_phase(phase, timeouts), provider, model);
-    anyhow::anyhow!(
-        "provider timeout: phase={} provider={} model={} timeout_ms={}",
-        metadata.phase,
-        metadata.provider,
-        metadata.model,
-        metadata.timeout_ms
-    )
+    sigil_kernel::ProviderTimeoutError::new(phase, timeout_for_phase(phase, timeouts)).into()
 }
 
 fn timeout_for_phase(phase: ProviderTimeoutPhase, timeouts: ModelRequestTimeouts) -> Duration {

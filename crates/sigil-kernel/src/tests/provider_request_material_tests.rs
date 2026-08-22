@@ -184,6 +184,14 @@ fn request_envelope_marks_process_local_overlays_and_in_memory_sessions_honestly
         durable.non_reconstructable_reasons,
         vec![ProviderRequestNonReconstructableReasonV1::ExactMessageOverlay]
     );
+    durable.verify_exact_process_local_request(&frozen)?;
+    let other_scope = FrozenProviderRequestMaterial::freeze("session-b", frozen.request().clone())?;
+    assert!(
+        durable
+            .verify_exact_process_local_request(&other_scope)
+            .is_err(),
+        "process-local material authority must remain bound to its exact session scope"
+    );
 
     let in_memory = frozen.request_envelope(&layout, None, "context-epoch:root")?;
     assert_eq!(

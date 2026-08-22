@@ -123,3 +123,26 @@ fn provider_route_cooldown_error_exposes_only_bounded_scheduling_metadata() {
         "provider route is cooling down; retry after 1250 ms (route sha256:test-route)"
     );
 }
+
+#[test]
+fn timeout_observation_is_typed_without_matching_error_text() {
+    let timeout = ProviderTimeoutError::new(
+        crate::ProviderTimeoutPhase::RequestStart,
+        Duration::from_millis(250),
+    );
+    let error: anyhow::Error = timeout.into();
+    let observation = ProviderFailureObservationV1::from_known_error(
+        &error,
+        None,
+        ProviderWireStateV1::RequestBytesMayHaveBeenSent,
+    );
+
+    assert_eq!(
+        observation.class,
+        ProviderFailureClassV1::TransportInterrupted
+    );
+    assert_eq!(
+        observation.wire_state,
+        ProviderWireStateV1::RequestBytesMayHaveBeenSent
+    );
+}

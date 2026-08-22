@@ -15,3 +15,13 @@ pub enum DeepSeekProviderError {
     #[error("deepseek invalid request: {0}")]
     InvalidRequest(String),
 }
+
+/// Response-body failure that preserves the typed `reqwest` source for kernel retry
+/// classification while retaining a bounded provider-specific diagnostic code.
+#[derive(Debug, Error)]
+#[error("deepseek messages stream read failed [{kind}]: {source}")]
+pub(crate) struct DeepSeekMessagesStreamReadError {
+    pub(crate) kind: &'static str,
+    #[source]
+    pub(crate) source: reqwest::Error,
+}

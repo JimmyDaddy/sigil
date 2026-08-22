@@ -275,7 +275,7 @@ fn physical_attempt_projection_rejects_unsafe_retry_predecessor() -> Result<()> 
     assert!(
         error
             .to_string()
-            .contains("was not a confirmed pre-dispatch connect failure")
+            .contains("lacks durable recovery authority")
     );
     Ok(())
 }

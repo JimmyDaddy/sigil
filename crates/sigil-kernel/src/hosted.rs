@@ -35,6 +35,19 @@ impl HostedToolKind {
             Self::WebSearch => "web_search",
         }
     }
+
+    /// Whether dispatching this hosted capability can mutate external state that Sigil would need
+    /// to reconcile before issuing a second physical provider attempt.
+    ///
+    /// A remote read can consume provider quota and return different observations on retry, but it
+    /// does not create the write-side ambiguity guarded by effect reconciliation. Retry budgets
+    /// account for repeated provider work separately.
+    #[must_use]
+    pub(crate) const fn may_mutate_external_state(self) -> bool {
+        match self {
+            Self::WebSearch => false,
+        }
+    }
 }
 
 /// Provider-neutral limits attached to one hosted-tool request.

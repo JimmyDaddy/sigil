@@ -13,10 +13,10 @@ use sigil_kernel::{
     NativeProviderCompactionRequest, PROVIDER_ERROR_BODY_LIMIT_BYTES,
     PortableTargetRequestMaterial, Provider, ProviderCapabilities, ProviderChunk,
     ProviderContextCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
-    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, RequestFitProof,
-    SecretRedactor, Session, TokenMeasurementBinding, TokenMeasurementScope,
-    VersionedProfileIdentity, provider_continuation_route_fingerprint, provider_status_error,
-    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
+    ProviderStreamTimeoutState, ProviderTimeoutPhase, RequestFitProof, SecretRedactor, Session,
+    TokenMeasurementBinding, TokenMeasurementScope, VersionedProfileIdentity,
+    provider_continuation_route_fingerprint, provider_status_error, read_provider_error_body,
+    timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
@@ -331,6 +331,50 @@ impl Provider for OpenAiResponsesProvider {
 
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
         openai_responses_image_input_capability(model_name)
+    }
+
+    fn observe_failure(
+        &self,
+        error: &anyhow::Error,
+        wire_state: sigil_kernel::ProviderWireStateV1,
+    ) -> sigil_kernel::ProviderFailureObservationV1 {
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<OpenAiResponsesProviderError>(),
+                Some(OpenAiResponsesProviderError::RetryableStatus(_))
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::TransientServer,
+                wire_state,
+                "provider_transient_server",
+            );
+        }
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<OpenAiResponsesProviderError>(),
+                Some(OpenAiResponsesProviderError::Authentication(_))
+                    | Some(OpenAiResponsesProviderError::MissingApiKey)
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::Authentication,
+                wire_state,
+                "provider_authentication",
+            );
+        }
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|transport| transport.status().is_none())
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::transport_interrupted(wire_state);
+        }
+        sigil_kernel::ProviderFailureObservationV1::from_known_error(
+            error,
+            self.classify_pre_generation_rejection(error),
+            wire_state,
+        )
     }
 
     async fn materialize_native_compaction_carrier(
@@ -730,18 +774,10 @@ fn response_stream(
 fn provider_timeout_error(
     phase: ProviderTimeoutPhase,
     timeouts: ModelRequestTimeouts,
-    provider: &str,
-    model: &str,
+    _provider: &str,
+    _model: &str,
 ) -> anyhow::Error {
-    let metadata =
-        ProviderTimeoutMetadata::new(phase, timeout_for_phase(phase, timeouts), provider, model);
-    anyhow::anyhow!(
-        "provider timeout: phase={} provider={} model={} timeout_ms={}",
-        metadata.phase,
-        metadata.provider,
-        metadata.model,
-        metadata.timeout_ms
-    )
+    sigil_kernel::ProviderTimeoutError::new(phase, timeout_for_phase(phase, timeouts)).into()
 }
 fn timeout_for_phase(phase: ProviderTimeoutPhase, timeouts: ModelRequestTimeouts) -> Duration {
     match phase {

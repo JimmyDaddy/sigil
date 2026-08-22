@@ -203,6 +203,49 @@ pub struct ProviderContextCapabilities {
     pub native_carrier_portability: NativeCarrierPortability,
 }
 
+/// One provider-owned alternate transport that is proven semantically equivalent to the current
+/// route. The identifiers are opaque, bounded machine labels; endpoint URLs, credentials, and
+/// provider-private protocol details must never enter durable recovery state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProviderTransportFallbackCandidateV1 {
+    pub fallback_transport_id: String,
+    pub source_transport_fingerprint: String,
+    pub fallback_transport_fingerprint: String,
+    pub semantic_route_fingerprint: String,
+}
+
+impl ProviderTransportFallbackCandidateV1 {
+    /// Validates the provider-neutral identity proof before it can be written as recovery
+    /// authority. Matching the semantic fingerprint is provider/runtime-owned; kernel only
+    /// rejects malformed or self-referential candidates.
+    pub fn validate(&self) -> Result<()> {
+        let valid_transport_id = !self.fallback_transport_id.is_empty()
+            && self.fallback_transport_id.len() <= 96
+            && self
+                .fallback_transport_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+        if !valid_transport_id
+            || self.source_transport_fingerprint == self.fallback_transport_fingerprint
+            || !is_sha256_fingerprint(&self.source_transport_fingerprint)
+            || !is_sha256_fingerprint(&self.fallback_transport_fingerprint)
+            || !is_sha256_fingerprint(&self.semantic_route_fingerprint)
+        {
+            anyhow::bail!("provider transport fallback candidate is malformed");
+        }
+        Ok(())
+    }
+}
+
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
 impl ProviderContextCapabilities {
     /// Conservative contract for an unknown or unverified route.
     #[must_use]
@@ -1267,6 +1310,43 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Maps a provider-owned failure into the recovery vocabulary.
+    ///
+    /// Implementations may inspect their own typed errors and transport types, but must not
+    /// classify arbitrary response text. The conservative default only recognizes existing typed
+    /// kernel facts and otherwise prevents automatic replay.
+    fn observe_failure(
+        &self,
+        error: &anyhow::Error,
+        wire_state: crate::ProviderWireStateV1,
+    ) -> crate::ProviderFailureObservationV1 {
+        crate::ProviderFailureObservationV1::from_known_error(
+            error,
+            self.classify_pre_generation_rejection(error),
+            wire_state,
+        )
+    }
+
+    /// Returns a provider-owned, semantically equivalent alternate transport for this exact
+    /// request and typed failure. The conservative default advertises no fallback.
+    fn transport_fallback_candidate(
+        &self,
+        _request: &CompletionRequest,
+        _failure: &crate::ProviderFailureObservationV1,
+    ) -> Option<ProviderTransportFallbackCandidateV1> {
+        None
+    }
+
+    /// Activates a fallback only after the caller has appended durable selection authority.
+    /// Adapters must revalidate their exact tenant/model/protocol binding here and fail closed on
+    /// config drift. This method must not send provider bytes.
+    fn activate_transport_fallback(
+        &self,
+        _candidate: &ProviderTransportFallbackCandidateV1,
+    ) -> Result<()> {
+        anyhow::bail!("provider transport fallback is unavailable on this route")
+    }
+
     /// Proves that one frozen portable-compaction target fits the provider/model request budget.
     ///
     /// Implementations may use a provider-owned exact measurement endpoint, but must return an
@@ -1332,6 +1412,14 @@ where
         error: &anyhow::Error,
     ) -> Option<ProviderRequestRejection> {
         (**self).classify_pre_generation_rejection(error)
+    }
+
+    fn observe_failure(
+        &self,
+        error: &anyhow::Error,
+        wire_state: crate::ProviderWireStateV1,
+    ) -> crate::ProviderFailureObservationV1 {
+        (**self).observe_failure(error, wire_state)
     }
 
     async fn prove_portable_compaction_target(

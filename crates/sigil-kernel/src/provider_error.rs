@@ -4,7 +4,186 @@ use anyhow::{Context, Result, anyhow};
 use futures::{Stream, StreamExt};
 use thiserror::Error;
 
-use crate::SecretRedactor;
+use crate::{ProviderRequestRejection, SecretRedactor};
+
+/// Typed provider timeout boundary. Adapters create this instead of encoding timeout phase in an
+/// error string so recovery policy can remain provider-neutral and text-free.
+#[derive(Debug, Clone, Error)]
+#[error("provider request timed out during {phase}")]
+pub struct ProviderTimeoutError {
+    pub phase: crate::ProviderTimeoutPhase,
+    pub timeout_ms: u64,
+}
+
+/// The provider transport ended without a terminal protocol frame. It is distinct from a parser
+/// violation so V1 can recover only the zero-output case and block partial output safely.
+#[derive(Debug, Clone, Error)]
+#[error("provider stream ended before its terminal frame")]
+pub struct ProviderStreamEndedUnexpectedly;
+
+impl ProviderTimeoutError {
+    #[must_use]
+    pub fn new(phase: crate::ProviderTimeoutPhase, timeout: Duration) -> Self {
+        Self {
+            phase,
+            timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        }
+    }
+}
+
+/// Provider-neutral point reached by a failed physical request.
+///
+/// Provider adapters own the mapping from their transport/protocol errors to this bounded
+/// vocabulary. The kernel deliberately never inspects error text when it makes recovery
+/// decisions.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderWireStateV1 {
+    NoBytesSent,
+    RequestBytesMayHaveBeenSent,
+    ResponseStarted,
+}
+
+/// Provider-supplied scheduling information that is safe for recovery policy to consume.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderRetryHintV1 {
+    None,
+    RetryAfterMs(u64),
+}
+
+/// Provider-neutral classification of a failed physical attempt.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderFailureClassV1 {
+    RejectedBeforeDispatch,
+    RateLimited,
+    TransientServer,
+    TransportInterrupted,
+    StreamEndedUnexpectedly,
+    ProtocolViolation,
+    ContextCapacity,
+    Authentication,
+    BillingOrQuota,
+    RouteUnavailable,
+    PermanentRequest,
+    Cancelled,
+}
+
+/// Typed, safe failure observation emitted by a provider adapter.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProviderFailureObservationV1 {
+    pub class: ProviderFailureClassV1,
+    pub retry_after_ms: Option<u64>,
+    pub wire_state: ProviderWireStateV1,
+    pub provider_retry_hint: ProviderRetryHintV1,
+    /// A bounded provider-neutral diagnostic code. Never include provider response text.
+    pub safe_diagnostic_code: String,
+}
+
+impl ProviderFailureObservationV1 {
+    /// Builds one adapter-owned bounded observation. The diagnostic code must be a stable,
+    /// provider-neutral identifier, never an HTTP body or transport error string.
+    #[must_use]
+    pub fn classified(
+        class: ProviderFailureClassV1,
+        wire_state: ProviderWireStateV1,
+        safe_diagnostic_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            class,
+            retry_after_ms: None,
+            provider_retry_hint: ProviderRetryHintV1::None,
+            wire_state,
+            safe_diagnostic_code: bounded_safe_diagnostic_code(safe_diagnostic_code.into()),
+        }
+    }
+
+    /// Builds the conservative default used when an adapter did not provide a richer mapping.
+    #[must_use]
+    pub fn from_known_error(
+        error: &anyhow::Error,
+        rejection: Option<ProviderRequestRejection>,
+        wire_state: ProviderWireStateV1,
+    ) -> Self {
+        if error
+            .chain()
+            .any(|cause| cause.downcast_ref::<ProviderTimeoutError>().is_some())
+        {
+            return Self::transport_interrupted(wire_state);
+        }
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<ProviderStreamEndedUnexpectedly>()
+                .is_some()
+        }) {
+            return Self::classified(
+                ProviderFailureClassV1::StreamEndedUnexpectedly,
+                wire_state,
+                "provider_stream_ended_unexpectedly",
+            );
+        }
+        if let Some(rate_limit) = provider_rate_limit_from_error(error) {
+            let retry_after_ms = rate_limit.retry_after_ms();
+            return Self {
+                class: ProviderFailureClassV1::RateLimited,
+                retry_after_ms,
+                wire_state,
+                provider_retry_hint: retry_after_ms
+                    .map(ProviderRetryHintV1::RetryAfterMs)
+                    .unwrap_or(ProviderRetryHintV1::None),
+                safe_diagnostic_code: "provider_rate_limited".to_owned(),
+            };
+        }
+        let (class, code) = match rejection {
+            Some(ProviderRequestRejection::ConnectFailedBeforeDispatch) => (
+                ProviderFailureClassV1::RejectedBeforeDispatch,
+                "connect_rejected_before_dispatch",
+            ),
+            Some(ProviderRequestRejection::RateLimited) => {
+                (ProviderFailureClassV1::RateLimited, "provider_rate_limited")
+            }
+            Some(ProviderRequestRejection::ContextWindowExceeded) => {
+                (ProviderFailureClassV1::ContextCapacity, "context_capacity")
+            }
+            None => (
+                ProviderFailureClassV1::PermanentRequest,
+                "provider_error_unclassified",
+            ),
+        };
+        Self {
+            class,
+            retry_after_ms: None,
+            wire_state,
+            provider_retry_hint: ProviderRetryHintV1::None,
+            safe_diagnostic_code: code.to_owned(),
+        }
+    }
+
+    /// Builds a bounded transport observation without exposing a provider error chain.
+    #[must_use]
+    pub fn transport_interrupted(wire_state: ProviderWireStateV1) -> Self {
+        Self::classified(
+            ProviderFailureClassV1::TransportInterrupted,
+            wire_state,
+            "provider_transport_interrupted",
+        )
+    }
+}
+
+fn bounded_safe_diagnostic_code(value: String) -> String {
+    let valid = !value.is_empty()
+        && value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    if valid {
+        value
+    } else {
+        "provider_failure_classified".to_owned()
+    }
+}
 
 /// Maximum number of bytes retained from a non-success provider response body.
 pub const PROVIDER_ERROR_BODY_LIMIT_BYTES: usize = 16 * 1024;

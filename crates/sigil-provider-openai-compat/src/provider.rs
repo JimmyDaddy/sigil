@@ -8,8 +8,8 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY
 use sigil_kernel::{
     CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
     ProviderCapabilities, ProviderChunk, ProviderContextCapabilities, ProviderStreamTimeoutState,
-    ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor, provider_status_error,
-    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
+    ProviderTimeoutPhase, SecretRedactor, provider_status_error, read_provider_error_body,
+    timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
@@ -102,6 +102,46 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
         openai_compatible_context_capabilities()
+    }
+
+    fn observe_failure(
+        &self,
+        error: &anyhow::Error,
+        wire_state: sigil_kernel::ProviderWireStateV1,
+    ) -> sigil_kernel::ProviderFailureObservationV1 {
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<OpenAiCompatibleProviderError>(),
+                Some(OpenAiCompatibleProviderError::RetryableStatus(_))
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::TransientServer,
+                wire_state,
+                "provider_transient_server",
+            );
+        }
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<OpenAiCompatibleProviderError>(),
+                Some(OpenAiCompatibleProviderError::Authentication(_))
+                    | Some(OpenAiCompatibleProviderError::MissingApiKey)
+            )
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::classified(
+                sigil_kernel::ProviderFailureClassV1::Authentication,
+                wire_state,
+                "provider_authentication",
+            );
+        }
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|transport| transport.status().is_none())
+        }) {
+            return sigil_kernel::ProviderFailureObservationV1::transport_interrupted(wire_state);
+        }
+        sigil_kernel::ProviderFailureObservationV1::from_known_error(error, None, wire_state)
     }
 
     async fn stream(
@@ -275,18 +315,10 @@ fn response_stream(
 fn provider_timeout_error(
     phase: ProviderTimeoutPhase,
     timeouts: ModelRequestTimeouts,
-    provider: &str,
-    model: &str,
+    _provider: &str,
+    _model: &str,
 ) -> anyhow::Error {
-    let metadata =
-        ProviderTimeoutMetadata::new(phase, timeout_for_phase(phase, timeouts), provider, model);
-    anyhow::anyhow!(
-        "provider timeout: phase={} provider={} model={} timeout_ms={}",
-        metadata.phase,
-        metadata.provider,
-        metadata.model,
-        metadata.timeout_ms
-    )
+    sigil_kernel::ProviderTimeoutError::new(phase, timeout_for_phase(phase, timeouts)).into()
 }
 
 fn timeout_for_phase(phase: ProviderTimeoutPhase, timeouts: ModelRequestTimeouts) -> Duration {

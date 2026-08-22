@@ -128,6 +128,7 @@ mod continuity_v2;
 mod conversation_promotion_projection;
 mod conversation_queue_mutation;
 mod conversation_queue_promotion;
+mod effect_reconciliation;
 mod entry;
 mod facade;
 mod portable_compaction;
@@ -141,7 +142,10 @@ mod provider_continuation_payload_coordinator;
 mod provider_continuation_payload_store;
 mod provider_continuation_resolution_coordinator;
 mod provider_native_compaction;
+mod provider_turn_recovery;
+mod public_event_outbox;
 mod recovery;
+mod recovery_blocker;
 mod stats;
 mod store;
 mod tool_artifact;
@@ -203,6 +207,18 @@ pub use continuity_v2::{
     SourceSpanRefV1, UntrustedModelNarrativeV2,
 };
 pub use conversation_promotion_projection::conversation_transcript_entry_from_record;
+pub use effect_reconciliation::{
+    EFFECT_RECONCILIATION_SCHEMA_VERSION, EffectReconciliationOutcomeV1, EffectReconciliationProbe,
+    EffectReconciliationProbeReceiptV1, EffectReconciliationProbeRequestV1,
+    EffectReconciliationProbeStartedEntryV1, EffectReconciliationProjectionV1,
+    EffectReconciliationRequiredEntryV1, EffectReconciliationTerminalEntryV1,
+    ReconciliationProbeKindV1,
+};
+pub(crate) use effect_reconciliation::{
+    validate_probe_started as validate_effect_reconciliation_probe_started,
+    validate_required as validate_effect_reconciliation_required,
+    validate_terminal as validate_effect_reconciliation_terminal,
+};
 pub use entry::*;
 pub use facade::{Session, StableCompactionSnapshot};
 pub use portable_compaction::{
@@ -287,6 +303,41 @@ pub use provider_continuation_resolution_coordinator::{
 pub use provider_native_compaction::{
     NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
     NativeProviderCompactionRequest,
+};
+pub use provider_turn_recovery::{
+    DEFAULT_PROVIDER_TURN_INITIAL_DELAY_MS, DEFAULT_PROVIDER_TURN_JITTER_RATIO_MILLIONTHS,
+    DEFAULT_PROVIDER_TURN_MAX_CUMULATIVE_DELAY_MS, DEFAULT_PROVIDER_TURN_MAX_DELAY_MS,
+    DEFAULT_PROVIDER_TURN_MAX_PARTIAL_OUTPUT_RETRIES, DEFAULT_PROVIDER_TURN_MAX_TRANSPORT_RETRIES,
+    EffectSettlementStateV1, PROVIDER_TURN_RECOVERY_PROJECTION_SCHEMA_VERSION,
+    PROVIDER_TURN_RECOVERY_SCHEMA_VERSION, ProviderOutputStateV1,
+    ProviderTurnPartialOutputDiscardedEntryV1, ProviderTurnRecoveryEvidenceV1,
+    ProviderTurnRecoveryExhaustedEntry, ProviderTurnRecoveryPolicyV1,
+    ProviderTurnRecoveryProjection, ProviderTurnRecoveryRetryKindV1,
+    ProviderTurnRecoveryScheduledEntry, ProviderTurnRecoveryStartedEntry,
+    ProviderTurnRecoveryState, ProviderTurnRecoveryTerminalDispositionV1,
+    ProviderTurnRecoveryTerminalError, ProviderTurnRequestMaterialAvailabilityV1,
+    ProviderTurnTransportFallbackSelectedEntryV1, PublicProviderTurnPartialOutputDiscardedViewV1,
+    PublicProviderTurnRecoveryActionV1, PublicProviderTurnRecoveryPhaseV1,
+    PublicProviderTurnRecoveryViewV1, RecoveryBudgetProjectionV1, RecoveryDispositionV1,
+};
+pub(crate) use provider_turn_recovery::{
+    ProviderTurnRecoveryAudit, validate_exhausted as validate_provider_turn_recovery_exhausted,
+    validate_partial_output_discarded as validate_provider_turn_partial_output_discarded,
+    validate_schedule as validate_provider_turn_recovery_schedule,
+    validate_started as validate_provider_turn_recovery_started,
+    validate_transport_fallback_selected as validate_provider_turn_transport_fallback_selected,
+};
+pub use public_event_outbox::{
+    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1,
+    PublicEventOutboxProjectionV1, PublicEventOutboxRecorder,
+};
+pub(crate) use public_event_outbox::{
+    validate_delivery_receipt as validate_public_event_delivery_receipt,
+    validate_outbox_entry as validate_public_event_outbox_entry,
+};
+pub use recovery_blocker::{
+    RECOVERY_BLOCKER_PROJECTION_SCHEMA_VERSION, RecoveryBlockerProjectionV1,
+    RecoveryBlockerResolutionStateV1,
 };
 pub use stats::session_stats_from_entries;
 pub(crate) use store::session_entry_from_domain_event;
@@ -373,6 +424,9 @@ pub(crate) fn append_current_test_session_identity(store: &JsonlSessionStore) ->
 #[cfg(test)]
 #[path = "tests/provider_native_compaction_tests.rs"]
 mod provider_native_compaction_tests;
+#[cfg(test)]
+#[path = "session/tests/recovery_blocker_tests.rs"]
+mod recovery_blocker_tests;
 #[cfg(test)]
 #[path = "tests/session_tests.rs"]
 mod tests;

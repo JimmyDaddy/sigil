@@ -91,6 +91,22 @@ pub struct ProviderRequestEnvelopeV1 {
 }
 
 impl ProviderRequestEnvelopeV1 {
+    /// Verifies that process-local frozen material is the exact request bound to this envelope.
+    ///
+    /// The keyed fingerprint includes the process-local secret and session scope, so this proof is
+    /// intentionally valid only while the current process retains the same material authority. It
+    /// must not be persisted or substituted for durable-frontier reconstruction after restart.
+    pub(crate) fn verify_exact_process_local_request(
+        &self,
+        material: &FrozenProviderRequestMaterial,
+    ) -> Result<()> {
+        self.validate()?;
+        if self.process_local_material_fingerprint != material.fingerprint() {
+            bail!("provider request process-local material fingerprint mismatch");
+        }
+        self.verify_reconstructed_request(material.request())
+    }
+
     /// Verifies a rebuilt provider-neutral request without requiring the original process HMAC key.
     ///
     /// This proves canonical request equality and cache-layout component equality. The caller still

@@ -252,6 +252,8 @@ impl ProviderPhysicalAttemptState {
 pub struct ProviderPhysicalAttemptProjection {
     cursor: Option<ProjectionCursor>,
     attempts: BTreeMap<ProviderPhysicalAttemptId, ProviderPhysicalAttemptState>,
+    recovery_schedules: BTreeMap<String, (ProviderTurnRecoveryScheduledEntry, u64)>,
+    recovery_starts: BTreeMap<ProviderPhysicalAttemptId, (ProviderTurnRecoveryStartedEntry, u64)>,
 }
 
 impl ProviderPhysicalAttemptProjection {
@@ -348,23 +350,77 @@ impl ProviderPhysicalAttemptProjection {
                 bail!("provider physical-attempt retry chain overlaps durable lifecycles");
             }
         }
-        for predecessor in predecessors {
+        for (index, predecessor) in predecessors.iter().enumerate() {
             let terminal = predecessor
                 .terminal
                 .as_ref()
                 .context("provider physical-attempt retry predecessor has no terminal")?;
-            if terminal.outcome != ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
-                || terminal.rejection
-                    != Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch)
-                || !terminal.durable_output_event_ids.is_empty()
-                || !terminal.durable_side_effect_event_ids.is_empty()
-            {
+            let safe_connect_predecessor = terminal.outcome
+                == ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+                && terminal.rejection
+                    == Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch)
+                && terminal.durable_output_event_ids.is_empty()
+                && terminal.durable_side_effect_event_ids.is_empty();
+            let recovery_predecessor = self.is_durable_recovery_predecessor(
+                predecessor,
+                attempts[index + 1],
+                index.saturating_add(2) as u32,
+            );
+            if !safe_connect_predecessor && !recovery_predecessor {
                 bail!(
-                    "provider physical-attempt retry predecessor was not a confirmed pre-dispatch connect failure"
+                    "provider physical-attempt retry predecessor lacks durable recovery authority"
                 );
             }
         }
         Ok(Some(effective))
+    }
+
+    fn is_durable_recovery_predecessor(
+        &self,
+        predecessor: &ProviderPhysicalAttemptState,
+        successor: &ProviderPhysicalAttemptState,
+        expected_ordinal: u32,
+    ) -> bool {
+        let Some(terminal) = predecessor.terminal.as_ref() else {
+            return false;
+        };
+        if !terminal.durable_output_event_ids.is_empty()
+            || !terminal.durable_side_effect_event_ids.is_empty()
+        {
+            return false;
+        }
+        let Some((started, started_sequence)) = self
+            .recovery_starts
+            .get(&successor.entry.physical_attempt_id)
+        else {
+            return false;
+        };
+        let Some((schedule, schedule_sequence)) = self.recovery_schedules.get(&started.recovery_id)
+        else {
+            return false;
+        };
+        let Some(envelope) = predecessor.entry.request_envelope.as_ref() else {
+            return false;
+        };
+        let Some(successor_envelope) = successor.entry.request_envelope.as_ref() else {
+            return false;
+        };
+        schedule.logical_run_id == predecessor.entry.logical_run_id
+            && started.logical_run_id == predecessor.entry.logical_run_id
+            && schedule.failed_physical_attempt_id == predecessor.entry.physical_attempt_id
+            && started.physical_attempt_id == successor.entry.physical_attempt_id
+            && schedule.request_envelope_digest == envelope.canonical_request_hash
+            && successor_envelope.canonical_request_hash == envelope.canonical_request_hash
+            && successor_envelope.source_frontier == schedule.source_frontier
+            && successor_envelope.cache_layout_hash == envelope.cache_layout_hash
+            && successor.entry.provider_name == predecessor.entry.provider_name
+            && successor.entry.model_name == predecessor.entry.model_name
+            && schedule.next_physical_attempt_ordinal == expected_ordinal
+            && predecessor
+                .terminal_stream_sequence
+                .is_some_and(|sequence| sequence < *schedule_sequence)
+            && *schedule_sequence < *started_sequence
+            && *started_sequence < successor.started_stream_sequence
     }
 
     /// Returns every physical attempt that was sent but has no durable terminal.
@@ -427,6 +483,16 @@ impl ProviderPhysicalAttemptProjection {
                 let entry: ProviderPhysicalAttemptTerminalEntry = decode_attempt_payload(event)?;
                 self.apply_terminal(event, entry)?;
             }
+            Some(DurableEventType::ProviderTurnRecoveryScheduled) => {
+                let entry = serde_json::from_value(event.payload.clone())
+                    .context("failed to decode provider-turn recovery schedule")?;
+                self.apply_recovery_schedule(event, entry)?;
+            }
+            Some(DurableEventType::ProviderTurnRecoveryStarted) => {
+                let entry = serde_json::from_value(event.payload.clone())
+                    .context("failed to decode provider-turn recovery start")?;
+                self.apply_recovery_start(event, entry)?;
+            }
             Some(_) | None => self.apply_output_event(event)?,
         }
 
@@ -474,6 +540,63 @@ impl ProviderPhysicalAttemptProjection {
                 causal_output_or_side_effect_event_ids: Vec::new(),
                 last_causation_event_id: event.event_id.clone(),
             },
+        );
+        Ok(())
+    }
+
+    fn apply_recovery_schedule(
+        &mut self,
+        event: &StoredEvent,
+        entry: ProviderTurnRecoveryScheduledEntry,
+    ) -> Result<()> {
+        super::validate_provider_turn_recovery_schedule(&entry)?;
+        let attempt = self
+            .attempt(&entry.failed_physical_attempt_id)
+            .context("provider-turn recovery schedule references an unknown physical attempt")?;
+        let terminal = attempt
+            .terminal
+            .as_ref()
+            .context("provider-turn recovery schedule references an unfinished physical attempt")?;
+        let envelope = attempt
+            .entry
+            .request_envelope
+            .as_ref()
+            .context("provider-turn recovery schedule lacks a request envelope")?;
+        if attempt.entry.logical_run_id != entry.logical_run_id
+            || terminal.durable_output_event_ids.len()
+                + terminal.durable_side_effect_event_ids.len()
+                > 0
+            || envelope.canonical_request_hash != entry.request_envelope_digest
+            || self.recovery_schedules.contains_key(&entry.recovery_id)
+        {
+            bail!("provider-turn recovery schedule is inconsistent with its failed attempt");
+        }
+        self.recovery_schedules
+            .insert(entry.recovery_id.clone(), (entry, event.stream_sequence));
+        Ok(())
+    }
+
+    fn apply_recovery_start(
+        &mut self,
+        event: &StoredEvent,
+        entry: ProviderTurnRecoveryStartedEntry,
+    ) -> Result<()> {
+        super::validate_provider_turn_recovery_started(&entry)?;
+        let (schedule, schedule_sequence) = self
+            .recovery_schedules
+            .get(&entry.recovery_id)
+            .context("provider-turn recovery start references no schedule")?;
+        if schedule.logical_run_id != entry.logical_run_id
+            || event.stream_sequence <= *schedule_sequence
+            || self
+                .recovery_starts
+                .contains_key(&entry.physical_attempt_id)
+        {
+            bail!("provider-turn recovery start is inconsistent with its schedule");
+        }
+        self.recovery_starts.insert(
+            entry.physical_attempt_id.clone(),
+            (entry, event.stream_sequence),
         );
         Ok(())
     }
@@ -685,6 +808,14 @@ impl ProviderNonGeneratingAttempt {
 }
 
 impl ProviderPhysicalAttemptAudit {
+    #[must_use]
+    pub(crate) fn physical_attempt_id(&self) -> Option<&str> {
+        match self {
+            Self::InMemory { .. } => None,
+            Self::Durable(audit) => Some(&audit.physical_attempt_id),
+        }
+    }
+
     fn non_generating_receipt(
         &self,
         session_scope_id: &str,
@@ -712,6 +843,7 @@ impl ProviderPhysicalAttemptAudit {
             frozen_request,
             ProviderPhysicalAttemptPurpose::ConversationGeneration,
             None,
+            None,
         )
         .await
     }
@@ -728,6 +860,35 @@ impl ProviderPhysicalAttemptAudit {
             frozen_request,
             ProviderPhysicalAttemptPurpose::ConversationGeneration,
             Some(physical_attempt_id),
+            None,
+        )
+        .await
+    }
+
+    /// Starts the physical attempt already claimed by a durable provider-turn recovery schedule.
+    ///
+    /// Before the new send barrier is written, the request is checked either against the exact
+    /// process-local fingerprint retained by the live owner or against the predecessor's durable
+    /// frontier. A process-local fingerprint is never accepted as cross-restart authority.
+    pub(crate) async fn start_recovery(
+        session: &Session,
+        logical_run_id: &str,
+        frozen_request: &crate::FrozenProviderRequestMaterial,
+        schedule: &ProviderTurnRecoveryScheduledEntry,
+        physical_attempt_id: &str,
+    ) -> Result<Self> {
+        if schedule.logical_run_id != logical_run_id {
+            bail!(
+                "provider-turn recovery schedule logical run does not match the attempted recovery"
+            );
+        }
+        Self::start_with_purpose_and_id(
+            session,
+            logical_run_id,
+            frozen_request,
+            ProviderPhysicalAttemptPurpose::ConversationGeneration,
+            Some(physical_attempt_id),
+            Some(schedule),
         )
         .await
     }
@@ -738,8 +899,15 @@ impl ProviderPhysicalAttemptAudit {
         frozen_request: &crate::FrozenProviderRequestMaterial,
         purpose: ProviderPhysicalAttemptPurpose,
     ) -> Result<Self> {
-        Self::start_with_purpose_and_id(session, logical_run_id, frozen_request, purpose, None)
-            .await
+        Self::start_with_purpose_and_id(
+            session,
+            logical_run_id,
+            frozen_request,
+            purpose,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn start_with_purpose_and_id(
@@ -748,6 +916,7 @@ impl ProviderPhysicalAttemptAudit {
         frozen_request: &crate::FrozenProviderRequestMaterial,
         purpose: ProviderPhysicalAttemptPurpose,
         requested_physical_attempt_id: Option<&str>,
+        recovery_schedule: Option<&ProviderTurnRecoveryScheduledEntry>,
     ) -> Result<Self> {
         if let Some(physical_attempt_id) = requested_physical_attempt_id {
             validate_identity("provider physical attempt id", physical_attempt_id)?;
@@ -759,36 +928,105 @@ impl ProviderPhysicalAttemptAudit {
             });
         };
         let request = frozen_request.request();
-        let (prior_cache_layout, prior_semantic_cache_layout_v2) = {
+        let recovery_schedule = recovery_schedule.cloned();
+        let request_for_recovery = request.clone();
+        let request_material_fingerprint = frozen_request.fingerprint().to_owned();
+        let (prior_cache_layout, prior_semantic_cache_layout_v2, recovery_envelope) = {
             let store = store.clone();
             tokio::task::spawn_blocking(move || {
                 let records = store.read_event_records_writer()?;
                 let projection = ProviderPhysicalAttemptProjection::from_records(&records)?;
-                Ok::<_, anyhow::Error>((
-                    projection
-                        .latest_cache_layout_proof_for_internal_use()
-                        .cloned(),
-                    projection
-                        .latest_semantic_cache_layout_proof_v2_for_internal_use()
-                        .cloned(),
-                ))
+                if let Some(schedule) = recovery_schedule {
+                    if purpose != ProviderPhysicalAttemptPurpose::ConversationGeneration {
+                        bail!("provider-turn recovery cannot start a non-conversation attempt");
+                    }
+                    let predecessor = projection
+                        .attempt(&schedule.failed_physical_attempt_id)
+                        .context("provider-turn recovery predecessor is missing")?;
+                    if predecessor.entry.logical_run_id != schedule.logical_run_id
+                        || predecessor.terminal.is_none()
+                    {
+                        bail!("provider-turn recovery predecessor is not terminal");
+                    }
+                    let envelope = predecessor
+                        .entry
+                        .request_envelope
+                        .as_ref()
+                        .context("provider-turn recovery predecessor lacks an envelope")?;
+                    if envelope.canonical_request_hash != schedule.request_envelope_digest
+                        || envelope.source_frontier != schedule.source_frontier
+                    {
+                        bail!("provider-turn recovery schedule does not match its predecessor envelope");
+                    }
+                    if envelope.process_local_material_fingerprint
+                        == request_material_fingerprint
+                    {
+                        envelope.verify_reconstructed_request(&request_for_recovery)?;
+                    } else {
+                        envelope.verify_reconstructed_request_at_frontier(
+                            store.path(),
+                            &request_for_recovery,
+                        )?;
+                    }
+                    Ok::<_, anyhow::Error>((
+                        predecessor.entry.cache_layout_proof.clone(),
+                        predecessor.entry.semantic_cache_layout_proof_v2.clone(),
+                        Some(envelope.clone()),
+                    ))
+                } else {
+                    Ok::<_, anyhow::Error>((
+                        projection
+                            .latest_cache_layout_proof_for_internal_use()
+                            .cloned(),
+                        projection
+                            .latest_semantic_cache_layout_proof_v2_for_internal_use()
+                            .cloned(),
+                        None,
+                    ))
+                }
             })
             .await
             .context("provider cache layout projection task failed")??
         };
-        let cache_layout_proof =
-            Some(frozen_request.cache_layout_proof(prior_cache_layout.as_ref())?);
-        let semantic_cache_layout_proof_v2 = Some(
-            frozen_request
-                .semantic_cache_layout_proof_v2(prior_semantic_cache_layout_v2.as_ref())?,
-        );
-        let source_projection = session.active_projection_snapshot()?;
-        let source_frontier = source_projection
+        let cache_layout_proof = if recovery_envelope.is_some() {
+            Some(
+                prior_cache_layout
+                    .context("provider-turn recovery predecessor lacks a cache layout proof")?,
+            )
+        } else {
+            Some(frozen_request.cache_layout_proof(prior_cache_layout.as_ref())?)
+        };
+        let semantic_cache_layout_proof_v2 = if recovery_envelope.is_some() {
+            Some(prior_semantic_cache_layout_v2.context(
+                "provider-turn recovery predecessor lacks a semantic cache layout proof",
+            )?)
+        } else {
+            Some(
+                frozen_request
+                    .semantic_cache_layout_proof_v2(prior_semantic_cache_layout_v2.as_ref())?,
+            )
+        };
+        let source_projection = if recovery_envelope.is_none() {
+            session.active_projection_snapshot()?
+        } else {
+            None
+        };
+        let source_frontier = recovery_envelope
             .as_ref()
-            .map(|snapshot| crate::ProviderRequestSourceFrontierV1::from(snapshot.frontier()));
-        let context_epoch_id = source_projection
+            .and_then(|envelope| envelope.source_frontier.clone())
+            .or_else(|| {
+                source_projection.as_ref().map(|snapshot| {
+                    crate::ProviderRequestSourceFrontierV1::from(snapshot.frontier())
+                })
+            });
+        let context_epoch_id = recovery_envelope
             .as_ref()
-            .map(|snapshot| snapshot.tool_output_pressure().active_epoch_id.clone())
+            .map(|envelope| envelope.context_epoch_id.clone())
+            .or_else(|| {
+                source_projection
+                    .as_ref()
+                    .map(|snapshot| snapshot.tool_output_pressure().active_epoch_id.clone())
+            })
             .unwrap_or_else(|| "context-epoch:root".to_owned());
         let durable_previous_response_handle =
             session.latest_response_handle(&request.provider_name);
@@ -802,6 +1040,18 @@ impl ProviderPhysicalAttemptAudit {
             durable_previous_response_handle.as_ref(),
             &durable_continuation_states,
         )?;
+        if let Some(previous) = &recovery_envelope {
+            previous.verify_reconstructed_request(request)?;
+            if request_envelope.canonical_request_hash != previous.canonical_request_hash
+                || request_envelope.source_frontier != previous.source_frontier
+                || request_envelope.context_epoch_id != previous.context_epoch_id
+                || request_envelope.cache_layout_hash != previous.cache_layout_hash
+            {
+                bail!(
+                    "provider-turn recovery request envelope drifted after durable reconstruction"
+                );
+            }
+        }
         let physical_attempt_id = requested_physical_attempt_id
             .map(str::to_owned)
             .unwrap_or_else(new_provider_physical_attempt_id);
