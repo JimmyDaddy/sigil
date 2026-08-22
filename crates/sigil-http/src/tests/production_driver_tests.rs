@@ -3755,6 +3755,26 @@ fn seed_revision_session(
         &mut session_log,
         &draft,
         &request,
+        &sigil_kernel::PlanCompileInputV1 {
+            source_attempt_id: "attempt-1".to_owned(),
+            source_turn_id: "message-1".to_owned(),
+            task_config_contract_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                "test",
+            ),
+            planner_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "v2",
+            ),
+            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "v2",
+            ),
+            intent_schema_hash: None,
+            max_plan_steps: 64,
+            workspace_id: None,
+            session_scope_id: Some("test-session".to_owned()),
+        },
         120,
     )
     .expect("seed draft should commit");

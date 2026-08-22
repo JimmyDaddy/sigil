@@ -3010,8 +3010,10 @@ export interface components {
             /** Format: uint32 */
             active_children: number;
             can_continue: boolean;
+            checklist: components["schemas"]["PublicTaskChecklistItem"][];
             /** Format: uint32 */
             completed_children: number;
+            execution?: components["schemas"]["TaskExecutionBinding"];
             /** Format: uint32 */
             failed_children: number;
             lanes: components["schemas"]["ConversationTaskLane"][];
@@ -3310,6 +3312,7 @@ export interface components {
         PlanDecisionCommandReceipt: {
             /** @enum {string} */
             action: "run" | "save" | "revise" | "reject";
+            candidate_hash?: string | null;
             client_id: string;
             command_id: string;
             plan_hash: string;
@@ -3317,7 +3320,10 @@ export interface components {
             replayed: boolean;
             revision_run_id?: string | null;
             session_id: string;
+            task_blocker?: components["schemas"]["TaskBlocker"] | null;
             task_id?: string | null;
+            task_phase?: components["schemas"]["TaskExecutionPhase"] | null;
+            task_title?: string | null;
             user_input_request?: components["schemas"]["UserInputRequest"] | null;
         };
         PlanDecisionRequest: {
@@ -3530,13 +3536,19 @@ export interface components {
             sequence: number;
             session_id: string;
         };
-        PublicRunEventPayload: components["schemas"]["RouteTransitionEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["RunAwaitingUserInputEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["ConversationRouteChangedEvent"] | components["schemas"]["PlanReviewChangedEvent"] | components["schemas"]["UserInputChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RouteRecoveryRequiredEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
+        PublicRunEventPayload: components["schemas"]["RouteTransitionEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["RunAwaitingUserInputEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["ConversationRouteChangedEvent"] | components["schemas"]["PlanReviewChangedEvent"] | components["schemas"]["UserInputChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskExecutionAdmittedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskChecklistUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunBlockedEvent"] | components["schemas"]["RunPausedEvent"] | components["schemas"]["RunInterruptedEvent"] | components["schemas"]["RouteRecoveryRequiredEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
         PublicSessionRouteTransitionView: {
             connection_id: string | null;
             /** @enum {string} */
             kind: "exact" | "rebound" | "explicitly_confirmed";
             model_id: string | null;
             remote_context_reset: boolean;
+        };
+        PublicTaskChecklistItem: {
+            item_id: string;
+            /** @enum {string} */
+            status: "pending" | "in_progress" | "completed";
+            text: string;
         };
         /** @enum {string} */
         PublicTaskPhase: "routing" | "planning" | "execution" | "integration" | "synthesis" | "terminal";
@@ -3622,6 +3634,11 @@ export interface components {
             /** @constant */
             type: "run_awaiting_user_input";
         };
+        RunBlockedEvent: {
+            reason: string;
+            /** @constant */
+            type: "run_blocked";
+        };
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunCancelRequest"];
         };
@@ -3675,6 +3692,16 @@ export interface components {
             /** @constant */
             type: "run_finished";
         };
+        RunInterruptedEvent: {
+            reason: string;
+            /** @constant */
+            type: "run_interrupted";
+        };
+        RunPausedEvent: {
+            reason: string;
+            /** @constant */
+            type: "run_paused";
+        };
         RunSnapshot: {
             id: string;
             pending_approvals: components["schemas"]["PendingApproval"][];
@@ -3719,7 +3746,7 @@ export interface components {
             type: "run_started";
         };
         /** @enum {string} */
-        RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "pause_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "paused" | "interrupted";
+        RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "pause_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "paused" | "blocked" | "interrupted";
         ServerCapabilities: {
             agent_activity: boolean;
             approval: boolean;
@@ -4036,10 +4063,55 @@ export interface components {
             /** @constant */
             type: "task_batch_changed";
         };
+        TaskBlocker: {
+            affected_capability?: components["schemas"]["TaskCapability"] | null;
+            affected_step?: components["schemas"]["TaskStepId"] | null;
+            available_actions?: components["schemas"]["TaskBlockerAction"][];
+            /** Format: uint64 */
+            created_at_ms: number;
+            evidence_digest: string;
+            reason_code: components["schemas"]["TaskBlockerReasonCode"];
+            /** Format: uint64 */
+            resolved_at_ms?: number | null;
+            retryable: boolean;
+            summary: string;
+        };
+        /** @enum {string} */
+        TaskBlockerAction: "retry_admission" | "replan" | "cancel" | "rebind_route" | "grant_permission" | "resume";
+        /** @enum {string} */
+        TaskBlockerReasonCode: "workspace_changed" | "workspace_snapshot_unavailable" | "missing_required_capability" | "provider_unavailable" | "credential_unavailable" | "permission_required" | "workspace_trust_required" | "external_writer_active" | "isolation_unavailable" | "disk_space_exhausted" | "artifact_storage_unavailable" | "session_storage_degraded" | "verification_runner_unavailable" | "route_rebind_required" | "contract_recompile_required";
+        /** @enum {string} */
+        TaskCapability: "workspace_read" | "workspace_write" | "vcs_read" | "process_execute" | "network_read" | "artifact_read" | "verification_run";
+        TaskChecklistUpdatedEvent: {
+            items: components["schemas"]["PublicTaskChecklistItem"][];
+            /** Format: uint32 */
+            revision: number;
+            task_id: string;
+            /** @constant */
+            type: "task_checklist_updated";
+        };
         TaskContinuationRequest: {
             guidance?: string | null;
             task_id: string;
         };
+        TaskExecutionAdmittedEvent: {
+            execution: components["schemas"]["TaskExecutionBinding"];
+            task_id: string;
+            /** @constant */
+            type: "task_execution_admitted";
+        };
+        TaskExecutionBinding: {
+            /** @constant */
+            kind: "plan";
+            /** Format: uint32 */
+            plan_version: number;
+        } | {
+            admission_id: string;
+            /** @constant */
+            kind: "direct";
+        };
+        /** @enum {string} */
+        TaskExecutionPhase: "preparing" | "ready" | "running" | "blocked" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
         TaskIntegrationAcceptanceCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["TaskIntegrationReviewRequest"];
         };
@@ -4097,18 +4169,16 @@ export interface components {
             client_id: string;
             command_id: string;
             correlation_id?: string | null;
+            execution: components["schemas"]["TaskExecutionBinding"];
             /** Format: uint64 */
             expected_stream_sequence?: number | null;
-            /** Format: uint32 */
-            plan_version: number;
             replayed: boolean;
             run: components["schemas"]["RunSnapshot"];
             session_id: string;
             task_id: string;
         };
         TaskPauseRequest: {
-            /** Format: uint32 */
-            plan_version: number;
+            execution: components["schemas"]["TaskExecutionBinding"];
             request_id: string;
             task_id: string;
         };
@@ -4157,6 +4227,7 @@ export interface components {
             /** @constant */
             type: "task_step_changed";
         };
+        TaskStepId: string;
         TerminalLifecycle: {
             /** Format: uint64 */
             emitted_at_ms: number;

@@ -280,6 +280,9 @@ fn protocol_provisional_id(
         PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::RunAwaitingUserInput { .. }
         | PublicRunEventKind::RunFailed { .. }
+        | PublicRunEventKind::RunBlocked { .. }
+        | PublicRunEventKind::RunPaused { .. }
+        | PublicRunEventKind::RunInterrupted { .. }
         | PublicRunEventKind::RouteRecoveryRequired { .. }
         | PublicRunEventKind::RunCancelled => Some(ConversationLiveProvisionalSlotV1::Terminal),
         PublicRunEventKind::RouteTransition { .. }
@@ -287,10 +290,14 @@ fn protocol_provisional_id(
         | PublicRunEventKind::TaskRunFinished { .. }
         | PublicRunEventKind::TaskRoutingChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
+        | PublicRunEventKind::TaskExecutionAdmitted { .. }
         | PublicRunEventKind::TaskPlanUpdated { .. }
+        | PublicRunEventKind::TaskChecklistUpdated { .. }
         | PublicRunEventKind::TaskBatchChanged { .. }
         | PublicRunEventKind::TaskStepChanged { .. }
         | PublicRunEventKind::IntegrationLaneChanged { .. }
+        | PublicRunEventKind::ProviderTurnRecoveryChanged { .. }
+        | PublicRunEventKind::ProviderTurnPartialOutputDiscarded { .. }
         | PublicRunEventKind::UserInputChanged { .. }
         | PublicRunEventKind::TextDelta { .. }
         | PublicRunEventKind::ReasoningDelta { .. }
@@ -458,6 +465,12 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
             *task_id = task_id.as_deref().map(safe_persistence_text);
             *status = safe_persistence_text(status);
         }
+        PublicRunEventKind::TaskExecutionAdmitted { task_id, execution } => {
+            *task_id = safe_persistence_text(task_id);
+            if let sigil_kernel::TaskExecutionBindingV1::Direct { admission_id } = execution {
+                *admission_id = safe_persistence_text(admission_id);
+            }
+        }
         PublicRunEventKind::TaskPlanUpdated {
             task_id,
             status,
@@ -477,6 +490,13 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
                     .collect();
                 step.mode = safe_persistence_text(&step.mode);
                 step.isolation = safe_persistence_text(&step.isolation);
+            }
+        }
+        PublicRunEventKind::TaskChecklistUpdated { task_id, items, .. } => {
+            *task_id = safe_persistence_text(task_id);
+            for item in items {
+                item.item_id = safe_persistence_text(&item.item_id);
+                item.text = safe_persistence_text(&item.text);
             }
         }
         PublicRunEventKind::TaskBatchChanged {
@@ -517,6 +537,15 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
         PublicRunEventKind::RunFailed { error } => {
             *error = safe_persistence_text(error);
         }
+        PublicRunEventKind::RunBlocked { reason }
+        | PublicRunEventKind::RunPaused { reason }
+        | PublicRunEventKind::RunInterrupted { reason } => {
+            *reason = safe_persistence_text(reason);
+        }
+        PublicRunEventKind::ProviderTurnRecoveryChanged { recovery } => {
+            recovery.reason_code = recovery.reason_code.as_deref().map(safe_persistence_text);
+        }
+        PublicRunEventKind::ProviderTurnPartialOutputDiscarded { .. } => {}
         PublicRunEventKind::ApprovalResolved { reason, .. } => {
             if let Some(reason) = reason {
                 *reason = safe_persistence_text(reason);
@@ -1106,6 +1135,9 @@ impl HttpLiveEventBus {
             &event.run_event.event,
             PublicRunEventKind::RunFinished { .. }
                 | PublicRunEventKind::RunFailed { .. }
+                | PublicRunEventKind::RunBlocked { .. }
+                | PublicRunEventKind::RunPaused { .. }
+                | PublicRunEventKind::RunInterrupted { .. }
                 | PublicRunEventKind::RouteRecoveryRequired { .. }
                 | PublicRunEventKind::RunCancelled
         );
@@ -1491,11 +1523,18 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
         | PublicRunEventKind::PlanReviewChanged { .. }
         | PublicRunEventKind::UserInputChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
+        | PublicRunEventKind::TaskExecutionAdmitted { .. }
         | PublicRunEventKind::TaskPlanUpdated { .. }
+        | PublicRunEventKind::TaskChecklistUpdated { .. }
         | PublicRunEventKind::TaskBatchChanged { .. }
         | PublicRunEventKind::TaskStepChanged { .. }
         | PublicRunEventKind::IntegrationLaneChanged { .. }
+        | PublicRunEventKind::ProviderTurnRecoveryChanged { .. }
+        | PublicRunEventKind::ProviderTurnPartialOutputDiscarded { .. }
         | PublicRunEventKind::RunFailed { .. }
+        | PublicRunEventKind::RunBlocked { .. }
+        | PublicRunEventKind::RunPaused { .. }
+        | PublicRunEventKind::RunInterrupted { .. }
         | PublicRunEventKind::RouteRecoveryRequired { .. }
         | PublicRunEventKind::RunCancelled
         | PublicRunEventKind::ToolCallStarted { .. }

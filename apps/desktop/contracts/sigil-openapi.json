@@ -3285,9 +3285,19 @@
           "can_continue": {
             "type": "boolean"
           },
+          "checklist": {
+            "items": {
+              "$ref": "#/components/schemas/PublicTaskChecklistItem"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
           "completed_children": {
             "format": "uint32",
             "type": "integer"
+          },
+          "execution": {
+            "$ref": "#/components/schemas/TaskExecutionBinding"
           },
           "failed_children": {
             "format": "uint32",
@@ -3344,6 +3354,7 @@
           "status",
           "steps",
           "steps_truncated",
+          "checklist",
           "active_children",
           "completed_children",
           "failed_children",
@@ -4683,6 +4694,12 @@
             ],
             "type": "string"
           },
+          "candidate_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_id": {
             "type": "string"
           },
@@ -4707,7 +4724,33 @@
           "session_id": {
             "type": "string"
           },
+          "task_blocker": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TaskBlocker"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_phase": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TaskExecutionPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task_title": {
             "type": [
               "string",
               "null"
@@ -5852,7 +5895,13 @@
             "$ref": "#/components/schemas/TaskPhaseChangedEvent"
           },
           {
+            "$ref": "#/components/schemas/TaskExecutionAdmittedEvent"
+          },
+          {
             "$ref": "#/components/schemas/TaskPlanUpdatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskChecklistUpdatedEvent"
           },
           {
             "$ref": "#/components/schemas/TaskBatchChangedEvent"
@@ -5865,6 +5914,15 @@
           },
           {
             "$ref": "#/components/schemas/RunFailedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunBlockedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunPausedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunInterruptedEvent"
           },
           {
             "$ref": "#/components/schemas/RouteRecoveryRequiredEvent"
@@ -5951,6 +6009,33 @@
           "connection_id",
           "model_id",
           "remote_context_reset"
+        ],
+        "type": "object"
+      },
+      "PublicTaskChecklistItem": {
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 240,
+            "type": "string"
+          }
+        },
+        "required": [
+          "item_id",
+          "text",
+          "status"
         ],
         "type": "object"
       },
@@ -6311,6 +6396,23 @@
         ],
         "type": "object"
       },
+      "RunBlockedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "const": "run_blocked",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "type": "object"
+      },
       "RunCancelCommand": {
         "allOf": [
           {
@@ -6551,6 +6653,40 @@
         ],
         "type": "object"
       },
+      "RunInterruptedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "const": "run_interrupted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RunPausedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "const": "run_paused",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "type": "object"
+      },
       "RunSnapshot": {
         "properties": {
           "id": {
@@ -6788,6 +6924,7 @@
           "failed",
           "cancelled",
           "paused",
+          "blocked",
           "interrupted"
         ],
         "type": "string"
@@ -8101,6 +8238,143 @@
         ],
         "type": "object"
       },
+      "TaskBlocker": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_capability": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TaskCapability"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "affected_step": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TaskStepId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "available_actions": {
+            "items": {
+              "$ref": "#/components/schemas/TaskBlockerAction"
+            },
+            "type": "array"
+          },
+          "created_at_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "evidence_digest": {
+            "type": "string"
+          },
+          "reason_code": {
+            "$ref": "#/components/schemas/TaskBlockerReasonCode"
+          },
+          "resolved_at_ms": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason_code",
+          "summary",
+          "retryable",
+          "evidence_digest",
+          "created_at_ms"
+        ],
+        "type": "object"
+      },
+      "TaskBlockerAction": {
+        "enum": [
+          "retry_admission",
+          "replan",
+          "cancel",
+          "rebind_route",
+          "grant_permission",
+          "resume"
+        ],
+        "type": "string"
+      },
+      "TaskBlockerReasonCode": {
+        "enum": [
+          "workspace_changed",
+          "workspace_snapshot_unavailable",
+          "missing_required_capability",
+          "provider_unavailable",
+          "credential_unavailable",
+          "permission_required",
+          "workspace_trust_required",
+          "external_writer_active",
+          "isolation_unavailable",
+          "disk_space_exhausted",
+          "artifact_storage_unavailable",
+          "session_storage_degraded",
+          "verification_runner_unavailable",
+          "route_rebind_required",
+          "contract_recompile_required"
+        ],
+        "type": "string"
+      },
+      "TaskCapability": {
+        "enum": [
+          "workspace_read",
+          "workspace_write",
+          "vcs_read",
+          "process_execute",
+          "network_read",
+          "artifact_read",
+          "verification_run"
+        ],
+        "type": "string"
+      },
+      "TaskChecklistUpdatedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublicTaskChecklistItem"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "revision": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "task_checklist_updated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "revision",
+          "items"
+        ],
+        "type": "object"
+      },
       "TaskContinuationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -8120,6 +8394,84 @@
           "task_id"
         ],
         "type": "object"
+      },
+      "TaskExecutionAdmittedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "execution": {
+            "$ref": "#/components/schemas/TaskExecutionBinding"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "type": {
+            "const": "task_execution_admitted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "task_id",
+          "execution"
+        ],
+        "type": "object"
+      },
+      "TaskExecutionBinding": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "plan",
+                "type": "string"
+              },
+              "plan_version": {
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "plan_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "admission_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "admission_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TaskExecutionPhase": {
+        "enum": [
+          "preparing",
+          "ready",
+          "running",
+          "blocked",
+          "paused",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted"
+        ],
+        "type": "string"
       },
       "TaskIntegrationAcceptanceCommand": {
         "allOf": [
@@ -8383,16 +8735,15 @@
               "null"
             ]
           },
+          "execution": {
+            "$ref": "#/components/schemas/TaskExecutionBinding"
+          },
           "expected_stream_sequence": {
             "format": "uint64",
             "type": [
               "integer",
               "null"
             ]
-          },
-          "plan_version": {
-            "format": "uint32",
-            "type": "integer"
           },
           "replayed": {
             "type": "boolean"
@@ -8412,7 +8763,7 @@
           "client_id",
           "session_id",
           "task_id",
-          "plan_version",
+          "execution",
           "run",
           "replayed"
         ],
@@ -8421,10 +8772,8 @@
       "TaskPauseRequest": {
         "additionalProperties": false,
         "properties": {
-          "plan_version": {
-            "format": "uint32",
-            "minimum": 1,
-            "type": "integer"
+          "execution": {
+            "$ref": "#/components/schemas/TaskExecutionBinding"
           },
           "request_id": {
             "type": "string"
@@ -8436,7 +8785,7 @@
         "required": [
           "request_id",
           "task_id",
-          "plan_version"
+          "execution"
         ],
         "type": "object"
       },
@@ -8622,6 +8971,9 @@
           "status"
         ],
         "type": "object"
+      },
+      "TaskStepId": {
+        "type": "string"
       },
       "TerminalLifecycle": {
         "additionalProperties": false,

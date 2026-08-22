@@ -636,6 +636,14 @@ fn publish_plan_review_revision_terminal(
             }
         }
         Ok(sigil_runtime::PlanReviewRunOutcome::Cancelled) => PublicRunEventKind::RunCancelled,
+        Ok(sigil_runtime::PlanReviewRunOutcome::Blocked(reason)) => {
+            PublicRunEventKind::RunBlocked {
+                reason: reason.clone(),
+            }
+        }
+        Ok(sigil_runtime::PlanReviewRunOutcome::Paused(reason)) => PublicRunEventKind::RunPaused {
+            reason: reason.clone(),
+        },
         Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(error))
         | Ok(sigil_runtime::PlanReviewRunOutcome::Failed(error))
         | Ok(sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error)) => {
@@ -5361,6 +5369,9 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
             &event.event,
             PublicRunEventKind::RunFinished { .. }
                 | PublicRunEventKind::RunFailed { .. }
+                | PublicRunEventKind::RunBlocked { .. }
+                | PublicRunEventKind::RunPaused { .. }
+                | PublicRunEventKind::RunInterrupted { .. }
                 | PublicRunEventKind::RouteRecoveryRequired { .. }
                 | PublicRunEventKind::RunCancelled
         );
@@ -5963,7 +5974,7 @@ fn http_terminal_from_application_result(
         Ok(terminal_status) => match terminal_status {
             ApplicationRunTerminalStatus::Succeeded => HttpRunTerminalOutcome::Finished,
             ApplicationRunTerminalStatus::Interrupted => HttpRunTerminalOutcome::Interrupted,
-            ApplicationRunTerminalStatus::Blocked => HttpRunTerminalOutcome::Failed,
+            ApplicationRunTerminalStatus::Blocked => HttpRunTerminalOutcome::Blocked,
             ApplicationRunTerminalStatus::AwaitingUserInput => HttpRunTerminalOutcome::Paused,
         },
         Err(_) => HttpRunTerminalOutcome::Failed,

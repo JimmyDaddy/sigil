@@ -3343,7 +3343,8 @@ async fn local_task_pause_route_is_exact_idempotent_and_typed() {
 
     assert_eq!(status, 200);
     assert_eq!(receipt["task_id"], pause_request.task_id.as_str());
-    assert_eq!(receipt["plan_version"], 4);
+    assert_eq!(receipt["execution"]["kind"], "plan");
+    assert_eq!(receipt["execution"]["plan_version"], 4);
     assert_eq!(receipt["run"]["status"], "pause_requested");
     assert_eq!(receipt["replayed"], false);
     assert_eq!(driver.pauses().len(), 1);
@@ -4625,6 +4626,87 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
 }
 
 #[test]
+fn openapi_plan_decision_receipt_exposes_optional_task_admission_fields() {
+    let document = http_openapi_document();
+    let receipt = &document["components"]["schemas"]["PlanDecisionCommandReceipt"];
+
+    for field in ["task_title", "candidate_hash", "task_phase", "task_blocker"] {
+        assert!(
+            receipt["properties"][field].is_object(),
+            "missing plan decision receipt field {field}"
+        );
+        assert!(
+            !receipt["required"]
+                .as_array()
+                .expect("plan decision receipt required fields")
+                .iter()
+                .any(|required| required == field),
+            "optional plan decision receipt field {field} must not be required"
+        );
+    }
+    for field in ["task_title", "candidate_hash"] {
+        assert_eq!(
+            receipt["properties"][field]["type"],
+            json!(["string", "null"])
+        );
+    }
+    assert_eq!(
+        receipt["properties"]["task_phase"]["oneOf"][0]["$ref"],
+        "#/components/schemas/TaskExecutionPhase"
+    );
+    assert_eq!(
+        receipt["properties"]["task_blocker"]["oneOf"][0]["$ref"],
+        "#/components/schemas/TaskBlocker"
+    );
+    for field in ["task_phase", "task_blocker"] {
+        assert_eq!(receipt["properties"][field]["oneOf"][1]["type"], "null");
+    }
+
+    assert_eq!(
+        document["components"]["schemas"]["TaskExecutionPhase"]["enum"],
+        json!([
+            "preparing",
+            "ready",
+            "running",
+            "blocked",
+            "paused",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+        ])
+    );
+    let blocker = &document["components"]["schemas"]["TaskBlocker"];
+    assert_eq!(blocker["additionalProperties"], false);
+    assert_eq!(
+        blocker["required"],
+        json!([
+            "reason_code",
+            "summary",
+            "retryable",
+            "evidence_digest",
+            "created_at_ms"
+        ])
+    );
+    assert_eq!(
+        blocker["properties"]["reason_code"]["$ref"],
+        "#/components/schemas/TaskBlockerReasonCode"
+    );
+    assert_eq!(
+        blocker["properties"]["affected_step"]["oneOf"][0]["$ref"],
+        "#/components/schemas/TaskStepId"
+    );
+    assert_eq!(
+        blocker["properties"]["affected_capability"]["oneOf"][0]["$ref"],
+        "#/components/schemas/TaskCapability"
+    );
+    assert_eq!(
+        blocker["properties"]["available_actions"]["items"]["$ref"],
+        "#/components/schemas/TaskBlockerAction"
+    );
+}
+
+#[test]
 fn public_run_event_serializes_to_run_event_sse_frame() {
     let event = PublicRunEvent::new(
         "session-1",
@@ -4699,6 +4781,37 @@ fn terminal_lifecycle_event_serializes_as_typed_durable_sse() {
         "ready"
     );
     assert_eq!(sse.id(), Some("sigil-http-run-v1:session-1:run-1:13"));
+}
+
+#[test]
+fn discarded_partial_output_serializes_as_a_durable_redacted_sse_signal() {
+    let event = PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        14,
+        PublicRunEventKind::ProviderTurnPartialOutputDiscarded {
+            output: sigil_kernel::PublicProviderTurnPartialOutputDiscardedViewV1 {
+                text_discarded: true,
+                reasoning_discarded: true,
+                tool_request_discarded: false,
+            },
+        },
+    );
+
+    let sse = public_run_event_to_sse(&event).expect("discard signal should serialize");
+    let data: Value = serde_json::from_str(sse.data()).expect("sse data should be json");
+    assert_eq!(data["event_class"], "durable");
+    assert_eq!(
+        data["run_event"]["event"]["type"],
+        "provider_turn_partial_output_discarded"
+    );
+    assert_eq!(data["run_event"]["event"]["output"]["text_discarded"], true);
+    assert!(
+        data["run_event"]["event"]
+            .get("physical_attempt_id")
+            .is_none()
+    );
+    assert!(data["run_event"]["event"].get("content").is_none());
 }
 
 #[test]
@@ -7699,7 +7812,7 @@ fn exact_task_pause_routes_once_and_rejection_restores_the_run() {
         .expect("exact Task pause should route");
 
     assert_eq!(receipt.task_id, request.task_id.as_str());
-    assert_eq!(receipt.plan_version, 2);
+    assert_eq!(receipt.execution, request.execution);
     assert_eq!(receipt.run.status, HttpRunStatus::PauseRequested);
     assert!(!receipt.replayed);
     assert_eq!(
@@ -9434,6 +9547,10 @@ impl HttpRunDriver for RecordingRunDriver {
             plan_hash: request.expected_plan_hash.clone(),
             action: request.action,
             task_id: None,
+            task_title: None,
+            candidate_hash: None,
+            task_phase: None,
+            task_blocker: None,
             revision_run_id: None,
             user_input_request: None,
             replayed: false,

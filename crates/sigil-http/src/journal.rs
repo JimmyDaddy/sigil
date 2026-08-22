@@ -644,6 +644,9 @@ fn protocol_event_is_terminal(event: &HttpProtocolEvent) -> bool {
         &event.run_event.event,
         sigil_kernel::PublicRunEventKind::RunFinished { .. }
             | sigil_kernel::PublicRunEventKind::RunFailed { .. }
+            | sigil_kernel::PublicRunEventKind::RunBlocked { .. }
+            | sigil_kernel::PublicRunEventKind::RunPaused { .. }
+            | sigil_kernel::PublicRunEventKind::RunInterrupted { .. }
             | sigil_kernel::PublicRunEventKind::RouteRecoveryRequired { .. }
             | sigil_kernel::PublicRunEventKind::RunCancelled
     )

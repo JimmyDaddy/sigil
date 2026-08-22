@@ -2680,7 +2680,7 @@ impl HttpSessionRunRegistry {
                 expected_stream_sequence: command.expected_stream_sequence,
                 correlation_id: command.correlation_id,
                 task_id: command.payload.task_id.as_str().to_owned(),
-                plan_version: command.payload.plan_version,
+                execution: command.payload.execution.clone(),
                 run,
                 replayed: false,
             })

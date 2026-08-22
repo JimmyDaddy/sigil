@@ -1881,16 +1881,18 @@ pub fn http_openapi_document() -> Value {
                     "type": "object",
                     "additionalProperties": false,
                     "description": "Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority.",
-                    "required": ["schema_version", "task_id", "phase", "status", "steps", "steps_truncated", "active_children", "completed_children", "failed_children", "lanes", "lanes_truncated", "can_continue"],
+                    "required": ["schema_version", "task_id", "phase", "status", "steps", "steps_truncated", "checklist", "active_children", "completed_children", "failed_children", "lanes", "lanes_truncated", "can_continue"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
                         "task_id": { "type": "string", "maxLength": 512 },
                         "phase": { "$ref": "#/components/schemas/PublicTaskPhase" },
                         "status": { "type": "string", "maxLength": 512 },
+                        "execution": { "$ref": "#/components/schemas/TaskExecutionBinding" },
                         "plan_version": { "type": "integer", "format": "uint32" },
                         "plan_status": { "type": "string", "maxLength": 512 },
                         "steps": { "type": "array", "maxItems": 128, "items": { "$ref": "#/components/schemas/ConversationTaskPlanStep" } },
                         "steps_truncated": { "type": "boolean" },
+                        "checklist": { "type": "array", "maxItems": 32, "items": { "$ref": "#/components/schemas/PublicTaskChecklistItem" } },
                         "active_children": { "type": "integer", "format": "uint32" },
                         "completed_children": { "type": "integer", "format": "uint32" },
                         "failed_children": { "type": "integer", "format": "uint32" },
@@ -2062,10 +2064,49 @@ pub fn http_openapi_document() -> Value {
                         "plan_hash": { "type": "string" },
                         "action": { "type": "string", "enum": ["run", "save", "revise", "reject"] },
                         "task_id": { "type": ["string", "null"] },
+                        "task_title": { "type": ["string", "null"] },
+                        "candidate_hash": { "type": ["string", "null"] },
+                        "task_phase": { "oneOf": [{ "$ref": "#/components/schemas/TaskExecutionPhase" }, { "type": "null" }] },
+                        "task_blocker": { "oneOf": [{ "$ref": "#/components/schemas/TaskBlocker" }, { "type": "null" }] },
                         "revision_run_id": { "type": ["string", "null"] },
                         "user_input_request": { "oneOf": [{ "$ref": "#/components/schemas/UserInputRequest" }, { "type": "null" }] },
                         "replayed": { "type": "boolean" }
                     }
+                },
+                "TaskExecutionPhase": {
+                    "type": "string",
+                    "enum": ["preparing", "ready", "running", "blocked", "paused", "completed", "failed", "cancelled", "interrupted"]
+                },
+                "TaskBlocker": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["reason_code", "summary", "retryable", "evidence_digest", "created_at_ms"],
+                    "properties": {
+                        "reason_code": { "$ref": "#/components/schemas/TaskBlockerReasonCode" },
+                        "summary": { "type": "string" },
+                        "affected_step": { "oneOf": [{ "$ref": "#/components/schemas/TaskStepId" }, { "type": "null" }] },
+                        "affected_capability": { "oneOf": [{ "$ref": "#/components/schemas/TaskCapability" }, { "type": "null" }] },
+                        "retryable": { "type": "boolean" },
+                        "available_actions": { "type": "array", "items": { "$ref": "#/components/schemas/TaskBlockerAction" } },
+                        "evidence_digest": { "type": "string" },
+                        "created_at_ms": { "type": "integer", "format": "uint64" },
+                        "resolved_at_ms": { "type": ["integer", "null"], "format": "uint64" }
+                    }
+                },
+                "TaskBlockerReasonCode": {
+                    "type": "string",
+                    "enum": ["workspace_changed", "workspace_snapshot_unavailable", "missing_required_capability", "provider_unavailable", "credential_unavailable", "permission_required", "workspace_trust_required", "external_writer_active", "isolation_unavailable", "disk_space_exhausted", "artifact_storage_unavailable", "session_storage_degraded", "verification_runner_unavailable", "route_rebind_required", "contract_recompile_required"]
+                },
+                "TaskBlockerAction": {
+                    "type": "string",
+                    "enum": ["retry_admission", "replan", "cancel", "rebind_route", "grant_permission", "resume"]
+                },
+                "TaskCapability": {
+                    "type": "string",
+                    "enum": ["workspace_read", "workspace_write", "vcs_read", "process_execute", "network_read", "artifact_read", "verification_run"]
+                },
+                "TaskStepId": {
+                    "type": "string"
                 },
                 "Sha256": {
                     "type": "string",
@@ -3423,16 +3464,38 @@ pub fn http_openapi_document() -> Value {
                 "TaskPauseRequest": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["request_id", "task_id", "plan_version"],
+                    "required": ["request_id", "task_id", "execution"],
                     "properties": {
                         "request_id": { "type": "string" },
                         "task_id": { "type": "string" },
-                        "plan_version": { "type": "integer", "format": "uint32", "minimum": 1 }
+                        "execution": { "$ref": "#/components/schemas/TaskExecutionBinding" }
                     }
+                },
+                "TaskExecutionBinding": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "plan_version"],
+                            "properties": {
+                                "kind": { "type": "string", "const": "plan" },
+                                "plan_version": { "type": "integer", "format": "uint32", "minimum": 1 }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "admission_id"],
+                            "properties": {
+                                "kind": { "type": "string", "const": "direct" },
+                                "admission_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+                            }
+                        }
+                    ]
                 },
                 "TaskPauseCommandReceipt": {
                     "type": "object",
-                    "required": ["command_id", "client_id", "session_id", "task_id", "plan_version", "run", "replayed"],
+                    "required": ["command_id", "client_id", "session_id", "task_id", "execution", "run", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
                         "client_id": { "type": "string" },
@@ -3440,7 +3503,7 @@ pub fn http_openapi_document() -> Value {
                         "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
                         "correlation_id": { "type": ["string", "null"] },
                         "task_id": { "type": "string" },
-                        "plan_version": { "type": "integer", "format": "uint32" },
+                        "execution": { "$ref": "#/components/schemas/TaskExecutionBinding" },
                         "run": { "$ref": "#/components/schemas/RunSnapshot" },
                         "replayed": { "type": "boolean" }
                     }
@@ -3498,7 +3561,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunStatus": {
                     "type": "string",
-                    "enum": ["starting", "running", "waiting_for_approval", "cancel_requested", "pause_requested", "execution_uncertain", "finished", "failed", "cancelled", "paused", "interrupted"]
+                    "enum": ["starting", "running", "waiting_for_approval", "cancel_requested", "pause_requested", "execution_uncertain", "finished", "failed", "cancelled", "paused", "blocked", "interrupted"]
                 },
                 "ApprovalDecisionCommand": {
                     "allOf": [
@@ -4315,6 +4378,19 @@ fn public_event_schemas() -> Map<String, Value> {
         }),
     );
     schemas.insert(
+        "PublicTaskChecklistItem".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["item_id", "text", "status"],
+            "properties": {
+                "item_id": { "type": "string", "maxLength": 256 },
+                "text": { "type": "string", "maxLength": 240 },
+                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+            }
+        }),
+    );
+    schemas.insert(
         "PublicToolCall".to_owned(),
         json!({
             "type": "object",
@@ -4545,6 +4621,18 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "TaskExecutionAdmittedEvent",
+            public_event_variant(
+                "task_execution_admitted",
+                &["task_id", "execution"],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "execution": { "$ref": "#/components/schemas/TaskExecutionBinding" }
+                })),
+                true,
+            ),
+        ),
+        (
             "TaskPlanUpdatedEvent",
             public_event_variant(
                 "task_plan_updated",
@@ -4554,6 +4642,19 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
                     "plan_version": { "type": "integer", "format": "uint32" },
                     "status": { "type": "string", "maxLength": 512 },
                     "steps": { "type": "array", "items": { "$ref": "#/components/schemas/PublicTaskPlanStep" } }
+                })),
+                true,
+            ),
+        ),
+        (
+            "TaskChecklistUpdatedEvent",
+            public_event_variant(
+                "task_checklist_updated",
+                &["task_id", "revision", "items"],
+                json_properties(json!({
+                    "task_id": { "type": "string", "maxLength": 512 },
+                    "revision": { "type": "integer", "format": "uint32", "minimum": 1 },
+                    "items": { "type": "array", "maxItems": 32, "items": { "$ref": "#/components/schemas/PublicTaskChecklistItem" } }
                 })),
                 true,
             ),
@@ -4625,6 +4726,33 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
                 "run_failed",
                 &["error"],
                 json_properties(json!({ "error": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "RunBlockedEvent",
+            public_event_variant(
+                "run_blocked",
+                &["reason"],
+                json_properties(json!({ "reason": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "RunPausedEvent",
+            public_event_variant(
+                "run_paused",
+                &["reason"],
+                json_properties(json!({ "reason": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "RunInterruptedEvent",
+            public_event_variant(
+                "run_interrupted",
+                &["reason"],
+                json_properties(json!({ "reason": { "type": "string" } })),
                 true,
             ),
         ),

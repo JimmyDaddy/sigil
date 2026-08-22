@@ -965,6 +965,7 @@ pub enum HttpConversationDisplayStatus {
     Failed,
     Cancelled,
     Interrupted,
+    Paused,
     Blocked,
     AwaitingUserInput,
 }
@@ -1214,11 +1215,14 @@ pub struct HttpConversationTaskControl {
     pub phase: PublicTaskPhase,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<sigil_kernel::TaskExecutionBindingV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_status: Option<String>,
     pub steps: Vec<HttpConversationTaskPlanStep>,
     pub steps_truncated: bool,
+    pub checklist: Vec<sigil_kernel::PublicTaskChecklistItemV1>,
     pub active_children: u32,
     pub completed_children: u32,
     pub failed_children: u32,
@@ -1234,10 +1238,12 @@ impl From<ConversationTaskControlV1> for HttpConversationTaskControl {
             task_id: task.task_id,
             phase: task.phase,
             status: task.status,
+            execution: task.execution,
             plan_version: task.plan_version,
             plan_status: task.plan_status,
             steps: task.steps.into_iter().map(Into::into).collect(),
             steps_truncated: task.steps_truncated,
+            checklist: task.checklist,
             active_children: task.active_children,
             completed_children: task.completed_children,
             failed_children: task.failed_children,
@@ -1310,10 +1316,43 @@ pub enum HttpPlanReviewStatus {
     WaitingForInput,
     Finalizing,
     DraftReady,
+    CompileFailed,
     CompletedWithoutDraft,
+    Blocked,
+    Paused,
     Failed,
     Interrupted,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTaskExecutionPhase {
+    Preparing,
+    Ready,
+    Running,
+    Blocked,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl From<sigil_kernel::TaskExecutionPhaseV1> for HttpTaskExecutionPhase {
+    fn from(phase: sigil_kernel::TaskExecutionPhaseV1) -> Self {
+        match phase {
+            sigil_kernel::TaskExecutionPhaseV1::Preparing => Self::Preparing,
+            sigil_kernel::TaskExecutionPhaseV1::Ready => Self::Ready,
+            sigil_kernel::TaskExecutionPhaseV1::Running => Self::Running,
+            sigil_kernel::TaskExecutionPhaseV1::Blocked => Self::Blocked,
+            sigil_kernel::TaskExecutionPhaseV1::Paused => Self::Paused,
+            sigil_kernel::TaskExecutionPhaseV1::Completed => Self::Completed,
+            sigil_kernel::TaskExecutionPhaseV1::Failed => Self::Failed,
+            sigil_kernel::TaskExecutionPhaseV1::Cancelled => Self::Cancelled,
+            sigil_kernel::TaskExecutionPhaseV1::Interrupted => Self::Interrupted,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1792,7 +1831,7 @@ map_enum!(ConversationDisplaySourceV1 => HttpConversationDisplaySource {
 });
 map_enum!(ConversationDisplayStatusV1 => HttpConversationDisplayStatus {
     Recorded, Requested, WaitingForApproval, Approved, Denied, Completed, Succeeded, Failed,
-    Cancelled, Interrupted, Blocked, AwaitingUserInput
+    Cancelled, Interrupted, Paused, Blocked, AwaitingUserInput
 });
 map_enum!(ConversationDisplayMessageRoleV1 => HttpConversationDisplayMessageRole {
     User, Assistant
@@ -2346,6 +2385,8 @@ pub enum HttpRunStatus {
     Cancelled,
     /// The physical run quiesced and its exact durable Task is resumably paused.
     Paused,
+    /// The run is durably blocked on a recoverable prerequisite or reconciliation action.
+    Blocked,
     /// Execution stopped without proving a clean cancellation terminal.
     Interrupted,
 }
@@ -2356,7 +2397,12 @@ impl HttpRunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Finished | Self::Failed | Self::Cancelled | Self::Paused | Self::Interrupted
+            Self::Finished
+                | Self::Failed
+                | Self::Cancelled
+                | Self::Paused
+                | Self::Blocked
+                | Self::Interrupted
         )
     }
 }
@@ -2373,6 +2419,8 @@ pub enum HttpRunTerminalOutcome {
     Cancelled,
     /// Cooperative cancellation reached durable quiescence for an exact Task pause.
     Paused,
+    /// Execution stopped at a durable recoverable blocker.
+    Blocked,
     /// Execution stopped without a provable clean cancellation terminal.
     Interrupted,
 }
@@ -2386,6 +2434,7 @@ impl HttpRunTerminalOutcome {
             Self::Failed => HttpRunStatus::Failed,
             Self::Cancelled => HttpRunStatus::Cancelled,
             Self::Paused => HttpRunStatus::Paused,
+            Self::Blocked => HttpRunStatus::Blocked,
             Self::Interrupted => HttpRunStatus::Interrupted,
         }
     }
@@ -3430,8 +3479,8 @@ pub struct HttpTaskPauseCommandReceipt {
     pub correlation_id: Option<String>,
     /// Exact Task selected by the rendered pause action.
     pub task_id: String,
-    /// Accepted plan incarnation selected by the rendered pause action.
-    pub plan_version: u32,
+    /// Exact planned or direct execution authority selected by the rendered pause action.
+    pub execution: sigil_kernel::TaskExecutionBindingV1,
     /// Run snapshot after the pause reached a durable terminal.
     pub run: HttpRunSnapshot,
     /// Whether this response was replayed from a prior command id.
@@ -3670,9 +3719,12 @@ impl From<sigil_kernel::PublicPlanReviewStatus> for HttpPlanReviewStatus {
             sigil_kernel::PublicPlanReviewStatus::WaitingForInput => Self::WaitingForInput,
             sigil_kernel::PublicPlanReviewStatus::Finalizing => Self::Finalizing,
             sigil_kernel::PublicPlanReviewStatus::DraftReady => Self::DraftReady,
+            sigil_kernel::PublicPlanReviewStatus::CompileFailed => Self::CompileFailed,
             sigil_kernel::PublicPlanReviewStatus::CompletedWithoutDraft => {
                 Self::CompletedWithoutDraft
             }
+            sigil_kernel::PublicPlanReviewStatus::Blocked => Self::Blocked,
+            sigil_kernel::PublicPlanReviewStatus::Paused => Self::Paused,
             sigil_kernel::PublicPlanReviewStatus::Failed => Self::Failed,
             sigil_kernel::PublicPlanReviewStatus::Interrupted => Self::Interrupted,
             sigil_kernel::PublicPlanReviewStatus::Cancelled => Self::Cancelled,
@@ -3756,6 +3808,18 @@ pub struct HttpPlanDecisionCommandReceipt {
     pub action: HttpPlanDecisionAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// RFC-0067: semantic Task title shown immediately after a Run receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_title: Option<String>,
+    /// RFC-0067: adopted candidate hash for receipt idempotency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_hash: Option<String>,
+    /// RFC-0067: durable Task phase right after admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_phase: Option<HttpTaskExecutionPhase>,
+    /// RFC-0067: typed blocker when admission held the Task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_blocker: Option<Box<sigil_kernel::TaskBlockerV1>>,
     /// Run identity of the supervised revision plan review executed for a `Revise` action, so the
     /// client can subscribe to and track the child run's event stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3865,6 +3929,10 @@ impl From<sigil_runtime::ApplicationPlanDecisionReceipt> for HttpPlanDecisionCom
                 sigil_runtime::ApplicationPlanAction::Reject => HttpPlanDecisionAction::Reject,
             },
             task_id: receipt.task_id,
+            task_title: receipt.task_title,
+            candidate_hash: receipt.candidate_hash,
+            task_phase: receipt.task_phase.map(Into::into),
+            task_blocker: receipt.task_blocker.map(Box::new),
             revision_run_id,
             user_input_request: receipt.user_input_request.map(Into::into),
             replayed: false,
