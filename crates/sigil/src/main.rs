@@ -1495,9 +1495,28 @@ async fn plan_decision_command(
             sigil_runtime::ApplicationPlanAction::Reject => "reject",
         },
         task_id: receipt.task_id,
+        task_phase: receipt.task_phase.map(|phase| phase.as_str().to_owned()),
+        task_blocker: receipt.task_blocker.map(|blocker| CliTaskBlocker {
+            reason_code: blocker.reason_code.as_str().to_owned(),
+            summary: blocker.summary,
+            retryable: blocker.retryable,
+            available_actions: blocker
+                .available_actions
+                .iter()
+                .map(|action| action.as_str().to_owned())
+                .collect(),
+        }),
     })
     .context("failed to serialize plan decision receipt")?;
     Ok(rendered)
+}
+
+#[derive(serde::Serialize)]
+struct CliTaskBlocker {
+    reason_code: String,
+    summary: String,
+    retryable: bool,
+    available_actions: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1508,6 +1527,10 @@ struct CliPlanDecisionReceipt {
     action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_blocker: Option<CliTaskBlocker>,
 }
 
 fn cli_application_run_request(
@@ -2322,6 +2345,57 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
                 ..RenderedOutput::default()
             }
         }
+        PublicRunEventKind::ProviderTurnRecoveryChanged { recovery } => {
+            let phase = match recovery.phase {
+                sigil_kernel::PublicProviderTurnRecoveryPhaseV1::Waiting => "waiting",
+                sigil_kernel::PublicProviderTurnRecoveryPhaseV1::Recovering => "recovering",
+                sigil_kernel::PublicProviderTurnRecoveryPhaseV1::Blocked => "blocked",
+                sigil_kernel::PublicProviderTurnRecoveryPhaseV1::Paused => "paused",
+            };
+            let reason = recovery
+                .reason_code
+                .as_deref()
+                .map(|code| format!(" reason={code}"))
+                .unwrap_or_default();
+            RenderedOutput {
+                stderr: format!(
+                    "[provider:recovery] {phase} retry={}/{}{}\n",
+                    recovery.retry_count, recovery.max_transport_retries, reason
+                ),
+                ..RenderedOutput::default()
+            }
+        }
+        PublicRunEventKind::ProviderTurnPartialOutputDiscarded { output } => {
+            let mut discarded = Vec::new();
+            if output.text_discarded {
+                discarded.push("text");
+            }
+            if output.reasoning_discarded {
+                discarded.push("reasoning");
+            }
+            if output.tool_request_discarded {
+                discarded.push("tool request");
+            }
+            RenderedOutput {
+                stderr: format!(
+                    "[provider:recovery] discarded partial {}; replacement output will follow\n",
+                    discarded.join(", ")
+                ),
+                ..RenderedOutput::default()
+            }
+        }
+        PublicRunEventKind::RunBlocked { reason } => RenderedOutput {
+            stderr: format!("[run:blocked] {reason}\n"),
+            ..RenderedOutput::default()
+        },
+        PublicRunEventKind::RunPaused { reason } => RenderedOutput {
+            stderr: format!("[run:paused] {reason}\n"),
+            ..RenderedOutput::default()
+        },
+        PublicRunEventKind::RunInterrupted { reason } => RenderedOutput {
+            stderr: format!("[run:interrupted] {reason}\n"),
+            ..RenderedOutput::default()
+        },
         PublicRunEventKind::RouteTransition { .. }
         | PublicRunEventKind::RunStarted { .. }
         | PublicRunEventKind::TaskRunStarted { .. }
@@ -2333,7 +2407,9 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
         | PublicRunEventKind::PlanReviewChanged { .. }
         | PublicRunEventKind::UserInputChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
+        | PublicRunEventKind::TaskExecutionAdmitted { .. }
         | PublicRunEventKind::TaskPlanUpdated { .. }
+        | PublicRunEventKind::TaskChecklistUpdated { .. }
         | PublicRunEventKind::TaskBatchChanged { .. }
         | PublicRunEventKind::TaskStepChanged { .. }
         | PublicRunEventKind::IntegrationLaneChanged { .. }

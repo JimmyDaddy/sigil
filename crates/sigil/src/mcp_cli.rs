@@ -448,9 +448,10 @@ fn load_config_for_update(path: &Path) -> Result<LoadedConfigForUpdate> {
         fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     RootConfig::load(path)
         .with_context(|| format!("failed to validate Sigil config at {}", path.display()))?;
-    let config =
-        toml::from_str(std::str::from_utf8(&source_bytes).context("Sigil config is not UTF-8")?)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+    let config = RootConfig::parse_persisted(
+        std::str::from_utf8(&source_bytes).context("Sigil config is not UTF-8")?,
+    )
+    .with_context(|| format!("failed to parse {}", path.display()))?;
     if fs::read(path).ok().as_deref() != Some(source_bytes.as_slice()) {
         bail!("Sigil config changed while it was being loaded; retry the command");
     }

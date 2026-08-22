@@ -966,6 +966,51 @@ fn text_cli_renders_route_recovery_without_private_binding_material() {
 }
 
 #[test]
+fn text_cli_renders_partial_output_discard_without_content_or_attempt_identity() {
+    let output =
+        super::render_public_run_event(PublicRunEventKind::ProviderTurnPartialOutputDiscarded {
+            output: sigil_kernel::PublicProviderTurnPartialOutputDiscardedViewV1 {
+                text_discarded: true,
+                reasoning_discarded: true,
+                tool_request_discarded: false,
+            },
+        });
+
+    assert_eq!(
+        output.stderr,
+        "[provider:recovery] discarded partial text, reasoning; replacement output will follow\n"
+    );
+}
+
+#[test]
+fn text_cli_renders_recoverable_run_states_without_downgrading_them_to_failed() {
+    let cases = [
+        (
+            PublicRunEventKind::RunBlocked {
+                reason: "waiting for workspace reconciliation".to_owned(),
+            },
+            "[run:blocked] waiting for workspace reconciliation\n",
+        ),
+        (
+            PublicRunEventKind::RunPaused {
+                reason: "provider retry budget is exhausted".to_owned(),
+            },
+            "[run:paused] provider retry budget is exhausted\n",
+        ),
+        (
+            PublicRunEventKind::RunInterrupted {
+                reason: "process stopped before the provider replied".to_owned(),
+            },
+            "[run:interrupted] process stopped before the provider replied\n",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        assert_eq!(super::render_public_run_event(event).stderr, expected);
+    }
+}
+
+#[test]
 fn cli_parses_run_command_with_explicit_config() -> Result<()> {
     let cli = Cli::try_parse_from(["sigil", "--config", "custom.toml", "run", "hello"])?;
 
@@ -2233,6 +2278,43 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
     )?
     .expect("draft must be valid");
     session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    // RFC-0067: a DraftReady plan must carry its executable candidate and ready marker.
+    let candidate = sigil_kernel::compile_executable_plan_candidate(
+        &draft,
+        &sigil_kernel::PlanCompileInputV1 {
+            source_attempt_id: attempt.attempt_id.as_str().to_owned(),
+            source_turn_id: source.message_id.clone(),
+            task_config_contract_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-task-config-v1",
+                "test",
+            ),
+            planner_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-plan-planner-schema-v1",
+                "v2",
+            ),
+            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
+                "sigil-task-contract-schema-v1",
+                "v2",
+            ),
+            intent_schema_hash: None,
+            max_plan_steps: 64,
+            workspace_id: None,
+            session_scope_id: Some(session.session_scope_id().to_owned()),
+        },
+    )
+    .expect("fixture draft must compile");
+    session.append_control(ControlEntry::ExecutablePlanCandidatePreparedV1(Box::new(
+        candidate.clone(),
+    )))?;
+    session.append_control(ControlEntry::PlanReadyCommittedV1(
+        sigil_kernel::PlanReadyCommittedV1Entry {
+            plan_id: draft.plan_id.clone(),
+            plan_hash: draft.plan_hash.clone(),
+            candidate_hash: candidate.candidate_hash.clone(),
+            attempt_id: attempt.attempt_id.as_str().to_owned(),
+            committed_at_ms: 2,
+        },
+    ))?;
     let mut ready = attempt;
     ready.status = PlanReviewAttemptStatus::DraftReady;
     ready.recorded_at_ms = 2;
