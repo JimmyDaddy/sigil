@@ -1,6 +1,14 @@
 # RFC-0067：Single Execution Spine and Monotonic Plan-to-Task Adoption V1
 
-状态：proposed（design only；implementation deferred）
+状态：部分实施（qualification pending；§18 的 real-model / fault-campaign / cross-surface E2E gate 尚未完成）
+
+> RFC-0069 取代本 RFC 对 `DraftReady`、前置完整 candidate compile、单条
+> `PlanExecutionAdoptedV1` 与 model-generated Task DAG/materialization 的规范性要求。自 RFC-0069 起，
+> `DraftReady` 仅表示可审阅的 durable Plan artifact；用户批准原子创建稳定 Task identity和 first-class
+> `TaskDirectExecutionAdmittedV1`，runner立即启动，不创建单步 `TaskPlan` 或 `TaskStep`。model planner/DAG仅可作为
+> 普通 Task的可选优化，失败必须降级到同一 direct admission。本 RFC
+> 其余关于单一 product handoff、单调 approval/task identity、stale command 和 legacy replay
+> 的约束仍有效；相冲突段落仅作为演进历史阅读。
 
 创建日期：2026-08-20
 

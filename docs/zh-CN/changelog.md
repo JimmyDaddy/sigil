@@ -8,6 +8,16 @@
 
 ## 尚未发布 - main
 
+- provider 的临时断线、超时、限流和服务端错误现在会在同一个 durable generation 内恢复：只有尚未提交
+  模型输出或外部 effect 时才会有界重试，并显示重连/等待状态。重启后也只有原 child session 保存了精确的
+  schedule/request proof 才会继续；partial output、未知 tool、hosted 或 workspace effect 会安全地停在
+  待处理状态，不会静默重放，也不会直接让整条 Task 失败。
+- Plan review 现在以可读 Plan 本身作为可审阅事实；可选 precompile 只是 advisory，不能拒绝一个
+  有效 Plan。`Run` 会原子批准精确 Plan、创建唯一稳定的 Task及 host 生成的单一线性执行单元，并立即
+  启动 runner；不再要求第二次模型调用生成 Task DAG或结构化 contract。typed提交失败时会把模型的有界
+  完整文本保留为可审阅 Plan；普通 Task的可选 planner如果
+  无法返回合法 plan，也会降级为直接线性执行。真实的 provider、权限、工具、验证和effect故障仍保持
+  类型化、可恢复。
 - Plan review 现在会打开完整、可滚动的工作台，不再把主要内容截断在紧凑状态卡片中。从 32x8 到
   宽屏终端都可以访问全部步骤；`Esc` 只关闭、不拒绝，输入可打印字符会返回 composer，所有动作继续
   绑定精确的 durable plan。

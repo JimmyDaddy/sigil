@@ -8,6 +8,19 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+- Transient provider disconnects, timeouts, rate limits, and server failures now recover within
+  the same durable generation when no response or external effect was committed. Recovery is
+  bounded, visible as reconnecting/waiting state, and survives restart only when the original
+  child session has an exact scheduled request proof. Partial output and unknown tool, hosted, or
+  workspace effects remain safely blocked for review instead of being silently replayed or
+  failing the whole Task.
+- Plan review now makes the readable Plan itself reviewable; an optional precompile is advisory
+  and never rejects a valid Plan. `Run` atomically approves the exact Plan, creates one stable Task
+  with a host-owned linear execution unit, and starts the runner immediately—no second model call
+  must generate a Task DAG or structured contract. A model's bounded final prose is preserved as a
+  reviewable Plan when typed submission fails, and ordinary Tasks also fall back to direct linear
+  execution when their optional planner cannot return a valid plan. Real provider, permission,
+  tool, verification, and effect failures remain typed and recoverable.
 - Plan review now opens a complete, scrollable workbench instead of truncating the plan inside a
   compact status card. All plan steps remain reachable on 32x8 through wide terminals; `Esc` closes
   without rejecting, printable input returns to the composer, and actions stay bound to the exact

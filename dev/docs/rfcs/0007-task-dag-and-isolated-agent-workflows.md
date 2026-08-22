@@ -1,6 +1,10 @@
 # RFC-0007 Task DAG and Isolated Agent Workflows
 
-状态：draft / E07.1、E07.3-E07.5 implemented；E07.2 仅完成 ready batching
+状态：implemented / verified
+
+> RFC-0069 修订：本 RFC 的 durable DAG是显式高级 orchestration和 legacy replay能力，不是 Plan Run或普通
+> Task的强制 admission contract。新 Plan Run使用一等 `TaskDirectExecutionAdmittedV1`，不生成单步
+> TaskPlan；普通 Task planner无法生成合法 DAG时必须降级到 direct execution继续执行。
 
 创建日期：2026-06-28
 
@@ -16,10 +20,11 @@
 
 本 RFC 定义 `/task` 从 sequential orchestrator 演进到 DAG-based orchestrator 的边界。目标是支持只读步骤并发、显式依赖、review / verify 阶段和 bounded replanning，同时不引入共享工作区并行写入风险。
 
-截至 2026-07-22，scheduler 已能选择多个 `read_only_batch` step，但
-`SequentialTaskOrchestrator` 仍逐项 `.await`，所以真实并发尚未实现。后续 execution、
-completion、permission 和 parallel-write integration 的完整闭环由
-[RFC-0053](0053-autonomous-task-routing-and-parallel-agent-orchestration-v1.md) 定义。
+截至 2026-08-22，runtime 已将已验证的 parallel batch 拆成 parent-owned prepare/commit
+和 detached child execution：read-only、`ChangesetOnly` 与受支持的 `Worktree` batch 会在
+同一并发预算内实际重叠执行，父 session 仍按 request/plan 顺序提交 durable terminal。
+共享 workspace 的直接写入继续由 write lease 串行化。RFC-0069 在此基础上进一步补充
+mutable workspace observation、effect-local CAS 与 recoverability 语义。
 
 ## 2. Goals
 
@@ -120,7 +125,10 @@ Main task UI should keep one recommended action per state, such as `continue`, `
 ## 9.1 Implementation Progress
 
 - E07.1 implemented plan schema, dependency metadata and durable graph projection.
-- E07.2 implemented read-only ready queue selection with concurrency budget, running-write exclusion, sequential write handoff and shared-read-only write denial coverage. Batch execution remains sequential; this slice must not be described as read-only execution concurrency.
+- E07.2 implemented ready-queue selection and actual detached execution for bounded read-only,
+  `ChangesetOnly`, and supported `Worktree` batches. Barrier-backed runtime tests prove that two
+  providers overlap while durable parent commits remain in stable request order; shared-workspace
+  writes remain exclusive.
 - E07.3 implemented review / verify state separation while keeping system verification authoritative.
 - E07.4 implemented bounded plan versions and `Superseded` projection semantics: accepting a newer plan version marks older plan versions superseded, preserves completed step history, marks unfinished old-plan steps as `Superseded`, clears current-step pointers to superseded plans, and surfaces the state in TUI summaries.
 - E07.5 implemented write isolation integration through RFC-0014 E14.1-E14.6: task DAG continue uses write-isolation ready queue, read-only steps can batch, shared-workspace write steps acquire durable write leases, changeset-only child writes remain parent-non-mutating, merge handoff creates parent mutation evidence, and failed writes cancel dependent steps.

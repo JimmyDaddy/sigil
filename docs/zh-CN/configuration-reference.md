@@ -43,11 +43,16 @@
 | `[model_request].request_timeout_secs` | `120` | 模型请求等待上限；单次启动可用 `SIGIL_MODEL_REQUEST_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_idle_timeout_secs` | `180` | 两个流式响应事件之间的最长等待时间；可用 `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_total_timeout_secs` | 未设置 | 整个流式响应的可选时限；可用 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 覆盖。 |
+| `[recovery.provider]` | transport `2`、partial-output `1`、延迟 `500`–`10000` ms、`jitter_ratio = 0.10`、累计 `120000` ms | 面向未来零 effect provider turn 的有界、provider-neutral 恢复策略。`max_transport_retries` 上限为 `10`，`max_partial_output_retries` 上限为 `3`；延迟值和 jitter（`0.0`–`1.0`）均受上限保护，以约束 durable retry budget。 |
 
 活动会话会保留自己的 `connection-id/model-id` 解析 route。`/model` 会在空闲时切换该 route，
 但不替换会话；其中显式的设为默认操作只修改保存默认值。TUI `/config` 保存 provider/model 选择时，
 则会把同一 route 同时应用到当前会话和保存默认值。旧 `[agent].provider` 与 `[providers.*]` 文件会被
 拒绝，需要直接替换为当前 connection schema。
+
+修改 `recovery.provider` 只影响之后新建的 schedule。每条 durable recovery
+schedule 都会保存准入时的精确 policy fingerprint；新 owner 发现等待中的 schedule 指纹不再匹配时会
+Blocked 并要求重新准入，而不是静默改写或 dispatch 该 attempt。
 
 provider 模板、凭据来源、模型发现与排障见[模型服务指南](providers.md)。
 

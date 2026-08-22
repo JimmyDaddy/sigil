@@ -43,11 +43,18 @@ Use [Configuration](configuration.md#storage-and-session-paths) for path choices
 | `[model_request].request_timeout_secs` | `120` | Model-request wait; `SIGIL_MODEL_REQUEST_TIMEOUT_SECS` overrides it for one launch. |
 | `[model_request].stream_idle_timeout_secs` | `180` | Maximum pause between streamed items; `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` overrides it. |
 | `[model_request].stream_total_timeout_secs` | unset | Optional total stream limit; `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` overrides it. |
+| `[recovery.provider]` | transport `2`, partial-output `1`, delays `500`–`10000` ms, `jitter_ratio = 0.10`, cumulative `120000` ms | Bounded, provider-neutral recovery policy for future zero-effect provider turns. `max_transport_retries` is capped at `10`, `max_partial_output_retries` at `3`; delay values and jitter (`0.0`–`1.0`) are bounded to protect the durable retry budget. |
 
 The active session keeps its own resolved `connection-id/model-id` route. `/model` switches that
 route while idle without replacing the session, while its explicit set-default action changes only
 the saved default. Saving a provider/model selection in TUI `/config` intentionally applies the
 same route to the current session and the saved default.
+
+Changing `recovery.provider` affects only schedules created afterward. Each
+durable recovery schedule stores the exact policy fingerprint it was admitted with; a new owner
+blocks a waiting schedule whose fingerprint no longer matches and requires re-admission rather
+than silently rewriting or dispatching that attempt.
+
 Older `[agent].provider` and `[providers.*]` files are rejected and must be replaced with the
 current connection schema.
 

@@ -35,7 +35,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Open saved-session actions | Select `/resume` row, then `Ctrl-O` or right-click |
 | Toggle latest Mermaid source | `Ctrl-O` when no saved-session, tool-card, or other higher-priority action is active |
 | Cycle visible agent transcript | Agent panel, `Alt-A`, `Shift-Alt-A` |
-| Expand/collapse thinking or activity | `Ctrl-T` |
+| Expand/collapse the current task list, thinking, or activity | Click the task overflow row or press `Ctrl-T` |
 | Run diagnostics on changed source | `Alt-D` |
 | Cancel focused terminal task | `Alt-X` |
 

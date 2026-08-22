@@ -79,6 +79,7 @@
 | 点击 slash 候选项 | Up/Down + Enter |
 | 点击 tool card | `Ctrl-G` + `Alt-J/K` |
 | 点击展开 tool card | `Ctrl-T` |
+| 点击任务列表的 `+N more tasks` / `Show less` 行 | `Ctrl-T` |
 | 滚动 timeline | Up/Down, PageUp/PageDown, `Ctrl-U/D` |
 | 点击 approval allow | `Y` |
 | 点击 approval deny | `N` |

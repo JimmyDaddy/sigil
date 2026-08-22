@@ -91,9 +91,11 @@
 - 不负责：DeepSeek 私有协议细节、具体 HTTP 端点拼装、UI 展示逻辑
 - conversation / Plan / Task 的语义分流遵守 2.6 的项目级模型语义决策边界；kernel 只承载 typed choice 与 host authority 校验
 - typed 路由决定必须先绑定 host-owned identity 再执行；Plan id、Task id、plan hash 和 continuation target 不得由模型参数自行选择，也不得从自然语言重建
+- `TaskDirectExecutionAdmittedV1` 与 accepted `TaskPlan` 都是一等 continuation authority；自动路由不得因为 direct Task 没有 plan version/status 或一次 Chat 已清除 focus 而隐藏 host-selected latest unfinished Task 的 `continue_existing_task`。Task focus 与进度展示必须分离：Chat/PlanReview 可以清除执行焦点，但不得删除或隐藏最新未完成 Task 的 display-only checklist；continuation candidate和展示 fallback都不能反向授予执行或 checklist mutation 权限，只有后续 typed selection/CAS可以恢复 authority
 - 公共类型修改时，必须先判断是否仍适合未来多 provider 复用
 - provider-hosted 能力只能通过中立 `HostedToolKind` / model capability 表达；hosted-enabled turn 的 text/reasoning/summary/evidence 必须先进入 hard-capped transient buffer，并在 runtime finalizer 完成 URL/source/citation 安全投影后才允许进入 session、`RunEvent` 或前端 handler
-- provider-hosted raw URL、title、query 与 remote source id 必须使用无 serde 实现且 redacted `Debug` 的 secret carrier；request bytes 开始发送后禁止透明 retry，provider 成功但未实际使用 hosted tool 必须记录 `NotUsed`
+- provider-hosted raw URL、title、query 与 remote source id 必须使用无 serde 实现且 redacted `Debug` 的 secret carrier；request bytes 开始发送后禁止 adapter 内透明 retry，provider 成功但未实际使用 hosted tool 必须记录 `NotUsed`；kernel 只有在旧 physical attempt 已 terminal、同一 logical turn 仍持有并校验 exact frozen request、无 durable output/client-tool/mutating effect 且 retry budget允许时，才可签发新的 physical attempt，进程重启后 process-local fingerprint不能替代 durable-frontier reconstruction
+- runtime/TUI adapter 必须把 typed execution error 保留到 Task root finalizer，不能先格式化为字符串再猜状态；verification或role-runtime构建在participant dispatch前失败时属于zero-dispatch preflight blocker，Task保持`Paused`并可用同一durable authority继续，只有已经进入不可恢复执行边界的错误才写`Failed`
 
 ### 3.2 `sigil-provider-deepseek`
 

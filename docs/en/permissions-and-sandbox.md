@@ -22,12 +22,11 @@ mode = "manual"
 
 `manual` is the recommended starting point. A specific deny always remains stricter than a broad mode.
 
-For a writable Task child, Sigil keeps a host-owned audited workspace frontier. A workspace change
-made by an authorized tool advances that frontier only after the tool's mutation evidence has been
-settled, so the child does not revoke its own grant after a legitimate edit. An unattributed change,
-a concurrent frontier conflict, or a changed tool/cancellation binding still fails closed. The
-grant's initial workspace snapshot remains immutable audit evidence. `danger-full-access` removes
-ordinary approval prompts; it does not disable mutation auditing, cancellation, or conflict checks.
+While a writable Task is running, Sigil tracks which workspace changes belong to approved actions.
+An approved edit does not invalidate the Task. If files change unexpectedly at the same time, or
+permission or cancellation conditions change, Sigil stops before continuing and keeps the relevant
+workspace states in the activity history. `danger-full-access` removes ordinary approval prompts;
+it does not disable change auditing, cancellation, or conflict checks.
 
 ## Review Before An Action Runs
 

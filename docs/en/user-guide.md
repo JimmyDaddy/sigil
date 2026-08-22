@@ -26,7 +26,7 @@ Type ordinary tasks in the composer. Use slash commands for a small set of contr
 
 ## Common Controls
 
-Press `F1` or `/` for help and commands. `F2` shows or hides the info rail, while `Shift-F2` changes its detail. Use `Ctrl-G` for activity, `Alt-V` for task verification, `Ctrl-R` for the latest controlled restore, `Alt-S` for the current Intent Stack, and `Ctrl-T` to expand or collapse thinking and activity. `Ctrl-C` cancels a run when no text is selected; `Esc` closes the current overlay. The complete key matrix lives in [Reference](reference.md#tui-keys).
+Press `F1` or `/` for help and commands. `F2` shows or hides the info rail, while `Shift-F2` changes its detail. Use `Ctrl-G` for activity, `Alt-V` for task verification, `Ctrl-R` for the latest controlled restore, `Alt-S` for the current Intent Stack, and `Ctrl-T` to expand or collapse the current task list, thinking, or activity. A collapsed task list also exposes a clickable `+N more tasks` row. `Ctrl-C` cancels a run when no text is selected; `Esc` closes the current overlay. The complete key matrix lives in [Reference](reference.md#tui-keys).
 
 The info rail is enabled by default when the terminal is wide enough. Its Git summary keeps the branch and total on the first row, then places staged, modified, untracked, conflict, and ahead/behind counts on a compact second row instead of truncating one long sentence. `F2` changes only the current run. To change the startup default, open `/config`, choose **Appearance**, toggle **Info rail**, and save with `Ctrl-S`; narrow terminals still collapse it automatically.
 
@@ -78,7 +78,7 @@ When enabled, search and fetch activity shows where data is going. Search result
 
 ## Planned Tasks
 
-Use `/plan` for a read-only plan and accept the Plan ready card only when you want execution to begin. Use `/task` when you already want Sigil to split and run multi-step work. With the default `routing_policy = "auto"`, task-worthy ordinary input is first routed through an automatic plan review; chat never continues an unfinished task by itself.
+Use `/plan` for a read-only plan and accept its reviewable Plan card only when you want execution to begin. A readable Plan can be reviewed, revised, or saved without creating execution authority. Structured Plan submission improves the card, but is optional: when a model only returns complete prose, Sigil preserves that bounded text as the Plan instead of failing generation. **Run** atomically approves the exact Plan, creates one stable Task with a host-owned linear execution unit, and starts the runner immediately; it does not wait for the model to generate a Task DAG or another structured contract. Provider, permission, tool, or verification problems that occur during execution remain recoverable on the Task. Use `/task` when you want durable task execution directly. If its optional model planner cannot produce a valid structure, Sigil falls back to the same linear execution path instead of failing admission. With the default `routing_policy = "auto"`, task-worthy ordinary input is first routed through automatic plan review; chat never continues an unfinished task by itself.
 
 Open a Plan ready item to review the complete, immutable plan before choosing an action. The
 workbench keeps every step, dependency, path, check, risk, and note reachable even on a short or
@@ -87,13 +87,15 @@ navigate. `Esc` only closes the workbench; it never rejects the plan. Typing a p
 returns to the composer and preserves that character, while `Shift-Tab` reopens the pending plan.
 Run, Save, Revise, and Reject remain explicit actions bound to the exact plan id and hash.
 
-Revise first asks what should change. The original plan remains reviewable while revision research
-runs, and a failed or cancelled revision restores its actions instead of replacing it with an empty
-failed draft. Questions from an agent use the same durable attention area: Submit, Decline, and
-Cancel run are distinct actions; `Esc` closes the form without answering it. Pending questions have
-no wall-clock timeout and are restored by `sigil resume`; `Shift-Tab` returns to them from the
-composer. Sigil resumes the exact suspended continuation after an accepted answer instead of
-replaying the provider turn that asked the question.
+Revise opens a dedicated **Plan revision** form rather than a generic input request. It explains
+that the current plan remains active, puts the requested change in a focused multi-line editor, and
+labels the outcomes as **Prepare revised plan** and **Keep current plan**. The original plan remains
+reviewable while revision research runs, and a failed or cancelled revision restores its actions
+instead of replacing it with an empty failed draft. Questions from an agent use the same durable
+attention area: Submit, Decline, and Cancel run are distinct actions; `Esc` closes the form without
+answering it. Pending questions have no wall-clock timeout and are restored by `sigil resume`;
+`Shift-Tab` returns to them from the composer. Sigil resumes the exact suspended continuation after
+an accepted answer instead of replaying the provider turn that asked the question.
 
 The task view shows steps, current status, child-agent work, and a Verification card when a check is needed. `Alt-V` focuses the card. Restoring a session shows the saved task state but never continues it automatically.
 
