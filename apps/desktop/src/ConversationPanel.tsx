@@ -43,6 +43,8 @@ import type {
   PlanDecisionAction,
   PlanReviewDetail,
   ProviderConnectionInventory,
+  ProviderTurnRecoveryPhase,
+  TaskBlocker,
   ProviderModelRef,
   ReasoningEffort,
   RunContext,
@@ -83,6 +85,7 @@ import {
   liveEventReducer,
   selectDeltaBuffers,
   selectLatestApprovalPresentation,
+  selectProviderTurnRecovery,
   selectTaskEvents,
   selectTerminalTasks,
   semanticLiveItemFromTimelineEvent,
@@ -223,6 +226,7 @@ export function ConversationPanel({
   const [planDetailFailure, setPlanDetailFailure] = useState(false);
   const [planDecisionBusy, setPlanDecisionBusy] = useState(false);
   const [planDecisionFailure, setPlanDecisionFailure] = useState(false);
+  const [planDecisionBlocker, setPlanDecisionBlocker] = useState<TaskBlocker | undefined>(undefined);
   const [durableUserInputs, setDurableUserInputs] = useState<UserInputRequest[]>([]);
   const [selectedUserInputKey, setSelectedUserInputKey] = useState<string>();
   const durableUserInput = durableUserInputs.find(
@@ -1332,12 +1336,29 @@ export function ConversationPanel({
     () => selectTerminalTasks(liveEventState),
     [liveEventState],
   );
+  const providerTurnRecoveryEvent = useMemo(
+    () => selectProviderTurnRecovery(liveEventState),
+    [liveEventState],
+  );
   const durableTask = useMemo<TaskProductProjection | undefined>(
     () => durableTaskControl,
     [durableTaskControl],
   );
   const taskProjection = useMemo<TaskProductProjection | undefined>(() => {
-    const currentTask = eventTask ?? durableTask;
+    const currentTask = eventTask === undefined
+      ? durableTask
+      : durableTask === undefined || durableTask.taskId !== eventTask.taskId
+        ? eventTask
+        : {
+            ...durableTask,
+            ...eventTask,
+            objective: eventTask.objective ?? durableTask.objective,
+            execution: eventTask.execution ?? durableTask.execution,
+            steps: eventTask.steps.length === 0 ? durableTask.steps : eventTask.steps,
+            checklist: eventTask.checklist.length === 0
+              ? durableTask.checklist
+              : eventTask.checklist,
+          };
     if (
       taskIntegrationReview === undefined
       || currentTask?.taskId === taskIntegrationReview.request.taskId
@@ -1675,7 +1696,7 @@ export function ConversationPanel({
     }
   };
 
-  const pauseTask = async (taskId: string, planVersion: number) => {
+  const pauseTask = async (taskId: string, execution: TaskProductProjection["execution"]) => {
     if (
       run === undefined
       || !active
@@ -1683,12 +1704,13 @@ export function ConversationPanel({
       || controlBusy
       || taskControlBusy
       || taskIntegrationBusy
+      || execution === undefined
     ) return;
     setTaskControlBusy(true);
     try {
       setRun(await bridge.pauseTask(workspaceId, session.id, run.id, {
         taskId,
-        planVersion,
+        execution,
       }));
     } catch {
       onNotice(t("taskPauseFailed"), true);
@@ -1741,8 +1763,6 @@ export function ConversationPanel({
     if (
       review === undefined
       || planDecisionBusy
-      || exactPlanDetail === undefined
-      || !planDetailOpen
       || !review.allowedActions.includes(action)
       || (review.stale && (action === "run" || action === "save"))
       || review.status !== "draft_ready"
@@ -1751,6 +1771,7 @@ export function ConversationPanel({
     ) return;
     setPlanDecisionBusy(true);
     setPlanDecisionFailure(false);
+    setPlanDecisionBlocker(undefined);
     if (action === "revise") {
       // Freeze the old plan immediately. The canonical reload will replace this optimistic
       // no-authority view with awaiting-guidance/running/failed state.
@@ -1770,9 +1791,17 @@ export function ConversationPanel({
         if (summary.taskId === undefined) {
           throw new Error("Run plan decision did not return a task identity.");
         }
+        if (summary.taskBlocker !== undefined) {
+          // RFC-0067: admission already held the Task with a durable typed blocker; do not
+          // start a runner for a blocked Task.
+          setPlanDecisionBlocker(summary.taskBlocker);
+          setPlanDecisionBusy(false);
+          return;
+        }
         // `Run` durably creates the Task; execution is intentionally owned by the existing
         // Task continuation path so it gets the same foreground ownership, event attachment,
         // cancellation, and restart semantics as every other Task run.
+        setPlanDecisionBlocker(undefined);
         await continueTask(summary.taskId);
       }
       if (summary.action === "revise" && summary.revisionRunId !== undefined) {
@@ -2144,6 +2173,7 @@ export function ConversationPanel({
           recoveryBinding: canonicalRouteRecovery.recoveryBinding,
           retryable: canonicalRouteRecovery.retryable,
         });
+  const providerTurnRecovery = providerTurnRecoveryEvent?.providerTurnRecovery;
   return (
     <div className="conversation-layout">
       <section
@@ -2282,8 +2312,8 @@ export function ConversationPanel({
           pauseBusy={taskControlBusy}
           reviewButtonRef={taskIntegrationTriggerRef}
           onPause={() => {
-            if (taskProjection.planVersion !== undefined) {
-              void pauseTask(taskProjection.taskId, taskProjection.planVersion);
+            if (taskProjection.execution !== undefined) {
+              void pauseTask(taskProjection.taskId, taskProjection.execution);
             }
           }}
           onContinue={(guidance) => void continueTask(taskProjection.taskId, guidance)}
@@ -2331,6 +2361,7 @@ export function ConversationPanel({
           disabled={submissionBlocked || pendingApproval?.approval !== undefined}
           busy={planDecisionBusy}
           failure={planDecisionFailure}
+          blocker={planDecisionBlocker}
           detail={exactPlanDetail}
           detailOpen={planDetailOpen && exactPlanDetail !== undefined}
           detailBusy={planDetailBusy}
@@ -2429,6 +2460,31 @@ export function ConversationPanel({
               </Button>
             ) : null}
           </div>
+        </section>
+      )}
+
+      {providerTurnRecovery === undefined ? null : (
+        <section
+          className="continuity-recovery sg-bounded-content"
+          role={providerTurnRecovery.userAttentionRequired ? "alert" : "status"}
+        >
+          <span className="continuity-recovery-icon" aria-hidden="true"><Icon name="warning" /></span>
+          <div className="continuity-recovery-copy">
+            <strong>{t(providerRecoveryTitleKey(providerTurnRecovery.phase))}</strong>
+            <p>{providerTurnRecovery.userAttentionRequired
+              ? t("providerRecoveryNeedsAttention")
+              : t("providerRecoveryAttempt", {
+                  current: String(providerTurnRecovery.activeRetryCount),
+                  total: String(providerTurnRecovery.activeMaxRetries),
+                })}</p>
+          </div>
+          {providerTurnRecovery.availableActions.includes("update_connection") ? (
+            <div className="continuity-recovery-actions">
+              <Button type="button" variant="quiet" onClick={onOpenSettings}>
+                {t("reviewRoute")}
+              </Button>
+            </div>
+          ) : null}
         </section>
       )}
 
@@ -3031,8 +3087,10 @@ function integrationReviewTaskProjection(
     taskId: review.request.taskId,
     phase: "integration",
     status: "awaiting_review",
+    execution: { kind: "plan", planVersion: review.request.planVersion },
     planVersion: review.request.planVersion,
     steps: [],
+    checklist: [],
     activeChildren: 0,
     completedChildren: 0,
     failedChildren: 0,
@@ -3046,7 +3104,7 @@ function integrationReviewTaskProjection(
 }
 
 function isTerminal(status: RunSummary["status"]): boolean {
-  return ["finished", "failed", "cancelled", "paused", "interrupted"].includes(status);
+  return ["finished", "failed", "cancelled", "paused", "blocked", "interrupted"].includes(status);
 }
 
 function userInputKey(request: UserInputRequest): string {
@@ -3063,9 +3121,23 @@ function userInputKey(request: UserInputRequest): string {
 function terminalStatusForEvent(event: TimelineEvent): RunSummary["status"] | undefined {
   if (event.kind === "run_finished") return "finished";
   if (event.kind === "run_failed") {
-    return event.status === "interrupted" ? "interrupted" : "failed";
+    return "failed";
   }
+  if (event.kind === "run_blocked") return "blocked";
+  if (event.kind === "run_paused") return "paused";
+  if (event.kind === "run_interrupted") return "interrupted";
   if (event.kind === "route_recovery_required") return "failed";
   if (event.kind === "run_cancelled") return "cancelled";
   return undefined;
+}
+
+function providerRecoveryTitleKey(
+  phase: ProviderTurnRecoveryPhase,
+): "providerRecoveryWaiting" | "providerRecoveryRecovering" | "providerRecoveryBlocked" | "providerRecoveryPaused" {
+  switch (phase) {
+    case "waiting": return "providerRecoveryWaiting";
+    case "recovering": return "providerRecoveryRecovering";
+    case "blocked": return "providerRecoveryBlocked";
+    case "paused": return "providerRecoveryPaused";
+  }
 }

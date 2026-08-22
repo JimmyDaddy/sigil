@@ -646,6 +646,7 @@ export type ConversationDisplayStatus =
   | "failed"
   | "cancelled"
   | "interrupted"
+  | "paused"
   | "blocked"
   | "awaiting_user_input";
 
@@ -764,7 +765,10 @@ export type PlanReviewStatus =
   | "waiting_for_input"
   | "finalizing"
   | "draft_ready"
+  | "compile_failed"
   | "completed_without_draft"
+  | "blocked"
+  | "paused"
   | "failed"
   | "interrupted"
   | "cancelled";
@@ -815,9 +819,36 @@ export interface PlanDecisionSummary {
   planHash: string;
   action: PlanDecisionAction;
   taskId?: string;
+  /** RFC-0067: durable Task phase right after admission. */
+  taskPhase?: TaskExecutionPhase;
+  /** RFC-0067: typed blocker when admission held the Task. */
+  taskBlocker?: TaskBlocker;
   revisionRunId?: string;
   userInputRequest?: UserInputRequest;
   replayed: boolean;
+}
+
+export type TaskExecutionPhase =
+  | "preparing"
+  | "ready"
+  | "running"
+  | "blocked"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export interface TaskBlocker {
+  reasonCode: string;
+  summary: string;
+  affectedStep?: string;
+  affectedCapability?: string;
+  retryable: boolean;
+  availableActions: string[];
+  evidenceDigest: string;
+  createdAtMs: number;
+  resolvedAtMs?: number;
 }
 
 export type PlanAgentRole = "planner" | "executor" | "subagent_read" | "subagent_write";
@@ -1012,10 +1043,12 @@ export interface ConversationTaskControl {
   taskId: string;
   phase: TimelineTaskPhase;
   status: string;
+  execution?: TaskExecutionBinding;
   planVersion?: number;
   planStatus?: string;
   steps: ConversationTaskPlanStep[];
   stepsTruncated: boolean;
+  checklist: TaskChecklistItem[];
   activeChildren: number;
   completedChildren: number;
   failedChildren: number;
@@ -1087,6 +1120,7 @@ export type RunStatus =
   | "failed"
   | "cancelled"
   | "paused"
+  | "blocked"
   | "interrupted";
 
 export type PermissionMode = "read-only" | "manual" | "auto-edit" | "danger-full-access";
@@ -1401,7 +1435,7 @@ export interface RunSummary {
 
 export interface TaskPauseBinding {
   taskId: string;
-  planVersion: number;
+  execution: TaskExecutionBinding;
 }
 
 export interface RunAttachment {
@@ -1681,7 +1715,9 @@ export type TimelineEventKind =
   | "plan_review_changed"
   | "user_input_changed"
   | "task_phase_changed"
+  | "task_execution_admitted"
   | "task_plan_updated"
+  | "task_checklist_updated"
   | "task_batch_changed"
   | "task_step_changed"
   | "integration_lane_changed"
@@ -1700,9 +1736,36 @@ export type TimelineEventKind =
   | "control"
   | "run_finished"
   | "run_failed"
+  | "run_blocked"
+  | "run_paused"
+  | "run_interrupted"
   | "route_recovery_required"
+  | "provider_turn_recovery"
+  | "provider_turn_partial_output_discarded"
   | "run_cancelled"
   | "other";
+
+export type ProviderTurnRecoveryPhase = "waiting" | "recovering" | "blocked" | "paused";
+
+export type ProviderTurnRecoveryAction =
+  | "retry_now"
+  | "update_connection"
+  | "review_effect"
+  | "cancel";
+
+/** Provider-neutral, product-safe recovery state. Internal attempt ids and provider bodies are
+ * intentionally absent from the Desktop bridge. */
+export interface TimelineProviderTurnRecovery {
+  phase: ProviderTurnRecoveryPhase;
+  activeRetryCount: number;
+  activeMaxRetries: number;
+  retryCount: number;
+  maxTransportRetries: number;
+  nextRetryUnixMs?: number;
+  reasonCode?: string;
+  availableActions: ProviderTurnRecoveryAction[];
+  userAttentionRequired: boolean;
+}
 
 export type SessionGrantUnavailableReasonCode =
   | "analysis_incomplete"
@@ -1759,6 +1822,16 @@ export type TimelineTaskPhase =
   | "synthesis"
   | "terminal";
 
+export type TaskExecutionBinding =
+  | { kind: "plan"; planVersion: number }
+  | { kind: "direct"; admissionId: string };
+
+export interface TaskChecklistItem {
+  itemId: string;
+  text: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
 export interface TimelineTaskPlanStep {
   stepId: string;
   title: string;
@@ -1773,6 +1846,7 @@ export interface TimelineTask {
   objective?: string;
   handoffId?: string;
   phase?: TimelineTaskPhase;
+  execution?: TaskExecutionBinding;
   planVersion?: number;
   batchId?: string;
   stepId?: string;
@@ -1782,7 +1856,9 @@ export interface TimelineTask {
   active?: number;
   completed?: number;
   failed?: number;
+  checklistRevision?: number;
   steps?: TimelineTaskPlanStep[];
+  checklist?: TaskChecklistItem[];
   conflicts?: string[];
 }
 
@@ -1850,6 +1926,7 @@ export interface TimelineEvent {
   task?: TimelineTask;
   terminalTask?: TimelineTerminalTask;
   routeRecovery?: TimelineRouteRecovery;
+  providerTurnRecovery?: TimelineProviderTurnRecovery;
   routeTransition?: TimelineRouteTransition;
 }
 

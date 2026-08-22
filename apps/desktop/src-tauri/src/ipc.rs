@@ -49,6 +49,7 @@ use sigil_desktop::{
     DesktopSupportDoctorReport, DesktopSupportEnvironment, DesktopSupportPrivacy,
     DesktopSupportStatus, DesktopSupportSummary, DesktopTaskIntegrationAcceptanceView,
     DesktopTaskIntegrationReviewRequest, DesktopTaskIntegrationReviewView, DesktopTimelineEvent,
+    DesktopTimelineTaskChecklistItem, DesktopTimelineTaskExecutionBinding,
     DesktopTimelineTerminalTask, DesktopToolArtifactAvailability as NativeToolArtifactAvailability,
     DesktopToolArtifactPage as NativeToolArtifactPage,
     DesktopToolArtifactPageEncoding as NativeToolArtifactPageEncoding,
@@ -1413,11 +1414,14 @@ pub(crate) struct DesktopConversationTaskControl {
     pub(crate) phase: &'static str,
     pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) execution: Option<DesktopTimelineTaskExecutionBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) plan_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) plan_status: Option<String>,
     pub(crate) steps: Vec<DesktopConversationTaskPlanStep>,
     pub(crate) steps_truncated: bool,
+    pub(crate) checklist: Vec<DesktopTimelineTaskChecklistItem>,
     pub(crate) active_children: u32,
     pub(crate) completed_children: u32,
     pub(crate) failed_children: u32,
@@ -1868,7 +1872,19 @@ pub(crate) struct DesktopTaskPauseInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
     pub(crate) task_id: String,
-    pub(crate) plan_version: u32,
+    pub(crate) execution: DesktopTaskExecutionBindingInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    deny_unknown_fields
+)]
+pub(crate) enum DesktopTaskExecutionBindingInput {
+    Plan { plan_version: u32 },
+    Direct { admission_id: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -1943,6 +1959,12 @@ pub(crate) struct DesktopPlanDecisionSummary {
     pub(crate) action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) task_id: Option<String>,
+    /// RFC-0067: durable Task phase right after admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) task_phase: Option<sigil_desktop::DesktopTaskExecutionPhase>,
+    /// RFC-0067: typed blocker when admission held the Task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) task_blocker: Option<sigil_desktop::DesktopTaskBlocker>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) revision_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1998,9 +2020,12 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
                 sigil_desktop::DesktopPlanReviewStatus::WaitingForInput => "waiting_for_input",
                 sigil_desktop::DesktopPlanReviewStatus::Finalizing => "finalizing",
                 sigil_desktop::DesktopPlanReviewStatus::DraftReady => "draft_ready",
+                sigil_desktop::DesktopPlanReviewStatus::CompileFailed => "compile_failed",
                 sigil_desktop::DesktopPlanReviewStatus::CompletedWithoutDraft => {
                     "completed_without_draft"
                 }
+                sigil_desktop::DesktopPlanReviewStatus::Blocked => "blocked",
+                sigil_desktop::DesktopPlanReviewStatus::Paused => "paused",
                 sigil_desktop::DesktopPlanReviewStatus::Failed => "failed",
                 sigil_desktop::DesktopPlanReviewStatus::Interrupted => "interrupted",
                 sigil_desktop::DesktopPlanReviewStatus::Cancelled => "cancelled",
@@ -2961,10 +2986,27 @@ impl From<NativeConversationTaskControl> for DesktopConversationTaskControl {
                 DesktopPublicTaskPhase::Terminal => "terminal",
             },
             status: value.status,
+            execution: value.execution.map(|execution| match execution {
+                sigil_desktop::DesktopTaskExecutionBinding::Plan { plan_version } => {
+                    DesktopTimelineTaskExecutionBinding::Plan { plan_version }
+                }
+                sigil_desktop::DesktopTaskExecutionBinding::Direct { admission_id } => {
+                    DesktopTimelineTaskExecutionBinding::Direct { admission_id }
+                }
+            }),
             plan_version: value.plan_version,
             plan_status: value.plan_status,
             steps: value.steps.into_iter().map(Into::into).collect(),
             steps_truncated: value.steps_truncated,
+            checklist: value
+                .checklist
+                .into_iter()
+                .map(|item| DesktopTimelineTaskChecklistItem {
+                    item_id: item.item_id,
+                    text: item.text,
+                    status: item.status,
+                })
+                .collect(),
             active_children: value.active_children,
             completed_children: value.completed_children,
             failed_children: value.failed_children,
@@ -3195,6 +3237,7 @@ fn conversation_display_status(status: NativeConversationDisplayStatus) -> &'sta
         NativeConversationDisplayStatus::Failed => "failed",
         NativeConversationDisplayStatus::Cancelled => "cancelled",
         NativeConversationDisplayStatus::Interrupted => "interrupted",
+        NativeConversationDisplayStatus::Paused => "paused",
         NativeConversationDisplayStatus::Blocked => "blocked",
         NativeConversationDisplayStatus::AwaitingUserInput => "awaiting_user_input",
     }
@@ -3216,6 +3259,7 @@ impl From<DesktopRunSnapshot> for DesktopRunSummary {
                 DesktopRunStatus::Failed => "failed",
                 DesktopRunStatus::Cancelled => "cancelled",
                 DesktopRunStatus::Paused => "paused",
+                DesktopRunStatus::Blocked => "blocked",
                 DesktopRunStatus::Interrupted => "interrupted",
             },
             permission_mode: permission_mode_label(value.permission_mode),

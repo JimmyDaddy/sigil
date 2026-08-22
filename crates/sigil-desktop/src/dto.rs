@@ -684,6 +684,7 @@ pub enum DesktopConversationDisplayStatus {
     Failed,
     Cancelled,
     Interrupted,
+    Paused,
     Blocked,
     AwaitingUserInput,
 }
@@ -910,11 +911,15 @@ pub struct DesktopConversationTaskControl {
     pub phase: crate::DesktopPublicTaskPhase,
     pub status: String,
     #[serde(default)]
+    pub execution: Option<DesktopTaskExecutionBinding>,
+    #[serde(default)]
     pub plan_version: Option<u32>,
     #[serde(default)]
     pub plan_status: Option<String>,
     pub steps: Vec<DesktopConversationTaskPlanStep>,
     pub steps_truncated: bool,
+    #[serde(default)]
+    pub checklist: Vec<crate::DesktopPublicTaskChecklistItem>,
     pub active_children: u32,
     pub completed_children: u32,
     pub failed_children: u32,
@@ -1486,7 +1491,15 @@ pub struct DesktopTerminalTaskCancelRequest {
 pub struct DesktopTaskPauseRequest {
     pub request_id: String,
     pub task_id: String,
-    pub plan_version: u32,
+    pub execution: DesktopTaskExecutionBinding,
+}
+
+/// First-class planned or direct execution authority bound to a Task control action.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum DesktopTaskExecutionBinding {
+    Plan { plan_version: u32 },
+    Direct { admission_id: String },
 }
 
 /// Public run lifecycle returned by the HTTP adapter.
@@ -1503,6 +1516,7 @@ pub enum DesktopRunStatus {
     Failed,
     Cancelled,
     Paused,
+    Blocked,
     Interrupted,
 }
 
@@ -1532,7 +1546,12 @@ impl DesktopRunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Finished | Self::Failed | Self::Cancelled | Self::Paused | Self::Interrupted
+            Self::Finished
+                | Self::Failed
+                | Self::Cancelled
+                | Self::Paused
+                | Self::Blocked
+                | Self::Interrupted
         )
     }
 }
@@ -2220,7 +2239,7 @@ pub struct DesktopTaskPauseCommandReceipt {
     #[serde(default)]
     pub correlation_id: Option<String>,
     pub task_id: String,
-    pub plan_version: u32,
+    pub execution: DesktopTaskExecutionBinding,
     pub run: DesktopRunSnapshot,
     pub replayed: bool,
 }
@@ -2654,6 +2673,12 @@ pub struct DesktopPlanDecisionCommandReceipt {
     pub action: DesktopPlanDecisionAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// RFC-0067: durable Task phase right after admission (Preparing/Ready/Blocked/Paused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_phase: Option<DesktopTaskExecutionPhase>,
+    /// RFC-0067: typed blocker when admission held the Task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_blocker: Option<DesktopTaskBlocker>,
     /// Run identity of the supervised revision plan review started by a `Revise` action, so the
     /// renderer can track the child run's lifecycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2661,6 +2686,43 @@ pub struct DesktopPlanDecisionCommandReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input_request: Option<DesktopUserInputRequest>,
     pub replayed: bool,
+}
+
+/// RFC-0067 durable Task execution phase mirrored across the native trust boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTaskExecutionPhase {
+    Preparing,
+    Ready,
+    Running,
+    Blocked,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+/// RFC-0067 typed blocker mirrored across the native trust boundary.
+///
+/// Field names follow the durable kernel record; the renderer only displays these facts and
+/// never reconstructs Task state from them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTaskBlocker {
+    pub reason_code: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_capability: Option<String>,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_actions: Vec<String>,
+    pub evidence_digest: String,
+    pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at_ms: Option<u64>,
 }
 
 /// Bounded plan review surface crossing the native trust boundary.
@@ -2712,7 +2774,10 @@ pub enum DesktopPlanReviewStatus {
     WaitingForInput,
     Finalizing,
     DraftReady,
+    CompileFailed,
     CompletedWithoutDraft,
+    Blocked,
+    Paused,
     Failed,
     Interrupted,
     Cancelled,

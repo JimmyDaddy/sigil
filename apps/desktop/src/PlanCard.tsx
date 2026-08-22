@@ -1,5 +1,5 @@
 import { useLocale } from "./i18n";
-import type { ConversationPlanReview, PlanDecisionAction, PlanReviewDetail, PlanSuggestedCheckDetail } from "./types";
+import type { ConversationPlanReview, PlanDecisionAction, PlanReviewDetail, PlanSuggestedCheckDetail, TaskBlocker } from "./types";
 import { Button } from "./ui/primitives";
 
 interface PlanCardProps {
@@ -7,6 +7,8 @@ interface PlanCardProps {
   disabled: boolean;
   busy: boolean;
   failure: boolean;
+  /** RFC-0067: durable admission blocker shown instead of the action row. */
+  blocker?: TaskBlocker;
   detail?: PlanReviewDetail;
   detailOpen: boolean;
   detailBusy: boolean;
@@ -21,6 +23,7 @@ export function PlanCard({
   disabled,
   busy,
   failure,
+  blocker,
   detail,
   detailOpen,
   detailBusy,
@@ -54,19 +57,26 @@ export function PlanCard({
       </header>
 
       {review.planHash === undefined ? null : (
-        <div className="plan-card-meta">
-          <code>{review.planId}</code>
-          <code>{review.planHash.slice(0, 12)}…</code>
-          {review.stepCount === undefined ? null : (
-            <span>{t("planReviewSteps", { count: review.stepCount })}</span>
-          )}
-          {review.targetPathCount === undefined ? null : (
-            <span>{t("planReviewTargetPaths", { count: review.targetPathCount })}</span>
-          )}
-          {review.suggestedCheckCount === undefined ? null : (
-            <span>{t("planReviewSuggestedChecks", { count: review.suggestedCheckCount })}</span>
-          )}
-          <span>{t(`planReviewSource_${review.source}`)}</span>
+        <div className="plan-card-overview">
+          <div className="plan-card-metrics" aria-label={t("planReviewOverview")}>
+            {review.stepCount === undefined ? null : (
+              <span>{t("planReviewSteps", { count: review.stepCount })}</span>
+            )}
+            {review.targetPathCount === undefined ? null : (
+              <span>{t("planReviewTargetPaths", { count: review.targetPathCount })}</span>
+            )}
+            {review.suggestedCheckCount === undefined ? null : (
+              <span>{t("planReviewSuggestedChecks", { count: review.suggestedCheckCount })}</span>
+            )}
+            <span>{t(`planReviewSource_${review.source}`)}</span>
+          </div>
+          <details className="plan-card-identity">
+            <summary>{t("planReviewIdentity")}</summary>
+            <div>
+              <code>{review.planId}</code>
+              <code>{review.planHash.slice(0, 12)}…</code>
+            </div>
+          </details>
         </div>
       )}
 
@@ -93,21 +103,41 @@ export function PlanCard({
       )}
 
       {review.planHash === undefined ? null : (
-        <div className="plan-card-review-toggle">
-          <Button
-            type="button"
-            variant="quiet"
-            data-plan-detail-toggle
-            disabled={detailBusy}
-            aria-expanded={detailOpen}
-            onClick={detailOpen ? onCloseDetail : onOpenDetail}
-          >
-            {detailBusy
-              ? t("planDetailLoading")
-              : detailOpen
-                ? t("planDetailClose")
-                : t("planDetailOpen")}
-          </Button>
+        <div className="plan-card-toolbar">
+          <div className="plan-card-review-toggle">
+            <Button
+              type="button"
+              variant="quiet"
+              data-plan-detail-toggle
+              disabled={detailBusy}
+              aria-expanded={detailOpen}
+              onClick={detailOpen ? onCloseDetail : onOpenDetail}
+            >
+              {detailBusy
+                ? t("planDetailLoading")
+                : detailOpen
+                  ? t("planDetailClose")
+                  : t("planDetailOpen")}
+            </Button>
+          </div>
+          {blocker !== undefined || review.allowedActions.length === 0 ? null : (
+            <div className="plan-card-actions" aria-label={t("planReviewActions")}>
+              {review.allowedActions.map((action) => (
+                <Button
+                  key={action}
+                  type="button"
+                  variant={action === "run" ? "primary" : action === "reject" ? "danger" : "secondary"}
+                  data-plan-action={action}
+                  disabled={actionDisabled(action)}
+                  onClick={() => onDecision(action)}
+                >
+                  {busy && action === primaryAction
+                    ? t("planDecisionInProgress")
+                    : t(`planDecision_${action}`)}
+                </Button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -180,24 +210,12 @@ export function PlanCard({
         </div>
       ) : null}
 
-      {!detailOpen || detail === undefined || review.allowedActions.length === 0 ? null : (
-        <div className="plan-card-actions">
-          {review.allowedActions.map((action) => (
-            <Button
-              key={action}
-              type="button"
-              variant={action === "run" ? "primary" : "secondary"}
-              data-plan-action={action}
-              disabled={actionDisabled(action)}
-              onClick={() => onDecision(action)}
-            >
-              {busy && action === primaryAction
-                ? t("planDecisionInProgress")
-                : t(`planDecision_${action}`)}
-            </Button>
-          ))}
+      {blocker !== undefined ? (
+        <div className="plan-card-notice plan-card-notice-error" role="alert">
+          <b>{t("planTaskBlocked")}</b> {blocker.summary}
         </div>
-      )}
+      ) : null}
+
     </section>
   );
 }

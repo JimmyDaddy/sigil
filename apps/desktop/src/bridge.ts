@@ -447,7 +447,7 @@ export const desktopBridge: DesktopBridge = {
   pauseTask: (workspaceId, sessionId, runId, request) =>
     invoke<RunSummary>("desktop_pause_task", {
       workspaceId,
-      input: { sessionId, runId, taskId: request.taskId, planVersion: request.planVersion },
+      input: { sessionId, runId, taskId: request.taskId, execution: request.execution },
     }),
   planDecision: (workspaceId, sessionId, planId, expectedPlanHash, action) =>
     invoke<PlanDecisionSummary>("desktop_plan_decision", {

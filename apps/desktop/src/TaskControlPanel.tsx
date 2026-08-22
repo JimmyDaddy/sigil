@@ -40,7 +40,7 @@ export function TaskControlPanel({
   const actionDisabled = disabled || busy || runActive;
   const canContinue = task.canContinue && !reviewReady && !runActive;
   const canPause = runActive
-    && task.planVersion !== undefined
+    && task.execution !== undefined
     && ["started", "running"].includes(task.status.toLowerCase());
 
   return (
@@ -82,7 +82,21 @@ export function TaskControlPanel({
         )}
       </div>
 
-      {task.steps.length === 0 ? null : (
+      {task.checklist.length === 0 ? null : (
+        <ol className="task-step-list task-checklist">
+          {task.checklist.map((item) => (
+            <li key={item.itemId}>
+              <span className={`task-step-dot task-step-${statusClass(item.status)}`} aria-hidden="true" />
+              <span>
+                <strong>{item.text}</strong>
+                <small>{formatMachineLabel(item.status)}</small>
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {task.checklist.length !== 0 || task.steps.length === 0 ? null : (
         <ol className="task-step-list">
           {task.steps.map((step) => (
             <li key={step.stepId}>
@@ -117,14 +131,16 @@ export function TaskControlPanel({
       ) : canContinue ? (
         <>
           <div className="task-control-actions">
-            <Button type="button" variant="quiet" disabled={actionDisabled} onClick={() => setGuidanceOpen((open) => !open)}>
-              {guidanceOpen ? t("hideTaskGuidance") : t("addTaskGuidance")}
-            </Button>
+            {task.execution?.kind === "direct" ? null : (
+              <Button type="button" variant="quiet" disabled={actionDisabled} onClick={() => setGuidanceOpen((open) => !open)}>
+                {guidanceOpen ? t("hideTaskGuidance") : t("addTaskGuidance")}
+              </Button>
+            )}
             <Button type="button" variant="primary" disabled={actionDisabled} onClick={() => onContinue()}>
               {busy ? t("continuingTask") : t("continueTask")}
             </Button>
           </div>
-          {guidanceOpen ? (
+          {guidanceOpen && task.execution?.kind !== "direct" ? (
             <div className="task-guidance">
               <TextArea
                 id={`task-guidance-${task.taskId}`}

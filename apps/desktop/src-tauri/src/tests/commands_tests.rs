@@ -432,6 +432,9 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                 task_id: "task-restart".to_owned(),
                 phase: DesktopPublicTaskPhase::Execution,
                 status: "paused".to_owned(),
+                execution: Some(sigil_desktop::DesktopTaskExecutionBinding::Plan {
+                    plan_version: 2,
+                }),
                 plan_version: Some(2),
                 plan_status: Some("accepted".to_owned()),
                 steps: vec![DesktopConversationTaskPlanStep {
@@ -444,6 +447,7 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                     status: Some("interrupted".to_owned()),
                 }],
                 steps_truncated: false,
+                checklist: Vec::new(),
                 active_children: 0,
                 completed_children: 1,
                 failed_children: 0,

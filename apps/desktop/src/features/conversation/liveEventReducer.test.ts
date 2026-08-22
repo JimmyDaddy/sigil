@@ -9,6 +9,7 @@ import {
   selectDeltaText,
   selectLatestApprovalPresentation,
   selectLatestPendingApproval,
+  selectProviderTurnRecovery,
   selectSemanticLiveItems,
   selectTaskEvents,
   selectTerminalTasks,
@@ -385,6 +386,37 @@ describe("live event reducer", () => {
     expect(selectDeltaBuffers(state)).toEqual([]);
   });
 
+  it("replaces both live channels when a failed provider attempt discards partial output", () => {
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "assistant_delta",
+      runSequence: "1",
+      text: "discarded response",
+    }));
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "reasoning_delta",
+      runSequence: "2",
+      text: "discarded reasoning",
+    }));
+
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "provider_turn_partial_output_discarded",
+      runSequence: "3",
+      status: "discarded",
+    }));
+
+    expect(selectDeltaBuffers(state)).toEqual([]);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "assistant_delta",
+      runSequence: "4",
+      text: "replacement response",
+    }));
+    const replacement = selectDeltaBuffers(state)[0];
+    expect(replacement === undefined ? "" : selectDeltaText(replacement)).toBe(
+      "replacement response",
+    );
+  });
+
   it("does not let a late semantic boundary erase newer delta fragments", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({ kind: "assistant_delta", runSequence: "8", text: "newer" }));
@@ -429,6 +461,18 @@ describe("live event reducer", () => {
       runSequence: "9",
       status: "interrupted",
     });
+
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "run_paused",
+      runId: "run-paused",
+      runSequence: "10",
+      status: "paused",
+    }));
+    expect(selectTerminalSignals(state)[2]).toEqual({
+      runId: "run-paused",
+      runSequence: "10",
+      status: "paused",
+    });
   });
 
   it("retains typed route recovery actions while terminating the unavailable run", () => {
@@ -456,6 +500,37 @@ describe("live event reducer", () => {
       runSequence: "10",
       status: "failed",
     }]);
+  });
+
+  it("keeps provider-turn recovery typed and clears it only for the next run", () => {
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "provider_turn_recovery",
+      runSequence: "10",
+      status: "waiting",
+      providerTurnRecovery: {
+        phase: "waiting",
+        activeRetryCount: 1,
+        activeMaxRetries: 2,
+        retryCount: 1,
+        maxTransportRetries: 2,
+        nextRetryUnixMs: 1_700_000_000_000,
+        availableActions: ["retry_now", "cancel"],
+        userAttentionRequired: false,
+      },
+    }));
+    expect(selectProviderTurnRecovery(state)?.providerTurnRecovery).toMatchObject({
+      phase: "waiting",
+      retryCount: 1,
+      availableActions: ["retry_now", "cancel"],
+    });
+
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "run_started",
+      runId: "run-2",
+      runSequence: "11",
+    }));
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
   });
 
   it("keeps the exact pending approval guard and removes it on resolution", () => {

@@ -76,7 +76,7 @@ fn settled_terminal_reattach_does_not_reenter_the_live_stream_owner() {
 fn terminal_snapshot_projection_preserves_interrupted_status() {
     assert_eq!(
         terminal_timeline_projection(DesktopRunStatus::Interrupted),
-        Some((DesktopTimelineEventKind::RunFailed, "interrupted"))
+        Some((DesktopTimelineEventKind::RunInterrupted, "interrupted"))
     );
     assert_eq!(
         terminal_timeline_projection(DesktopRunStatus::Failed),
@@ -88,7 +88,7 @@ fn terminal_snapshot_projection_preserves_interrupted_status() {
     );
     assert_eq!(
         terminal_timeline_projection(DesktopRunStatus::Paused),
-        Some((DesktopTimelineEventKind::RunCancelled, "paused"))
+        Some((DesktopTimelineEventKind::RunPaused, "paused"))
     );
 }
 
@@ -243,6 +243,7 @@ fn timeline(sequence: u64, kind: DesktopTimelineEventKind) -> DesktopTimelineEve
         tool_execution: None,
         task: None,
         terminal_task: None,
+        provider_turn_recovery: None,
         route_recovery: None,
         route_transition: None,
     }

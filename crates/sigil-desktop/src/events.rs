@@ -73,6 +73,15 @@ pub struct DesktopPublicTaskPlanStep {
     pub isolation: String,
 }
 
+/// Bounded display-only checklist item mirrored from the public protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicTaskChecklistItem {
+    pub item_id: String,
+    pub text: String,
+    pub status: String,
+}
+
 /// Renderer-facing task-plan step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -307,11 +316,20 @@ pub enum DesktopPublicRunEventKind {
         phase: DesktopPublicTaskPhase,
         status: String,
     },
+    TaskExecutionAdmitted {
+        task_id: String,
+        execution: crate::DesktopTaskExecutionBinding,
+    },
     TaskPlanUpdated {
         task_id: String,
         plan_version: u32,
         status: String,
         steps: Vec<DesktopPublicTaskPlanStep>,
+    },
+    TaskChecklistUpdated {
+        task_id: String,
+        revision: u32,
+        items: Vec<DesktopPublicTaskChecklistItem>,
     },
     TaskBatchChanged {
         task_id: String,
@@ -339,6 +357,15 @@ pub enum DesktopPublicRunEventKind {
     },
     RunFailed {
         error: String,
+    },
+    RunBlocked {
+        reason: String,
+    },
+    RunPaused {
+        reason: String,
+    },
+    RunInterrupted {
+        reason: String,
     },
     RouteRecoveryRequired {
         code: DesktopRouteRecoveryCode,
@@ -401,6 +428,12 @@ pub enum DesktopPublicRunEventKind {
     TerminalLifecycle {
         event: DesktopTerminalLifecycleView,
     },
+    ProviderTurnRecoveryChanged {
+        recovery: DesktopPublicProviderTurnRecoveryView,
+    },
+    ProviderTurnPartialOutputDiscarded {
+        output: DesktopPublicProviderTurnPartialOutputDiscardedView,
+    },
     Usage {},
     ContinuationState {},
     Control {
@@ -429,7 +462,9 @@ pub enum DesktopTimelineEventKind {
     PlanReviewChanged,
     UserInputChanged,
     TaskPhaseChanged,
+    TaskExecutionAdmitted,
     TaskPlanUpdated,
+    TaskChecklistUpdated,
     TaskBatchChanged,
     TaskStepChanged,
     IntegrationLaneChanged,
@@ -440,6 +475,8 @@ pub enum DesktopTimelineEventKind {
     ToolCompleted,
     ToolProgress,
     TerminalLifecycle,
+    ProviderTurnRecovery,
+    ProviderTurnPartialOutputDiscarded,
     ToolResult,
     ApprovalRequested,
     ApprovalResolved,
@@ -448,6 +485,9 @@ pub enum DesktopTimelineEventKind {
     Control,
     RunFinished,
     RunFailed,
+    RunBlocked,
+    RunPaused,
+    RunInterrupted,
     RouteRecoveryRequired,
     RunCancelled,
     Other,
@@ -475,6 +515,8 @@ pub struct DesktopTimelineTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<DesktopPublicTaskPhase>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<DesktopTimelineTaskExecutionBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
@@ -492,10 +534,36 @@ pub struct DesktopTimelineTask {
     pub completed: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checklist_revision: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<DesktopTimelineTaskPlanStep>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checklist: Vec<DesktopTimelineTaskChecklistItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<String>,
+}
+
+/// Renderer-facing planned or direct Task execution binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    deny_unknown_fields
+)]
+pub enum DesktopTimelineTaskExecutionBinding {
+    Plan { plan_version: u32 },
+    Direct { admission_id: String },
+}
+
+/// Renderer-facing non-authoritative checklist item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineTaskChecklistItem {
+    pub item_id: String,
+    pub text: String,
+    pub status: String,
 }
 
 /// Narrow approval summary safe to send to the local renderer.
@@ -580,9 +648,127 @@ pub struct DesktopTimelineEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_task: Option<DesktopTimelineTerminalTask>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_turn_recovery: Option<DesktopTimelineProviderTurnRecovery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub route_recovery: Option<DesktopTimelineRouteRecovery>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_transition: Option<DesktopTimelineRouteTransition>,
+}
+
+/// Product-safe provider-turn recovery phase mirrored from the shared public contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderTurnRecoveryPhase {
+    Waiting,
+    Recovering,
+    Blocked,
+    Paused,
+}
+
+impl DesktopProviderTurnRecoveryPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Recovering => "recovering",
+            Self::Blocked => "blocked",
+            Self::Paused => "paused",
+        }
+    }
+}
+
+/// Typed action forwarded without physical-attempt or provider diagnostic detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopProviderTurnRecoveryAction {
+    RetryNow,
+    UpdateConnection,
+    ReviewEffect,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPublicProviderTurnRecoveryView {
+    pub phase: DesktopProviderTurnRecoveryPhase,
+    #[serde(default)]
+    pub active_retry_count: u32,
+    #[serde(default)]
+    pub active_max_retries: u32,
+    pub retry_count: u32,
+    pub max_transport_retries: u32,
+    #[serde(default)]
+    pub next_retry_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    pub available_actions: Vec<DesktopProviderTurnRecoveryAction>,
+    pub user_attention_required: bool,
+}
+
+/// Renderer-safe signal that clears only live fragments from a failed provider attempt. The
+/// discarded contents never cross the bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPublicProviderTurnPartialOutputDiscardedView {
+    pub text_discarded: bool,
+    pub reasoning_discarded: bool,
+    pub tool_request_discarded: bool,
+}
+
+/// Renderer-safe recovery state. It intentionally excludes attempt ids, request material, and
+/// raw provider diagnostics while retaining the typed actions required for product parity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineProviderTurnRecovery {
+    pub phase: DesktopProviderTurnRecoveryPhase,
+    pub active_retry_count: u32,
+    pub active_max_retries: u32,
+    pub retry_count: u32,
+    pub max_transport_retries: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub available_actions: Vec<DesktopProviderTurnRecoveryAction>,
+    pub user_attention_required: bool,
+}
+
+impl TryFrom<&DesktopPublicProviderTurnRecoveryView> for DesktopTimelineProviderTurnRecovery {
+    type Error = DesktopProtocolEventError;
+
+    fn try_from(value: &DesktopPublicProviderTurnRecoveryView) -> Result<Self, Self::Error> {
+        let active_retry_count = if value.active_max_retries == 0 {
+            value.retry_count
+        } else {
+            value.active_retry_count
+        };
+        let active_max_retries = if value.active_max_retries == 0 {
+            value.max_transport_retries
+        } else {
+            value.active_max_retries
+        };
+        if value.retry_count > value.max_transport_retries.saturating_add(1)
+            || active_retry_count > active_max_retries.saturating_add(1)
+            || value.available_actions.len() > 8
+        {
+            return Err(DesktopProtocolEventError::InvalidPayload);
+        }
+        let reason_code = value
+            .reason_code
+            .as_deref()
+            .map(bounded_machine_label)
+            .transpose()?;
+        Ok(Self {
+            phase: value.phase,
+            active_retry_count,
+            active_max_retries,
+            retry_count: value.retry_count,
+            max_transport_retries: value.max_transport_retries,
+            next_retry_unix_ms: value.next_retry_unix_ms,
+            reason_code,
+            available_actions: value.available_actions.clone(),
+            user_attention_required: value.user_attention_required,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,6 +911,12 @@ impl DesktopProtocolEvent {
             }
             _ => None,
         };
+        let provider_turn_recovery = match event {
+            DesktopPublicRunEventKind::ProviderTurnRecoveryChanged { recovery } => {
+                Some(DesktopTimelineProviderTurnRecovery::try_from(recovery)?)
+            }
+            _ => None,
+        };
         let approval_request_id = match event {
             DesktopPublicRunEventKind::ApprovalResolved {
                 approval_request_id,
@@ -829,9 +1021,12 @@ impl DesktopProtocolEvent {
                         crate::DesktopPlanReviewStatus::WaitingForInput => "waiting_for_input",
                         crate::DesktopPlanReviewStatus::Finalizing => "finalizing",
                         crate::DesktopPlanReviewStatus::DraftReady => "draft_ready",
+                        crate::DesktopPlanReviewStatus::CompileFailed => "compile_failed",
                         crate::DesktopPlanReviewStatus::CompletedWithoutDraft => {
                             "completed_without_draft"
                         }
+                        crate::DesktopPlanReviewStatus::Blocked => "blocked",
+                        crate::DesktopPlanReviewStatus::Paused => "paused",
                         crate::DesktopPlanReviewStatus::Failed => "failed",
                         crate::DesktopPlanReviewStatus::Interrupted => "interrupted",
                         crate::DesktopPlanReviewStatus::Cancelled => "cancelled",
@@ -866,11 +1061,23 @@ impl DesktopProtocolEvent {
                 None,
                 Some(bounded_text(status)),
             ),
+            DesktopPublicRunEventKind::TaskExecutionAdmitted { .. } => (
+                DesktopTimelineEventKind::TaskExecutionAdmitted,
+                None,
+                None,
+                Some("admitted".to_owned()),
+            ),
             DesktopPublicRunEventKind::TaskPlanUpdated { status, .. } => (
                 DesktopTimelineEventKind::TaskPlanUpdated,
                 None,
                 None,
                 Some(bounded_text(status)),
+            ),
+            DesktopPublicRunEventKind::TaskChecklistUpdated { .. } => (
+                DesktopTimelineEventKind::TaskChecklistUpdated,
+                None,
+                None,
+                Some("updated".to_owned()),
             ),
             DesktopPublicRunEventKind::TaskBatchChanged {
                 batch_id, failed, ..
@@ -938,6 +1145,41 @@ impl DesktopProtocolEvent {
                 Some(bounded_machine_label(&event.task_id)?),
                 terminal_task.as_ref().map(|task| task.status.clone()),
             ),
+            DesktopPublicRunEventKind::ProviderTurnRecoveryChanged { recovery } => (
+                DesktopTimelineEventKind::ProviderTurnRecovery,
+                Some(match recovery.phase {
+                    DesktopProviderTurnRecoveryPhase::Waiting => format!(
+                        "Reconnecting… {}/{}",
+                        recovery.active_retry_count, recovery.active_max_retries
+                    ),
+                    DesktopProviderTurnRecoveryPhase::Recovering => format!(
+                        "Reconnecting provider request… {}/{}",
+                        recovery.active_retry_count, recovery.active_max_retries
+                    ),
+                    DesktopProviderTurnRecoveryPhase::Blocked => {
+                        "Provider recovery needs attention before this task can continue."
+                            .to_owned()
+                    }
+                    DesktopProviderTurnRecoveryPhase::Paused => {
+                        "Provider recovery is paused and can be resumed when ready.".to_owned()
+                    }
+                }),
+                None,
+                Some(recovery.phase.as_str().to_owned()),
+            ),
+            DesktopPublicRunEventKind::ProviderTurnPartialOutputDiscarded { output } => (
+                DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded,
+                Some(
+                    if output.tool_request_discarded {
+                        "Connection interrupted. The incomplete tool request was discarded."
+                    } else {
+                        "Connection interrupted. The incomplete response was discarded and will be regenerated."
+                    }
+                    .to_owned(),
+                ),
+                None,
+                Some("discarded".to_owned()),
+            ),
             DesktopPublicRunEventKind::ToolResult { result } => (
                 DesktopTimelineEventKind::ToolResult,
                 Some(bounded_text(&result.content)),
@@ -993,6 +1235,24 @@ impl DesktopProtocolEvent {
                 Some(bounded_text(error)),
                 None,
                 Some("failed".to_owned()),
+            ),
+            DesktopPublicRunEventKind::RunBlocked { reason } => (
+                DesktopTimelineEventKind::RunBlocked,
+                Some(bounded_text(reason)),
+                None,
+                Some("blocked".to_owned()),
+            ),
+            DesktopPublicRunEventKind::RunPaused { reason } => (
+                DesktopTimelineEventKind::RunPaused,
+                Some(bounded_text(reason)),
+                None,
+                Some("paused".to_owned()),
+            ),
+            DesktopPublicRunEventKind::RunInterrupted { reason } => (
+                DesktopTimelineEventKind::RunInterrupted,
+                Some(bounded_text(reason)),
+                None,
+                Some("interrupted".to_owned()),
             ),
             DesktopPublicRunEventKind::RouteRecoveryRequired { code, .. } => (
                 DesktopTimelineEventKind::RouteRecoveryRequired,
@@ -1067,6 +1327,7 @@ impl DesktopProtocolEvent {
             tool_execution,
             task,
             terminal_task,
+            provider_turn_recovery,
             route_recovery,
             route_transition,
         })
@@ -1383,6 +1644,7 @@ impl DesktopPendingApproval {
             tool_execution: None,
             task: None,
             terminal_task: None,
+            provider_turn_recovery: None,
             route_recovery: None,
             route_transition: None,
         })
@@ -1486,6 +1748,13 @@ fn project_task_event(
             phase: Some(*phase),
             ..DesktopTimelineTask::default()
         },
+        DesktopPublicRunEventKind::TaskExecutionAdmitted { task_id, execution } => {
+            DesktopTimelineTask {
+                task_id: Some(bounded_machine_label(task_id)?),
+                execution: Some(project_task_execution_binding(execution)?),
+                ..DesktopTimelineTask::default()
+            }
+        }
         DesktopPublicRunEventKind::TaskPlanUpdated {
             task_id,
             plan_version,
@@ -1497,6 +1766,19 @@ fn project_task_event(
             steps: steps
                 .iter()
                 .map(project_task_plan_step)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..DesktopTimelineTask::default()
+        },
+        DesktopPublicRunEventKind::TaskChecklistUpdated {
+            task_id,
+            revision,
+            items,
+        } => DesktopTimelineTask {
+            task_id: Some(bounded_machine_label(task_id)?),
+            checklist_revision: Some(*revision),
+            checklist: items
+                .iter()
+                .map(project_task_checklist_item)
                 .collect::<Result<Vec<_>, _>>()?,
             ..DesktopTimelineTask::default()
         },
@@ -1547,6 +1829,33 @@ fn project_task_event(
         _ => return Ok(None),
     };
     Ok(Some(task))
+}
+
+fn project_task_execution_binding(
+    execution: &crate::DesktopTaskExecutionBinding,
+) -> Result<DesktopTimelineTaskExecutionBinding, DesktopProtocolEventError> {
+    Ok(match execution {
+        crate::DesktopTaskExecutionBinding::Plan { plan_version } => {
+            DesktopTimelineTaskExecutionBinding::Plan {
+                plan_version: *plan_version,
+            }
+        }
+        crate::DesktopTaskExecutionBinding::Direct { admission_id } => {
+            DesktopTimelineTaskExecutionBinding::Direct {
+                admission_id: bounded_machine_label(admission_id)?,
+            }
+        }
+    })
+}
+
+fn project_task_checklist_item(
+    item: &DesktopPublicTaskChecklistItem,
+) -> Result<DesktopTimelineTaskChecklistItem, DesktopProtocolEventError> {
+    Ok(DesktopTimelineTaskChecklistItem {
+        item_id: bounded_machine_label(&item.item_id)?,
+        text: bounded_text(&item.text),
+        status: bounded_machine_label(&item.status)?,
+    })
 }
 
 fn project_task_plan_step(

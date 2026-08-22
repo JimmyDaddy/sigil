@@ -20,10 +20,10 @@ use sigil_desktop::{
     DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
     DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteRequest,
     DesktopSessionOpenRequest, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
-    DesktopStartupFailure, DesktopTaskContinuationRequest, DesktopTimelineTerminalTask,
-    DesktopToolArtifactReadRequest, DesktopToolArtifactSelector as NativeToolArtifactSelector,
-    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
-    DesktopWorkspaceSummary,
+    DesktopStartupFailure, DesktopTaskContinuationRequest, DesktopTaskExecutionBinding,
+    DesktopTimelineTerminalTask, DesktopToolArtifactReadRequest,
+    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptQuery,
+    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -59,14 +59,14 @@ use crate::{
         DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
         DesktopSessionQuarantineSummary, DesktopSessionRenameInput,
         DesktopSessionRouteRecoverySummary, DesktopSessionSummary, DesktopSupportDoctorSummary,
-        DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskIntegrationAcceptInput,
-        DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
-        DesktopTaskPauseInput, DesktopTerminalTaskCancelInput, DesktopTerminalTaskCancelSummary,
-        DesktopToolArtifactPage, DesktopToolArtifactReadInput, DesktopToolArtifactSelector,
-        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopUserInputDecisionInput,
-        DesktopUserInputDecisionSummary, DesktopUserInputReadInput, DesktopUserInputRequestSummary,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
-        desktop_session_route_recovery_summary,
+        DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskExecutionBindingInput,
+        DesktopTaskIntegrationAcceptInput, DesktopTaskIntegrationAcceptanceSummary,
+        DesktopTaskIntegrationReviewSummary, DesktopTaskPauseInput, DesktopTerminalTaskCancelInput,
+        DesktopTerminalTaskCancelSummary, DesktopToolArtifactPage, DesktopToolArtifactReadInput,
+        DesktopToolArtifactSelector, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopUserInputDecisionInput, DesktopUserInputDecisionSummary, DesktopUserInputReadInput,
+        DesktopUserInputRequestSummary, DesktopVerificationRerunInput, DesktopVerificationSummary,
+        DesktopWorkspaceSelection, desktop_session_route_recovery_summary,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -1263,12 +1263,24 @@ pub(crate) async fn desktop_pause_task(
     ] {
         validate_session_id(value)?;
     }
-    if input.plan_version == 0 {
-        return Err(DesktopCommandError::new(
-            "invalid_task_pause",
-            "The Task pause binding is invalid.",
-        ));
-    }
+    let execution = match input.execution {
+        DesktopTaskExecutionBindingInput::Plan { plan_version } if plan_version > 0 => {
+            DesktopTaskExecutionBinding::Plan { plan_version }
+        }
+        DesktopTaskExecutionBindingInput::Direct { admission_id }
+            if !admission_id.is_empty()
+                && admission_id.len() <= 256
+                && !admission_id.chars().any(char::is_control) =>
+        {
+            DesktopTaskExecutionBinding::Direct { admission_id }
+        }
+        _ => {
+            return Err(DesktopCommandError::new(
+                "invalid_task_pause",
+                "The Task pause binding is invalid.",
+            ));
+        }
+    };
     let client = state
         .manager
         .lock()
@@ -1291,7 +1303,7 @@ pub(crate) async fn desktop_pause_task(
             &input.run_id,
             snapshot.stream_sequence,
             &input.task_id,
-            input.plan_version,
+            execution,
         )
         .await
         .map(|receipt| receipt.run.into())
@@ -1346,6 +1358,8 @@ pub(crate) async fn desktop_plan_decision(
             DesktopPlanDecisionActionInput::Reject => "reject",
         },
         task_id: receipt.task_id,
+        task_phase: receipt.task_phase,
+        task_blocker: receipt.task_blocker,
         revision_run_id: receipt.revision_run_id,
         user_input_request: receipt.user_input_request.map(Into::into),
         replayed: receipt.replayed,

@@ -1161,18 +1161,21 @@ fn run_start_serializes_an_exact_same_session_model_route() {
 
 #[test]
 fn task_pause_request_identity_matches_the_shared_content_binding() {
-    let request = desktop_task_pause_request("task_1", 3);
+    let request = desktop_task_pause_request(
+        "task_1",
+        crate::DesktopTaskExecutionBinding::Plan { plan_version: 3 },
+    );
 
     assert_eq!(
         request.request_id,
-        "task-pause-a5c1fc2df6690659ad1d6fc69c101c629f3728d78a9204b8b38cbd3900e19943"
+        "task-pause-8255cff6d4b82d53e2f95ed642e5cac61db6837bb1428027a4e1fb48f854ce0b"
     );
     assert_eq!(
         serde_json::to_value(request).expect("Task pause should encode"),
         serde_json::json!({
-            "request_id": "task-pause-a5c1fc2df6690659ad1d6fc69c101c629f3728d78a9204b8b38cbd3900e19943",
+            "request_id": "task-pause-8255cff6d4b82d53e2f95ed642e5cac61db6837bb1428027a4e1fb48f854ce0b",
             "task_id": "task_1",
-            "plan_version": 3
+            "execution": { "kind": "plan", "plan_version": 3 }
         })
     );
 }

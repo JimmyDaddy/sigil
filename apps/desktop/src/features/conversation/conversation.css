@@ -69,31 +69,42 @@
 .task-guidance .sg-field { width: 100%; }
 .task-guidance .sg-field-control { min-height: 64px; resize: vertical; }
 
-.plan-card { display: grid; min-height: 68px; max-height: min(32vh, 300px); flex: 0 1 auto; gap: 9px; padding: 11px 12px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); }
+.plan-card { display: grid; min-height: 68px; max-height: min(34vh, 332px); flex: 0 1 auto; gap: 10px; padding: 12px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); box-shadow: inset 3px 0 0 var(--sg-sys-color-primary); }
 .plan-card > header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.plan-card h3 { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 13px; }
+.plan-card > header > div { min-width: 0; }
+.plan-card h3 { display: -webkit-box; margin: 2px 0 0; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .plan-card-eyebrow { color: var(--sg-sys-color-primary); font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .plan-status { flex: 0 0 auto; padding: 3px 7px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container-high); font-size: 9px; font-weight: 750; text-transform: uppercase; }
 .plan-status-draft-ready { color: var(--sg-domain-color-on-success); background: var(--sg-domain-color-success); }
+.plan-status-compile-failed, .plan-status-blocked, .plan-status-paused { color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); }
 .plan-status-failed, .plan-status-cancelled, .plan-status-interrupted { color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
-.plan-card-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px 9px; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
-.plan-card-meta code { max-width: 280px; overflow: hidden; color: var(--sg-sys-color-on-surface-variant); text-overflow: ellipsis; white-space: nowrap; }
+.plan-card-overview { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
+.plan-card-metrics { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px; }
+.plan-card-metrics span { padding: 3px 6px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container-high); font-size: 10px; white-space: nowrap; }
+.plan-card-identity { flex: 0 1 auto; min-width: 0; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
+.plan-card-identity summary { cursor: pointer; white-space: nowrap; }
+.plan-card-identity > div { display: grid; gap: 3px; margin-top: 6px; }
+.plan-card-identity code { max-width: 250px; overflow: hidden; color: var(--sg-sys-color-on-surface-variant); text-overflow: ellipsis; white-space: nowrap; }
 .plan-card-risk { display: grid; gap: 2px; padding: 8px; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-sm); }
 .plan-card-risk strong { font-size: 9px; text-transform: uppercase; color: var(--sg-sys-color-on-surface-subtle); }
 .plan-card-risk span { color: var(--sg-sys-color-on-surface-variant); font-size: 11px; line-height: 1.5; }
 .plan-card-notice { padding: 7px 9px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); font-size: 10px; }
 .plan-card-notice-error { color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
-.plan-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.plan-card-toolbar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding-top: 2px; border-top: 1px solid var(--sg-sys-color-outline-variant); }
+.plan-card-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .plan-card-open { max-height: min(68vh, 720px); }
-.plan-card-review-toggle { display: flex; justify-content: flex-start; }
+.plan-card-review-toggle { display: flex; min-width: 0; justify-content: flex-start; }
 .plan-workbench { display: grid; gap: 14px; padding: 12px; overflow: visible; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface); }
 .plan-workbench section { display: grid; gap: 6px; }
 .plan-workbench h4, .plan-workbench p { margin: 0; }
 .plan-workbench h4 { color: var(--sg-sys-color-primary); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
 .plan-workbench p, .plan-workbench li { color: var(--sg-sys-color-on-surface-variant); font-size: 11px; line-height: 1.55; }
-.plan-workbench-steps { display: grid; gap: 12px; margin: 0; padding-left: 22px; }
-.plan-workbench-steps > li { display: grid; gap: 5px; }
-.plan-workbench-contract { display: flex; flex-wrap: wrap; gap: 6px; }
+.plan-workbench-steps { display: grid; gap: 8px; margin: 0; padding-left: 26px; }
+.plan-workbench-steps > li { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); background: var(--sg-sys-color-surface-container-low); }
+.plan-workbench-steps > li::marker { color: var(--sg-sys-color-primary); font-weight: 800; }
+.plan-workbench-contract { display: flex; flex-wrap: wrap; gap: 5px; }
+.plan-workbench-contract code { padding: 2px 5px; border-radius: var(--sg-sys-radius-full); color: var(--sg-sys-color-on-surface-subtle); background: var(--sg-sys-color-surface-container-high); font-size: 10px; }
+@media (max-width: 620px) { .plan-card-overview, .plan-card-toolbar { align-items: flex-start; flex-direction: column; } .plan-card-actions { justify-content: flex-start; } }
 .user-input-card { display: grid; max-height: min(60vh, 620px); gap: 12px; padding: 12px; overflow-y: auto; border: 1px solid var(--sg-sys-color-primary); border-radius: var(--sg-sys-radius-md); background: var(--sg-sys-color-surface-container-low); }
 .user-input-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .user-input-card h3 { margin: 3px 0 0; font-size: 13px; }

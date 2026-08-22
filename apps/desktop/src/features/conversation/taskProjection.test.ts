@@ -90,6 +90,43 @@ describe("Task product projection", () => {
       expect(task?.canContinue, status).toBe(canContinue);
     }
   });
+
+  it("projects direct execution and a real display checklist without inventing a plan step", () => {
+    const task = projectCurrentTask([
+      event("task_run_started", {
+        task: { taskId: "task-direct", objective: "Execute the approved objective" },
+      }),
+      event("task_execution_admitted", {
+        status: "admitted",
+        task: {
+          taskId: "task-direct",
+          execution: { kind: "direct", admissionId: "admission-direct" },
+        },
+      }),
+      event("task_checklist_updated", {
+        status: "updated",
+        task: {
+          taskId: "task-direct",
+          checklistRevision: 2,
+          checklist: [
+            { itemId: "inspect", text: "Inspect", status: "completed" },
+            { itemId: "implement", text: "Implement", status: "in_progress" },
+          ],
+        },
+      }),
+    ]);
+
+    expect(task).toMatchObject({
+      taskId: "task-direct",
+      execution: { kind: "direct", admissionId: "admission-direct" },
+      steps: [],
+      checklist: [
+        { text: "Inspect", status: "completed" },
+        { text: "Implement", status: "in_progress" },
+      ],
+    });
+    expect(task?.planVersion).toBeUndefined();
+  });
 });
 
 function event(

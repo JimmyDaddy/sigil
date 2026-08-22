@@ -47,6 +47,78 @@ fn timeline_projection_keeps_conversation_text_and_drops_raw_tool_arguments() {
 }
 
 #[test]
+fn provider_turn_recovery_projects_typed_actions_without_attempt_identity() {
+    let event = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "provider_turn_recovery_changed",
+            "recovery": {
+                "phase": "paused",
+                "active_retry_count": 2,
+                "active_max_retries": 2,
+                "retry_count": 2,
+                "max_transport_retries": 2,
+                "reason_code": "provider_retry_budget_exhausted",
+                "available_actions": ["retry_now", "cancel"],
+                "user_attention_required": true
+            }
+        }),
+    );
+
+    let timeline = event
+        .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+        .expect("provider recovery should project");
+    assert_eq!(
+        timeline.kind,
+        DesktopTimelineEventKind::ProviderTurnRecovery
+    );
+    assert_eq!(timeline.status.as_deref(), Some("paused"));
+    let recovery = timeline
+        .provider_turn_recovery
+        .as_ref()
+        .expect("typed provider recovery is forwarded");
+    assert_eq!(recovery.retry_count, 2);
+    assert_eq!(recovery.active_max_retries, 2);
+    assert_eq!(
+        recovery.available_actions,
+        vec![
+            DesktopProviderTurnRecoveryAction::RetryNow,
+            DesktopProviderTurnRecoveryAction::Cancel,
+        ]
+    );
+    let encoded = serde_json::to_string(&timeline).expect("timeline serializes");
+    assert!(!encoded.contains("physical_attempt"));
+}
+
+#[test]
+fn discarded_partial_output_projects_without_content_or_attempt_identity() {
+    let event = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "provider_turn_partial_output_discarded",
+            "output": {
+                "text_discarded": true,
+                "reasoning_discarded": true,
+                "tool_request_discarded": false
+            }
+        }),
+    );
+
+    let timeline = event
+        .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+        .expect("discard signal should project");
+    assert_eq!(
+        timeline.kind,
+        DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded
+    );
+    assert_eq!(timeline.status.as_deref(), Some("discarded"));
+    let serialized = serde_json::to_string(&timeline).expect("timeline serializes");
+    assert!(serialized.contains("incomplete response"));
+    assert!(!serialized.contains("physical_attempt"));
+    assert!(!serialized.contains("discarded text"));
+}
+
+#[test]
 fn timeline_projection_keeps_allowlisted_shell_command_and_assistant_kind() {
     let shell = envelope(
         DesktopProtocolEventClass::Durable,
@@ -490,6 +562,8 @@ fn every_current_public_event_variant_deserializes_without_opaque_event_parsing(
         json!({"type": "task_batch_changed", "task_id": "task-1", "plan_version": 1, "batch_id": "batch-1", "active": 1, "completed": 0, "failed": 0}),
         json!({"type": "task_step_changed", "task_id": "task-1", "plan_version": 1, "step_id": "step-1", "attempt_id": "attempt-1", "status": "running"}),
         json!({"type": "integration_lane_changed", "task_id": "task-1", "plan_version": 1, "plan_id": "plan-1", "lane_id": "lane-1", "status": "running", "conflicts": []}),
+        json!({"type": "provider_turn_recovery_changed", "recovery": {"phase": "waiting", "active_retry_count": 1, "active_max_retries": 2, "retry_count": 1, "max_transport_retries": 2, "available_actions": [], "user_attention_required": false}}),
+        json!({"type": "provider_turn_partial_output_discarded", "output": {"text_discarded": true, "reasoning_discarded": false, "tool_request_discarded": false}}),
         json!({"type": "run_failed", "error": "failed"}),
         json!({"type": "route_recovery_required", "code": "session_route_confirmation_required", "actions": ["repair_connection", "start_new_session"], "recovery_binding": "binding-1", "retryable": true}),
         json!({"type": "run_cancelled"}),

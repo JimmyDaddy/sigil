@@ -5579,6 +5579,7 @@ describe("desktop workspace and history shell", () => {
           taskId: "task-restart-control",
           phase: "execution",
           status: "paused",
+          execution: { kind: "plan", planVersion: 3 },
           planVersion: 3,
           planStatus: "accepted",
           steps: [{
@@ -5591,6 +5592,7 @@ describe("desktop workspace and history shell", () => {
             status: "interrupted",
           }],
           stepsTruncated: false,
+          checklist: [],
           activeChildren: 0,
           completedChildren: 1,
           failedChildren: 0,
@@ -5709,7 +5711,10 @@ describe("desktop workspace and history shell", () => {
       workspace.id,
       "http-session-new",
       "run-1",
-      { taskId: "task-pause-1", planVersion: 7 },
+      {
+        taskId: "task-pause-1",
+        execution: { kind: "plan", planVersion: 7 },
+      },
     ));
     expect(cancelRun).not.toHaveBeenCalled();
   });
@@ -5790,10 +5795,10 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText("plan-review-1")).toBeTruthy();
     expect(screen.getByText(/sha256:ddddd/)).toBeTruthy();
     expect(screen.getByText("Automatic plan review")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Review complete plan" }));
-    expect(await screen.findByTestId("plan-workbench")).toBeTruthy();
     const runButton = screen.getByRole("button", { name: "Run plan" });
     expect(runButton.hasAttribute("disabled")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Review complete plan" }));
+    expect(await screen.findByTestId("plan-workbench")).toBeTruthy();
     await user.click(runButton);
 
     await waitFor(() => expect(planDecision).toHaveBeenCalledWith(

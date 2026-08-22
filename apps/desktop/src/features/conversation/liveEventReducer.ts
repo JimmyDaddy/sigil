@@ -80,6 +80,8 @@ export interface LiveEventState {
   latestTaskRunId?: string;
   terminalSignals: ReadonlyMap<string, LiveTerminalSignal>;
   routeRecovery?: TimelineEvent;
+  /** Most recent provider-turn recovery for the active run, projected without attempt identity. */
+  providerTurnRecovery?: TimelineEvent;
 }
 
 export type LiveEventAction =
@@ -326,6 +328,10 @@ export function selectTerminalTasks(state: LiveEventState): LiveTerminalTask[] {
   });
 }
 
+export function selectProviderTurnRecovery(state: LiveEventState): TimelineEvent | undefined {
+  return state.providerTurnRecovery;
+}
+
 export function semanticLiveItemFromTimelineEvent(
   event: TimelineEvent,
 ): LiveConversationDisplayItem | undefined {
@@ -466,6 +472,11 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   } else if (event.kind === "run_started" && next.routeRecovery !== undefined) {
     next = { ...next, routeRecovery: undefined };
   }
+  if (event.kind === "provider_turn_recovery" && event.providerTurnRecovery !== undefined) {
+    next = { ...next, providerTurnRecovery: event };
+  } else if (event.kind === "run_started" && next.providerTurnRecovery !== undefined) {
+    next = { ...next, providerTurnRecovery: undefined };
+  }
   const terminalSignal = terminalSignalFromTimelineEvent(event);
   if (terminalSignal !== undefined) {
     return receiveTerminalSignal(next, terminalSignal);
@@ -484,6 +495,8 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
     );
   } else if (isToolBoundary(event.kind)) {
     next = clearRunDeltaChannelThrough(next, event.runId, "assistant", event.runSequence);
+  } else if (event.kind === "provider_turn_partial_output_discarded") {
+    next = clearRunDeltaBuffersThrough(next, event.runId, event.runSequence);
   } else if (event.kind === "run_started") {
     next = clearRunDeltaBuffersThrough(next, event.runId, event.runSequence);
   }
@@ -1027,10 +1040,36 @@ function toolStatus(event: TimelineEvent): LiveConversationDisplayItem["status"]
 }
 
 function terminalStatus(event: TimelineEvent): ConversationTerminalStatus | undefined {
+  const isTerminalEvent = event.kind === "run_finished"
+    || event.kind === "run_failed"
+    || event.kind === "run_blocked"
+    || event.kind === "run_paused"
+    || event.kind === "run_interrupted"
+    || event.kind === "route_recovery_required"
+    || event.kind === "run_cancelled";
+  if (!isTerminalEvent) return undefined;
+  // Durable or replayed adapters may preserve a more precise terminal status on a generic
+  // `run_failed` envelope. Keep that typed status rather than manufacturing `failed`; this is
+  // essential for recoverable paused/blocked and interrupted runs to retain their action model.
+  switch (event.status) {
+    case "succeeded":
+    case "failed":
+    case "cancelled":
+    case "interrupted":
+    case "paused":
+    case "blocked":
+    case "awaiting_user_input":
+      return event.status;
+    default:
+      break;
+  }
   if (event.kind === "run_finished") return "succeeded";
   if (event.kind === "run_failed") {
-    return event.status === "interrupted" ? "interrupted" : "failed";
+    return "failed";
   }
+  if (event.kind === "run_blocked") return "blocked";
+  if (event.kind === "run_paused") return "paused";
+  if (event.kind === "run_interrupted") return "interrupted";
   if (event.kind === "route_recovery_required") return "failed";
   if (event.kind === "run_cancelled") return "cancelled";
   return undefined;

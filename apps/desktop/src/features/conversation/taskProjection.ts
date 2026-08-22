@@ -1,4 +1,6 @@
 import type {
+  TaskChecklistItem,
+  TaskExecutionBinding,
   TimelineEvent,
   TimelineTaskPhase,
   TimelineTaskPlanStep,
@@ -20,9 +22,11 @@ export interface TaskProductProjection {
   objective?: string;
   phase?: TimelineTaskPhase;
   status: string;
+  execution?: TaskExecutionBinding;
   planVersion?: number;
   planStatus?: string;
   steps: TaskStepProjection[];
+  checklist: TaskChecklistItem[];
   activeChildren: number;
   completedChildren: number;
   failedChildren: number;
@@ -41,7 +45,9 @@ export function projectCurrentTask(
   const started = findKind(taskEvents, "task_run_started");
   const finished = findKind(taskEvents, "task_run_finished");
   const phase = findKind(taskEvents, "task_phase_changed");
+  const execution = findKind(taskEvents, "task_execution_admitted");
   const plan = findKind(taskEvents, "task_plan_updated");
+  const checklist = findKind(taskEvents, "task_checklist_updated");
   const stepStatuses = new Map(
     taskEvents
       .filter((event) => event.kind === "task_step_changed" && event.task?.stepId !== undefined)
@@ -81,9 +87,14 @@ export function projectCurrentTask(
     objective: started?.task?.objective,
     phase: phase?.task?.phase,
     status,
+    execution: execution?.task?.execution
+      ?? (plan?.task?.planVersion === undefined
+        ? undefined
+        : { kind: "plan", planVersion: plan.task.planVersion }),
     planVersion: plan?.task?.planVersion ?? phase?.task?.planVersion,
     planStatus: plan?.status,
     steps,
+    checklist: checklist?.task?.checklist ?? [],
     activeChildren: sumTaskCount(batches, "active"),
     completedChildren: sumTaskCount(batches, "completed"),
     failedChildren: sumTaskCount(batches, "failed"),

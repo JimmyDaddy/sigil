@@ -712,15 +712,15 @@ impl DesktopHttpClient {
         run_id: &str,
         expected_stream_sequence: u64,
         task_id: &str,
-        plan_version: u32,
+        execution: crate::DesktopTaskExecutionBinding,
     ) -> Result<DesktopTaskPauseCommandReceipt, DesktopClientError> {
         validate_stream_identity(session_id)?;
         validate_stream_identity(run_id)?;
         validate_stream_identity(task_id)?;
-        if plan_version == 0 {
+        if !desktop_task_execution_binding_is_valid(&execution) {
             return Err(DesktopClientError::InvalidRoute);
         }
-        let payload = desktop_task_pause_request(task_id, plan_version);
+        let payload = desktop_task_pause_request(task_id, execution.clone());
         let command = self.command(session_id, Some(expected_stream_sequence), payload);
         let command_id = command.command_id.clone();
         let client_id = command.client_id.clone();
@@ -736,7 +736,7 @@ impl DesktopHttpClient {
             || receipt.session_id != session_id
             || receipt.expected_stream_sequence != Some(expected_stream_sequence)
             || receipt.task_id != task_id
-            || receipt.plan_version != plan_version
+            || receipt.execution != execution
             || receipt.run.id != run_id
             || receipt.run.session_id != session_id
         {
@@ -2299,16 +2299,30 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{}", sha256_hex(bytes))
 }
 
-fn desktop_task_pause_request(task_id: &str, plan_version: u32) -> DesktopTaskPauseRequest {
+fn desktop_task_pause_request(
+    task_id: &str,
+    execution: crate::DesktopTaskExecutionBinding,
+) -> DesktopTaskPauseRequest {
     let seed = serde_json::json!({
         "task_id": task_id,
-        "plan_version": plan_version,
+        "execution": execution,
     })
     .to_string();
     DesktopTaskPauseRequest {
         request_id: format!("task-pause-{}", sha256_hex(seed.as_bytes())),
         task_id: task_id.to_owned(),
-        plan_version,
+        execution,
+    }
+}
+
+fn desktop_task_execution_binding_is_valid(execution: &crate::DesktopTaskExecutionBinding) -> bool {
+    match execution {
+        crate::DesktopTaskExecutionBinding::Plan { plan_version } => *plan_version > 0,
+        crate::DesktopTaskExecutionBinding::Direct { admission_id } => {
+            !admission_id.is_empty()
+                && admission_id.len() <= 256
+                && !admission_id.chars().any(char::is_control)
+        }
     }
 }
 

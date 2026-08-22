@@ -515,6 +515,15 @@ impl RunProjection {
             DesktopTimelineEventKind::RunFailed => {
                 self.run_status = DesktopRunStatus::Failed;
             }
+            DesktopTimelineEventKind::RunBlocked => {
+                self.run_status = DesktopRunStatus::Blocked;
+            }
+            DesktopTimelineEventKind::RunPaused => {
+                self.run_status = DesktopRunStatus::Paused;
+            }
+            DesktopTimelineEventKind::RunInterrupted => {
+                self.run_status = DesktopRunStatus::Interrupted;
+            }
             DesktopTimelineEventKind::RunCancelled => {
                 self.run_status =
                     if self.task_pause_observed || event.status.as_deref() == Some("paused") {
@@ -851,6 +860,7 @@ async fn terminal_snapshot(
         tool_execution: None,
         task: None,
         terminal_task: None,
+        provider_turn_recovery: None,
         route_recovery: None,
         route_transition: None,
     };
@@ -897,6 +907,7 @@ fn terminal_snapshot_timeline(
         tool_execution: None,
         task: None,
         terminal_task: Some(task),
+        provider_turn_recovery: None,
         route_recovery: None,
         route_transition: None,
     }
@@ -984,9 +995,12 @@ fn terminal_timeline_projection(
     match status {
         DesktopRunStatus::Finished => Some((DesktopTimelineEventKind::RunFinished, "finished")),
         DesktopRunStatus::Failed => Some((DesktopTimelineEventKind::RunFailed, "failed")),
-        DesktopRunStatus::Interrupted => Some((DesktopTimelineEventKind::RunFailed, "interrupted")),
+        DesktopRunStatus::Blocked => Some((DesktopTimelineEventKind::RunBlocked, "blocked")),
+        DesktopRunStatus::Interrupted => {
+            Some((DesktopTimelineEventKind::RunInterrupted, "interrupted"))
+        }
         DesktopRunStatus::Cancelled => Some((DesktopTimelineEventKind::RunCancelled, "cancelled")),
-        DesktopRunStatus::Paused => Some((DesktopTimelineEventKind::RunCancelled, "paused")),
+        DesktopRunStatus::Paused => Some((DesktopTimelineEventKind::RunPaused, "paused")),
         _ => None,
     }
 }
