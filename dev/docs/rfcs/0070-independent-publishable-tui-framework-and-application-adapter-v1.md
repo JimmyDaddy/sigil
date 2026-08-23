@@ -17,6 +17,9 @@
 - [RFC-0067 Single Execution Spine and Monotonic Plan-to-Task Adoption V1](0067-single-execution-spine-and-monotonic-plan-to-task-adoption-v1.md)
 - [RFC-0068 Durable Recovery Spine and Effect-Scoped Retry V1](0068-durable-recovery-spine-and-effect-scoped-retry-v1.md)
 - [RFC-0069 Recoverability Boundaries, Plan Direct Execution and Workspace Concurrency V1](0069-recoverability-boundaries-plan-materialization-and-workspace-concurrency-v1.md)
+- [RFC-0071 Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1](0071-unified-resource-authority-and-sandbox-lifecycle-v1.md)：**hard implementation prerequisite**；只有R71.8在同一release candidate完成资格化后才允许启动R70.0。
+
+实施前置：两份RFC严格串行。RFC-0071先完整实施R71.0-R71.8；RFC-0070随后从post-R71稳定基线执行R70.0-R70.8。RFC-0071实施期间不得并行推进任何R70 slice；本RFC不得要求RFC-0071预先创建`sigil-application`或拆分TUI package。
 
 ## 1. 摘要
 
@@ -54,13 +57,17 @@ Internal Sigil workspace        ▼
 └───────────────────────────────┬────────────────────────────────────┘
                                 │ versioned application port
 ┌───────────────────────────────▼────────────────────────────────────┐
-│ sigil-application -> sigil-runtime -> sigil-kernel/authority plane │
+│ sigil-tui-app --consumes--> sigil-application contract             │
+│ sigil-runtime --implements--> sigil-application contract           │
+│ sigil-application --depends on--> sigil-kernel public contract     │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 第三方开发者只需要声明一个 `sigil-tui` dependency；其下的 core 与 Ratatui adapter 是锁步发布的实现
 package。仓库内 `sigil-tui-app` 与 `sigil-application` 均 `publish = false`，分别承载 Sigil 产品投影和
 transport-neutral application contract。
+
+RFC-0071先建立Resource Authority/Sandbox、permission V3、resource/effect receipt、RecoveryBlockerV2及kernel-owned `ResourceRecoverySurfaceContractV1`；R71阶段现有surface可暂经runtime facade消费。RFC-0070不再重做这条authority spine，只把post-R71高层query/command/event/projection收敛到`sigil-application`，并机械删除surface-to-runtime transitional edge。
 
 核心交互不变量是：
 
@@ -106,6 +113,7 @@ transport-neutral application contract。
 14. **snapshot/frontier/event 与 command replay 是 application 规范。** 必须冻结 scope、generation、gap/reset、
     reserve-before-effect、payload conflict 与 uncertain outcome，不能留给各 surface adapter 自行解释。
 15. **测试、benchmark、package 与 semver gate 是发布条件，不是后补工作。**
+16. **RFC-0071 是硬实施前置。** R70.0只能从R71.8资格化后的稳定基线开始；R70不得重定义Resource Authority、Sandbox、permission V3、resource/recovery durable schema或surface contract canonical hash。
 
 ## 3. 背景与当前根因
 
@@ -330,19 +338,30 @@ target lookup复杂度不等于完整dispatch复杂度。
 ### 7.2 依赖方向单向
 
 ```text
+Cargo depends-on edges:
+
 sigil-tui-core
     <- sigil-tui-ratatui
         <- sigil-tui
             <- sigil-tui-app
                 <- sigil binary composition root
 
-sigil-application
-    <- sigil-runtime implementation
-    <- sigil-tui-app consumer
+sigil-tui-app ----------> sigil-application
+sigil-http / CLI -------> sigil-application
+sigil-runtime ----------> sigil-application
+sigil-application ------> sigil-kernel public contract
+
+sigil-runtime --------> sigil-resource-authority / sigil-sandbox
+sigil binary composition root -> sigil-runtime + sigil-tui-app
 ```
 
 禁止 `sigil-tui-core`、`sigil-tui-ratatui`、`sigil-tui` 反向依赖 `sigil-application`。禁止
-`sigil-tui-app` 直接依赖 runtime implementation。
+`sigil-tui-app` 直接依赖 runtime implementation。`sigil-application`不得依赖`sigil-runtime`、
+`sigil-resource-authority`或`sigil-sandbox` concrete implementation；runtime实现application port并独占组合
+RFC-0071 physical services。上图中public-contract edge允许复用kernel-owned
+`ResourceRecoverySurfaceContractV1`，但application facade不得复制其canonical schema/hash或另建recovery authority。
+RFC-0070完成态的HTTP/CLI shared application adapter同样只依赖`sigil-application`；binary/server composition root可同时
+组装runtime implementation与adapter，但adapter不能借composition重新取得runtime-private或physical API。
 
 ### 7.3 Committed presentation 是唯一可交互事实源
 
@@ -509,6 +528,7 @@ framework 嵌入自己的 runtime。
 职责：
 
 - versioned application query/command/event/projection/receipt；
+- 无损复用RFC-0071 kernel-owned `ResourceRecoverySurfaceContractV1`、`ToolPermissionPlanV3/DecisionV3`、resource/effect receipt与`RecoveryBlockerV2` public view；
 - bounded renderer-safe DTO；
 - transport-neutral application port；
 - presentation obligation与独立 trusted presenter capability protocol；
@@ -519,6 +539,12 @@ framework 嵌入自己的 runtime。
 该 crate 可以依赖 `sigil-kernel` 的 provider-neutral public contract，但不得依赖 TUI、Desktop、HTTP 或
 某个 provider adapter。现有 `sigil-runtime::application_run` 中的 prepare、public event、cancel、outbox、
 delivery receipt 与 session lease 是迁移种子，而不是完整 application port。
+
+`sigil-application`是application protocol/facade owner，不是physical resource或sandbox authority。它不得依赖
+`sigil-resource-authority`/`sigil-sandbox` concrete type、持有path/descriptor/lease实现、复制R71 canonical
+encoding，或为command reservation、resource reservation与recovery各建一份互相竞争的事实源。R70 command
+reservation只保护application command的idempotency/effect admission；R71 resource reservation/journal只保护
+physical resource lifecycle。两者通过typed command/effect/resource receipt关联，不能互相替代或双写同一事实。
 
 ### 8.5 `sigil-tui-app`（仓库内部，`publish = false`）
 
@@ -542,7 +568,8 @@ delivery receipt 与 session lease 是迁移种子，而不是完整 application
 - `sigil-kernel`；
 - `sigil-tools-builtin`；
 - `sigil-updater`；
-- provider、MCP、process、session store implementation。
+- provider、MCP、process、session store implementation；
+- `sigil-resource-authority`、`sigil-sandbox`及其concrete/physical type。
 
 ### 8.6 为什么不在首版拆更多 package
 
@@ -1077,8 +1104,9 @@ Generator可以是xtask或source parser，本RFC不锁定工具；但CI必须比
 unknown target、缺失mapping、无理由`retire/NotExposed`、wildcard classifier或缺test id都阻断。`merge`必须列出
 所有source variant并说明信息未丢失。
 
-Runtime只实现一次`sigil-application` service。TUI/HTTP/CLI只做mechanical adapter，Desktop继续经typed HTTP
-schema消费同一service。对于manifest声明为shared的command，在相同authoritative fixture和normalized payload下，
+Runtime只实现一次`sigil-application` service。该service必须直接复用post-R71 kernel public resource/recovery
+contract，不能把R71 transitional runtime facade复制成第二个状态源；迁移完成即删除TUI/HTTP/CLI对该transitional
+facade的直接依赖。TUI/HTTP/CLI只做mechanical adapter，Desktop继续经typed HTTP schema消费同一service。对于manifest声明为shared的command，在相同authoritative fixture和normalized payload下，
 TUI keyboard、TUI mouse、Desktop、HTTP、CLI必须产生相同typed domain receipt、frontier与domain-event序列；
 transport metadata/authenticated identity可以不同，但不能改变domain result。确实不适用某surface时必须记录
 `NotExposed + rationale`，不能留空。
@@ -2224,6 +2252,22 @@ projection或journal delivery failure不能把已提交 domain terminal改写成
 - 所有surface复用single application command journal；adapter不能自行降低reserve/replay/conflict/uncertain语义；
 - delivery ACK、domain receipt、trusted presentation receipt是三个不同对象，任何一个都不能冒充另一个。
 
+### 20.7 RFC-0071 resource/recovery authority 保持独立
+
+R70实施时，以下post-R71 contract是只消费、不重写的冻结输入：
+
+- `ToolPermissionPlanV3/ToolPermissionDecisionV3`与exact approval/resource binding；
+- `ManagedExecutionServiceV1`、`ManagedFileAccessServiceV1`、`ManagedStorageServiceV1`的pathless application-facing ports；
+- resource journal、physical effect facts、resource/effect/cleanup receipt；
+- `RecoveryBlockerV2`与kernel-owned`ResourceRecoverySurfaceContractV1` canonical schema/hash/action token；
+- Resource Authority/Sandbox的generation、lease、reservation、quarantine、reconciliation与single-writer ownership。
+
+`sigil-application`可以将这些fact组合进application projection、command admission和typed domain receipt，但不能
+解释host path、重新签action token、从UI文案推断recovery、直接调用physical cleanup，或把R71 runtime transitional
+facade fork成长期双入口。application command reservation与resource journal的key、owner、terminal各自独立；
+application effect只通过R71 typed receipt/frontier确认resource outcome。若R70设计需要改变任何R71 durable bytes、
+canonical hash、authority owner或recovery transition，必须先单独修订RFC-0071，不能在R70 slice内隐式完成。
+
 ## 21. 当前源码到目标职责的映射
 
 | 当前模块 | 目标归属 | 迁移说明 |
@@ -2236,10 +2280,11 @@ projection或journal delivery failure不能把已提交 domain terminal改写成
 | `AppState` paths/runtime/updater/session fields | application/host | 不进入 renderer |
 | `view_model` data types | public/product SurfaceModel | `from_app`移入 adapter |
 | `worker_bridge`, `runtime_status` | application adapter/host | event/receipt reducer |
-| `runner/*` | `sigil-application` + `sigil-runtime` | 从 TUI完全移出 |
+| `runner/*` | `sigil-application` + `sigil-runtime` composition | 从TUI完全移出；runtime调用RFC-0071 managed ports，application不接管physical authority |
 | setup/config/session flow | adapter + application service | UI draft与真实 effect分离 |
 | clipboard/image/open external | host capability | core只发 request/action |
-| `workspace_git`, updater, scratch, child JSONL | application service | UI不得执行 I/O |
+| `workspace_git`, scratch, child JSONL | application semantic adapter + RFC-0071 managed services | UI不得执行I/O；physical allocation/lease/storage仍归Resource Authority/closed semantic owner |
+| updater cache/state | transport-neutral updater owner + application typed port | 保持RFC-0071 `ProductUpdaterState`独立owner，不迁入agent resource authority或TUI |
 | launcher terminal lifecycle/input decode | public optional driver | worker/session/effect wiring留 composition root |
 | `commands.rs` | generic key binding + product action catalog | label不能成为 command authority |
 | UI/app/runner tests | public headless、adapter contract、runtime contract三层 | 不再依赖一体化 fixture |
@@ -2248,10 +2293,15 @@ projection或journal delivery failure不能把已提交 domain terminal改写成
 
 迁移禁止 big-bang。每阶段都要保留现有功能，先建立可比较 contract，再删除旧路径。
 
+**Cross-RFC serial invariant**：本计划只有在RFC-0071 R71.8完成、同一release candidate资格化并产出post-R71 handoff manifest后才启动。R70.0以前不得预建`sigil-application`、拆public TUI package或把R71 transitional facade当成R70进度；R70实施中也不得修改R71 durable schema/authority来“顺便适配”。
+
 ### R70.0：冻结基线、能力清单与 profiler
+
+**Depends**：RFC-0071 R71.8 qualified closure；不能用R71.5 shadow、R71.6 cutover或R71.7 local green代替。
 
 交付：
 
+- 校验R71 handoff manifest与exact post-R71 baseline commit，冻结`ResourceRecoverySurfaceContractV1` schema/hash、permission V3、receipt/blocker/action binding、runtime transitional facade入口、consumer清单与待删除edge；
 - 记录当前 scroll/mouse/stream/resize/theme基线；
 - 固定 10k/100k mixed transcript fixture；
 - 将 `scripts/tui-mouse-smoke.sh` 中 composer、slash、scroll、config、session、approval、tool card、hover、
@@ -2259,10 +2309,11 @@ projection或journal delivery failure不能把已提交 domain terminal改写成
 - 增加 phase timing临时 instrumentation；
 - 记录 current dirty worktree之外的基线 commit；
 - 从production `WorkerCommand`、`WorkerMessage`及surface command/event enum生成versioned migration manifest，
-  记录每个variant的target、receipt、effect/replay class、surface exposure、test与phase。
+  记录每个variant的target、receipt、effect/replay class、surface exposure、test与phase；R71 public resource/recovery row必须标记`reuse`而非`redefine/migrate`。
 
 退出条件：能量化`AppState projection / LayoutSnapshot / render / flush`各自成本；enum discovery与manifest零差异，
-没有缺mapping、无理由retire/NotExposed或wildcard classifier。
+没有缺mapping、无理由retire/NotExposed或wildcard classifier；handoff manifest与workspace current contract完全一致，
+没有legacy permission/blocker schema、第二份surface canonical hash或未登记surface-to-runtime edge。
 
 ### R70.1：在现有 crate 中先落 `CommittedPresentation`
 
@@ -2316,8 +2367,11 @@ render invariant与Unicode/UAX #9 contract gate通过。此阶段不把预载完
 
 ### R70.4：建立完整 `sigil-application` contract
 
+**Depends**：R70.3与R70.0冻结的post-R71 contract；不得针对pre-R71 worker/resource schema实现。
+
 交付：
 
+- 直接依赖kernel-owned`ResourceRecoverySurfaceContractV1`并无损组合permission V3、resource/effect receipt、`RecoveryBlockerV2`与exact action envelope；删除任何application-local副本/转换状态机；
 - atomic scoped snapshot-feed cut、event envelope、gap/reset/writer restart与delivery ACK；
 - async projection page/range contract、bounded cache/cancel/stale response；
 - grouped versioned command envelope；
@@ -2325,7 +2379,7 @@ render invariant与Unicode/UAX #9 contract gate通过。此阶段不把预载完
 - durable reserve-before-effect、payload conflict、settlement class、uncertain/restart repair；
 - approval/cancel/session/config/provider/MCP/task/agent/user-input/maintenance projection；
 - 独立trusted presenter capability，不进入ordinary command port；
-- 现有 `application_run` capability迁入/实现该 contract；
+- 现有 `application_run` capability迁入/实现该 contract；R71 runtime transitional facade在迁移期只作为同一service的薄兼容入口，不拥有第二份projection/recovery truth；
 - fake application实现；
 - 在exclusive lease下幂等导入legacy HTTP command store的identity、unfinished reservation、terminal receipt与
   tombstone；cutover任何时刻只有一个writable reservation authority，并可在中途crash后继续/回滚；
@@ -2334,7 +2388,9 @@ render invariant与Unicode/UAX #9 contract gate通过。此阶段不把预载完
 退出条件：TUI通过port运行；cold-cache`paged-transcript-100k`证明未预载全部ID/body且cache/in-flight有界；
 snapshot/gap/reset、reserve/replay/uncertain、forged presenter tests通过；TUI keyboard/mouse、Desktop、HTTP、CLI对
 shared commands的domain receipt/frontier/event conformance通过；legacy store crash-safe cutover与single-writer
-gate通过；不直接消费内部`RunEvent`或worker oneshot/Arc。
+gate通过；不直接消费内部`RunEvent`或worker oneshot/Arc；application port不依赖RA/Sandbox concrete type，
+R71 canonical bytes/hash与authority owner在迁移前后逐项相同。application command reservation与R71 resource
+reservation分别只有一个writer，且只通过typed receipt/frontier关联。
 
 ### R70.5：物理拆 package 与第二消费者
 
@@ -2355,12 +2411,16 @@ package-identity edge。
 交付：
 
 - `runner/*`从公开/产品 TUI package消失；
-- provider/tool/session/MCP/updater/workspace/git/scratch/child JSONL全部由application/runtime host拥有；
+- provider/tool/session/MCP/workspace/git/child-session等**semantic orchestration与adapter wiring**由application/runtime host拥有；
+- scratch/temp/state/cache/artifact physical allocation、lease、quota、cleanup/recovery继续只由RFC-0071 Resource Authority/Sandbox或RFC-0071 §9.5 closed product owner承担；application/runtime不得接收root path、复制allocator或成为第二cleanup owner；
+- updater继续由`ProductUpdaterState` owner管理，application只消费typed updater port；
 - `sigil-tui-app`只依赖 `sigil-tui` + `sigil-application`；
+- 删除TUI/HTTP/CLI对R71 runtime transitional resource/recovery facade的direct dependency，Desktop generated wire仍消费同一application service；
 - binary composition root wiring完成。
 
 退出条件：依赖图与source policy gate全部通过；migration manifest零未映射production row、零无理由
-`NotExposed/retire`；approval/cancel/egress/session/recovery cross-surface tests无退化。
+`NotExposed/retire`；approval/cancel/egress/session/recovery cross-surface tests无退化；application/TUI package无
+RA/Sandbox concrete/physical type，runtime transitional consumer edge为零，R71 authority/receipt/blocker schema未变化。
 
 ### R70.7：发布资格与 preview release
 
@@ -2384,6 +2444,7 @@ package-identity edge。
 - 删除旧 layout snapshot；
 - 删除 dual theme/input/command mapping；
 - 将旧protocol manifest row标为已验证retire，并保持历史可追溯；
+- 删除R71 handoff manifest中登记的runtime transitional surface facade兼容入口；kernel-owned resource/recovery contract与durable history继续保留；
 - 更新核心技术方案、README、AGENTS/工程文档中的 crate职责。
 
 ## 23. 功能保留矩阵
@@ -2571,6 +2632,9 @@ cold-cache 100k E2E gate。
 - 公共API、docs、examples中无provider/agent/session/tool专属contract；
 - `sigil-tui-app`不依赖runtime/kernel/tools/updater/provider；
 - `sigil-application` presenter port只使用application-owned renderer-neutral type，不依赖任何公开TUI package；
+- `sigil-application`可依赖kernel-owned`ResourceRecoverySurfaceContractV1`，但不依赖RA/Sandbox concrete/physical type，也不复制其schema/hash/action signer；
+- TUI/HTTP/CLI对R71 runtime transitional resource/recovery facade的direct dependency为零；所有surface只经`sigil-application`或Desktop typed wire消费同一contract；
+- Cargo/AST gate证明physical resource allocation/lease/quota/cleanup/recovery仍只有RFC-0071 owner，application/runtime未新增root-path allocator、GC或第二authority；
 - renderer源码无 `AppState`；
 - public package production源码无filesystem/process/network/session store；
 - `runner/*`不在public TUI package；
@@ -2634,6 +2698,9 @@ CI脚本解析JSON/dependency graph做断言，不依赖易碎的文本grep。
   expired、outbox delivery ACK与restart恢复通过；
 - TUI keyboard/mouse、Desktop、HTTP、CLI shared command fixture产生相同domain receipt/frontier/event；generic
   receipt没有替代domain receipt；
+- post-R71 permission V3、resource/effect receipt、RecoveryBlockerV2、action envelope与canonical hash在application facade迁移前后byte-for-byte/fixture-equal；
+- application command reservation与R71 resource reservation各自single-writer、key/terminal不混用，且只通过typed effect/resource receipt和frontier关联；
+- forged surface adapter、application-local action token、transport-private recovery enum、第二runtime/application recovery state machine均在effect前拒绝；
 - migration manifest零未映射production row、零无理由`NotExposed/retire`；
 - SafePersist projection之外的exact内容不进入SurfaceModel；
 - renderer error不改写domain terminal。
@@ -2665,7 +2732,11 @@ RFC-0070 只有同时满足以下条件才能标记 implemented：
 9. migration manifest零未映射production row、零无理由`NotExposed/retire`；
 10. dependency allowlist、独立consumer与crate artifact qualification通过；
 11.核心技术方案、crate职责、README与developer docs已同步；
-12.旧兼容层、dual state和临时feature flag已清理。
+12.旧兼容层、dual state和临时feature flag已清理；
+13. RFC-0071 R71.8 qualification与post-R71 handoff manifest先于任何R70 implementation commit，execution ledger不存在重叠slice；
+14. `sigil-application`无损复用R71 kernel resource/recovery contract，permission V3、resource journal/receipt、blocker/action canonical bytes与authority owner未被R70改写；
+15. `sigil-tui-app`、public TUI packages与application contract均无RA/Sandbox concrete/physical type，R71 transitional surface-to-runtime edge已全部删除；
+16. application command reservation与resource lifecycle authority没有双写、互相冒充或第二cleanup/recovery owner。
 
 完成“拆出一个目录”或“能够 `cargo check`”不构成Done。
 
