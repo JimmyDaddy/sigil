@@ -392,10 +392,14 @@ mod tests {
     fn shadow_services(
         issuer: Arc<dyn KernelCapabilityIssuerV1>,
     ) -> RuntimeManagedResourceServicesV1 {
-        let storage = Arc::new(AuthorityManagedStorageServiceV1::new(
-            AuthorityStorageGrantTableV1::new(),
-            authority(),
-        ));
+        shadow_services_with_table(issuer, AuthorityStorageGrantTableV1::new())
+    }
+
+    fn shadow_services_with_table(
+        issuer: Arc<dyn KernelCapabilityIssuerV1>,
+        table: AuthorityStorageGrantTableV1,
+    ) -> RuntimeManagedResourceServicesV1 {
+        let storage = Arc::new(AuthorityManagedStorageServiceV1::new(table, authority()));
         let file_access = sigil_resource_authority::file_access_stub::stub_file_access_service();
         let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
             authority(),
@@ -491,6 +495,103 @@ mod tests {
                 probe.adapter
             );
         }
+    }
+
+    fn storage_grant(
+        grant_id: &str,
+        owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
+        family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1,
+    ) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+        sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+            grant_id: sigil_kernel::resource::OpaqueStorageGrantId::new(grant_id.to_owned()),
+            admission_hash: CanonicalHash::from_bytes([0x31; 32]),
+            semantic_owner: owner,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            purpose_hash: CanonicalHash::from_bytes([0x32; 32]),
+            namespace_hash: CanonicalHash::from_bytes([0x33; 32]),
+            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
+            journal_scope_hash: CanonicalHash::from_bytes([0x34; 32]),
+            resource_ref: sigil_kernel::resource::ResourceRefV1 {
+                resource_id: sigil_kernel::resource::OpaqueResourceId::new(format!(
+                    "res-{grant_id}"
+                )),
+                kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
+                owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
+                journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
+                generation: 1,
+            },
+            resource_binding_digest: CanonicalHash::from_bytes([0x35; 32]),
+            physical_binding_hash: CanonicalHash::from_bytes([0x36; 32]),
+            resource_kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
+            owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
+            capability_family: family,
+            retention_policy: sigil_kernel::resource::ResourceRetentionPolicyV1::SessionPolicy,
+            quota_profile: sigil_kernel::resource::ResourceQuotaProfileV1 {
+                class: sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
+                max_bytes: 1024,
+                max_entries: 100,
+                max_open_holders: 1,
+                max_age_ms: None,
+                hard_runtime_enforcement_required: true,
+                profile_hash: CanonicalHash::from_bytes([0x37; 32]),
+            },
+            semantic_schema: sigil_kernel::resource::OpaqueSemanticSchemaId::new(format!(
+                "schema-{grant_id}"
+            )),
+            authority_generation: authority(),
+            journal_admission_sequence: 1,
+            grant_hash: CanonicalHash::from_bytes([0x38; 32]),
+        }
+    }
+
+    #[test]
+    fn resource_global_cutover_storage_family_exact_probe() {
+        use sigil_kernel::resource::{
+            ManagedStorageCapabilityFamilyV1 as Family, ManagedStorageSemanticOwnerV1 as Owner,
+        };
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table
+            .register(storage_grant(
+                "g-session-log",
+                Owner::SessionLog,
+                Family::AppendLog,
+            ))
+            .expect("register");
+        table
+            .register(storage_grant(
+                "g-input-history",
+                Owner::InteractiveInputHistory,
+                Family::AppendLog,
+            ))
+            .expect("register");
+        table
+            .register(storage_grant(
+                "g-artifact",
+                Owner::ArtifactStaging,
+                Family::StreamingArtifact,
+            ))
+            .expect("register");
+        let services = shadow_services_with_table(mock_issuer(), table);
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let probes = probe_mandatory_adapters(
+            &services,
+            &recovery,
+            CanonicalHash::from_bytes([0xd2; 32]),
+            1,
+        );
+        let passed: Vec<MandatoryAdapterKindV1> = probes
+            .iter()
+            .filter(|p| p.passed)
+            .map(|p| p.adapter)
+            .collect();
+        // Exactly the three registered writer channels are ready; the other four fail closed.
+        assert!(passed.contains(&MandatoryAdapterKindV1::StorageSessionLog));
+        assert!(passed.contains(&MandatoryAdapterKindV1::StorageInputHistory));
+        assert!(passed.contains(&MandatoryAdapterKindV1::StorageArtifact));
+        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageSessionLifecycle));
+        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageMemory));
+        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageSessionCatalog));
+        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageAdapterDurableState));
     }
 
     #[test]

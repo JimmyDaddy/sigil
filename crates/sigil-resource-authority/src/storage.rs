@@ -78,26 +78,20 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         capability: ValidatedStorageAdmissionCapabilityV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1> {
         let _ = capability;
-        if self.table.grants.is_empty() {
-            return Err(ManagedStorageErrorV1::CapabilityMismatch);
-        }
-        let _ = request;
+        // Family-exact closure: any unrelated grant must not masquerade as readiness for a
+        // different capability family (R71.6 cutover probe depends on this exactness).
+        let Some(grant) = self.table.grants.values().find(|grant| {
+            grant.capability_family == request.capability_family
+                && grant.semantic_owner == request.semantic_owner
+        }) else {
+            return Err(ManagedStorageErrorV1::FamilyMismatch);
+        };
         Ok(ManagedStorageNamespaceHandleV1::new(
             sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
                 "handle-storage-1".to_owned(),
             ),
-            self.table
-                .grants
-                .values()
-                .next()
-                .expect("non-empty")
-                .namespace_hash,
-            self.table
-                .grants
-                .values()
-                .next()
-                .expect("non-empty")
-                .capability_family,
+            grant.namespace_hash,
+            grant.capability_family,
             OpaqueKernelCapabilityAuthenticatorV1::new("auth-storage-1".to_owned()),
         ))
     }
@@ -266,5 +260,84 @@ mod tests {
             sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLifecycleLog
         );
         assert_eq!(receipt.committed_sequence_or_version, Some(7));
+    }
+
+    #[test]
+    fn r71_storage_family_exact_closure() {
+        use sigil_kernel::managed_storage::{
+            ManagedStorageAdmissionRequestV1, ValidatedStorageAdmissionCapabilityV1,
+        };
+        use sigil_kernel::resource::{
+            ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1, OpaqueSessionId,
+            ResourceJournalScopeV1, ResourceOwnerScopeV1,
+        };
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant()).expect("register");
+        let service = AuthorityManagedStorageServiceV1::new(
+            table,
+            AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([8u8; 32]),
+            },
+        );
+        let exact = ManagedStorageAdmissionRequestV1 {
+            semantic_owner: ManagedStorageSemanticOwnerV1::SessionLog,
+            capability_family: ManagedStorageCapabilityFamilyV1::AppendLog,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            source:
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
+                    application_generation: 1,
+                },
+            owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new("s-1".to_owned())),
+            journal_scope: ResourceJournalScopeV1::Application,
+        };
+        service
+            .admit_namespace(
+                exact,
+                ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+            )
+            .expect("exact family+owner");
+        // Same family but different semantic owner: refused (a different writer must not piggyback).
+        let piggyback = ManagedStorageAdmissionRequestV1 {
+            semantic_owner: ManagedStorageSemanticOwnerV1::InteractiveInputHistory,
+            capability_family: ManagedStorageCapabilityFamilyV1::AppendLog,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            source:
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
+                    application_generation: 1,
+                },
+            owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new("s-1".to_owned())),
+            journal_scope: ResourceJournalScopeV1::Application,
+        };
+        let error = service
+            .admit_namespace(
+                piggyback,
+                ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+            )
+            .expect_err("piggyback");
+        assert!(matches!(error, ManagedStorageErrorV1::FamilyMismatch));
+        // Unrelated family: refused, never a masqueraded readiness.
+        let unrelated = ManagedStorageAdmissionRequestV1 {
+            semantic_owner: ManagedStorageSemanticOwnerV1::SessionCatalog,
+            capability_family: ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection,
+            purpose:
+                sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::RebuildableProjection,
+            source:
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
+                    application_generation: 1,
+                },
+            owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new("s-1".to_owned())),
+            journal_scope: ResourceJournalScopeV1::Application,
+        };
+        let error = service
+            .admit_namespace(
+                unrelated,
+                ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+            )
+            .expect_err("unrelated");
+        assert!(matches!(error, ManagedStorageErrorV1::FamilyMismatch));
     }
 }
