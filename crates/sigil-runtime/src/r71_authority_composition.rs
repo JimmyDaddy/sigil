@@ -31,6 +31,9 @@ pub struct RuntimeAuthorityCompositionV1 {
     /// The composition's single real capability broker: surfaces seal/issue through this
     /// (one-shot proofs; kernel-side binding).
     pub broker: std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
+    /// Kernel-owned tool authority facade: in-process file tools seal -> issue -> adjudicate
+    /// through this (one-shot tool tokens; never fabricated by a tool).
+    pub tool_authority: sigil_kernel::tool_authority::KernelToolAuthorityV1,
 }
 
 impl std::fmt::Debug for RuntimeAuthorityCompositionV1 {
@@ -127,7 +130,7 @@ pub fn compose_runtime_authority(
         broker.clone() as Arc<dyn KernelCapabilityIssuerV1>,
         records_projection as Arc<dyn ManagedProjectionServiceV1>,
         execution,
-        file_access,
+        Arc::clone(&file_access),
         crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
     );
     let storage_writer = std::sync::Arc::new(ManagedStorageWriterAdapterV1::with_storage_issuer(
@@ -141,6 +144,10 @@ pub fn compose_runtime_authority(
         storage_writer,
         declared_channels: declared.iter().copied().collect(),
         broker: std::sync::Arc::clone(&broker),
+        tool_authority: sigil_kernel::tool_authority::KernelToolAuthorityV1::new(
+            Arc::clone(&file_access),
+            Arc::clone(&broker),
+        ),
     })
 }
 
@@ -243,6 +250,65 @@ mod tests {
     };
     use crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1;
     use sigil_kernel::cutover_manifest::MandatoryAdapterKindV1;
+
+    #[test]
+    fn r71_composition_tool_authority_facade_is_wired() {
+        use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let exec = dir.path().join("exec");
+        std::fs::create_dir_all(&state).expect("state dir");
+        std::fs::create_dir_all(state.join("cache")).expect("cache dir");
+        std::fs::create_dir_all(&exec).expect("exec dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("mode");
+            std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ));
+        let composition = compose_runtime_authority(
+            &state,
+            &exec,
+            CanonicalHash::from_bytes([0x55; 32]),
+            planner,
+            &[Ch::SessionLog],
+        )
+        .expect("compose");
+        let binding =
+            sigil_kernel::managed_file_access::ManagedFileAdmissionBindingV1::ToolPermissionPlan {
+                permission_plan_hash: CanonicalHash::from_bytes([0xa1; 32]),
+                decision_hash: CanonicalHash::from_bytes([0xa2; 32]),
+                approval_continuity_hash: CanonicalHash::from_bytes([0xa3; 32]),
+                tool_start_event_digest: CanonicalHash::from_bytes([0xa4; 32]),
+                file_access_plan_hash: CanonicalHash::from_bytes([0xa5; 32]),
+                file_subject_binding_hash: CanonicalHash::from_bytes([0xa6; 32]),
+                file_resolver_proof_digest: CanonicalHash::from_bytes([0xa7; 32]),
+                file_authority_generation: sigil_kernel::resource::AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: CanonicalHash::from_bytes([0xa8; 32]),
+                },
+                workspace_mutation_activation: None,
+            };
+        let subject = sigil_kernel::resource::OpaquePermissionSubjectRef::new("ws-1".to_owned());
+        let outcome = composition.tool_authority.adjudicate_tool_file_access(
+            binding,
+            &subject,
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::Read,
+        );
+        // Observable subjects are registered by the surface bootstrap; an unobserved subject
+        // fails closed through the real wire.
+        let error = outcome.expect_err("unregistered subject");
+        assert!(matches!(
+            error,
+            sigil_kernel::tool_authority::KernelToolAuthorityErrorV1::Access(
+                sigil_kernel::managed_file_access::ManagedFileAccessErrorV1::OperationNotPermitted
+            )
+        ));
+    }
 
     #[test]
     fn r71_composition_declared_channel_writes_and_probes_exactly() {

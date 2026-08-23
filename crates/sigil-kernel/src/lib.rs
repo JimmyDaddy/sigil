@@ -72,6 +72,7 @@ pub mod task_orchestrator;
 pub mod terminal_task;
 pub mod time;
 pub mod tool;
+pub mod tool_authority;
 pub mod user_input;
 pub mod verification;
 pub mod web_budget;
