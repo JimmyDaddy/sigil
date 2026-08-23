@@ -57,3 +57,15 @@ mod fault_key_tests;
 #[cfg(test)]
 #[path = "tests/fault_retire_tests.rs"]
 mod fault_retire_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_bridge_tests.rs"]
+mod fault_bridge_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_child_tests.rs"]
+mod fault_child_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_updater_tests.rs"]
+mod fault_updater_tests;
