@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_thread;
 pub mod approval;
+pub mod borrowed_mutation;
 pub mod cache_layout;
 pub mod cancellation;
 pub mod capability_issuer;
