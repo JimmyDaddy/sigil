@@ -3339,6 +3339,9 @@ async fn assemble_application_tool_surface(
         ),
         terminal_lifecycle_sink,
         services.scratch_control().cloned(),
+        services
+            .authority_composition()
+            .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
     )
     .await?;
     // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run

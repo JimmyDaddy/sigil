@@ -19,6 +19,7 @@ fn test_store(root: &Path, workspace_id: &str) -> WritableMemoryStore {
             WritableMemoryScope::ProjectFact,
             Some(workspace_id.to_owned()),
         ),
+        managed_writer: None,
     }
 }
 
@@ -395,6 +396,93 @@ fn remember_tools_require_preview_and_default_to_ask() -> Result<()> {
             .and_then(|scope| scope.qualifiers.get("scope"))
             .map(String::as_str),
         Some("any")
+    );
+    Ok(())
+}
+
+#[test]
+fn managed_writer_round_trips_both_memory_scopes_under_admitted_namespaces() -> Result<()> {
+    use crate::managed_storage_writer::{ManagedStorageWriterAdapterV1, memory_grants};
+    use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+    use sigil_kernel::managed_storage::ManagedStorageServiceV1;
+    use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash};
+    use sigil_resource_authority::storage::{
+        AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let anchor = temp.path().join("state");
+    std::fs::create_dir_all(&anchor)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&anchor, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let mut table = AuthorityStorageGrantTableV1::new();
+    for grant in memory_grants(0x76) {
+        table.register(grant)?;
+    }
+    let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
+        std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
+            table,
+            AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([0x68; 32]),
+            },
+        ));
+    let broker = std::sync::Arc::new(KernelCapabilityBrokerV1::new());
+    let writer = std::sync::Arc::new(ManagedStorageWriterAdapterV1::with_storage_issuer(
+        service,
+        anchor.clone(),
+        CanonicalHash::from_bytes([0x69; 32]),
+        broker,
+    ));
+    let store = WritableMemoryStore::with_managed_writer("workspace-managed", Arc::clone(&writer))?;
+
+    let preference = store.remember(
+        WritableMemoryScope::UserPreference,
+        "user likes concise Chinese replies",
+        source("preference"),
+    )?;
+    let fact = store.remember(
+        WritableMemoryScope::ProjectFact,
+        "managed memory rounds trip through the composed writer",
+        source("fact"),
+    )?;
+    assert_ne!(preference.memory_id, fact.memory_id);
+
+    let inspected = store.inspect(Some(WritableMemoryScope::UserPreference), 16)?;
+    assert!(
+        inspected
+            .iter()
+            .any(|entry| entry.statement.contains("concise Chinese")),
+        "managed user-preferences namespace must be readable: {:?}",
+        inspected
+    );
+    let facts = store.inspect(Some(WritableMemoryScope::ProjectFact), 16)?;
+    assert!(
+        facts
+            .iter()
+            .any(|entry| entry.statement.contains("composed writer")),
+        "managed project-facts namespace must be readable: {:?}",
+        facts
+    );
+
+    // The physical leaves are authority-declared named namespaces, never caller paths.
+    assert!(
+        anchor
+            .join("managed")
+            .join("durable-memory")
+            .join("user-preferences")
+            .is_dir()
+    );
+    assert!(
+        anchor
+            .join("managed")
+            .join("durable-memory")
+            .join("project-facts")
+            .is_dir()
     );
     Ok(())
 }

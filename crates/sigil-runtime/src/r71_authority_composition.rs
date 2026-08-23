@@ -94,6 +94,17 @@ pub fn compose_runtime_authority(
     };
     let mut table = sigil_resource_authority::storage::AuthorityStorageGrantTableV1::new();
     for channel in declared {
+        if *channel == crate::managed_storage_writer::StorageWriterChannelV1::DurableMemory {
+            // Both DurableMemory scope classes are writer channels of the same family: the
+            // ProjectFact grant covers the probe cell; the UserPreference grant keeps the
+            // two-class DurableMemory writer from being partially closed.
+            for grant in crate::managed_storage_writer::memory_grants(0x76) {
+                table.register(grant).map_err(|error| {
+                    RuntimeAuthorityCompositionErrorV1::GrantDeclared(error.to_string())
+                })?;
+            }
+            continue;
+        }
         let grant = grant_for_channel(*channel, 0x76);
         table.register(grant).map_err(|error| {
             RuntimeAuthorityCompositionErrorV1::GrantDeclared(error.to_string())

@@ -332,6 +332,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
         workspace_trust,
         network_admission,
         None,
+        None,
     )
     .await?
     .registry)
@@ -367,6 +368,7 @@ pub async fn build_tool_surface_with_mutation_recorder_and_workspace_trust_and_n
         network_admission,
         terminal_lifecycle_sink,
         None,
+        None,
     )
     .await
 }
@@ -382,6 +384,9 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
     network_admission: ExtensionProcessNetworkAdmission,
     terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
     scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+    managed_memory_writer: Option<
+        std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
@@ -394,6 +399,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
         workspace_trust,
         network_admission,
         scratch_control,
+        managed_memory_writer,
     )
     .await
 }
@@ -465,6 +471,7 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         workspace_trust,
         network_admission,
         None,
+        None,
     )
     .await?
     .registry)
@@ -482,6 +489,9 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
     external_scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+    managed_memory_writer: Option<
+        std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -493,14 +503,21 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         workspace_trust,
         terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
         external_scratch_control,
+        managed_memory_writer.clone(),
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
     if root_config.memory.writable {
         let paths =
             resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-        context_resolver =
-            context_resolver.with_writable_memory(crate::WritableMemoryStore::from_paths(&paths));
+        let memory_store = match managed_memory_writer {
+            Some(writer) => crate::WritableMemoryStore::with_managed_writer(
+                paths.workspace_id.as_str(),
+                writer,
+            )?,
+            None => crate::WritableMemoryStore::from_paths(&paths),
+        };
+        context_resolver = context_resolver.with_writable_memory(memory_store);
     }
     let mut registration_options = McpDeclarationRegistrationOptions::new(McpServerStartup::Eager)
         .with_handlers(
@@ -700,6 +717,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         workspace_root.clone(),
         workspace_trust,
         terminal_lifecycle_route,
+        None,
         None,
     )?;
     let mut context_resolver =
@@ -1043,6 +1061,9 @@ fn register_local_tools(
     workspace_trust: WorkspaceTrust,
     terminal_lifecycle_route: Option<RuntimeTerminalLifecycleRoute>,
     external_scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+    managed_memory_writer: Option<
+        std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> Result<(
     Option<sigil_code_intel::CodeIntelligenceService>,
     sigil_tools_builtin::TerminalTaskControlHandle,
@@ -1100,10 +1121,14 @@ fn register_local_tools(
         &root_config.skills,
     );
     if root_config.memory.writable {
-        crate::register_writable_memory_tools(
-            registry,
-            crate::WritableMemoryStore::from_paths(&paths),
-        );
+        let memory_store = match managed_memory_writer.as_ref() {
+            Some(writer) => crate::WritableMemoryStore::with_managed_writer(
+                paths.workspace_id.as_str(),
+                std::sync::Arc::clone(writer),
+            )?,
+            None => crate::WritableMemoryStore::from_paths(&paths),
+        };
+        crate::register_writable_memory_tools(registry, memory_store);
     }
     Ok((code_intelligence, handles.terminal, handles.scratch))
 }

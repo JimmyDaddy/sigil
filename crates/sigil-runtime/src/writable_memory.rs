@@ -29,6 +29,14 @@ pub use sigil_kernel::{REMEMBER_PROJECT_FACT_TOOL_NAME, REMEMBER_USER_PREFERENCE
 use crate::paths::SigilPaths;
 
 pub const INSPECT_MEMORY_TOOL_NAME: &str = "inspect_memory";
+
+/// Closed managed namespace key per scope (authority-declared sub-leaf; separated atoms only).
+fn managed_memory_namespace_key(scope: WritableMemoryScope) -> &'static str {
+    match scope {
+        WritableMemoryScope::UserPreference => "user-preferences",
+        WritableMemoryScope::ProjectFact => "project-facts",
+    }
+}
 pub const FORGET_MEMORY_TOOL_NAME: &str = "forget_memory";
 const MEMORY_SCHEMA_VERSION: u32 = 1;
 const MEMORY_STATEMENT_MAX_LINES: usize = 12;
@@ -52,6 +60,13 @@ impl WritableMemoryScope {
         match self {
             Self::UserPreference => "user_preference",
             Self::ProjectFact => "project_fact",
+        }
+    }
+
+    fn memory_class(self) -> sigil_kernel::resource::MemoryScopeClassV1 {
+        match self {
+            Self::UserPreference => sigil_kernel::resource::MemoryScopeClassV1::UserPreference,
+            Self::ProjectFact => sigil_kernel::resource::MemoryScopeClassV1::ProjectFact,
         }
     }
 
@@ -766,6 +781,11 @@ fn validate_journal_append_bounds(
 pub(crate) struct WritableMemoryStore {
     user_preferences: MemoryScopeStore,
     project_facts: MemoryScopeStore,
+    /// RFC-0071 R71.6: when a boot composition is attached, each scope lives under its
+    /// authority-admitted durable-memory namespace (journaled-atomic-projection family); the
+    /// legacy path-rooted store is kept for composition-free boots.
+    managed_writer:
+        Option<std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>>,
 }
 
 impl WritableMemoryStore {
@@ -790,7 +810,39 @@ impl WritableMemoryStore {
                 WritableMemoryScope::ProjectFact,
                 Some(paths.workspace_id.clone()),
             ),
+            managed_writer: None,
         }
+    }
+
+    /// RFC-0071 R71.6: rooted at the admitted durable-memory namespaces of the composed writer
+    /// (both scope classes). Reads and writes share the same authority-declared leaves, so a
+    /// managed store never walks outside the composition's grant scope.
+    pub(crate) fn with_managed_writer(
+        workspace_id: &str,
+        writer: std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    ) -> Result<Self> {
+        use crate::managed_storage_writer::StorageWriterChannelV1;
+        let user_root = writer.managed_named_leaf_path(
+            StorageWriterChannelV1::DurableMemory,
+            managed_memory_namespace_key(WritableMemoryScope::UserPreference),
+        )?;
+        let project_root = writer.managed_named_leaf_path(
+            StorageWriterChannelV1::DurableMemory,
+            managed_memory_namespace_key(WritableMemoryScope::ProjectFact),
+        )?;
+        Ok(Self {
+            user_preferences: MemoryScopeStore::new(
+                user_root,
+                WritableMemoryScope::UserPreference,
+                None,
+            ),
+            project_facts: MemoryScopeStore::new(
+                project_root,
+                WritableMemoryScope::ProjectFact,
+                Some(workspace_id.to_owned()),
+            ),
+            managed_writer: Some(writer),
+        })
     }
 
     fn scope_store(&self, scope: WritableMemoryScope) -> &MemoryScopeStore {
@@ -806,8 +858,21 @@ impl WritableMemoryStore {
         statement: &str,
         source: MemoryWriteSource,
     ) -> Result<DurableMemoryReceipt> {
-        self.scope_store(scope)
-            .remember(statement, source.into_owned()?)
+        let source = source.into_owned()?;
+        if let Some(writer) = self.managed_writer.as_ref() {
+            // RFC-0071 R71.6: one admitted namespace per durable write; the scope store writes
+            // its journal/entry files inside the lease, then finalize closes the namespace
+            // exactly once (the returned receipt is the durable writer fact for the batch).
+            let lease = writer
+                .acquire_memory_namespace(scope.memory_class(), managed_memory_namespace_key(scope))
+                .map_err(|error| anyhow!("managed memory namespace admission failed: {error}"))?;
+            let receipt = self.scope_store(scope).remember(statement, source)?;
+            writer
+                .finalize(lease)
+                .map_err(|error| anyhow!("managed memory namespace finalize failed: {error}"))?;
+            return Ok(receipt);
+        }
+        self.scope_store(scope).remember(statement, source)
     }
 
     fn inspect(

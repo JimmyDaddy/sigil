@@ -234,6 +234,33 @@ impl ManagedStorageWriterAdapterV1 {
         channel: StorageWriterChannelV1,
         key: &str,
     ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
+        let (semantic_owner, _, _) = channel.mapping();
+        self.acquire_owned(channel, semantic_owner, key)
+    }
+
+    /// Admit + prepare one NAMED durable-memory namespace for the exact scope class. The two
+    /// DurableMemory scope classes are separate semantic owners (UserPreference / ProjectFact),
+    /// so the channel mapping alone is not owner-exact; the caller names the class and the
+    /// admission grant table has both grants registered by the composition.
+    pub fn acquire_memory_namespace(
+        &self,
+        class: sigil_kernel::resource::MemoryScopeClassV1,
+        key: &str,
+    ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
+        use sigil_kernel::resource::ManagedStorageSemanticOwnerV1;
+        self.acquire_owned(
+            StorageWriterChannelV1::DurableMemory,
+            ManagedStorageSemanticOwnerV1::DurableMemory(class),
+            key,
+        )
+    }
+
+    fn acquire_owned(
+        &self,
+        channel: StorageWriterChannelV1,
+        semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
+        key: &str,
+    ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
         if key.is_empty()
             || key.len() > 64
             || !key
@@ -242,7 +269,7 @@ impl ManagedStorageWriterAdapterV1 {
         {
             return Err(ManagedStorageWriterErrorV1::LeafEscapesAnchor);
         }
-        let (semantic_owner, capability_family, leaf) = channel.mapping();
+        let (_, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?.join(key);
         std::fs::create_dir_all(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
@@ -428,12 +455,49 @@ impl ManagedStorageWriterAdapterV1 {
 /// Authority-form grant for one declared writer channel (R71.6 production composition:
 /// a declared writer is a registered grant, so the cutover probe reflects exactly what is
 /// composed and nothing more).
+/// Both DurableMemory scope-class grants (UserPreference / ProjectFact) under the same
+/// JournaledAtomicProjection family: the two classes are distinct semantic owners, so the
+/// memory writer admits exact class namespaces and the cutover probe only inspects the
+/// frozen ProjectFact cell.
+pub fn memory_grants(seed: u8) -> Vec<sigil_kernel::managed_storage::StorageAdmissionGrantV1> {
+    use sigil_kernel::resource::MemoryScopeClassV1;
+    let project = grant_for_owner(
+        StorageWriterChannelV1::DurableMemory,
+        sigil_kernel::resource::ManagedStorageSemanticOwnerV1::DurableMemory(
+            MemoryScopeClassV1::ProjectFact,
+        ),
+        seed,
+    );
+    let mut preferences = grant_for_owner(
+        StorageWriterChannelV1::DurableMemory,
+        sigil_kernel::resource::ManagedStorageSemanticOwnerV1::DurableMemory(
+            MemoryScopeClassV1::UserPreference,
+        ),
+        seed + 1,
+    );
+    // Both classes are grants of the same writer channel: grant ids must stay distinct for
+    // the authority tables (a duplicate id would be a capability mismatch at registration).
+    preferences.grant_id = sigil_kernel::resource::OpaqueStorageGrantId::new(
+        "grant-writer-durable-memory-preferences".to_owned(),
+    );
+    vec![project, preferences]
+}
+
 pub fn grant_for_channel(
     channel: StorageWriterChannelV1,
     seed: u8,
 ) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+    let (semantic_owner, _, _) = channel.mapping();
+    grant_for_owner(channel, semantic_owner, seed)
+}
+
+fn grant_for_owner(
+    channel: StorageWriterChannelV1,
+    semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
+    seed: u8,
+) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
     use sigil_kernel::resource::{AuthorityGeneration, OpaqueStorageGrantId, ResourceOwnerScopeV1};
-    let (semantic_owner, capability_family, leaf) = channel.mapping();
+    let (_, capability_family, leaf) = channel.mapping();
     let mut ns = [seed; 32];
     ns[0] = leaf.as_bytes()[0];
     sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
