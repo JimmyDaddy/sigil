@@ -107,6 +107,26 @@ pub struct ToolFileAccessAdmissionTokenV1 {
 }
 
 impl ToolFileAccessAdmissionTokenV1 {
+    /// Kernel-owned qualification fixture handle (R71.6 conformance only). Production
+    /// issuance is the capability broker inside kernel; this constructor exists so the
+    /// authority adjudicator conformance fixtures can build an exact token shape.
+    pub fn qualification_fixture(
+        binding: ManagedFileAdmissionBindingV1,
+        subject_binding_hash: CanonicalHash,
+        operation_digest: CanonicalHash,
+    ) -> Self {
+        Self {
+            binding,
+            subject_binding_hash,
+            operation_digest,
+            claim: NonCloneOneShotClaim {
+                _authenticator: OpaqueKernelCapabilityAuthenticatorV1::new(
+                    "qualification".to_owned(),
+                ),
+            },
+        }
+    }
+
     pub fn binding(&self) -> &ManagedFileAdmissionBindingV1 {
         &self.binding
     }

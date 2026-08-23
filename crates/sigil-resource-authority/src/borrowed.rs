@@ -76,10 +76,10 @@ pub struct BorrowedAccessLeaseV1 {
     pub cleanup_status: ResourceCleanupStatusV1,
 }
 
-/// Authority-private borrowed subject registry (generation per subject ref).
+/// Authority-private borrowed subject registry (generation + observed identity per subject ref).
 #[derive(Debug, Default)]
 pub struct BorrowedSubjectRegistryV1 {
-    observations: BTreeMap<String, (BorrowedSubjectClassV1, u64)>,
+    observations: BTreeMap<String, (BorrowedSubjectClassV1, u64, Option<CanonicalLocalIdentity>)>,
 }
 
 impl BorrowedSubjectRegistryV1 {
@@ -96,20 +96,52 @@ impl BorrowedSubjectRegistryV1 {
         class: BorrowedSubjectClassV1,
         generation: u64,
     ) -> Result<(), BorrowedErrorV1> {
+        self.observe_with_identity(subject_ref, class, generation, None)
+    }
+
+    /// Registers an identity observation with the observed canonical identity (R71.6
+    /// adjudication evidence: identity_before in the access receipt).
+    pub fn observe_with_identity(
+        &mut self,
+        subject_ref: &OpaquePermissionSubjectRef,
+        class: BorrowedSubjectClassV1,
+        generation: u64,
+        identity: Option<CanonicalLocalIdentity>,
+    ) -> Result<(), BorrowedErrorV1> {
         let key = subject_ref.as_str().to_owned();
         if self
             .observations
             .get(&key)
-            .is_some_and(|(existing, _)| *existing != class)
+            .is_some_and(|(existing, _, _)| *existing != class)
         {
             return Err(BorrowedErrorV1::NoAdmission);
         }
-        self.observations.insert(key, (class, generation));
+        self.observations.insert(key, (class, generation, identity));
         Ok(())
     }
 
     pub fn generation_for(&self, subject_ref: &OpaquePermissionSubjectRef) -> Option<u64> {
-        self.observations.get(subject_ref.as_str()).map(|(_, g)| *g)
+        self.observations
+            .get(subject_ref.as_str())
+            .map(|(_, g, _)| *g)
+    }
+
+    pub fn class_for(
+        &self,
+        subject_ref: &OpaquePermissionSubjectRef,
+    ) -> Option<BorrowedSubjectClassV1> {
+        self.observations
+            .get(subject_ref.as_str())
+            .map(|(c, _, _)| *c)
+    }
+
+    pub fn identity_for(
+        &self,
+        subject_ref: &OpaquePermissionSubjectRef,
+    ) -> Option<&CanonicalLocalIdentity> {
+        self.observations
+            .get(subject_ref.as_str())
+            .and_then(|(_, _, identity)| identity.as_ref())
     }
 }
 

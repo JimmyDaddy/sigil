@@ -60,11 +60,12 @@ impl RuntimeManagedResourceServicesV1 {
         capability_issuer: Arc<dyn KernelCapabilityIssuerV1>,
         projection: Arc<dyn ManagedProjectionServiceV1>,
         execution: Arc<dyn ManagedExecutionServiceV1>,
+        file_access: Arc<dyn ManagedFileAccessServiceV1>,
         file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1,
     ) -> Self {
         Self {
             execution,
-            file_access: bundle.file_access,
+            file_access,
             storage: bundle.storage,
             projection,
             capability_issuer,

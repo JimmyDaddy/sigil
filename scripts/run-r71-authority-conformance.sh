@@ -50,4 +50,5 @@ run_suite authority-borrowed cargo test -p sigil-resource-authority --lib borrow
 run_suite authority-reconcile cargo test -p sigil-resource-authority --lib reconcile -- --format terse
 run_suite authority-storage cargo test -p sigil-resource-authority --lib storage -- --format terse
 run_suite authority-factory cargo test -p sigil-resource-authority --lib factory -- --format terse
+run_suite authority-file-access cargo test -p sigil-resource-authority --lib file_access -- --format terse
 echo "r71-authority-conformance: all fixtures passed"

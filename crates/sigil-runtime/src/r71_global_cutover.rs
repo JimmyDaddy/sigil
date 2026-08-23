@@ -584,19 +584,30 @@ mod tests {
             AuthorityStorageGrantTableV1::new(),
             authority(),
         ));
-        let file_access = sigil_resource_authority::file_access_stub::stub_file_access_service();
+        let stub_file_access =
+            sigil_resource_authority::file_access_stub::stub_file_access_service();
         let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
             authority(),
             storage,
-            file_access,
+            stub_file_access,
         )
         .build_bundle();
+        let registry = Arc::new(std::sync::Mutex::new(
+            sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
+        ));
+        let file_access: Arc<dyn sigil_kernel::managed_file_access::ManagedFileAccessServiceV1> =
+            Arc::new(
+                sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new(
+                    registry,
+                ),
+            );
         let services = RuntimeManagedResourceServicesV1::compose_sandbox_backed(
             bundle,
             mock_issuer(),
             Arc::new(CutoverStubProjectionServiceV1),
             execution,
-            RuntimeFileAccessSeamV1::ShadowPlaceholder,
+            file_access,
+            RuntimeFileAccessSeamV1::AuthorityBacked,
         );
         let recovery = RuntimeResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
@@ -619,12 +630,19 @@ mod tests {
             .expect("terminal probe");
         assert!(one_shot.passed);
         assert!(terminal.passed);
-        // The gate still fails closed (file access / desktop seams not yet cut over) and the
-        // failing kind is NOT the execution seam: no partial cutover claim.
+        // File access is now authority-backed: its probe passes too.
+        let file_access_probe = probes
+            .iter()
+            .find(|p| p.adapter == MandatoryAdapterKindV1::FileAccessInProcess)
+            .expect("file access probe");
+        assert!(file_access_probe.passed);
+        // The gate still fails closed (storage grants / desktop seams not yet cut over) and the
+        // failing kind is among the not-yet-wired adapters: no partial cutover claim.
         let error = cutover.gate().expect_err("still incomplete");
         if let CutoverErrorV1::AdapterNotReady(kind) = error {
             assert_ne!(*kind, MandatoryAdapterKindV1::ExecutionOneShot);
             assert_ne!(*kind, MandatoryAdapterKindV1::ExecutionTerminal);
+            assert_ne!(*kind, MandatoryAdapterKindV1::FileAccessInProcess);
         } else {
             panic!("expected AdapterNotReady, got {error:?}");
         }
