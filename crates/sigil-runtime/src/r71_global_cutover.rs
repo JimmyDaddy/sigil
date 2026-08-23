@@ -361,6 +361,55 @@ impl RuntimeGlobalCutoverV1 {
     }
 }
 
+/// Closed cutover manifest persistence error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CutoverPersistenceErrorV1 {
+    #[error("cutover manifest path is not a private regular file")]
+    NotPrivateFile,
+    #[error("cutover manifest content hash does not match its manifest_hash")]
+    CorruptManifest,
+    #[error("cutover manifest schema version is unknown")]
+    UnknownVersion,
+    #[error("cutover manifest io failed: {0}")]
+    Io(String),
+}
+
+impl RuntimeGlobalCutoverV1 {
+    /// Persists the content-addressed manifest as a private (0600) regular file. The boot owner
+    /// writes it once per generation; the next boot replays it against the registry.
+    pub fn save_manifest(&self, path: &std::path::Path) -> Result<(), CutoverPersistenceErrorV1> {
+        let bytes = serde_json::to_vec(self.manifest())
+            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
+        std::fs::write(path, bytes)
+            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
+        sigil_kernel::config::secure_private_path_permissions(path)
+            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Loads and validates a persisted manifest: private regular file, known schema, content
+    /// hash intact. A manifest failing any of these must not be used to claim an epoch.
+    pub fn load_and_validate_manifest(
+        path: &std::path::Path,
+    ) -> Result<CutoverManifestV1, CutoverPersistenceErrorV1> {
+        let private_ok = sigil_kernel::config::private_path_permissions_are_restricted(path)
+            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
+        if !private_ok {
+            return Err(CutoverPersistenceErrorV1::NotPrivateFile);
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
+        let manifest: CutoverManifestV1 = serde_json::from_slice(&bytes)
+            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
+        validate_cutover_manifest(&manifest).map_err(|error| match error {
+            CutoverErrorV1::UnknownSchemaVersion => CutoverPersistenceErrorV1::UnknownVersion,
+            CutoverErrorV1::ManifestHashMismatch => CutoverPersistenceErrorV1::CorruptManifest,
+            _ => CutoverPersistenceErrorV1::CorruptManifest,
+        })?;
+        Ok(manifest)
+    }
+}
+
 /// Probe-source content binding before the manifest hash exists: bound to the generation
 /// the probes are proving.
 mod probe_source {
@@ -747,5 +796,89 @@ mod tests {
         } else {
             panic!("expected AdapterNotReady, got {error:?}");
         }
+    }
+    #[test]
+    fn resource_global_cutover_manifest_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cutover-manifest.json");
+        let services = shadow_services(mock_issuer());
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let cutover = RuntimeGlobalCutoverV1::evaluate(
+            "inst-persist",
+            1,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::Legacy,
+        );
+        cutover.save_manifest(&path).expect("save");
+        let loaded = RuntimeGlobalCutoverV1::load_and_validate_manifest(&path).expect("load");
+        assert_eq!(loaded, *cutover.manifest());
+        // Replay into the registry after restart: idempotent for the same manifest.
+        let mut registry = sigil_kernel::cutover_manifest::CutoverManifestRegistryV1::new();
+        registry.publish(&loaded).expect("replay");
+    }
+
+    #[test]
+    fn resource_global_cutover_manifest_tamper_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cutover-manifest.json");
+        let services = shadow_services(mock_issuer());
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let cutover = RuntimeGlobalCutoverV1::evaluate(
+            "inst-tamper",
+            1,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::Legacy,
+        );
+        cutover.save_manifest(&path).expect("save");
+        // Tamper: bump the recorded generation without recomputing the content hash.
+        let text = std::fs::read_to_string(&path).expect("read");
+        let tampered = text.replace(
+            "\"application_generation\":1",
+            "\"application_generation\":9",
+        );
+        assert_ne!(text, tampered);
+        std::fs::write(&path, tampered).expect("write");
+        let error = RuntimeGlobalCutoverV1::load_and_validate_manifest(&path).expect_err("tamper");
+        assert!(matches!(error, CutoverPersistenceErrorV1::CorruptManifest));
+    }
+
+    #[test]
+    fn resource_global_cutover_manifest_fixed_forward_across_boots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cutover-manifest.json");
+        let services = shadow_services(mock_issuer());
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let first = RuntimeGlobalCutoverV1::evaluate(
+            "inst-forward",
+            1,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::Legacy,
+        );
+        first.save_manifest(&path).expect("save first");
+        let loaded = RuntimeGlobalCutoverV1::load_and_validate_manifest(&path).expect("load");
+        let mut registry = sigil_kernel::cutover_manifest::CutoverManifestRegistryV1::new();
+        registry.publish(&loaded).expect("publish");
+        // A later boot with a different generation for the same instance is rejected: fixed forward.
+        let second = RuntimeGlobalCutoverV1::evaluate(
+            "inst-forward",
+            2,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::Legacy,
+        );
+        let error = registry
+            .publish(second.manifest())
+            .expect_err("fixed forward");
+        assert!(matches!(
+            error,
+            sigil_kernel::cutover_manifest::CutoverErrorV1::AlreadyPublished
+        ));
     }
 }
