@@ -681,6 +681,10 @@ pub struct ApplicationRunServices {
     /// epoch exactly once; a NewCurrentSchema manifest failing the mandatory readiness gate
     /// prevents `require_cutover_or_fail` from returning Ok at all.
     cutover: Option<Arc<crate::r71_global_cutover::RuntimeGlobalCutoverV1>>,
+    /// RFC-0071 R71.6: the boot authority composition (services + writer adapter + broker)
+    /// shared by this surface's run paths; None before boot attach.
+    authority_composition:
+        Option<Arc<crate::r71_authority_composition::RuntimeAuthorityCompositionV1>>,
 }
 
 /// Process-local typed control for persistent terminal tasks admitted by one prepared run.
@@ -766,6 +770,7 @@ impl ApplicationRunServices {
             scratch_control: None,
             model_eval_route_qualified: false,
             cutover: None,
+            authority_composition: None,
         }
     }
 
@@ -784,6 +789,7 @@ impl ApplicationRunServices {
             scratch_control: None,
             model_eval_route_qualified: false,
             cutover: None,
+            authority_composition: None,
         }
     }
 
@@ -850,6 +856,23 @@ impl ApplicationRunServices {
     #[must_use]
     pub fn cutover(&self) -> Option<&crate::r71_global_cutover::RuntimeGlobalCutoverV1> {
         self.cutover.as_deref()
+    }
+
+    /// Attaches the boot authority composition (composed exactly once per process).
+    #[must_use]
+    pub fn with_authority_composition(
+        mut self,
+        composition: crate::r71_authority_composition::RuntimeAuthorityCompositionV1,
+    ) -> Self {
+        self.authority_composition = Some(Arc::new(composition));
+        self
+    }
+
+    /// Returns the attached authority composition (None before boot attach).
+    pub fn authority_composition(
+        &self,
+    ) -> Option<&crate::r71_authority_composition::RuntimeAuthorityCompositionV1> {
+        self.authority_composition.as_deref()
     }
 
     /// Mandatory readiness check: the boot owner calls this after selecting the epoch. A

@@ -148,6 +148,92 @@ pub fn compose_runtime_authority(
 pub fn composition_journal_scope() -> ResourceJournalScopeV1 {
     ResourceJournalScopeV1::Application
 }
+/// Closed boot-authority attach error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BootAuthorityErrorV1 {
+    #[error("config load failed: {0}")]
+    Config(String),
+    #[error("cutover attach failed: {0}")]
+    Cutover(crate::r71_global_cutover::CutoverBootErrorV1),
+    #[error("authority composition failed: {0}")]
+    Composition(RuntimeAuthorityCompositionErrorV1),
+}
+
+/// One-call boot attach shared by CLI headless/machine and HTTP serve: selects the legacy
+/// epoch (durable manifest, fixed-forward), prepares the authority anchors and composes the
+/// authority surface once, then attaches both to the run services (fail closed on any step).
+pub fn attach_boot_authority_to_services(
+    services: crate::application_run::ApplicationRunServices,
+    config_path: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> Result<crate::application_run::ApplicationRunServices, BootAuthorityErrorV1> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
+    // Config may be absent on first run or non-regular (streamed FIFO): attach the epoch only
+    // (manifest + guard) and skip authority composition, which requires a real config file.
+    let config_meta = match std::fs::symlink_metadata(config_path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
+                .map_err(BootAuthorityErrorV1::Cutover);
+        }
+        Err(error) => {
+            return Err(BootAuthorityErrorV1::Config(error.to_string()));
+        }
+    };
+    if !config_meta.file_type().is_file() {
+        return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
+            .map_err(BootAuthorityErrorV1::Cutover);
+    }
+    // A malformed config must not hard-block the recovery/first-run server: degrade to an
+    // epoch-only attach (manifest + guard, no authority composition) exactly like absent
+    // configs. The authority gate applies to runs with a valid config.
+    let root_config = match sigil_kernel::RootConfig::load(config_path) {
+        Ok(config) => config,
+        Err(_) => {
+            return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
+                .map_err(BootAuthorityErrorV1::Cutover);
+        }
+    };
+    let cutover = crate::r71_global_cutover::legacy_boot_decision(config_path)
+        .map_err(BootAuthorityErrorV1::Cutover)?;
+    let paths =
+        crate::resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    for anchor in [&paths.state_root, &paths.scratch_root] {
+        std::fs::create_dir_all(anchor)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(anchor, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        }
+    }
+    std::fs::create_dir_all(paths.state_root.join("cache"))
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            paths.state_root.join("cache"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    }
+    let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+        crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+    ));
+    let composition = compose_runtime_authority(
+        &paths.state_root,
+        &paths.scratch_root,
+        cutover.manifest().manifest_hash,
+        planner,
+        &[Ch::SessionLog, Ch::InputHistory, Ch::SessionCatalog],
+    )
+    .map_err(BootAuthorityErrorV1::Composition)?;
+    let services = crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
+        .map_err(BootAuthorityErrorV1::Cutover)?;
+    Ok(services.with_authority_composition(composition))
+}
 
 #[cfg(test)]
 mod tests {

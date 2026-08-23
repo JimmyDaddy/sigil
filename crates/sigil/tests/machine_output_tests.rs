@@ -271,6 +271,8 @@ fn json_process_configuration_error_is_structured_and_exits_two() {
     assert_eq!(stdout.lines().count(), 1);
     let record: serde_json::Value = serde_json::from_str(&stdout).expect("stdout should be JSON");
     assert_eq!(record["record_type"], "error");
+    // Missing config on first-run/machine flows is classified by the request layer (boot
+    // attach degrades to epoch-only for absent configs); the message never leaks raw paths.
     assert_eq!(record["error"]["code"], "model_route_not_configured");
     assert!(!stdout.contains("missing.toml"));
     fs::remove_dir_all(workspace).expect("test workspace should remove");

@@ -1622,6 +1622,8 @@ async fn run_json_classifies_missing_config_without_leaking_raw_source() -> Resu
     assert_eq!(exit, MachineExitCode::InvalidInput);
     let record: serde_json::Value = serde_json::from_slice(&stdout)?;
     assert_eq!(record["record_type"], "error");
+    // Missing config on first-run/machine flows is classified by the request layer (the boot
+    // attach degrades to epoch-only for absent configs); the message never leaks raw paths.
     assert_eq!(record["error"]["code"], "model_route_not_configured");
     assert_eq!(record["error"]["message"], "model route is not configured");
     assert!(!String::from_utf8(stdout)?.contains("missing.toml"));
@@ -1653,7 +1655,15 @@ async fn run_json_cancellation_during_preparation_emits_error_and_exit_130() -> 
         record["error"]["message"],
         "application run was cancelled before startup completed"
     );
-    assert!(!workspace.join("state").exists());
+    // RFC-0071 R71.6: the authority anchors may exist after boot attach, but no session data
+    // may have been written before the cancellation.
+    let state = workspace.join("state");
+    if state.exists() {
+        assert!(
+            !state.join("sessions").exists(),
+            "cancelled before any durable session data"
+        );
+    }
     Ok(())
 }
 

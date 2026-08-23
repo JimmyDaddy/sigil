@@ -1239,9 +1239,16 @@ fn cli_application_run_request(
 fn attach_boot_cutover(
     services: ApplicationRunServices,
     config_path: &Path,
+    launch_cwd: &Path,
 ) -> Result<ApplicationRunServices> {
-    sigil_runtime::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
-        .map_err(anyhow::Error::new)
+    // RFC-0071 R71.6: one-call boot attach (epoch + authority composition) shared by every
+    // surface; CLI surfaces never re-implement the decision or the composition.
+    sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        config_path,
+        launch_cwd,
+    )
+    .map_err(anyhow::Error::new)
 }
 
 async fn run_command(
@@ -1255,10 +1262,8 @@ async fn run_command(
 ) -> Result<()> {
     let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
-    let services = attach_boot_cutover(
-        ApplicationRunServices::new(disclosure_presenter),
-        config_path,
-    )?;
+    // RFC-0071 R71.6: parse the request first (config read happens there, cancellation-aware
+    // in machine mode), then attach the boot epoch/authority before any run is prepared.
     let request = cli_application_run_request(
         config_path,
         launch_cwd,
@@ -1267,6 +1272,11 @@ async fn run_command(
         model,
         session_path,
         route_recovery_binding,
+    )?;
+    let services = attach_boot_cutover(
+        ApplicationRunServices::new(disclosure_presenter),
+        config_path,
+        launch_cwd,
     )?;
     let prepared = prepare_application_run(request, &services).await?;
     let (execution, _control) = prepared.into_parts();
@@ -1394,17 +1404,9 @@ where
     debug_assert!(output != RunOutput::Text);
     let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
-    let services = match attach_boot_cutover(
-        ApplicationRunServices::new(disclosure_presenter),
-        config_path,
-    ) {
-        Ok(services) => services,
-        Err(error) => {
-            eprintln!("sigil: cutover guard failed: {error:#}");
-            return MachineExitCode::InvalidInput;
-        }
-    };
     let mut cancellation = Box::pin(cancellation);
+    // RFC-0071 R71.6: parse the request first (config read happens here, cancellation-aware),
+    // then attach the boot epoch/authority before any run is prepared.
     let request = match cli_application_run_request(
         config_path,
         launch_cwd,
@@ -1421,6 +1423,29 @@ where
                 writer,
                 MachineRecord::error(machine_error.clone()),
                 MachineExitCode::for_error(machine_error.code),
+            );
+        }
+    };
+    let services = match attach_boot_cutover(
+        ApplicationRunServices::new(disclosure_presenter),
+        config_path,
+        launch_cwd,
+    ) {
+        Ok(services) => services,
+        Err(_error) => {
+            // Machine protocol: a boot guard failure is a closed ConfigurationInvalid before
+            // any run starts; the message never leaks raw config paths.
+            let error = MachineError {
+                code: MachineErrorCode::ConfigurationInvalid,
+                message: "application boot failed before the run started".to_owned(),
+                retryable: false,
+                allowed_actions: vec![],
+                recovery_binding: None,
+            };
+            return write_machine_terminal(
+                writer,
+                MachineRecord::error(error),
+                MachineExitCode::InvalidInput,
             );
         }
     };
