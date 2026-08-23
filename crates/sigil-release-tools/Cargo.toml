@@ -1,0 +1,33 @@
+[package]
+name = "sigil-release-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "sigil-model-eval"
+path = "src/bin/sigil-model-eval.rs"
+
+[[bin]]
+name = "sigil-model-eval-route-contract"
+path = "src/bin/sigil-model-eval-route-contract.rs"
+
+[[bin]]
+name = "sigil-model-eval-rollout-manifest"
+path = "src/bin/sigil-model-eval-rollout-manifest.rs"
+
+[dependencies]
+sigil-kernel = { path = "../sigil-kernel" }
+sigil-runtime = { path = "../sigil-runtime" }
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -21,6 +21,7 @@ members = [
     "crates/sigil-http",
     "crates/sigil",
     "crates/sigil-tui",
+    "crates/sigil-release-tools",
 ]
 resolver = "2"
 

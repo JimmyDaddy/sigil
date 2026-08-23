@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use sigil_kernel::process_observation::{
-    HostProcessObservationFactoryV1, HostProcessObservationServiceV1,
-    HostProcessObservationV1, HostProcessObservationVerifierV1, ProcessObservationErrorV1,
-    ProcessObservationPurposeV1, ProcessVitalityV1, VerifiedProcessObservationV1,
+    HostProcessObservationFactoryV1, HostProcessObservationServiceV1, HostProcessObservationV1,
+    HostProcessObservationVerifierV1, ProcessObservationErrorV1, ProcessObservationPurposeV1,
+    ProcessVitalityV1, VerifiedProcessObservationV1,
 };
 use sigil_kernel::resource::CanonicalHash;
 

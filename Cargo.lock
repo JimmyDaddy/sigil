@@ -5745,6 +5745,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-release-tools"
+version = "0.0.1-beta.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "serde_json",
+ "sigil-kernel",
+ "sigil-runtime",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "sigil-resource-authority"
 version = "0.0.1-beta.4"
 dependencies = [

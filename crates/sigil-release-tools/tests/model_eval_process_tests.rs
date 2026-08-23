@@ -38,7 +38,10 @@ fn hidden_model_eval_process_runs_scripted_production_tool_path() -> Result<()> 
             output_dir.to_str().context("output path is not UTF-8")?,
         ])
         .current_dir(&repo_root)
-        .env("SIGIL_BIN", env!("CARGO_BIN_EXE_sigil"))
+        .env(
+            "SIGIL_MODEL_EVAL_BIN",
+            env!("CARGO_BIN_EXE_sigil-model-eval"),
+        )
         .env("SIGIL_API_KEY", "loopback-model-eval-key")
         .output()?;
     server
@@ -92,11 +95,12 @@ fn hidden_model_eval_process_rejects_missing_credential_before_provider_io() -> 
     write_credentialed_model_eval_config(&config_path, &secured_base_url)?;
     let output_dir = temp.path().join("campaign");
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new(env!("CARGO_BIN_EXE_sigil"))
+    let output = Command::new(env!("CARGO_BIN_EXE_sigil-model-eval"))
         .args([
             "--config",
             config_path.to_str().context("config path is not UTF-8")?,
-            "model-eval",
+            "--launch-cwd",
+            repo_root.to_str().context("repo root is not UTF-8")?,
             "--case",
             "small-code-edit",
             "--repetitions",

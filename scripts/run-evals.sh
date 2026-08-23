@@ -149,7 +149,7 @@ else
   fi
   model_args=(
     --config "${config_path}"
-    model-eval
+    --launch-cwd "${repo_root}"
     --repetitions "${repetitions}"
     --max-cost-usd "${max_cost_usd}"
     --timeout-secs "${timeout_secs}"
@@ -161,10 +161,10 @@ else
   if [[ -n "${orchestration_route_contract}" ]]; then
     model_args+=(--orchestration-route-contract "${orchestration_route_contract}")
   fi
-  if [[ -n "${SIGIL_BIN:-}" ]]; then
-    "${SIGIL_BIN}" "${model_args[@]}"
+  if [[ -n "${SIGIL_MODEL_EVAL_BIN:-}" ]]; then
+    "${SIGIL_MODEL_EVAL_BIN}" "${model_args[@]}"
   else
-    cargo run --quiet -p sigil -- "${model_args[@]}"
+    cargo run --quiet -p sigil-release-tools --bin sigil-model-eval -- "${model_args[@]}"
   fi
 fi
 
