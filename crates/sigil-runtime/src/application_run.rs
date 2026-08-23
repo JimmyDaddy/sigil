@@ -3507,9 +3507,22 @@ async fn prepare_application_run_internal(
             })?;
     let session_leases = Arc::clone(&services.session_leases);
     let task_executor_attached = services.task_role_provider_builder.is_some();
-    let tool_authority = services
-        .authority_composition()
-        .map(|composition| std::sync::Arc::new(composition.tool_authority.clone()));
+    // RFC-0071 R71.6: the new-epoch binary is the only consumer of the composed authority;
+    // legacy-epoch runs keep the V2 path (tool_authority None, adjudication defers). The
+    // boot-time gate stays RED until every mandatory adapter is composed, so a new-epoch run
+    // either adjudicates through the real authority or never starts - never partial, never a
+    // per-consumer switch.
+    let tool_authority = match services.cutover() {
+        Some(cutover)
+            if cutover.manifest().selected_epoch
+                == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema =>
+        {
+            services
+                .authority_composition()
+                .map(|composition| std::sync::Arc::new(composition.tool_authority.clone()))
+        }
+        _ => None,
+    };
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking(
             request,

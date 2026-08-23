@@ -6274,7 +6274,24 @@ async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()>
         planner,
         &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
     )?;
+    let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
+    let cutover = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
+        "inst-apprun-authority",
+        1,
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
+        },
+        &composition.services,
+        &recovery,
+        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema,
+    );
+    assert!(
+        cutover.gate().is_err(),
+        "the shadow surface stays RED until every mandatory adapter is composed"
+    );
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_global_cutover(cutover)
         .with_authority_composition(composition);
     let request = ApplicationRunRequest::non_interactive(
         &config_path,
@@ -6283,10 +6300,61 @@ async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()>
         "run-composed-authority",
     );
     let prepared = prepare_application_run(request, &services).await?;
-    let options = prepared.run_options();
     assert!(
-        options.tool_authority.is_some(),
-        "a boot composition must be handed to the agent run options"
+        prepared.run_options().tool_authority.is_some(),
+        "a new-epoch binary must hand the composed tool authority to the agent run"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn r71_application_prepare_keeps_legacy_tool_authority_absent() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let state = temp.path().join("state");
+    let exec = temp.path().join("exec");
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&exec)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let planner: std::sync::Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+        std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        ));
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &exec,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x5b; 32]),
+        planner,
+        &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
+    )?;
+    let cutover = crate::r71_global_cutover::RuntimeGlobalCutoverV1::legacy_decision(
+        "inst-apprun-legacy",
+        1,
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 0,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x72; 32]),
+        },
+    );
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_global_cutover(cutover)
+        .with_authority_composition(composition);
+    let request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "inspect the workspace",
+        "run-legacy-authority",
+    );
+    let prepared = prepare_application_run(request, &services).await?;
+    assert!(
+        prepared.run_options().tool_authority.is_none(),
+        "the legacy epoch must keep the V2 path (file-tool adjudication defers)"
     );
     Ok(())
 }
