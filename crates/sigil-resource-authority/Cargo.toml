@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 sigil-kernel = { path = "../sigil-kernel" }
 serde.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
