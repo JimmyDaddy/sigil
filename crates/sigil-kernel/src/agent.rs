@@ -4885,6 +4885,127 @@ where
     first_error.map_or(Ok(()), Err)
 }
 
+/// RFC-0071 R71.6: sealed V3 decision produced from the durable approval evidence already in
+/// the session (the ToolApproval entry for interactive/session-approved tools, the
+/// ToolPermissionDecisionV2 entry for policy decisions, latest wins). Missing evidence yields
+/// None - no decision seal without a durable record, and a zero-sentinel hash is never
+/// fabricated for approval evidence.
+fn r71_sealed_v3_decision(
+    session: &Session,
+    plan: &crate::permission_plan_v3::ToolPermissionPlanV3,
+    call: &ToolCall,
+    prepared_intent_digest: Option<crate::resource::CanonicalHash>,
+) -> Result<Option<crate::permission_plan_v3::ToolPermissionDecisionV3>> {
+    use crate::permission::PermissionConfirmation;
+    use crate::permission_plan_v3::{PermissionConfirmationV3, ToolPermissionPolicyFacetsV3};
+    use crate::resource::CanonicalHash;
+
+    struct Evidence {
+        hash: CanonicalHash,
+        approval_request_id: String,
+        policy_version: String,
+        policy_decision: crate::permission::ApprovalMode,
+        external_directory_required: bool,
+        confirmation: Option<PermissionConfirmation>,
+    }
+    let mut evidence: Option<Evidence> = None;
+    let mut session_grant_id: Option<String> = None;
+    for entry in session.entries() {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.identity.call_id == call.id =>
+            {
+                evidence = Some(Evidence {
+                    hash: r71_entry_hash(approval),
+                    approval_request_id: approval.identity.approval_request_id.clone(),
+                    policy_version: approval.identity.policy_version.clone(),
+                    policy_decision: approval.policy_decision,
+                    external_directory_required: approval.external_directory_required,
+                    confirmation: approval.confirmation.clone(),
+                });
+            }
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == call.id =>
+            {
+                evidence = Some(Evidence {
+                    hash: r71_entry_hash(decision.as_ref()),
+                    approval_request_id: format!("policy:{}", call.id),
+                    policy_version: decision.policy_version.clone(),
+                    policy_decision: decision.policy_decision,
+                    external_directory_required: decision.external_directory_required,
+                    confirmation: decision.confirmation.clone(),
+                });
+            }
+            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
+                if grant.source_call_id == call.id =>
+            {
+                session_grant_id = Some(grant.grant_id.clone());
+            }
+            _ => {}
+        }
+    }
+    let Some(evidence) = evidence else {
+        return Ok(None);
+    };
+    // V1 only binds exact typed- phrase confirmations; standard/type-path confirmations are
+    // policy-bounded but not hash-bound (V3 carries no fabricated hash for them).
+    let confirmation = match evidence.confirmation.as_ref() {
+        Some(PermissionConfirmation::TypePhrase { phrase }) => Some(PermissionConfirmationV3 {
+            confirmation_id: format!("confirm:{}", call.id),
+            accepted_hash: r71_digest_to_canonical(phrase)?,
+        }),
+        Some(PermissionConfirmation::Standard) | Some(PermissionConfirmation::TypePath) => None,
+        None => None,
+    };
+    let facets = ToolPermissionPolicyFacetsV3 {
+        external_directory_required: evidence.external_directory_required,
+        session_grant_available: session_grant_id.is_some(),
+        confirmation_required: confirmation.is_some(),
+    };
+    let grant_ref = session_grant_id.map(crate::resource::OpaqueSessionGrantRef::new);
+    Ok(Some(
+        crate::permission_plan_v3_builder::v3_decision_from_authorization(
+            plan,
+            format!("decision:{}:{}", call.id, evidence.approval_request_id),
+            evidence.approval_request_id,
+            evidence.hash,
+            call.id.clone(),
+            evidence.policy_version,
+            evidence.policy_decision,
+            facets,
+            confirmation,
+            grant_ref,
+            prepared_intent_digest,
+        ),
+    ))
+}
+
+/// Canonical 32-byte hash of one durable control entry (exact evidence binding).
+fn r71_entry_hash<T: serde::Serialize>(value: &T) -> crate::resource::CanonicalHash {
+    use crate::resource::CanonicalHash;
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    CanonicalHash::from_bytes(out)
+}
+
+/// Parses a "sha256:<hex>" (or bare 64-hex) digest into the canonical 32-byte hash.
+fn r71_digest_to_canonical(text: &str) -> Result<crate::resource::CanonicalHash> {
+    use crate::resource::CanonicalHash;
+    let hex = text.strip_prefix("sha256:").unwrap_or(text);
+    if hex.len() != 64 {
+        bail!("digest is not a 32-byte hash");
+    }
+    let mut out = [0u8; 32];
+    for (index, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let text = std::str::from_utf8(chunk)?;
+        out[index] = u8::from_str_radix(text, 16)?;
+    }
+    Ok(CanonicalHash::from_bytes(out))
+}
+
 fn prepare_parallel_tool_execution<H, A>(
     context: &mut ToolCallProcessingContext<'_, '_, '_, H, A>,
     authorized: &AuthorizedToolCall,
@@ -4961,7 +5082,17 @@ where
             std::sync::Arc::new(crate::permission_plan_v3_builder::v3_plan_from_v2(
                 &current_plan,
             )),
-            None,
+            r71_sealed_v3_decision(
+                context.session,
+                &crate::permission_plan_v3_builder::v3_plan_from_v2(&current_plan),
+                &authorized.call,
+                authorized
+                    .prepared_tool_call
+                    .as_ref()
+                    .map(|prepared| r71_digest_to_canonical(prepared.prepared_digest()))
+                    .transpose()?,
+            )?
+            .map(std::sync::Arc::new),
         );
     Ok(ParallelToolPreparation::Ready {
         execution_started: Instant::now(),
@@ -6070,11 +6201,21 @@ where
         )
         .with_approved_subjects(execution_subjects.clone());
     if let Some(plan) = current_permission_plan.clone() {
+        let sealed_plan = crate::permission_plan_v3_builder::v3_plan_from_v2(&plan);
+        let sealed_decision = r71_sealed_v3_decision(
+            session,
+            &sealed_plan,
+            &call,
+            prepared_tool_call
+                .as_ref()
+                .map(|prepared| r71_digest_to_canonical(prepared.prepared_digest()))
+                .transpose()?,
+        )?;
         execution_tool_ctx = execution_tool_ctx
             .with_prepared_permission_plan(plan.clone())
             .with_v3_admission(
-                std::sync::Arc::new(crate::permission_plan_v3_builder::v3_plan_from_v2(&plan)),
-                None,
+                std::sync::Arc::new(sealed_plan),
+                sealed_decision.map(std::sync::Arc::new),
             );
     }
     let result = if let Some(prepared) = prepared_tool_call {

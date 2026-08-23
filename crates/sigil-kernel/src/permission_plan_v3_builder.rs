@@ -16,6 +16,49 @@ use crate::resource::{
 
 use sha2::Digest;
 
+/// Exact V3 subject binding of the sealed plan: the file-access plane's subject binding when
+/// the tool carries one (in-process file tools), zero otherwise (non-file planes bind no
+/// borrowed subject).
+pub fn v3_subject_binding_hash(plan: &ToolPermissionPlanV3) -> CanonicalHash {
+    plan.managed_file_access_plan
+        .as_ref()
+        .map(|file_ref| file_ref.subject_binding_hash)
+        .unwrap_or(CanonicalHash::from_bytes([0u8; 32]))
+}
+
+/// RFC-0071 R71.6 authorization-time seal: the V3 decision bound to the approved plan. The
+/// caller supplies the exact durable approval evidence hash (approval entry or policy decision
+/// entry) - a caller that cannot name the durable evidence must not seal a decision.
+#[allow(clippy::too_many_arguments)]
+pub fn v3_decision_from_authorization(
+    plan: &ToolPermissionPlanV3,
+    decision_id: String,
+    approval_request_id: String,
+    approval_request_hash: CanonicalHash,
+    call_id: String,
+    policy_version: String,
+    policy_decision: crate::permission::ApprovalMode,
+    policy_facets: ToolPermissionPolicyFacetsV3,
+    confirmation: Option<PermissionConfirmationV3>,
+    grant_ref: Option<crate::resource::OpaqueSessionGrantRef>,
+    prepared_intent_digest: Option<CanonicalHash>,
+) -> ToolPermissionDecisionV3 {
+    build_v3_decision(
+        plan,
+        crate::resource::OpaquePermissionDecisionId::new(decision_id),
+        crate::resource::OpaqueApprovalRequestId::new(approval_request_id),
+        approval_request_hash,
+        crate::resource::OpaqueToolCallId::new(call_id),
+        v3_subject_binding_hash(plan),
+        &policy_version,
+        policy_decision,
+        policy_facets,
+        confirmation,
+        grant_ref,
+        prepared_intent_digest,
+    )
+}
+
 pub fn build_v3_plan(
     core: ToolPermissionPlanCoreV3,
     resource_requirements: ResourceRequirementSetV1,

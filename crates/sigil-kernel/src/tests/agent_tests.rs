@@ -16203,3 +16203,82 @@ async fn unknown_family_command_variants_share_command_family_session_grant() ->
     }));
     Ok(())
 }
+
+#[test]
+fn r71_sealed_v3_decision_binds_policy_evidence_exactly() -> Result<()> {
+    use crate::permission_plan_v3_builder::{v3_plan_from_v2, v3_subject_binding_hash};
+    let mut session = Session::new("sealed-v3", "test-model");
+    let call = ToolCall {
+        id: "call-v3-evidence".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: json!({ "path": "src/lib.rs" }).to_string(),
+    };
+    let subject = ToolSubject::path_with_scope(
+        "src/lib.rs".to_owned(),
+        "src/lib.rs".to_owned(),
+        None,
+        ToolSubjectScope::Workspace,
+    );
+    let call_args: Value = serde_json::from_str(&call.args_json)?;
+    let plan = crate::ToolPermissionPlanV2::bind(
+        &call.name,
+        &call_args,
+        std::path::Path::new("."),
+        crate::ToolPermissionPlanDraft {
+            access: ToolAccess::Read,
+            operation: crate::ToolOperation::Read,
+            effects: BTreeSet::from([crate::ToolPermissionEffect::FileRead]),
+            subjects: vec![subject.clone()],
+            analysis: crate::ToolAnalysisStatus::Complete,
+            containment: crate::ExecutionContainmentRequest::default(),
+            semantic_scope: None,
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::new(),
+            safe_summary: crate::ToolPermissionSummary {
+                title: "Read file".to_owned(),
+                detail: "sealed decision fixture".to_owned(),
+                ..crate::ToolPermissionSummary::default()
+            },
+            managed_file_access: None,
+        },
+    )?;
+    let decision = PermissionDecision::new(
+        ApprovalMode::Allow,
+        "read_file",
+        ToolAccess::Read,
+        vec![subject],
+        false,
+    );
+    let mut handler = crate::event::NoopEventHandler;
+    super::tool_audit::append_tool_approval_policy_audit(
+        &mut session,
+        &mut handler,
+        &call,
+        &decision,
+        &plan,
+        "sha256:policy-v3",
+        None,
+        None,
+    )?;
+
+    let sealed_v3 = v3_plan_from_v2(&plan);
+    let sealed = super::r71_sealed_v3_decision(&session, &sealed_v3, &call, None)?
+        .expect("durable policy evidence must seal a V3 decision");
+    assert_eq!(sealed.plan_hash, sealed_v3.plan_hash);
+    assert_eq!(sealed.policy_decision, ApprovalMode::Allow);
+    assert_eq!(sealed.policy_version, "sha256:policy-v3");
+    assert_eq!(
+        sealed.approval_request_id.as_str(),
+        "policy:call-v3-evidence"
+    );
+    assert_ne!(
+        sealed.approval_request_hash,
+        crate::resource::CanonicalHash::from_bytes([0u8; 32])
+    );
+    assert_eq!(
+        sealed.subject_binding_hash,
+        v3_subject_binding_hash(&sealed_v3)
+    );
+    assert!(sealed.decision_hash != crate::resource::CanonicalHash::from_bytes([0u8; 32]));
+    Ok(())
+}
