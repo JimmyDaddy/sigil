@@ -31,7 +31,7 @@ run_suite() {
   }
   local summary
   summary=$(echo "$output" | grep -E 'test result: ok\.' | tail -1 || true)
-  if [[ -z "$summary" ]] || echo "$summary" | grep -qE '0 passed'; then
+  if [[ -z "$summary" ]] || echo "$summary" | grep -qE '([^0-9]|^)0 passed'; then
     echo "FAIL(conformance/$label): zero tests ran or missing summary" >&2
     exit 1
   fi

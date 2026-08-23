@@ -33,3 +33,11 @@ pub use lease::{
 };
 pub use quota::{QuotaBookV1, QuotaErrorV1, QuotaReservationV1};
 pub use spawn_protocol::{PreparedSandboxLaunchV1, SandboxBoundExecutionLeaseV1};
+
+#[cfg(test)]
+#[path = "tests/fault_journal_tests.rs"]
+mod fault_journal_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_bootstrap_tests.rs"]
+mod fault_bootstrap_tests;

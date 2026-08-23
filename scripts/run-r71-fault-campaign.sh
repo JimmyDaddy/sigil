@@ -31,7 +31,7 @@ run_suite() {
   }
   local summary
   summary=$(echo "$output" | grep -E 'test result: ok\.' | tail -1 || true)
-  if [[ -z "$summary" ]] || echo "$summary" | grep -qE '0 passed'; then
+  if [[ -z "$summary" ]] || echo "$summary" | grep -qE '([^0-9]|^)0 passed'; then
     echo "FAIL(campaign/$label): zero tests ran or missing summary" >&2
     exit 1
   fi
@@ -39,6 +39,8 @@ run_suite() {
 }
 
 run_suite recovery-gate cargo test -p sigil-kernel --lib resource_recovery -- --format terse
+run_suite fault-jrn cargo test -p sigil-resource-authority --lib r71_f_jrn -- --format terse
+run_suite fault-boot cargo test -p sigil-resource-authority --lib r71_f_boot -- --format terse
 run_suite contract-goldens bash scripts/check-r71-contract-goldens.sh
 run_suite authority-fixtures bash scripts/run-r71-authority-conformance.sh
 echo "r71-fault-campaign: all fixtures passed"

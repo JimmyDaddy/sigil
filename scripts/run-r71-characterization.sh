@@ -99,7 +99,7 @@ run_cargo_fixture() {
     echo "$output" | tail -30 >&2
     exit 1
   fi
-  if echo "$summary" | grep -qE '0 passed'; then
+  if echo "$summary" | grep -qE '([^0-9]|^)0 passed'; then
     echo "FAIL($label): zero tests ran (zero test is not success)" >&2
     echo "$output" | tail -30 >&2
     exit 1
