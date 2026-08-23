@@ -58,6 +58,7 @@ pub mod resource_recovery_surface;
 pub mod resume;
 pub mod secret;
 pub mod session;
+pub mod session_export;
 pub mod skill;
 pub mod sse;
 pub mod task;
