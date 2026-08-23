@@ -43,6 +43,7 @@ pub mod orchestration;
 pub mod permission;
 pub mod permission_plan;
 pub mod permission_plan_v3;
+pub mod permission_plan_v3_builder;
 pub mod persistence;
 pub mod plan;
 pub mod plugin;
