@@ -55,6 +55,7 @@ pub mod provider_timeout;
 pub mod public_task_event;
 pub mod recovery;
 pub mod resource;
+pub mod resource_recovery;
 pub mod resource_recovery_surface;
 pub mod resume;
 pub mod secret;
