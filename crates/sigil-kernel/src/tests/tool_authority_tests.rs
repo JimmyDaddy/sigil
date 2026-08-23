@@ -32,8 +32,8 @@ impl ManagedFileAccessServiceV1 for TestAdjudicatorV1 {
         crate::managed_file_access::ManagedFileAccessResultV1,
         crate::managed_file_access::ManagedFileAccessErrorV1,
     > {
-        *self.calls.lock().unwrap() += 1;
-        let observed = self.observed.lock().unwrap();
+        *self.calls.lock().expect("calls lock") += 1;
+        let observed = self.observed.lock().expect("observed lock");
         if !observed.contains(request.subject_ref.as_str()) {
             return Err(
                 crate::managed_file_access::ManagedFileAccessErrorV1::OperationNotPermitted,
