@@ -2118,3 +2118,69 @@ fn artifact_gc_fails_closed_when_durable_disable_cannot_be_written() -> Result<(
     );
     Ok(())
 }
+
+#[test]
+fn managed_lifecycle_journal_round_trips_under_admitted_namespace() -> Result<()> {
+    use crate::managed_storage_writer::{
+        ManagedStorageWriterAdapterV1, StorageWriterChannelV1, grant_for_channel,
+    };
+    use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+    use sigil_kernel::managed_storage::ManagedStorageServiceV1;
+    use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash};
+    use sigil_resource_authority::storage::{
+        AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let anchor = temp.path().join("state");
+    fs::create_dir(&anchor)?;
+    #[cfg(unix)]
+    fs::set_permissions(&anchor, fs::Permissions::from_mode(0o700))?;
+    let mut table = AuthorityStorageGrantTableV1::new();
+    table.register(grant_for_channel(
+        StorageWriterChannelV1::SessionLifecycleLog,
+        0x76,
+    ))?;
+    let storage: Arc<dyn ManagedStorageServiceV1> =
+        Arc::new(AuthorityManagedStorageServiceV1::new(
+            table,
+            AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([0x68; 32]),
+            },
+        ));
+    let writer = Arc::new(ManagedStorageWriterAdapterV1::with_storage_issuer(
+        storage,
+        anchor.clone(),
+        CanonicalHash::from_bytes([0x69; 32]),
+        Arc::new(KernelCapabilityBrokerV1::new()),
+    ));
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"))
+            .with_managed_writer(writer, "workspace-1")?;
+
+    service.journal_append(
+        "session-pin:managed",
+        100,
+        LocalSessionLifecycleEvent::PinChanged(LocalSessionPinJournalBinding {
+            source_session_ref: sigil_kernel::SessionRef::new_relative("session-test.jsonl")?,
+            source_session_id: "session-test".to_owned(),
+            pinned: true,
+        }),
+    )?;
+
+    let records = service.lifecycle_records()?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].operation_id, "session-pin:managed");
+    assert!(
+        anchor
+            .join("managed")
+            .join("session-lifecycle-log")
+            .join("workspace-1")
+            .join("session-lifecycle-v1.jsonl")
+            .is_file()
+    );
+    Ok(())
+}

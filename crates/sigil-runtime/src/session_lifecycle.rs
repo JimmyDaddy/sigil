@@ -362,6 +362,12 @@ pub struct LocalSessionLifecycleService {
     lifecycle_journal_path: PathBuf,
     limits: LocalSessionLifecycleLimits,
     scratch_cleanup: Option<ScratchCleanupBinding>,
+    /// RFC-0071 R71.6: when a boot composition is attached, every lifecycle journal record is
+    /// written inside an authority-admitted session-lifecycle namespace (one namespace per
+    /// record batch; finalize emits the durable writer fact).
+    managed_writer:
+        Option<std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>>,
+    managed_namespace_key: Option<String>,
 }
 
 /// RFC-0062 14.1: session-scoped scratch namespace cleanup bound to session deletion.
@@ -390,7 +396,27 @@ impl LocalSessionLifecycleService {
             lifecycle_journal_path,
             limits: LocalSessionLifecycleLimits::default(),
             scratch_cleanup: None,
+            managed_writer: None,
+            managed_namespace_key: None,
         }
+    }
+
+    /// RFC-0071 R71.6: relocates the lifecycle journal under the composition's
+    /// authority-declared session-lifecycle namespace and routes every journal append through
+    /// one admitted namespace per record batch (reads keep the same leaf).
+    pub fn with_managed_writer(
+        mut self,
+        writer: std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        namespace_key: impl Into<String>,
+    ) -> Result<Self> {
+        use crate::managed_storage_writer::StorageWriterChannelV1;
+        let namespace_key = namespace_key.into();
+        let namespace = writer
+            .managed_named_leaf_path(StorageWriterChannelV1::SessionLifecycleLog, &namespace_key)?;
+        self.lifecycle_journal_path = namespace.join("session-lifecycle-v1.jsonl");
+        self.managed_writer = Some(writer);
+        self.managed_namespace_key = Some(namespace_key);
+        Ok(self)
     }
 
     #[must_use]
@@ -420,6 +446,40 @@ impl LocalSessionLifecycleService {
     pub fn with_lifecycle_journal_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.lifecycle_journal_path = path.into();
         self
+    }
+
+    /// One append through the composed writer when managed: each record batch gets its own
+    /// admitted session-lifecycle namespace and the finalize is the durable writer fact. The
+    /// legacy path-rooted journal is kept for composition-free boots.
+    fn journal_append(
+        &self,
+        operation_id: &str,
+        recorded_at_unix_ms: u64,
+        event: LocalSessionLifecycleEvent,
+    ) -> Result<LocalSessionLifecycleRecord> {
+        if let Some(writer) = self.managed_writer.as_ref() {
+            let key = self
+                .managed_namespace_key
+                .as_deref()
+                .ok_or_else(|| anyhow!("managed lifecycle journal is missing its namespace key"))?;
+            let lease = writer
+                .acquire_named(
+                    crate::managed_storage_writer::StorageWriterChannelV1::SessionLifecycleLog,
+                    key,
+                )
+                .map_err(|error| {
+                    anyhow!("managed lifecycle namespace admission failed: {error}")
+                })?;
+            let record =
+                self.lifecycle_journal()
+                    .append(operation_id, recorded_at_unix_ms, event)?;
+            writer
+                .finalize(lease)
+                .map_err(|error| anyhow!("managed lifecycle namespace finalize failed: {error}"))?;
+            return Ok(record);
+        }
+        self.lifecycle_journal()
+            .append(operation_id, recorded_at_unix_ms, event)
     }
 
     /// Reads and validates the workspace lifecycle hash chain.
@@ -867,7 +927,7 @@ impl LocalSessionLifecycleService {
             included_artifact_count: artifact.payload.tool_artifacts.included_artifact_count,
         };
         let operation_id = format!("session-export:{}", uuid::Uuid::new_v4());
-        self.lifecycle_journal().append(
+        self.journal_append(
             &operation_id,
             exported_at_unix_ms,
             LocalSessionLifecycleEvent::ExportPlanned(binding.clone()),
@@ -1053,7 +1113,7 @@ impl LocalSessionLifecycleService {
             )?;
         }
         let operation_id = format!("session-artifact-gc:{}", uuid::Uuid::new_v4());
-        self.lifecycle_journal().append(
+        self.journal_append(
             &operation_id,
             now_unix_ms,
             LocalSessionLifecycleEvent::ArtifactGcCompleted(LocalSessionArtifactGcJournalBinding {
@@ -1091,7 +1151,7 @@ impl LocalSessionLifecycleService {
             .clone()
             .ok_or_else(|| anyhow!("source session has no durable identity"))?;
         let operation_id = format!("session-pin:{}", uuid::Uuid::new_v4());
-        self.lifecycle_journal().append(
+        self.journal_append(
             &operation_id,
             recorded_at_unix_ms,
             LocalSessionLifecycleEvent::PinChanged(LocalSessionPinJournalBinding {
@@ -1173,7 +1233,7 @@ impl LocalSessionLifecycleService {
             bail!("generated session title binding is invalid");
         }
         let operation_id = format!("session-generated-title:{}", uuid::Uuid::new_v4());
-        self.lifecycle_journal().append(
+        self.journal_append(
             &operation_id,
             recorded_at_unix_ms,
             LocalSessionLifecycleEvent::GeneratedTitleChanged(
@@ -1353,7 +1413,7 @@ impl LocalSessionLifecycleService {
             preview_digest: preview.preview_digest.clone(),
         };
         let operation_id = format!("session-delete:{}", uuid::Uuid::new_v4());
-        self.lifecycle_journal().append(
+        self.journal_append(
             &operation_id,
             applied_at_unix_ms,
             LocalSessionLifecycleEvent::DeletePlanned(binding.clone()),
