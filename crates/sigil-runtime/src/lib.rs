@@ -124,6 +124,7 @@ pub mod integration_lanes;
 pub mod interactive_session_attachment;
 pub mod isolated_workspace;
 pub mod machine_protocol;
+pub mod managed_resource_adapters;
 pub mod mcp_declaration;
 pub mod mcp_oauth;
 pub mod mcp_oauth_flow;

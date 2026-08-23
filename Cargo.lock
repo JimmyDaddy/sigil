@@ -5799,6 +5799,7 @@ dependencies = [
  "sigil-provider-gemini",
  "sigil-provider-openai-compat",
  "sigil-provider-openai-responses",
+ "sigil-resource-authority",
  "sigil-tools-builtin",
  "tempfile",
  "thiserror 2.0.19",
