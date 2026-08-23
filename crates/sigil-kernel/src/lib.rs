@@ -19,6 +19,7 @@ pub mod egress;
 pub mod eval;
 pub mod event;
 pub mod execution_backend;
+pub mod extension_admission;
 pub mod external;
 pub mod hosted;
 pub mod image_attachment;

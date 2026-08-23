@@ -121,6 +121,10 @@ opaque_id!(OpaqueRunId, "Opaque run identity.");
 opaque_id!(OpaqueTerminalTaskId, "Opaque terminal task identity.");
 opaque_id!(OpaqueExtensionId, "Opaque extension identity.");
 opaque_id!(
+    OpaqueExtensionGrantRef,
+    "Opaque durable extension configuration grant reference."
+);
+opaque_id!(
     OpaquePublishTransactionId,
     "Opaque artifact publish transaction identity."
 );
