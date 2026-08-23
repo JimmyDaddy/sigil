@@ -174,19 +174,17 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             };
             let permission_mode_override =
                 std::sync::Arc::new(sigil_kernel::PermissionModeOverride::new());
-            let options = sigil_runtime::build_run_options(
+            let mut options = sigil_runtime::build_run_options(
                 &root_config,
                 workspace_root.clone(),
                 interaction_mode,
                 Some(permission_mode_override.as_ref().clone()),
-            )
-            .with_tool_authority(std::sync::Arc::new(
-                authority_composition
-                    .as_ref()
-                    .expect("boot composition")
-                    .tool_authority
-                    .clone(),
-            ));
+            );
+            if let Some(composition) = authority_composition.as_ref() {
+                options = options.with_tool_authority(std::sync::Arc::new(
+                    composition.tool_authority.clone(),
+                ));
+            }
             let extension_network_admission = ExtensionProcessNetworkAdmission::new(
                 options.permission_context.network_policy,
                 false,
