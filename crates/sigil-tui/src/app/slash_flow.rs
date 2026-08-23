@@ -13,7 +13,7 @@ use sigil_kernel::{
     SkillTrustState, default_user_config_dir,
 };
 use sigil_runtime::{
-    AgentProfileRegistry, ResolvedAgentProfile,
+    AgentProfileRegistry, ResolvedAgentProfile, normalize_provider_model_alias,
     provider_connections::{ConnectionReadiness, bundled_model_entries, load_provider_connections},
 };
 use std::{collections::HashSet, path::Path};
@@ -273,11 +273,67 @@ impl AppState {
         }
 
         let best_rank = ranked_entries.iter().map(|(rank, _)| *rank).min();
-        ranked_entries
+        let mut entries = ranked_entries
             .into_iter()
             .filter(|(rank, _)| Some(*rank) == best_rank)
             .map(|(_, entry)| entry)
-            .collect()
+            .collect::<Vec<_>>();
+
+        if !trimmed.is_empty() {
+            let looks_like_full_model_id = trimmed.len() >= 8
+                && trimmed
+                    .bytes()
+                    .any(|byte| matches!(byte, b'-' | b'.' | b'/'));
+            if !entries.is_empty() && !looks_like_full_model_id {
+                return entries;
+            }
+            let exact_model_ref = if let Some((connection_id, model_id)) = trimmed.split_once('/') {
+                sigil_kernel::ConnectionId::new(connection_id.to_owned())
+                    .ok()
+                    .and_then(|connection_id| {
+                        ModelRef::new(connection_id, model_id.to_owned()).ok()
+                    })
+            } else {
+                let model_id = normalize_provider_model_alias(&self.runtime.provider_name, trimmed)
+                    .unwrap_or_else(|| trimmed.to_owned());
+                current.as_ref().and_then(|model_ref| {
+                    ModelRef::new(model_ref.connection_id.clone(), model_id).ok()
+                })
+            };
+            let Some(exact_model_ref) = exact_model_ref else {
+                return entries;
+            };
+            if !usable_connections.contains(&exact_model_ref.connection_id) {
+                return entries;
+            }
+            let exact_arg = format!(
+                "{}/{}",
+                exact_model_ref.connection_id, exact_model_ref.model_id
+            );
+            let exact_is_listed = entries.iter().any(|entry| entry.resolved.arg == exact_arg);
+            if exact_is_listed {
+                return entries;
+            }
+            let exact_entry = SlashSelectorEntry {
+                fill: format!("/model {exact_arg}"),
+                label: format!("Use exact model ID: {}", exact_model_ref.model_id),
+                description: format!(
+                    "{}  press Enter to switch the current conversation route",
+                    exact_model_ref.connection_id
+                ),
+                resolved: ResolvedSlashCommand {
+                    canonical: "/model".to_owned(),
+                    arg: exact_arg,
+                },
+            };
+            if looks_like_full_model_id {
+                entries.insert(0, exact_entry);
+            } else {
+                entries.push(exact_entry);
+            }
+        }
+
+        entries
     }
 
     fn resume_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {

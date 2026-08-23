@@ -18,7 +18,7 @@ route 边界并在当前会话继续；在精确模型候选上按 `D` 只修改
 
 | 模型服务 | 适合场景 | 图片输入 | 配置值 |
 | --- | --- | --- | --- |
-| [DeepSeek](provider-deepseek.md) | 快速设置的默认路径，以及 DeepSeek 专用选项 | 不支持 | `deepseek` |
+| [DeepSeek](provider-deepseek.md) | 快速设置的默认路径，以及 DeepSeek 专用选项 | 仅 `deepseek-v4-flash-vision-exp` | `deepseek` |
 | [OpenAI-compatible](provider-openai-compatible.md) | 兼容 Chat Completions 的 `/v1` 网关 | 不支持 | `openai_compat` |
 | [OpenAI Responses](provider-openai-responses.md) | 使用 OpenAI Responses 接口 | 识别到的模型 ID | `openai_responses` |
 | [Anthropic](provider-anthropic.md) | 通过 Anthropic Messages 使用 Claude | 识别到的 Claude ID | `anthropic` |

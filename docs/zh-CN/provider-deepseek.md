@@ -39,7 +39,13 @@ fim_model = "deepseek-v4-pro"
 
 `base_url` 属于这条精确连接。`beta_base_url`、`anthropic_base_url`、`fim_model`、`strict_tools_mode` 和 `user_id_strategy` 放在 `[connections.deepseek-default.options]` 下，只作用于该 DeepSeek 路由。
 
-DeepSeek 图片输入尚未启用。附加图片会在发送请求前被拒绝；需要处理图片时，请选择支持图片的模型服务。
+[`deepseek-v4-flash-vision-exp`](https://api-docs.deepseek.com/guides/vision) 已作为实验模型内置，
+也是 Sigil 唯一启用图片输入的 DeepSeek 精确模型 ID。选择该模型时，来自本机的 PNG、JPEG 和 WebP
+附件会作为 OpenAI-compatible 图片内容块发送；其他 DeepSeek 模型 ID 仍会在请求发出前拒绝附件。
+即使 provider 接受更多格式或远程图片 URL，Sigil 也不会自行抓取 URL 或扩大已声明的输入格式。
+
+当前空闲会话可用 `/model deepseek-v4-flash-vision-exp` 切换。对于目录未列出的新发布或私有模型，
+直接在 `/model` 后输入完整 ID；选择器会显示 **Use exact model ID** 候选，不会把它替换为名称相近的目录模型。
 
 ## 验证
 

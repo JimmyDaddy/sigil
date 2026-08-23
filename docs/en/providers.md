@@ -22,7 +22,7 @@ updates both the saved default and the current conversation route.
 
 | Provider | Use it for | Image input | Config value |
 | --- | --- | --- | --- |
-| [DeepSeek](provider-deepseek.md) | Default Quick Setup path and DeepSeek-specific options | No | `deepseek` |
+| [DeepSeek](provider-deepseek.md) | Default Quick Setup path and DeepSeek-specific options | `deepseek-v4-flash-vision-exp` only | `deepseek` |
 | [OpenAI-compatible](provider-openai-compatible.md) | Chat Completions-compatible `/v1` gateways | No | `openai_compat` |
 | [OpenAI Responses](provider-openai-responses.md) | OpenAI Responses models | Recognized model IDs | `openai_responses` |
 | [Anthropic](provider-anthropic.md) | Claude through Anthropic Messages | Recognized Claude IDs | `anthropic` |

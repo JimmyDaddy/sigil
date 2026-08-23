@@ -1495,18 +1495,31 @@ fn slash_model_execution_accepts_an_explicit_custom_model_id() -> Result<()> {
     let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let previous_session_id = app.session_id.clone();
-    app.composer.input = "/model ds-custom".to_owned();
+    app.composer.input = "/model ds-custom-2026-08".to_owned();
 
     let rows = app.slash_selector_rows();
-    assert!(rows.is_empty());
+    assert_eq!(
+        rows.first().map(|(label, _)| label.as_str()),
+        Some("Use exact model ID: ds-custom-2026-08")
+    );
+    let Some(AppAction::SetDefaultModel { root_config, .. }) =
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE))?
+    else {
+        panic!("D should save the exact model candidate as the default route");
+    };
+    assert_eq!(
+        root_config.agent.connection.as_ref().map(|id| id.as_str()),
+        Some("deepseek-default")
+    );
+    assert_eq!(root_config.agent.model, "ds-custom-2026-08");
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::RuntimeConfigUpdated { .. })
     ));
     assert_eq!(app.session_id, previous_session_id);
-    assert_eq!(app.runtime.model_name, "ds-custom");
+    assert_eq!(app.runtime.model_name, "ds-custom-2026-08");
     assert!(app.last_notice().is_some_and(|notice| {
-        notice.contains("route -> deepseek-default/ds-custom")
+        notice.contains("route -> deepseek-default/ds-custom-2026-08")
             && notice.contains("saved default unchanged")
     }));
     Ok(())

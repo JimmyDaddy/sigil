@@ -39,7 +39,15 @@ The example binds this connection to `SIGIL_API_KEY`. You can instead choose the
 
 `base_url` belongs to this exact connection. `beta_base_url`, `anthropic_base_url`, `fim_model`, `strict_tools_mode`, and `user_id_strategy` belong under `[connections.deepseek-default.options]` and apply only to this DeepSeek route.
 
-DeepSeek image input is not enabled. An attached image is rejected before a request is sent; choose a supported image provider instead.
+[`deepseek-v4-flash-vision-exp`](https://api-docs.deepseek.com/guides/vision) is bundled as an
+experimental model and is the only DeepSeek model for which Sigil enables image input. With that
+exact model ID, locally attached PNG, JPEG, and WebP files are sent as OpenAI-compatible image
+content parts. Other DeepSeek model IDs reject attachments before dispatch. Sigil does not fetch
+remote image URLs or claim support for additional formats merely because the provider accepts them.
+
+Use `/model deepseek-v4-flash-vision-exp` for the current idle conversation. For a newly released
+or private model ID not listed by discovery, type the full ID after `/model`; the selector shows a
+**Use exact model ID** candidate instead of replacing it with a similarly named catalog model.
 
 ## Verify
 
