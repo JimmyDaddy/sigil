@@ -139,6 +139,7 @@ pub mod provider_config;
 pub mod provider_connections;
 pub mod provider_debug;
 pub mod provider_status;
+pub mod r71_shadow_planner;
 pub mod session_control;
 pub mod session_lifecycle;
 mod session_title;
