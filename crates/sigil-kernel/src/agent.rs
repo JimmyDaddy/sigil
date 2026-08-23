@@ -4956,7 +4956,14 @@ where
             authorized.explicit_network_approval,
         )
         .with_approved_subjects(authorized.execution_subjects.clone())
-        .with_prepared_permission_plan(current_plan);
+        .with_prepared_permission_plan(current_plan.clone())
+        .with_v3_admission(
+            std::sync::Arc::new(crate::permission_plan_v3_builder::v3_plan_from_v2(
+                &current_plan,
+                None,
+            )),
+            None,
+        );
     Ok(ParallelToolPreparation::Ready {
         execution_started: Instant::now(),
         execution_tool_ctx,
@@ -6064,7 +6071,14 @@ where
         )
         .with_approved_subjects(execution_subjects.clone());
     if let Some(plan) = current_permission_plan.clone() {
-        execution_tool_ctx = execution_tool_ctx.with_prepared_permission_plan(plan);
+        execution_tool_ctx = execution_tool_ctx
+            .with_prepared_permission_plan(plan.clone())
+            .with_v3_admission(
+                std::sync::Arc::new(crate::permission_plan_v3_builder::v3_plan_from_v2(
+                    &plan, None,
+                )),
+                None,
+            );
     }
     let result = if let Some(prepared) = prepared_tool_call {
         let (current_policy_fingerprint, current_approval_identity) = prepared_current_authority

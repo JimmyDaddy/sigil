@@ -120,6 +120,73 @@ pub fn build_v3_decision(
     }
 }
 
+/// Sealed V3 plan derived from the approved V2 plan: the semantic payload is copied as-is
+/// (V3 core), V3-only planes are empty in the current pipeline unless the caller supplies
+/// the file-access ref (tools declare refs; the runtime passes them once the declare-wiring
+/// lands). The sealed hash is computed canonically (never re-encodes from DTO text).
+pub fn v3_plan_from_v2(
+    v2_plan: &crate::permission_plan::ToolPermissionPlanV2,
+    managed_file_access_plan: Option<ManagedFileAccessPlanDraftRefV1>,
+) -> ToolPermissionPlanV3 {
+    let core = ToolPermissionPlanCoreV3 {
+        tool_name: v2_plan.tool_name.clone(),
+        access: v2_plan.access.clone(),
+        operation: v2_plan.operation.clone(),
+        effects: v2_plan.effects.clone(),
+        subjects: v2_plan.subjects.clone(),
+        analysis: v2_plan.analysis.clone(),
+        containment: v2_plan.containment.clone(),
+        semantic_scope: v2_plan.semantic_scope.clone(),
+        tool_default_mode: v2_plan.tool_default_mode,
+        analysis_bindings: v2_plan.analysis_bindings.clone(),
+        safe_summary: v2_plan.safe_summary.clone(),
+    };
+    build_v3_plan(
+        core,
+        ResourceRequirementSetV1 {
+            schema_version: 1,
+            requirements: crate::resource::BoundedVec::new(),
+            canonical_hash: CanonicalHash::from_bytes([0u8; 32]),
+        },
+        Vec::new(),
+        Vec::new(),
+        managed_file_access_plan,
+        ResourceJournalScopeV1::Application,
+        enforcement_from_containment(&v2_plan.containment),
+    )
+}
+
+/// Sealed requested-enforcement from the approved containment (transitional V3 classes: the
+/// containment boundary is exact only when a concrete filesystem/network boundary was
+/// requested; Unspecified stays ExplicitUnconfined until real backends land in R71.8).
+fn enforcement_from_containment(
+    containment: &crate::permission_plan::ExecutionContainmentRequest,
+) -> RequestedEnforcementV1 {
+    use crate::permission_plan::{FilesystemContainment, NetworkContainment};
+    let requirement = match containment.filesystem {
+        FilesystemContainment::Unspecified => {
+            crate::resource::EnforcementRequirementClassV1::ExplicitUnconfined
+        }
+        _ => crate::resource::EnforcementRequirementClassV1::RequiredExact,
+    };
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(format!("{containment:?}").as_bytes());
+    let profile_hash = CanonicalHash::from_bytes(hasher.finalize().into());
+    RequestedEnforcementV1 {
+        requirement,
+        deny_ambient_system_temp_write: false,
+        deny_ambient_home_write: false,
+        deny_ungranted_workspace_write: matches!(
+            containment.filesystem,
+            FilesystemContainment::WorkspaceReadOnly
+        ),
+        require_process_tree_ownership: containment.persistent_process,
+        require_network_policy: !matches!(containment.network, NetworkContainment::Unspecified),
+        requested_capability_set_hash: CanonicalHash::from_bytes([0u8; 32]),
+        profile_hash,
+    }
+}
+
 fn attempt_journal_scope_hash_bytes(scope: &ResourceJournalScopeV1) -> &'static [u8] {
     match scope {
         ResourceJournalScopeV1::Application => b"application",

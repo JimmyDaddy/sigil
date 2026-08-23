@@ -158,3 +158,48 @@ fn r71_v3_decision_digest_binds_plan_and_confirmation() {
         Some(file_ref().plan_hash)
     );
 }
+
+#[test]
+fn r71_v3_plan_from_approved_v2_is_sealed_deterministic() {
+    use crate::permission_plan_v3_builder::v3_plan_from_v2;
+    let v2 = crate::permission_plan::ToolPermissionPlanV2 {
+        schema_version: 1,
+        tool_name: "read_file".to_owned(),
+        access: crate::ToolAccess::Read,
+        operation: crate::ToolOperation::Read,
+        effects: Default::default(),
+        subjects: vec![crate::ToolSubject {
+            kind: crate::ToolSubjectKind::Path,
+            original: ".".to_owned(),
+            normalized: ".".to_owned(),
+            canonical_path: None,
+            scope: crate::ToolSubjectScope::Workspace,
+            access: crate::ToolAccess::Read,
+        }],
+        analysis: crate::ToolAnalysisStatus::Complete,
+        containment: crate::ExecutionContainmentRequest::default(),
+        semantic_scope: None,
+        tool_default_mode: None,
+        analysis_bindings: Default::default(),
+        plan_hash: "v2-hash".to_owned(),
+        safe_summary: crate::ToolPermissionSummary {
+            title: "read".to_owned(),
+            detail: "".to_owned(),
+            step_count: 0,
+            workspace_code_steps: 0,
+        },
+    };
+    let a = v3_plan_from_v2(&v2, None);
+    let b = v3_plan_from_v2(&v2, None);
+    assert_eq!(a.plan_hash, b.plan_hash);
+    assert_ne!(a.plan_hash, CanonicalHash::from_bytes([0u8; 32]));
+    // Unspecified containment stays ExplicitUnconfined (transitional V3 classes).
+    assert_eq!(
+        a.requested_enforcement.requirement,
+        EnforcementRequirementClassV1::ExplicitUnconfined
+    );
+    // Sealing with a file ref changes the bound hash (the admission is content-covering).
+    let with_ref = v3_plan_from_v2(&v2, Some(file_ref()));
+    assert_ne!(a.plan_hash, with_ref.plan_hash);
+    assert_eq!(with_ref.managed_file_access_plan, Some(file_ref()));
+}
