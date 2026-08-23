@@ -125,12 +125,24 @@ impl SandboxManagedExecutionServiceV1 {
             owner_scope: ResourceOwnerScopeV1::Application,
             capture: request.capture.clone(),
             limits: request.limits.clone(),
+            environment: request.environment.clone(),
         };
         let draft = self
             .planner
             .plan_execution(plan_request)
             .map_err(|_| ManagedExecutionErrorV1::ExecutionPlanDrift)?;
         if draft.draft_hash != request.execution_plan_draft_hash {
+            return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
+        }
+        if request.environment.len()
+            > sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ENV_ENTRIES
+        {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        if draft.environment_digest
+            != sigil_kernel::managed_execution::canonical_environment_digest(&request.environment)
+        {
+            // The sandbox never accepts an environment the planner did not seal.
             return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
         }
         // Planner-authoritative enforcement: the consumer never self-declares confinement.
@@ -162,7 +174,18 @@ impl SandboxManagedExecutionServiceV1 {
 
         let standard = standard_reserved_environment(&self.execution_temp_root);
         let mut candidate = standard.clone();
-        let (_override, env) = apply_reserved_environment(&mut candidate, &standard, None, false);
+        let (_override, mut env) =
+            apply_reserved_environment(&mut candidate, &standard, None, false);
+        // Agreed (planner-sealed) environment overlays the reserved baseline: same semantic
+        // writer contract as the terminal/extension launcher, never unverified values. The
+        // local reserved map is String-keyed, so config-granted UTF-8 env values apply exactly;
+        // non-UTF-8 env strings stay rejected (Local never serves extension launches).
+        for (key, value) in &request.environment {
+            env.insert(
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            );
+        }
         let environment_binding_hash = env_hash(&env);
 
         let requirement = draft
@@ -917,6 +940,9 @@ mod tests {
                 sandbox_provider_generation: 1,
                 capture_policy_hash: zero_hash(),
                 resource_limits_hash: zero_hash(),
+                environment_digest: sigil_kernel::managed_execution::canonical_environment_digest(
+                    &request.environment,
+                ),
                 draft_hash,
             })
         }
@@ -941,6 +967,7 @@ mod tests {
             },
             capture: cap(),
             limits: limits(),
+            environment: Vec::new(),
         }
     }
 
@@ -1129,5 +1156,47 @@ mod tests {
             receipt.process.termination,
             ProcessTerminationV1::Exited { code: 0 }
         ));
+    }
+
+    #[test]
+    fn r71_managed_environment_planner_sealed_and_reaches_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svc = service(false, dir.path());
+        let mut request = exec_request(
+            &["/bin/sh", "-c", "test \"$R71_ENV_SEAL\" = \"yes\""],
+            false,
+        );
+        request.environment = vec![(OsString::from("R71_ENV_SEAL"), OsString::from("yes"))];
+        let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+            .expect("agreed environment must execute");
+        assert!(matches!(
+            receipt.process.termination,
+            ProcessTerminationV1::Exited { code: 0 }
+        ));
+    }
+
+    #[test]
+    fn r71_environment_digest_is_order_independent_and_exact() {
+        use sigil_kernel::managed_execution::canonical_environment_digest;
+        let a = vec![
+            (OsString::from("A"), OsString::from("1")),
+            (OsString::from("B"), OsString::from("2")),
+        ];
+        let b = vec![
+            (OsString::from("B"), OsString::from("2")),
+            (OsString::from("A"), OsString::from("1")),
+        ];
+        let c = vec![
+            (OsString::from("A"), OsString::from("2")),
+            (OsString::from("B"), OsString::from("1")),
+        ];
+        assert_eq!(
+            canonical_environment_digest(&a),
+            canonical_environment_digest(&b)
+        );
+        assert_ne!(
+            canonical_environment_digest(&a),
+            canonical_environment_digest(&c)
+        );
     }
 }

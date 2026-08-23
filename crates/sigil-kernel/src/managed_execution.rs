@@ -57,6 +57,35 @@ pub struct EnvironmentProfileRefV1 {
     pub profile_hash: CanonicalHash,
 }
 
+/// Closed bound on managed execution agreement environment entries (never unbounded envs).
+pub const MAX_MANAGED_EXECUTION_ENV_ENTRIES: usize = 128;
+
+/// Canonical environment digest: exact key=value bytes, sorted by key. Planner and sandbox
+/// recompute the same digest so environment is planner-authoritative (the sandbox never
+/// accepts an unagreed environment, and a drift fails closed).
+pub fn canonical_environment_digest(environment: &[(OsString, OsString)]) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = environment
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.as_os_str().as_encoded_bytes().to_vec(),
+                value.as_os_str().as_encoded_bytes().to_vec(),
+            )
+        })
+        .collect();
+    entries.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"managed-execution-env-v1");
+    for (key, value) in &entries {
+        hasher.update(key);
+        hasher.update(b"=");
+        hasher.update(value);
+        hasher.update(b"\0");
+    }
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
 /// Pre-permission planner request (pathless).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedExecutionPlanRequestV1 {
@@ -67,6 +96,8 @@ pub struct ManagedExecutionPlanRequestV1 {
     pub owner_scope: crate::resource::ResourceOwnerScopeV1,
     pub capture: ExecutionCapturePolicy,
     pub limits: ExecutionResourceLimits,
+    /// Agreed environment (config-granted extension/server env); sealed by the planner.
+    pub environment: Vec<(OsString, OsString)>,
 }
 
 impl ManagedExecutionPlanRequestV1 {
@@ -97,6 +128,8 @@ pub struct ManagedExecutionPlanDraftV1 {
     pub sandbox_provider_generation: u64,
     pub capture_policy_hash: CanonicalHash,
     pub resource_limits_hash: CanonicalHash,
+    /// Digest of the agreed environment (see canonical_environment_digest).
+    pub environment_digest: CanonicalHash,
     pub draft_hash: CanonicalHash,
 }
 
@@ -162,6 +195,8 @@ pub struct ManagedExecutionRequestV1 {
     pub environment_profile: EnvironmentProfileRefV1,
     pub capture: ExecutionCapturePolicy,
     pub limits: ExecutionResourceLimits,
+    /// Agreed environment (config-granted extension/server env); must match the sealed plan.
+    pub environment: Vec<(OsString, OsString)>,
 }
 
 /// Output channel classification.

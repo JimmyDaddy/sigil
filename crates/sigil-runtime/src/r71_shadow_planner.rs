@@ -158,6 +158,8 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
             )
             .as_bytes(),
         );
+        let environment_digest =
+            sigil_kernel::managed_execution::canonical_environment_digest(&request.environment);
         let draft_id = OpaqueExecutionPlanDraftId::new(format!(
             "shadow-draft-{}-{}",
             request
@@ -187,7 +189,14 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
             sandbox_provider_generation: 0,
             capture_policy_hash,
             resource_limits_hash: canonical_digest(b"shadow-resource-limits-1"),
-            draft_hash: canonical_digest(b"shadow-draft-hash-1"),
+            environment_digest,
+            draft_hash: canonical_digest(
+                &[
+                    argv_digest.as_bytes().as_slice(),
+                    environment_digest.as_bytes().as_slice(),
+                ]
+                .concat(),
+            ),
         };
         Ok(draft)
     }
@@ -216,6 +225,7 @@ mod tests {
                 },
                 pty: false,
             },
+            environment: Vec::new(),
             limits: sigil_kernel::managed_execution::ExecutionResourceLimits {
                 max_output_bytes: 128 * 1024,
                 max_runtime_ms: 30_000,
