@@ -92,39 +92,40 @@ fn r71_tool_authority_guarded_helper_returns_none_without_authority() {
     )
     .expect("no authority is legacy-ok");
     assert!(outcome.is_none());
-    #[test]
-    fn r71_tool_authority_tool_context_guard() {
-        use std::sync::{Arc, Mutex};
-        // Reuse the in-module test adjudicator via the tool context wiring path: attach a
-        // facade with a stub adjudicator, then exercise the context guard.
-        let _ = (Arc::new(1), Mutex::new(()));
-        let ctx = crate::tool::ToolContext::new(".", 30);
-        // No authority attached: legacy-ok None.
-        let binding = v3_file_access_binding(
-            CanonicalHash::from_bytes([0x01; 32]),
-            CanonicalHash::from_bytes([0x02; 32]),
-            CanonicalHash::from_bytes([0x03; 32]),
-            CanonicalHash::from_bytes([0x04; 32]),
-            &ManagedFileAccessPlanDraftRefV1 {
-                plan_id: OpaqueManagedFileAccessPlanId::new("fa-1".to_owned()),
-                subject_ref: OpaquePermissionSubjectRef::new("ws-1".to_owned()),
-                subject_binding_hash: CanonicalHash::from_bytes([0x11; 32]),
-                operation_digest: CanonicalHash::from_bytes([0x12; 32]),
-                authority_generation: AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: CanonicalHash::from_bytes([0x13; 32]),
-                },
-                resolver_proof_digest: CanonicalHash::from_bytes([0x14; 32]),
-                plan_hash: CanonicalHash::from_bytes([0x15; 32]),
+}
+
+#[test]
+fn r71_tool_authority_tool_context_guard() {
+    use std::sync::{Arc, Mutex};
+    // Reuse the in-module test adjudicator via the tool context wiring path: attach a
+    // facade with a stub adjudicator, then exercise the context guard.
+    let _ = (Arc::new(1), Mutex::new(()));
+    let ctx = crate::tool::ToolContext::new(".", 30);
+    // No authority attached: legacy-ok None.
+    let binding = v3_file_access_binding(
+        CanonicalHash::from_bytes([0x01; 32]),
+        CanonicalHash::from_bytes([0x02; 32]),
+        CanonicalHash::from_bytes([0x03; 32]),
+        CanonicalHash::from_bytes([0x04; 32]),
+        &ManagedFileAccessPlanDraftRefV1 {
+            plan_id: OpaqueManagedFileAccessPlanId::new("fa-1".to_owned()),
+            subject_ref: OpaquePermissionSubjectRef::new("ws-1".to_owned()),
+            subject_binding_hash: CanonicalHash::from_bytes([0x11; 32]),
+            operation_digest: CanonicalHash::from_bytes([0x12; 32]),
+            authority_generation: AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([0x13; 32]),
             },
-        );
-        let outcome = ctx
-            .adjudicate_file_operation(
-                &binding,
-                &OpaquePermissionSubjectRef::new("ws-1".to_owned()),
-                crate::managed_file_access::ManagedFileOperationV1::Read,
-            )
-            .expect("legacy ok");
-        assert!(outcome.is_none());
-    }
+            resolver_proof_digest: CanonicalHash::from_bytes([0x14; 32]),
+            plan_hash: CanonicalHash::from_bytes([0x15; 32]),
+        },
+    );
+    let outcome = ctx
+        .adjudicate_file_operation(
+            &binding,
+            &OpaquePermissionSubjectRef::new("ws-1".to_owned()),
+            crate::managed_file_access::ManagedFileOperationV1::Read,
+        )
+        .expect("legacy ok");
+    assert!(outcome.is_none());
 }
