@@ -249,6 +249,19 @@ pub struct ValidatedStorageAdmissionCapabilityV1 {
     authenticator: OpaqueKernelCapabilityAuthenticatorV1,
 }
 
+impl ValidatedStorageAdmissionCapabilityV1 {
+    /// Kernel-owned startup readiness probe handle (R71.6). This is NOT a real admission;
+    /// services must treat it as probe-only and real admissions must be issuer-issued. It
+    /// exists so the mandatory adapter readiness check can run a round trip without a
+    /// consumer fabricating a handle.
+    pub fn startup_probe() -> Self {
+        Self {
+            handle_id: OpaqueKernelCapabilityHandleId::new("startup-probe".to_owned()),
+            authenticator: OpaqueKernelCapabilityAuthenticatorV1::new("startup-probe".to_owned()),
+        }
+    }
+}
+
 /// Storage outcome envelope: semantic result plus managed-storage receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedStorageResultV1 {

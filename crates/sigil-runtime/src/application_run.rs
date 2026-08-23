@@ -677,6 +677,10 @@ pub struct ApplicationRunServices {
     /// Release-candidate model eval may exercise DirectTask before a rollout sidecar exists.
     /// Production adapters cannot set this crate-private evidence override.
     model_eval_route_qualified: bool,
+    /// RFC-0071 R71.6: the one application-global cutover decision. The boot owner selects the
+    /// epoch exactly once; a NewCurrentSchema manifest failing the mandatory readiness gate
+    /// prevents `require_cutover_or_fail` from returning Ok at all.
+    cutover: Option<Arc<crate::r71_global_cutover::RuntimeGlobalCutoverV1>>,
 }
 
 /// Process-local typed control for persistent terminal tasks admitted by one prepared run.
@@ -761,6 +765,7 @@ impl ApplicationRunServices {
             terminal_lifecycle_handler: None,
             scratch_control: None,
             model_eval_route_qualified: false,
+            cutover: None,
         }
     }
 
@@ -778,6 +783,7 @@ impl ApplicationRunServices {
             terminal_lifecycle_handler: None,
             scratch_control: None,
             model_eval_route_qualified: false,
+            cutover: None,
         }
     }
 
@@ -826,6 +832,56 @@ impl ApplicationRunServices {
     #[must_use]
     pub fn task_executor_attached(&self) -> bool {
         self.task_role_provider_builder.is_some()
+    }
+
+    /// Attaches the one application-global cutover decision. The boot owner calls this exactly
+    /// once per process; a second attachment replaces the previous decision but the manifest
+    /// registry rejects a different manifest for the same instance (fixed-forward).
+    #[must_use]
+    pub fn with_global_cutover(
+        mut self,
+        cutover: crate::r71_global_cutover::RuntimeGlobalCutoverV1,
+    ) -> Self {
+        self.cutover = Some(Arc::new(cutover));
+        self
+    }
+
+    /// Returns the attached cutover decision, when the boot owner selected an epoch.
+    #[must_use]
+    pub fn cutover(&self) -> Option<&crate::r71_global_cutover::RuntimeGlobalCutoverV1> {
+        self.cutover.as_deref()
+    }
+
+    /// Mandatory readiness check: the boot owner calls this after selecting the epoch. A
+    /// NewCurrentSchema manifest with any failing adapter probe returns Err and the application
+    /// must not start partially. No attached decision (legacy boot path) is a valid Ok because
+    /// the epoch has not been published yet.
+    pub fn require_cutover_or_fail(
+        &self,
+    ) -> Result<(), sigil_kernel::cutover_manifest::CutoverErrorV1> {
+        match self.cutover.as_deref() {
+            None => Ok(()),
+            Some(decision) => decision.gate().map_err(|error| error.clone()),
+        }
+    }
+
+    /// Old-schema session guard: after the publish, only current-schema sessions may be opened
+    /// by this binary. Surfaces call this before opening any session store.
+    pub fn admit_session_open(
+        &self,
+        session_epoch: sigil_kernel::cutover_manifest::StartupEpochV1,
+    ) -> Result<(), sigil_kernel::cutover_manifest::CutoverErrorV1> {
+        let binary_epoch = self
+            .cutover
+            .as_ref()
+            .map(|decision| decision.manifest().selected_epoch)
+            .unwrap_or(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy);
+        sigil_kernel::cutover_manifest::admit_session_open(
+            sigil_kernel::cutover_manifest::SessionOpenAttemptV1 {
+                session_epoch,
+                binary_epoch,
+            },
+        )
     }
 }
 

@@ -15,6 +15,7 @@ pub mod conversation_fork;
 pub mod conversation_queue;
 pub mod conversation_route;
 pub mod conversation_run;
+pub mod cutover_manifest;
 pub mod direct_task_execution;
 pub mod egress;
 pub mod eval;
