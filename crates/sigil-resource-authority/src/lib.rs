@@ -85,3 +85,7 @@ mod fault_catalog_tests;
 #[cfg(test)]
 #[path = "tests/fault_attachment_tests.rs"]
 mod fault_attachment_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_export_tests.rs"]
+mod fault_export_tests;
