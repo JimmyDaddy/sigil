@@ -167,6 +167,10 @@ impl Provider for DeepSeekProvider {
         )
     }
 
+    fn image_input_capability(&self, model_name: &str) -> sigil_kernel::ImageInputCapability {
+        crate::request::deepseek_image_input_capability(model_name)
+    }
+
     fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
         deepseek_context_capabilities(
             self.profile.primary_base_url.trim_end_matches('/') == "https://api.deepseek.com",

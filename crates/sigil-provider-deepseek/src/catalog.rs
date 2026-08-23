@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-pub const BUNDLED_DEEPSEEK_MODELS: [(&str, &str, bool); 2] = [
+pub const BUNDLED_DEEPSEEK_MODELS: [(&str, &str, bool); 3] = [
     ("deepseek-v4-flash", "DeepSeek V4 Flash", true),
+    (
+        "deepseek-v4-flash-vision-exp",
+        "DeepSeek V4 Flash Vision (Experimental)",
+        false,
+    ),
     ("deepseek-v4-pro", "DeepSeek V4 Pro", false),
 ];
 

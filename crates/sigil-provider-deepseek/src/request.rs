@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
 use sigil_kernel::{
@@ -29,7 +30,10 @@ pub fn build_chat_request(
     quirks: &DeepSeekProviderQuirkProfile,
 ) -> Result<PreparedChatRequest> {
     validate_request_image_attachments(request)?;
-    validate_image_input_capability(ImageInputCapability::Unsupported, request)?;
+    validate_image_input_capability(
+        deepseek_image_input_capability(&request.model_name),
+        request,
+    )?;
     let replay_states = index_replay_states(&request.continuation_states);
     let messages = request
         .messages
@@ -81,7 +85,9 @@ fn model_message_to_json(
         "role": role,
     });
 
-    if let Some(content) = &message.content {
+    if matches!(message.role, MessageRole::User) && !message.image_attachments.is_empty() {
+        base["content"] = user_message_content(message)?;
+    } else if let Some(content) = &message.content {
         base["content"] = Value::String(content.clone());
     } else if matches!(message.role, MessageRole::Assistant) {
         base["content"] = Value::Null;
@@ -120,6 +126,45 @@ fn model_message_to_json(
     }
 
     Ok(base)
+}
+
+fn user_message_content(message: &ModelMessage) -> Result<Value> {
+    let mut content = Vec::with_capacity(1 + message.image_attachments.len());
+    if message
+        .content
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        content.push(json!({
+            "type": "text",
+            "text": message.content.as_deref().unwrap_or_default(),
+        }));
+    }
+    for attachment in &message.image_attachments {
+        let encoded = STANDARD.encode(attachment.resolved_bytes()?);
+        content.push(json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!("data:{};base64,{encoded}", attachment.mime_type.as_str()),
+            },
+        }));
+    }
+    Ok(Value::Array(content))
+}
+
+/// Returns image-input support for the exact DeepSeek model IDs whose wire contract is verified.
+///
+/// Unknown and text-only model IDs remain unsupported so attachments never silently cross an
+/// OpenAI-compatible boundary merely because the endpoint accepts chat-completions payloads.
+pub(crate) fn deepseek_image_input_capability(model_name: &str) -> ImageInputCapability {
+    if model_name
+        .trim()
+        .eq_ignore_ascii_case("deepseek-v4-flash-vision-exp")
+    {
+        ImageInputCapability::Supported
+    } else {
+        ImageInputCapability::Unsupported
+    }
 }
 
 pub fn build_prefix_completion_request(

@@ -5656,6 +5656,7 @@ version = "0.0.1-beta.4"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "futures",
  "reqwest 0.12.28",
  "serde",

@@ -1,4 +1,13 @@
-use crate::parse_deepseek_model_list;
+use crate::{BUNDLED_DEEPSEEK_MODELS, parse_deepseek_model_list};
+
+#[test]
+fn bundled_catalog_includes_the_exact_vision_experiment_model_id() {
+    assert!(BUNDLED_DEEPSEEK_MODELS.iter().any(|(id, label, default)| {
+        *id == "deepseek-v4-flash-vision-exp"
+            && *label == "DeepSeek V4 Flash Vision (Experimental)"
+            && !default
+    }));
+}
 
 #[test]
 fn deepseek_catalog_parses_official_shape_and_rejects_wrong_owner() {

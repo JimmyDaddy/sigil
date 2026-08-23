@@ -1,8 +1,9 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ImageAttachment, ImageMimeType, MessageRole, ModelMessage, ProviderContinuationState,
-    ReasoningEffort, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec,
+    ImageAttachment, ImageInputCapability, ImageMimeType, MessageRole, ModelMessage,
+    ProviderContinuationState, ReasoningEffort, ToolAccess, ToolCategory, ToolPreviewCapability,
+    ToolSpec,
 };
 
 use crate::{
@@ -12,7 +13,8 @@ use crate::{
 
 use super::{
     StrictToolsMode, build_chat_request, build_fim_completion_request,
-    build_prefix_completion_request, extract_user_id, extract_user_id_from_partition_key,
+    build_prefix_completion_request, deepseek_image_input_capability, extract_user_id,
+    extract_user_id_from_partition_key,
 };
 
 #[test]
@@ -100,6 +102,74 @@ fn chat_request_rejects_image_input_before_mapping() -> Result<()> {
     };
     assert!(error.to_string().contains("does not support image input"));
     Ok(())
+}
+
+#[test]
+fn exact_vision_model_maps_resolved_images_to_openai_compatible_content_parts() -> Result<()> {
+    let mut user = ModelMessage::user("inspect the screenshot");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let request = sigil_kernel::CompletionRequest {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash-vision-exp".to_owned(),
+        messages: vec![user],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+        hosted_tools: Vec::new(),
+    };
+
+    let prepared = build_chat_request(
+        &request,
+        None,
+        StrictToolsMode::Off,
+        &DeepSeekProviderQuirkProfile::default(),
+    )?;
+
+    assert_eq!(prepared.body.messages[0]["content"][0]["type"], "text");
+    assert_eq!(
+        prepared.body.messages[0]["content"][0]["text"],
+        "inspect the screenshot"
+    );
+    assert_eq!(prepared.body.messages[0]["content"][1]["type"], "image_url");
+    assert_eq!(
+        prepared.body.messages[0]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,AQID"
+    );
+    assert!(
+        prepared.body.messages[0]["content"][1]["image_url"]
+            .get("detail")
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn vision_image_capability_is_allowlisted_by_exact_model_id() {
+    assert_eq!(
+        deepseek_image_input_capability(" DeepSeek-V4-Flash-Vision-Exp "),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        deepseek_image_input_capability("deepseek-v4-flash"),
+        ImageInputCapability::Unsupported
+    );
+    assert_eq!(
+        deepseek_image_input_capability("deepseek-v4-flash-vision-exp-preview"),
+        ImageInputCapability::Unsupported
+    );
 }
 
 #[test]

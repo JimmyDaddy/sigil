@@ -14,8 +14,8 @@ use sigil_kernel::{
     CompactionFoldPlan, CompactionInitiation, ContextBodyRef, ContextInclusionReason, ContextItem,
     ContextSensitivity, ContextSource, ContextTrustLevel, ContinuationItemPriority,
     ContinuationModelOutputItemV1, ContinuationModelOutputV1, ControlEntry, EffectiveTokenBudget,
-    FrozenProviderRequestMaterial, InputTokenEvidence, InteractionMode, JsonlSessionStore,
-    MemoryConfig, ModelMessage, ModelRequestTimeouts, NoopEventHandler,
+    FrozenProviderRequestMaterial, ImageInputCapability, InputTokenEvidence, InteractionMode,
+    JsonlSessionStore, MemoryConfig, ModelMessage, ModelRequestTimeouts, NoopEventHandler,
     PROVIDER_ERROR_BODY_LIMIT_BYTES, PermissionConfig, PortableSemanticCompactionRequest,
     PortableTargetRequestMaterial, Provider, ProviderChunk, ProviderPhysicalAttemptProjection,
     ProviderRequestRejection, ReasoningEffort, ReasoningStreamSupport, RequestFitProof,
@@ -998,6 +998,14 @@ fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result
     assert!(capabilities.supports_infill_completion);
     assert!(capabilities.supports_system_fingerprint);
     assert!(capabilities.tool_name_max_chars > 0);
+    assert_eq!(
+        provider.image_input_capability("deepseek-v4-flash-vision-exp"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        provider.image_input_capability("deepseek-v4-flash"),
+        ImageInputCapability::Unsupported
+    );
     assert_eq!(
         provider.base_url_for_endpoint(crate::endpoint::DeepSeekEndpointClass::AnthropicCompat),
         "http://anthropic.test"
