@@ -259,3 +259,271 @@ mod tests {
         );
     }
 }
+
+/// Kernel-side proof binding record.
+type ProofRecordV1 = (ProofKindV1, &'static str, Vec<u8>);
+
+/// The real kernel capability broker (production): seals opaque admission proofs, issues
+/// one-shot execution bundles and storage namespace handles, verifies consumed bundles.
+/// Single instance per composition. The proof handle is opaque; the broker keeps the
+/// purpose/attempt/family binding ledger kernel-side so no consumer can fabricate a
+/// capability with chosen content.
+#[derive(Debug, Default)]
+pub struct KernelCapabilityBrokerV1 {
+    table: std::sync::Mutex<KernelCapabilityTableV1>,
+    /// proof handle -> (kind, purpose, physical attempt bytes)
+    proofs: std::sync::Mutex<std::collections::BTreeMap<String, ProofRecordV1>>,
+    storage_families: std::sync::Mutex<
+        std::collections::BTreeMap<
+            String,
+            (
+                crate::resource::ManagedStorageCapabilityFamilyV1,
+                CanonicalHash,
+            ),
+        >,
+    >,
+    views: std::sync::Mutex<std::collections::BTreeMap<String, VerifiedExecutionBundleViewV1>>,
+    sequence: std::sync::atomic::AtomicU64,
+}
+
+impl KernelCapabilityBrokerV1 {
+    pub const fn new() -> Self {
+        Self {
+            table: std::sync::Mutex::new(KernelCapabilityTableV1::new()),
+            proofs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            storage_families: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            views: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            sequence: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// Seals an execution admission proof (kernel-owned; the handle is opaque and the
+    /// purpose/attempt stay kernel-side).
+    pub fn seal_execution_proof(
+        &self,
+        kind: ProofKindV1,
+        purpose: &'static str,
+        physical_attempt_id: Vec<u8>,
+    ) -> SealedExecutionAdmissionProofV1 {
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let handle = format!("proof-{seq}");
+        let proof = SealedExecutionAdmissionProofV1 {
+            handle_id: crate::resource::OpaqueKernelProofHandleId::new(handle.clone()),
+            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(format!(
+                "auth-{seq}"
+            )),
+            kind,
+        };
+        self.proofs
+            .lock()
+            .expect("broker proofs")
+            .insert(handle, (kind, purpose, physical_attempt_id));
+        proof
+    }
+
+    /// Seals a storage namespace admission proof carrying the authority-declared family the
+    /// handle will bind.
+    pub fn seal_storage_namespace_proof(
+        &self,
+        family: crate::resource::ManagedStorageCapabilityFamilyV1,
+        namespace_hash: CanonicalHash,
+    ) -> SealedExecutionAdmissionProofV1 {
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let handle = format!("proof-{seq}");
+        let proof = SealedExecutionAdmissionProofV1 {
+            handle_id: crate::resource::OpaqueKernelProofHandleId::new(handle.clone()),
+            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(format!(
+                "auth-{seq}"
+            )),
+            kind: ProofKindV1::StorageNamespace,
+        };
+        self.storage_families
+            .lock()
+            .expect("storage families")
+            .insert(handle, (family, namespace_hash));
+        proof
+    }
+
+    fn take_proof(
+        &self,
+        proof: SealedExecutionAdmissionProofV1,
+    ) -> Result<(ProofKindV1, &'static str, Vec<u8>), CapabilityIssueErrorV1> {
+        self.proofs
+            .lock()
+            .expect("broker proofs")
+            .remove(proof.handle_id.as_str())
+            .ok_or(CapabilityIssueErrorV1::UnknownOrConsumed)
+    }
+
+    fn bundle_key(&self, bundle: &IssuedExecutionAdmissionBundleV1) -> String {
+        let (token, cap) = match bundle {
+            IssuedExecutionAdmissionBundleV1::OneShot {
+                consumer_token,
+                resource_capability,
+            }
+            | IssuedExecutionAdmissionBundleV1::Terminal {
+                consumer_token,
+                resource_capability,
+            }
+            | IssuedExecutionAdmissionBundleV1::Extension {
+                consumer_token,
+                resource_capability,
+            } => (
+                consumer_token.as_str().to_owned(),
+                resource_capability.as_str().to_owned(),
+            ),
+        };
+        format!("{token}:{cap}")
+    }
+}
+
+impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
+    fn issue_execution(
+        &self,
+        proof: SealedExecutionAdmissionProofV1,
+    ) -> Result<IssuedExecutionAdmissionBundleV1, CapabilityIssueErrorV1> {
+        let (kind, purpose, attempt) = self.take_proof(proof)?;
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let bundle = match kind {
+            ProofKindV1::ExecutionOneShot => IssuedExecutionAdmissionBundleV1::OneShot {
+                consumer_token: crate::resource::OpaqueResourceId::new(format!(
+                    "token:{purpose}:{seq}"
+                )),
+                resource_capability: crate::resource::OpaqueResourceId::new(format!(
+                    "cap:{purpose}:{seq}"
+                )),
+            },
+            ProofKindV1::ExecutionTerminal => IssuedExecutionAdmissionBundleV1::Terminal {
+                consumer_token: crate::resource::OpaqueResourceId::new(format!(
+                    "token:{purpose}:{seq}"
+                )),
+                resource_capability: crate::resource::OpaqueResourceId::new(format!(
+                    "cap:{purpose}:{seq}"
+                )),
+            },
+            _ => return Err(CapabilityIssueErrorV1::KindMismatch),
+        };
+        let key = self.bundle_key(&bundle);
+        self.table
+            .lock()
+            .expect("broker table")
+            .record_issued(key.clone())
+            .map_err(|_| CapabilityIssueErrorV1::UnknownOrConsumed)?;
+        let mut digest = [0u8; 32];
+        {
+            let bytes = key.as_bytes();
+            let bound = bytes.len().min(32);
+            digest[..bound].copy_from_slice(&bytes[..bound]);
+        }
+        self.views.lock().expect("broker views").insert(
+            key,
+            VerifiedExecutionBundleViewV1 {
+                bundle_hash: CanonicalHash::from_bytes(digest),
+                purpose,
+                physical_attempt_id: Some(attempt),
+            },
+        );
+        Ok(bundle)
+    }
+
+    fn issue_file_access(
+        &self,
+        _proof: SealedExecutionAdmissionProofV1,
+    ) -> Result<ManagedFileAccessAdmissionTokenV1, CapabilityIssueErrorV1> {
+        Err(CapabilityIssueErrorV1::FacetUnavailable)
+    }
+
+    fn verify_execution_bundle(
+        &self,
+        bundle: IssuedExecutionAdmissionBundleV1,
+    ) -> Result<VerifiedExecutionBundleViewV1, CapabilityVerifyErrorV1> {
+        let key = self.bundle_key(&bundle);
+        let Some(view) = self.views.lock().expect("broker views").remove(&key) else {
+            return Err(CapabilityVerifyErrorV1::VerifyFailed(
+                "unknown or consumed bundle".to_owned(),
+            ));
+        };
+        self.table
+            .lock()
+            .expect("broker table")
+            .record_consumed(key)
+            .map_err(|_| CapabilityVerifyErrorV1::VerifyFailed("already consumed".to_owned()))?;
+        Ok(view)
+    }
+}
+
+impl KernelCapabilityBrokerV1 {
+    /// Issues the storage admission CAPABILITY for a sealed storage-namespace proof (the
+    /// kernel port's admission parameter; the broker binds family/namespace kernel-side).
+    pub fn issue_storage_namespace_capability(
+        &self,
+        proof: SealedExecutionAdmissionProofV1,
+    ) -> Result<crate::managed_storage::ValidatedStorageAdmissionCapabilityV1, CapabilityIssueErrorV1>
+    {
+        let (_, _) = self
+            .storage_families
+            .lock()
+            .expect("storage families")
+            .remove(proof.handle_id.as_str())
+            .ok_or(CapabilityIssueErrorV1::UnknownOrConsumed)?;
+        Ok(
+            crate::managed_storage::ValidatedStorageAdmissionCapabilityV1::broker_issued(
+                crate::resource::OpaqueKernelCapabilityHandleId::new(
+                    proof.handle_id.as_str().to_owned(),
+                ),
+            ),
+        )
+    }
+}
+
+impl KernelStorageCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
+    fn issue_storage_namespace_handle(
+        &self,
+        proof: SealedExecutionAdmissionProofV1,
+    ) -> Result<crate::managed_storage::ManagedStorageNamespaceHandleV1, CapabilityIssueErrorV1>
+    {
+        let (family, namespace_hash) = self
+            .storage_families
+            .lock()
+            .expect("storage families")
+            .remove(proof.handle_id.as_str())
+            .ok_or(CapabilityIssueErrorV1::UnknownOrConsumed)?;
+        Ok(
+            crate::managed_storage::ManagedStorageNamespaceHandleV1::new(
+                crate::resource::OpaqueKernelCapabilityHandleId::new(
+                    proof.handle_id.as_str().to_owned(),
+                ),
+                namespace_hash,
+                family,
+                crate::resource::OpaqueKernelCapabilityAuthenticatorV1::new(format!(
+                    "auth-{}",
+                    proof.handle_id.as_str()
+                )),
+            ),
+        )
+    }
+
+    fn issue_storage_object_key(
+        &self,
+        _proof: SealedExecutionAdmissionProofV1,
+    ) -> Result<crate::managed_storage::OpaqueStorageObjectKeyV1, CapabilityIssueErrorV1> {
+        Err(CapabilityIssueErrorV1::FacetUnavailable)
+    }
+
+    fn issue_storage_stream_key(
+        &self,
+        _proof: SealedExecutionAdmissionProofV1,
+    ) -> Result<crate::managed_storage::OpaqueStorageStreamKeyV1, CapabilityIssueErrorV1> {
+        Err(CapabilityIssueErrorV1::FacetUnavailable)
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/capability_broker_tests.rs"]
+mod broker_tests;

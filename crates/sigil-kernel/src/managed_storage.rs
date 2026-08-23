@@ -250,6 +250,17 @@ pub struct ValidatedStorageAdmissionCapabilityV1 {
 }
 
 impl ValidatedStorageAdmissionCapabilityV1 {
+    /// Kernel-broker-issued admission capability (real; distinct from the probe marker).
+    pub(crate) fn broker_issued(handle_id: OpaqueKernelCapabilityHandleId) -> Self {
+        Self {
+            authenticator: OpaqueKernelCapabilityAuthenticatorV1::new(format!(
+                "auth-{}",
+                handle_id.as_str()
+            )),
+            handle_id,
+        }
+    }
+
     /// Kernel-owned startup readiness probe handle (R71.6). This is NOT a real admission;
     /// services must treat it as probe-only and real admissions must be issuer-issued. It
     /// exists so the mandatory adapter readiness check can run a round trip without a

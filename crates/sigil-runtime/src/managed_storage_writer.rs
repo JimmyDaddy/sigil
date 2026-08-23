@@ -130,6 +130,10 @@ pub struct ManagedStorageWriterAdapterV1 {
     service: std::sync::Arc<dyn ManagedStorageServiceV1>,
     state_anchor: PathBuf,
     cutover_manifest_hash: CanonicalHash,
+    /// Real kernel capability broker (production): writer batches use broker-issued storage
+    /// namespaces (production grant ns), never the kernel startup-probe marker.
+    storage_issuer:
+        Option<std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>>,
 }
 
 impl ManagedStorageWriterAdapterV1 {
@@ -144,6 +148,24 @@ impl ManagedStorageWriterAdapterV1 {
             service,
             state_anchor,
             cutover_manifest_hash,
+            storage_issuer: None,
+        }
+    }
+
+    /// Production constructor: every acquire is backed by a real broker-issued storage
+    /// namespace capability (one-shot proof), so writer batches bind the production grant
+    /// namespace while startup probes keep their dedicated probe namespaces.
+    pub fn with_storage_issuer(
+        service: std::sync::Arc<dyn ManagedStorageServiceV1>,
+        state_anchor: PathBuf,
+        cutover_manifest_hash: CanonicalHash,
+        storage_issuer: std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
+    ) -> Self {
+        Self {
+            service,
+            state_anchor,
+            cutover_manifest_hash,
+            storage_issuer: Some(storage_issuer),
         }
     }
 
@@ -203,13 +225,30 @@ impl ManagedStorageWriterAdapterV1 {
             )),
             journal_scope: ResourceJournalScopeV1::Application,
         };
+        let capability = match &self.storage_issuer {
+            Some(broker) => {
+                let mut leaf_ns = [0x6au8; 32];
+                for (index, byte) in leaf.bytes().take(16).enumerate() {
+                    leaf_ns[index] = byte;
+                }
+                let proof = broker.seal_storage_namespace_proof(
+                    capability_family,
+                    CanonicalHash::from_bytes(leaf_ns),
+                );
+                broker
+                    .issue_storage_namespace_capability(proof)
+                    .map_err(|error| {
+                        ManagedStorageWriterErrorV1::AdmissionFailed(format!("{error:?}"))
+                    })?
+            }
+            None => {
+                sigil_kernel::managed_storage::ValidatedStorageAdmissionCapabilityV1::startup_probe(
+                )
+            }
+        };
         let handle = self
             .service
-            .admit_namespace(
-                request,
-                sigil_kernel::managed_storage::ValidatedStorageAdmissionCapabilityV1::startup_probe(
-                ),
-            )
+            .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
@@ -489,5 +528,59 @@ mod tests {
             error,
             ManagedStorageWriterErrorV1::FinalizeFailed(_)
         ));
+    }
+    #[test]
+    fn r71_sw_broker_backed_writer_uses_production_namespace() {
+        use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(session_log_grant()).expect("register");
+        let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
+            std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
+                table,
+                AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: hash(8),
+                },
+            ));
+        let broker = std::sync::Arc::new(KernelCapabilityBrokerV1::new());
+        let writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
+            service.clone(),
+            dir.path().to_path_buf(),
+            hash(10),
+            broker.clone(),
+        );
+        // A startup probe runs first: its namespace is dedicated and never the production one.
+        let capability =
+            sigil_kernel::managed_storage::ValidatedStorageAdmissionCapabilityV1::startup_probe();
+        let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
+            semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLog,
+            capability_family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::AppendLog,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            source:
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash: hash(10),
+                    application_generation: 1,
+                },
+            owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Session(
+                OpaqueSessionId::new("s-1".to_owned()),
+            ),
+            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
+        };
+        let probe_handle = service
+            .admit_namespace(request, capability)
+            .expect("probe admit");
+        assert_ne!(probe_handle.namespace_hash, hash(3));
+        service
+            .finalize_namespace(probe_handle, "probe".to_owned())
+            .expect("probe finalize");
+        // The broker-backed writer batch binds the production grant namespace and works after
+        // the probe finalized its own namespace.
+        let lease = writer
+            .acquire(StorageWriterChannelV1::SessionLog)
+            .expect("acquire");
+        assert_eq!(lease.namespace_digest(), hash(3));
+        writer.write_record(&lease, b"seq=1").expect("write");
+        writer.finalize(lease).expect("finalize");
     }
 }

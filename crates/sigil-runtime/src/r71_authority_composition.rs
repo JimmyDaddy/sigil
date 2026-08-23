@@ -51,10 +51,14 @@ pub fn compose_runtime_authority(
     execution_temp_root: &Path,
     cutover_manifest_hash: CanonicalHash,
     planner: Arc<dyn ManagedExecutionPlannerV1>,
-    issuer: Arc<dyn KernelCapabilityIssuerV1>,
     projection: Arc<dyn ManagedProjectionServiceV1>,
     declared: &[StorageWriterChannelV1],
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
+    // The real kernel capability broker is the single issuer for this composition: execution
+    // bundles and storage admission capabilities are broker-issued (one-shot proofs), never
+    // fabricated by consumers.
+    let broker =
+        std::sync::Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new());
     let bootstrap = sigil_resource_authority::bootstrap::AuthorityBootstrapRoots {
         state_anchor: state_anchor.to_path_buf(),
         cache_anchor: state_anchor.join("cache"),
@@ -103,16 +107,17 @@ pub fn compose_runtime_authority(
     .build_bundle();
     let services = RuntimeManagedResourceServicesV1::compose_sandbox_backed(
         bundle,
-        issuer,
+        broker.clone() as Arc<dyn KernelCapabilityIssuerV1>,
         projection,
         execution,
         file_access,
         crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
     );
-    let storage_writer = ManagedStorageWriterAdapterV1::new(
+    let storage_writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
         storage,
         state_anchor.to_path_buf(),
         cutover_manifest_hash,
+        broker,
     );
     Ok(RuntimeAuthorityCompositionV1 {
         services,
@@ -170,7 +175,6 @@ mod tests {
             Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
                 crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
             ));
-        let issuer = sigil_kernel::capability_issuer::mock_issuer();
         let projection: Arc<dyn sigil_kernel::managed_projection::ManagedProjectionServiceV1> =
             Arc::new(CompositionStubProjectionServiceV1);
         let composition = crate::r71_authority_composition::compose_runtime_authority(
@@ -178,7 +182,6 @@ mod tests {
             &exec,
             CanonicalHash::from_bytes([0x55; 32]),
             planner,
-            issuer,
             projection,
             &[Ch::SessionLog],
         )
