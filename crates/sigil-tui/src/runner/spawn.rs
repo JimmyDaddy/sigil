@@ -103,7 +103,12 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         .admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy)
         .map_err(anyhow::Error::new)?;
     let attachment_lease = if let Some(attachment) = supplied_attachment {
-        let store = JsonlSessionStore::new(&session_log_path)?;
+        let store = sigil_runtime::r71_global_cutover::guarded_session_open(
+            &session_log_path,
+            boot_cutover.as_ref(),
+            sigil_kernel::cutover_manifest::StartupEpochV1::Legacy,
+        )
+        .map_err(anyhow::Error::new)?;
         anyhow::ensure!(
             attachment.session_path() == store.path(),
             "transferred worker attachment belongs to another durable session"
@@ -212,7 +217,11 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 );
                 return;
             }
-            let store = match JsonlSessionStore::new(&session_log_path) {
+            let store = match sigil_runtime::r71_global_cutover::guarded_session_open(
+                &session_log_path,
+                boot_cutover.as_ref(),
+                sigil_kernel::cutover_manifest::StartupEpochV1::Legacy,
+            ) {
                 Ok(store) => store,
                 Err(error) => {
                     tracing::debug!(%error, "session writer startup is unavailable");

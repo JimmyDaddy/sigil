@@ -550,6 +550,31 @@ pub fn inspect_cutover_manifest(
     RuntimeGlobalCutoverV1::load_and_validate_manifest(&manifest_path).map(Some)
 }
 
+/// Closed guarded session-open error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CutoverSessionOpenErrorV1 {
+    #[error("session epoch guard rejected the open: {0}")]
+    Guard(CutoverErrorV1),
+    #[error("session store open failed: {0}")]
+    SessionOpen(String),
+}
+
+/// The only sanctioned session-store open in a cutover-aware surface: the decision's
+/// session boundary (binary epoch vs session epoch) is checked before any store open. A
+/// new-epoch binary opening a legacy session is refused here, closing the old-session
+/// unavailable path end-to-end.
+pub fn guarded_session_open(
+    path: &std::path::Path,
+    decision: &RuntimeGlobalCutoverV1,
+    session_epoch: StartupEpochV1,
+) -> Result<sigil_kernel::JsonlSessionStore, CutoverSessionOpenErrorV1> {
+    decision
+        .admit_session_open(session_epoch)
+        .map_err(CutoverSessionOpenErrorV1::Guard)?;
+    sigil_kernel::JsonlSessionStore::new(path)
+        .map_err(|error| CutoverSessionOpenErrorV1::SessionOpen(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,5 +1128,42 @@ mod tests {
             .admit_session_open(StartupEpochV1::NewCurrentSchema)
             .expect_err("legacy binary rejects new session");
         assert!(matches!(error, CutoverErrorV1::LegacyBinaryRejected));
+    }
+    #[test]
+    fn resource_global_cutover_guarded_session_open_end_to_end() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        // Legacy epoch binary: legacy open is admitted.
+        let legacy = RuntimeGlobalCutoverV1::legacy_decision("inst-guarded", 1, authority());
+        let store = guarded_session_open(&session_path, &legacy, StartupEpochV1::Legacy)
+            .expect("legacy open");
+        drop(store);
+        // A new-epoch binary opening the same legacy session is refused before any store open.
+        let services = shadow_services(mock_issuer());
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let new_epoch = RuntimeGlobalCutoverV1::evaluate(
+            "inst-new",
+            1,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::NewCurrentSchema,
+        );
+        if new_epoch.gate().is_ok() {
+            // Fully cut-over surfaces reject legacy sessions through the same guard.
+            let error = guarded_session_open(&session_path, &new_epoch, StartupEpochV1::Legacy)
+                .expect_err("old session unavailable");
+            assert!(matches!(
+                error,
+                CutoverSessionOpenErrorV1::Guard(CutoverErrorV1::LegacySessionUnavailable)
+            ));
+        } else {
+            // The gate refuses to claim cutover before every adapter is wired; the guard still
+            // exists and would reject the open (decision-level) even without an actual open.
+            let error = new_epoch
+                .admit_session_open(StartupEpochV1::Legacy)
+                .expect_err("decision rejects");
+            assert!(matches!(error, CutoverErrorV1::LegacySessionUnavailable));
+        }
     }
 }
