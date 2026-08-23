@@ -27,6 +27,9 @@ pub struct RuntimeManagedResourceServicesV1 {
     /// Actual seam kind behind `execution` (ShadowPlaceholder until the sandbox-backed
     /// managed execution protocol is composed; R71.6 cutover probe reads this truthfully).
     pub execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1,
+    /// Actual extension (MCP / plugin) launch seam: legacy configured backend until the
+    /// managed execution route is composed for extension processes (probe fails closed).
+    pub extension_execution_seam: crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1,
     /// Actual seam kind behind `file_access`.
     pub file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1,
     /// True when the composed projection port is the production records-backed rebuildable
@@ -51,6 +54,8 @@ impl RuntimeManagedResourceServicesV1 {
             projection,
             capability_issuer,
             execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1::ShadowPlaceholder,
+            extension_execution_seam:
+                crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::LegacyLauncher,
             file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1::ShadowPlaceholder,
             projection_backed: false,
         }
@@ -74,6 +79,10 @@ impl RuntimeManagedResourceServicesV1 {
             projection,
             capability_issuer,
             execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1::SandboxBacked,
+            // Extension processes keep the legacy launcher until the managed route is
+            // composed for them (the cutover probe stays honestly red).
+            extension_execution_seam:
+                crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::LegacyLauncher,
             file_access_seam,
             projection_backed: true,
         }

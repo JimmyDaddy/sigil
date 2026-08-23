@@ -40,6 +40,17 @@ pub enum RuntimeExecutionSeamV1 {
     SandboxBacked,
 }
 
+/// Actual extension (MCP / plugin) process launch seam kind: the probe never claims an
+/// extension route the composition does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeExecutionExtensionSeamV1 {
+    /// Extension processes still launch through the legacy configured backend path; probe
+    /// fails closed until the managed execution route is composed.
+    LegacyLauncher,
+    /// Extension processes launch through the composed managed execution service; probe passes.
+    ManagedExecutionBacked,
+}
+
 /// Actual in-process file access seam kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeFileAccessSeamV1 {
@@ -178,10 +189,14 @@ pub fn probe_mandatory_adapters(
         services.execution_seam,
         RuntimeExecutionSeamV1::SandboxBacked
     );
+    let extension = matches!(
+        services.extension_execution_seam,
+        RuntimeExecutionExtensionSeamV1::ManagedExecutionBacked
+    );
     for (kind, passed) in [
         (MandatoryAdapterKindV1::ExecutionOneShot, execution),
         (MandatoryAdapterKindV1::ExecutionTerminal, execution),
-        (MandatoryAdapterKindV1::ExecutionExtension, false),
+        (MandatoryAdapterKindV1::ExecutionExtension, extension),
     ] {
         out.push(AdapterReadinessProbeV1 {
             adapter: kind,
@@ -651,6 +666,47 @@ mod tests {
         assert!(matches!(error, CutoverErrorV1::AdapterNotReady(_)));
         assert!(!cutover.is_current_schema_ready());
         assert_eq!(cutover.manifest().mandatory_readiness.len(), 18);
+    }
+
+    #[test]
+    fn resource_global_cutover_extension_probe_reflects_real_seam() {
+        let mut services = shadow_services(mock_issuer());
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let before = RuntimeGlobalCutoverV1::evaluate(
+            "inst-ext-before",
+            1,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::NewCurrentSchema,
+        );
+        let ext_before = before
+            .manifest()
+            .mandatory_readiness
+            .iter()
+            .find(|probe| probe.adapter == MandatoryAdapterKindV1::ExecutionExtension)
+            .expect("extension probe");
+        assert!(
+            !ext_before.passed,
+            "legacy launcher must not claim the extension route"
+        );
+
+        services.extension_execution_seam = RuntimeExecutionExtensionSeamV1::ManagedExecutionBacked;
+        let after = RuntimeGlobalCutoverV1::evaluate(
+            "inst-ext-after",
+            1,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::NewCurrentSchema,
+        );
+        let ext_after = after
+            .manifest()
+            .mandatory_readiness
+            .iter()
+            .find(|probe| probe.adapter == MandatoryAdapterKindV1::ExecutionExtension)
+            .expect("extension probe");
+        assert!(ext_after.passed, "the probe must reflect the composed seam");
     }
 
     #[test]
