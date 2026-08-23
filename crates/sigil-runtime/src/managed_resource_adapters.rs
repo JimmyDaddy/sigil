@@ -24,6 +24,11 @@ pub struct RuntimeManagedResourceServicesV1 {
     pub storage: Arc<dyn ManagedStorageServiceV1>,
     pub projection: Arc<dyn ManagedProjectionServiceV1>,
     pub capability_issuer: Arc<dyn KernelCapabilityIssuerV1>,
+    /// Actual seam kind behind `execution` (ShadowPlaceholder until the sandbox-backed
+    /// managed execution protocol is composed; R71.6 cutover probe reads this truthfully).
+    pub execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1,
+    /// Actual seam kind behind `file_access`.
+    pub file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1,
 }
 
 impl RuntimeManagedResourceServicesV1 {
@@ -42,6 +47,29 @@ impl RuntimeManagedResourceServicesV1 {
             storage: bundle.storage,
             projection,
             capability_issuer,
+            execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1::ShadowPlaceholder,
+            file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1::ShadowPlaceholder,
+        }
+    }
+
+    /// Composes the R71.6 execution surface: the sandbox-owned managed execution service is
+    /// the only execution port, and the seal registrar flags the seam as sandbox-backed so
+    /// the cutover probe reflects reality.
+    pub fn compose_sandbox_backed(
+        bundle: ResourceAuthorityServiceBundleV1,
+        capability_issuer: Arc<dyn KernelCapabilityIssuerV1>,
+        projection: Arc<dyn ManagedProjectionServiceV1>,
+        execution: Arc<dyn ManagedExecutionServiceV1>,
+        file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1,
+    ) -> Self {
+        Self {
+            execution,
+            file_access: bundle.file_access,
+            storage: bundle.storage,
+            projection,
+            capability_issuer,
+            execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1::SandboxBacked,
+            file_access_seam,
         }
     }
 }

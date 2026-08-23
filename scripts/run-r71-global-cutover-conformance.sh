@@ -43,6 +43,8 @@ run_suite() {
 # Kernel: cutover manifest contract + current-schema-only session boundary.
 run_suite kernel-cutover-manifest cargo test -p sigil-kernel --lib cutover_manifest -- --format terse
 run_suite kernel-current-schema-only cargo test -p sigil-kernel --lib current_schema_only -- --format terse
+# Sandbox: managed execution service (spawn, truthful Local none, bounded output, fail closed).
+run_suite sandbox-managed-execution cargo test -p sigil-sandbox --lib r71_managed -- --format terse
 # Runtime: application-global cutover coordinator + boot seam fail-closed behavior.
 run_suite runtime-global-cutover cargo test -p sigil-runtime --lib resource_global_cutover -- --format terse
 echo "r71-global-cutover-conformance: all fixtures passed"

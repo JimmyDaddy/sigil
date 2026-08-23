@@ -46,4 +46,5 @@ run_suite sandbox-local cargo test -p sigil-sandbox --lib local -- --format ters
 run_suite sandbox-launch-plan cargo test -p sigil-sandbox --lib launch_plan -- --format terse
 run_suite sandbox-principal cargo test -p sigil-sandbox --lib principal -- --format terse
 run_suite sandbox-output cargo test -p sigil-sandbox --lib output -- --format terse
+run_suite sandbox-managed-execution cargo test -p sigil-sandbox --lib r71_managed -- --format terse
 echo "r71-sandbox-conformance: all fixtures passed"

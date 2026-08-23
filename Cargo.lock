@@ -5800,6 +5800,7 @@ dependencies = [
  "sigil-provider-openai-compat",
  "sigil-provider-openai-responses",
  "sigil-resource-authority",
+ "sigil-sandbox",
  "sigil-tools-builtin",
  "tempfile",
  "thiserror 2.0.19",
@@ -5817,6 +5818,8 @@ dependencies = [
 name = "sigil-sandbox"
 version = "0.0.1-beta.4"
 dependencies = [
+ "async-trait",
+ "futures",
  "serde",
  "serde_json",
  "sha2 0.10.9",

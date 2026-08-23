@@ -163,18 +163,20 @@ fn storage_family_probe(
 }
 
 /// Mandatory adapter probe plan over a concrete runtime surface (exactly 18 probes).
-#[allow(clippy::too_many_arguments)]
+/// The execution/file-access seams are read from the composed surface itself, so a probe can
+/// never claim a seam the composition does not hold.
 pub fn probe_mandatory_adapters(
     services: &RuntimeManagedResourceServicesV1,
     recovery: &RuntimeResourceRecoveryFacadeV1,
-    execution_seam: RuntimeExecutionSeamV1,
-    file_access_seam: RuntimeFileAccessSeamV1,
     cutover_manifest_hash: CanonicalHash,
     application_generation: u64,
 ) -> Vec<AdapterReadinessProbeV1> {
     let mut out = Vec::with_capacity(18);
 
-    let execution = matches!(execution_seam, RuntimeExecutionSeamV1::SandboxBacked);
+    let execution = matches!(
+        services.execution_seam,
+        RuntimeExecutionSeamV1::SandboxBacked
+    );
     for (kind, passed) in [
         (MandatoryAdapterKindV1::ExecutionOneShot, execution),
         (MandatoryAdapterKindV1::ExecutionTerminal, execution),
@@ -193,7 +195,10 @@ pub fn probe_mandatory_adapters(
 
     out.push(AdapterReadinessProbeV1 {
         adapter: MandatoryAdapterKindV1::FileAccessInProcess,
-        passed: matches!(file_access_seam, RuntimeFileAccessSeamV1::AuthorityBacked),
+        passed: matches!(
+            services.file_access_seam,
+            RuntimeFileAccessSeamV1::AuthorityBacked
+        ),
         evidence_digest: CanonicalHash::from_bytes([0xb3; 32]),
     });
 
@@ -296,16 +301,14 @@ pub struct RuntimeGlobalCutoverV1 {
 
 impl RuntimeGlobalCutoverV1 {
     /// Builds the cutover decision for a surface. The manifest is content-addressed and the
-    /// gate is evaluated immediately; the decision is immutable.
-    #[allow(clippy::too_many_arguments)]
+    /// gate is evaluated immediately; the decision is immutable. Seam kinds are read from the
+    /// composed surface (a probe can never claim a seam the composition does not hold).
     pub fn evaluate(
         instance_id: impl Into<String>,
         application_generation: u64,
         authority_generation: AuthorityGeneration,
         services: &RuntimeManagedResourceServicesV1,
         recovery: &RuntimeResourceRecoveryFacadeV1,
-        execution_seam: RuntimeExecutionSeamV1,
-        file_access_seam: RuntimeFileAccessSeamV1,
         selected_epoch: StartupEpochV1,
     ) -> Self {
         let mut manifest = CutoverManifestV1 {
@@ -323,8 +326,6 @@ impl RuntimeGlobalCutoverV1 {
                 manifest.mandatory_readiness = probe_mandatory_adapters(
                     services,
                     recovery,
-                    execution_seam,
-                    file_access_seam,
                     probe_source::probe(application_generation),
                     application_generation,
                 );
@@ -375,11 +376,11 @@ mod probe_source {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use sigil_kernel::capability_issuer::{KernelCapabilityIssuerV1, mock_issuer};
     use sigil_resource_authority::storage::{
         AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
     };
+    use std::sync::Arc;
 
     fn authority() -> AuthorityGeneration {
         AuthorityGeneration {
@@ -437,8 +438,6 @@ mod tests {
             authority(),
             &services,
             &recovery,
-            RuntimeExecutionSeamV1::ShadowPlaceholder,
-            RuntimeFileAccessSeamV1::ShadowPlaceholder,
             StartupEpochV1::NewCurrentSchema,
         );
         let error = cutover.gate().expect_err("must fail closed");
@@ -457,8 +456,6 @@ mod tests {
             authority(),
             &services,
             &recovery,
-            RuntimeExecutionSeamV1::ShadowPlaceholder,
-            RuntimeFileAccessSeamV1::ShadowPlaceholder,
             StartupEpochV1::Legacy,
         );
         assert!(cutover.gate().is_ok());
@@ -473,8 +470,6 @@ mod tests {
         let probes = probe_mandatory_adapters(
             &services,
             &recovery,
-            RuntimeExecutionSeamV1::ShadowPlaceholder,
-            RuntimeFileAccessSeamV1::ShadowPlaceholder,
             CanonicalHash::from_bytes([0xd1; 32]),
             1,
         );
@@ -508,8 +503,6 @@ mod tests {
             authority(),
             &services,
             &recovery,
-            RuntimeExecutionSeamV1::ShadowPlaceholder,
-            RuntimeFileAccessSeamV1::ShadowPlaceholder,
             StartupEpochV1::Legacy,
         );
         let b = RuntimeGlobalCutoverV1::evaluate(
@@ -518,8 +511,6 @@ mod tests {
             authority(),
             &services,
             &recovery,
-            RuntimeExecutionSeamV1::ShadowPlaceholder,
-            RuntimeFileAccessSeamV1::ShadowPlaceholder,
             StartupEpochV1::Legacy,
         );
         assert_eq!(a.manifest().manifest_hash, b.manifest().manifest_hash);
@@ -552,8 +543,6 @@ mod tests {
             authority(),
             &services,
             &recovery,
-            RuntimeExecutionSeamV1::ShadowPlaceholder,
-            RuntimeFileAccessSeamV1::ShadowPlaceholder,
             StartupEpochV1::NewCurrentSchema,
         );
         let run_services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter))
@@ -575,5 +564,69 @@ mod tests {
         run_services
             .admit_session_open(StartupEpochV1::NewCurrentSchema)
             .expect("new epoch open");
+    }
+
+    #[test]
+    fn resource_global_cutover_sandbox_seam_readiness_is_truthful() {
+        use sigil_sandbox::managed::SandboxManagedExecutionServiceV1;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ));
+        let execution: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionServiceV1> =
+            Arc::new(SandboxManagedExecutionServiceV1::new(
+                planner,
+                dir.path().to_path_buf(),
+            ));
+        let storage = Arc::new(AuthorityManagedStorageServiceV1::new(
+            AuthorityStorageGrantTableV1::new(),
+            authority(),
+        ));
+        let file_access = sigil_resource_authority::file_access_stub::stub_file_access_service();
+        let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
+            authority(),
+            storage,
+            file_access,
+        )
+        .build_bundle();
+        let services = RuntimeManagedResourceServicesV1::compose_sandbox_backed(
+            bundle,
+            mock_issuer(),
+            Arc::new(CutoverStubProjectionServiceV1),
+            execution,
+            RuntimeFileAccessSeamV1::ShadowPlaceholder,
+        );
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let cutover = RuntimeGlobalCutoverV1::evaluate(
+            "inst-sandbox",
+            1,
+            authority(),
+            &services,
+            &recovery,
+            StartupEpochV1::NewCurrentSchema,
+        );
+        // Execution probes now reflect the composed sandbox-backed seam.
+        let probes = &cutover.manifest().mandatory_readiness;
+        let one_shot = probes
+            .iter()
+            .find(|p| p.adapter == MandatoryAdapterKindV1::ExecutionOneShot)
+            .expect("one-shot probe");
+        let terminal = probes
+            .iter()
+            .find(|p| p.adapter == MandatoryAdapterKindV1::ExecutionTerminal)
+            .expect("terminal probe");
+        assert!(one_shot.passed);
+        assert!(terminal.passed);
+        // The gate still fails closed (file access / desktop seams not yet cut over) and the
+        // failing kind is NOT the execution seam: no partial cutover claim.
+        let error = cutover.gate().expect_err("still incomplete");
+        if let CutoverErrorV1::AdapterNotReady(kind) = error {
+            assert_ne!(*kind, MandatoryAdapterKindV1::ExecutionOneShot);
+            assert_ne!(*kind, MandatoryAdapterKindV1::ExecutionTerminal);
+        } else {
+            panic!("expected AdapterNotReady, got {error:?}");
+        }
     }
 }
