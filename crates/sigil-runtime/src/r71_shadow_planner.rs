@@ -9,8 +9,8 @@
 use std::collections::BTreeSet;
 
 use sigil_kernel::managed_execution::{
-    ExecutionCapturePolicy, ExecutionPurposeV1, ManagedExecutionPlanDraftV1,
-    ManagedExecutionPlanErrorV1, ManagedExecutionPlanRequestV1, ManagedExecutionPlannerV1,
+    ExecutionPurposeV1, ManagedExecutionPlanDraftV1, ManagedExecutionPlanErrorV1,
+    ManagedExecutionPlanRequestV1, ManagedExecutionPlannerV1,
 };
 use sigil_kernel::resource::{
     CanonicalHash, EnvironmentProfileClassV1, OpaqueExecutionPlanDraftId, OpaqueRequirementId,
@@ -196,6 +196,7 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sigil_kernel::managed_execution::ExecutionCapturePolicy;
 
     fn sample_request() -> ManagedExecutionPlanRequestV1 {
         ManagedExecutionPlanRequestV1 {

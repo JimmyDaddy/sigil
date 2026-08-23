@@ -5,8 +5,7 @@
 //! transitional edge that RFC-0070 R70.4/R70.6 replaces mechanically.
 
 use sigil_kernel::resource_recovery_surface::{
-    ResourceEffectReceiptViewV1, ResourceRecoveryActionEnvelopeV1,
-    ResourceRecoverySurfaceContractV1,
+    ResourceRecoveryActionEnvelopeV1, ResourceRecoverySurfaceContractV1,
 };
 
 /// Facade query result: a lossless projection plus the exact action envelope round trip.
@@ -85,6 +84,7 @@ pub mod facade_error {
 mod tests {
     use super::*;
     use sigil_kernel::resource::{CanonicalHash, OpaqueBlockerId, ResourceCleanupStatusV1};
+    use sigil_kernel::resource_recovery_surface::ResourceEffectReceiptViewV1;
     use sigil_kernel::resource_recovery_surface::{
         PublicRecoveryBlockerV2, ResourceRecoveryActionV1, ResourceRecoveryDomainV1,
         ResourceRecoveryReasonCodeV1, ResourceRecoveryRetryDispositionV1,
