@@ -775,6 +775,14 @@ impl HttpProductionRunDriver {
             sigil_runtime::agent_supervisor::task_role_runtime::RuntimeTaskRoleProviderBuilder,
         ))
         .with_scratch_control(options.scratch_control.clone());
+        // RFC-0071 R71.6: the server surface selects the epoch exactly once per stable instance
+        // id and fails closed before serving (the CLI headless/machine paths share the same
+        // attachment; a later new-epoch binary refuses these legacy manifests).
+        let services = sigil_runtime::r71_global_cutover::attach_legacy_boot_cutover(
+            services,
+            &options.config_path,
+        )
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         Ok(Self {
             options,
             services,

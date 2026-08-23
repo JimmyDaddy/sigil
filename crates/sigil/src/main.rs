@@ -1234,49 +1234,14 @@ fn cli_application_run_request(
     Ok(request)
 }
 
-/// RFC-0071 R71.6: boot-time epoch selection for CLI headless/machine paths. The legacy
-/// epoch is selected exactly once per stable instance id; the content-addressed cutover
-/// manifest is persisted next to the config and the session-open guard admits legacy
-/// sessions only (a later new-epoch binary rejects them).
+/// RFC-0071 R71.6: boot-time epoch selection. Delegates to the shared runtime attachment
+/// (CLI headless/machine must not re-implement the epoch decision).
 fn attach_boot_cutover(
     services: ApplicationRunServices,
     config_path: &Path,
 ) -> Result<ApplicationRunServices> {
-    use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash};
-    let instance_id = format!(
-        "cli:{}",
-        sigil_kernel::external::sha256_hex(config_path.to_string_lossy().as_bytes())
-    );
-    let mut digest = [0u8; 32];
-    {
-        let hex = instance_id.as_bytes();
-        let bound = hex.len().min(32);
-        digest[..bound].copy_from_slice(&hex[..bound]);
-    }
-    let authority = AuthorityGeneration {
-        epoch: 0,
-        instance_hash: CanonicalHash::from_bytes(digest),
-    };
-    let cutover = sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1::legacy_decision(
-        instance_id,
-        1,
-        authority,
-    );
-    let manifest_path = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".sigil-cutover-manifest.json");
-    cutover
-        .save_manifest(&manifest_path)
-        .map_err(anyhow::Error::new)?;
-    let services = services.with_global_cutover(cutover);
-    services
-        .require_cutover_or_fail()
-        .map_err(anyhow::Error::new)?;
-    services
-        .admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy)
-        .map_err(anyhow::Error::new)?;
-    Ok(services)
+    sigil_runtime::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
+        .map_err(anyhow::Error::new)
 }
 
 async fn run_command(

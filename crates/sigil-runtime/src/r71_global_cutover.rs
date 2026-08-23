@@ -450,6 +450,67 @@ mod probe_source {
     }
 }
 
+/// Closed boot-cutover attachment error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CutoverBootErrorV1 {
+    #[error("cutover manifest persistence failed: {0}")]
+    Persistence(CutoverPersistenceErrorV1),
+    #[error("mandatory readiness / session guard failed: {0}")]
+    Guard(CutoverErrorV1),
+}
+
+/// Shared boot attachment for every surface (CLI headless/machine, HTTP serve, desktop
+/// launcher): selects the legacy epoch exactly once per stable instance id derived from the
+/// config seed, persists the content-addressed manifest next to it, runs the mandatory
+/// readiness guard (fail closed) and the legacy session-open guard. A failure aborts startup
+/// before any run is prepared.
+pub fn attach_legacy_boot_cutover(
+    services: crate::application_run::ApplicationRunServices,
+    seed: &std::path::Path,
+) -> Result<crate::application_run::ApplicationRunServices, CutoverBootErrorV1> {
+    let instance_id = format!(
+        "sigil:{}",
+        sigil_kernel::external::sha256_hex(seed.to_string_lossy().as_bytes())
+    );
+    let mut digest = [0u8; 32];
+    {
+        let hex = instance_id.as_bytes();
+        let bound = hex.len().min(32);
+        digest[..bound].copy_from_slice(&hex[..bound]);
+    }
+    let authority = AuthorityGeneration {
+        epoch: 0,
+        instance_hash: CanonicalHash::from_bytes(digest),
+    };
+    let cutover = RuntimeGlobalCutoverV1::legacy_decision(instance_id, 1, authority);
+    let manifest_path = seed
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".sigil-cutover-manifest.json");
+    if manifest_path.exists() {
+        // Fixed-forward across boots: the durable manifest must validate AND match this boot
+        // decision exactly. A tampered or drifting manifest fails startup, never silently
+        // overwritten (the registry record is the only epoch truth for this instance).
+        let existing = RuntimeGlobalCutoverV1::load_and_validate_manifest(&manifest_path)
+            .map_err(CutoverBootErrorV1::Persistence)?;
+        if existing != *cutover.manifest() {
+            return Err(CutoverBootErrorV1::Guard(CutoverErrorV1::AlreadyPublished));
+        }
+    } else {
+        cutover
+            .save_manifest(&manifest_path)
+            .map_err(CutoverBootErrorV1::Persistence)?;
+    }
+    let services = services.with_global_cutover(cutover);
+    services
+        .require_cutover_or_fail()
+        .map_err(CutoverBootErrorV1::Guard)?;
+    services
+        .admit_session_open(StartupEpochV1::Legacy)
+        .map_err(CutoverBootErrorV1::Guard)?;
+    Ok(services)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,5 +987,65 @@ mod tests {
         assert!(a.gate().is_ok());
         assert_eq!(a.manifest().mandatory_readiness.len(), 0);
         assert_eq!(a.manifest().selected_epoch, StartupEpochV1::Legacy);
+    }
+    #[test]
+    fn resource_global_cutover_boot_attach_selects_legacy_once() {
+        use crate::application_run::ApplicationRunServices;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seed = dir.path().join("config.toml");
+        std::fs::write(&seed, b"[core]\n").expect("seed");
+        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
+        let attached = attach_legacy_boot_cutover(services, &seed).expect("attach");
+        let decision = attached.cutover().expect("decision");
+        assert!(decision.gate().is_ok());
+        assert_eq!(decision.manifest().selected_epoch, StartupEpochV1::Legacy);
+        assert_eq!(decision.manifest().mandatory_readiness.len(), 0);
+        let manifest_path = dir.path().join(".sigil-cutover-manifest.json");
+        assert!(manifest_path.exists());
+        // Reboot with the same seed: identical manifest replay is accepted.
+        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
+        attach_legacy_boot_cutover(services, &seed).expect("idempotent reboot");
+        // Legacy session open stays allowed; a new-epoch binary would reject it (kernel guard).
+        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
+        let attached = attach_legacy_boot_cutover(services, &seed).expect("attach again");
+        attached
+            .admit_session_open(StartupEpochV1::Legacy)
+            .expect("legacy open");
+    }
+
+    #[test]
+    fn resource_global_cutover_boot_attach_tampered_manifest_fails_closed() {
+        use crate::application_run::ApplicationRunServices;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seed = dir.path().join("config.toml");
+        std::fs::write(&seed, b"[core]\n").expect("seed");
+        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
+        attach_legacy_boot_cutover(services, &seed).expect("attach");
+        let manifest_path = dir.path().join(".sigil-cutover-manifest.json");
+        // A valid-but-different manifest (drifting generation) is refused, never overwritten.
+        let mut manifest =
+            RuntimeGlobalCutoverV1::load_and_validate_manifest(&manifest_path).expect("load");
+        assert_eq!(manifest.application_generation, 1);
+        manifest.application_generation = 2;
+        manifest.manifest_hash = sigil_kernel::cutover_manifest::compute_manifest_hash(&manifest);
+        let bytes = serde_json::to_vec(&manifest).expect("encode");
+        std::fs::write(&manifest_path, bytes).expect("write");
+        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
+        let error = attach_legacy_boot_cutover(services, &seed).expect_err("drift");
+        assert!(matches!(
+            error,
+            CutoverBootErrorV1::Guard(CutoverErrorV1::AlreadyPublished)
+        ));
+
+        // Then a tampered manifest fails closed at validation, never silently overwritten.
+        let text = std::fs::read_to_string(&manifest_path).expect("read");
+        let tampered = text.replace(
+            "\"application_generation\":2",
+            "\"application_generation\":7",
+        );
+        std::fs::write(&manifest_path, tampered).expect("tamper");
+        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
+        let error = attach_legacy_boot_cutover(services, &seed).expect_err("tampered");
+        assert!(matches!(error, CutoverBootErrorV1::Persistence(_)));
     }
 }
