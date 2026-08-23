@@ -139,12 +139,20 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                 OpaqueKernelCapabilityAuthenticatorV1::new("auth-probe-storage-1".to_owned()),
             )
         } else {
+            // Broker-issued claims: the namespace identity is the claim binding itself (the
+            // broker seals the true family/namespace kernel-side). Each claim is a distinct
+            // one-shot namespace, so named writer batches never share a finalize scope.
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(capability.handle_id.as_str().as_bytes());
+            let claim_ns = CanonicalHash::from_bytes(hasher.finalize().into());
             (
-                sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
-                    "handle-storage-1".to_owned(),
-                ),
-                grant.namespace_hash,
-                OpaqueKernelCapabilityAuthenticatorV1::new("auth-storage-1".to_owned()),
+                capability.handle_id.clone(),
+                claim_ns,
+                OpaqueKernelCapabilityAuthenticatorV1::new(format!(
+                    "auth-{}",
+                    capability.handle_id.as_str()
+                )),
             )
         };
         Ok(ManagedStorageNamespaceHandleV1::new(

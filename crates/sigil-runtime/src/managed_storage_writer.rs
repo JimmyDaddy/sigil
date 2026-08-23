@@ -207,6 +207,88 @@ impl ManagedStorageWriterAdapterV1 {
         Ok(resolved)
     }
 
+    /// Admit + prepare one NAMED namespace (per-session/per-object sub-key). The key must be
+    /// opaque-bounded and safe for an authority-declared sub-leaf (no separators, no dots
+    /// beyond one, length capped); illegal keys are rejected before any filesystem access.
+    pub fn acquire_named(
+        &self,
+        channel: StorageWriterChannelV1,
+        key: &str,
+    ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
+        if key.is_empty()
+            || key.len() > 64
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        {
+            return Err(ManagedStorageWriterErrorV1::LeafEscapesAnchor);
+        }
+        let (semantic_owner, capability_family, leaf) = channel.mapping();
+        let path = self.leaf_path(leaf)?.join(key);
+        std::fs::create_dir_all(&path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+            let flushed = std::fs::symlink_metadata(&path)
+                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+            if flushed.permissions().mode() & 0o077 != 0 {
+                return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
+            }
+        }
+        let capability = match &self.storage_issuer {
+            Some(broker) => {
+                let mut key_ns = [0x6bu8; 32];
+                for (index, byte) in key.bytes().take(32).enumerate() {
+                    key_ns[index] = byte;
+                }
+                let proof = broker.seal_storage_namespace_proof(
+                    capability_family,
+                    CanonicalHash::from_bytes(key_ns),
+                );
+                broker
+                    .issue_storage_namespace_capability(proof)
+                    .map_err(|error| {
+                        ManagedStorageWriterErrorV1::AdmissionFailed(format!("{error:?}"))
+                    })?
+            }
+            None => {
+                sigil_kernel::managed_storage::ValidatedStorageAdmissionCapabilityV1::startup_probe(
+                )
+            }
+        };
+        let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
+            semantic_owner,
+            capability_family,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            source:
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash: self.cutover_manifest_hash,
+                    application_generation: 1,
+                },
+            owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new(
+                "application".to_owned(),
+            )),
+            journal_scope: ResourceJournalScopeV1::Application,
+        };
+        let handle = self
+            .service
+            .admit_namespace(request, capability)
+            .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        Ok(ManagedStorageWriterLeaseV1 {
+            handle,
+            path,
+            channel,
+        })
+    }
+
     /// Admit + prepare: one namespace per batch, physical leaf owner-only (0700) and no-follow.
     pub fn acquire(
         &self,
@@ -592,16 +674,61 @@ mod tests {
             .admit_namespace(request, capability)
             .expect("probe admit");
         assert_ne!(probe_handle.namespace_hash, hash(3));
+        let probe_ns = probe_handle.namespace_hash;
         service
             .finalize_namespace(probe_handle, "probe".to_owned())
             .expect("probe finalize");
-        // The broker-backed writer batch binds the production grant namespace and works after
-        // the probe finalized its own namespace.
+        // The broker-backed writer batch binds a claim-scoped namespace (distinct from the
+        // probe claim) and works after the probe finalized its own namespace.
         let lease = writer
             .acquire(StorageWriterChannelV1::SessionLog)
             .expect("acquire");
-        assert_eq!(lease.namespace_digest(), hash(3));
+        assert_ne!(lease.namespace_digest(), probe_ns);
+        assert_ne!(
+            lease.namespace_digest(),
+            CanonicalHash::from_bytes([0u8; 32])
+        );
         writer.write_record(&lease, b"seq=1").expect("write");
         writer.finalize(lease).expect("finalize");
+    }
+    #[test]
+    fn r71_sw_named_acquire_per_session_and_unsafe_key_rejected() {
+        use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(session_log_grant()).expect("register");
+        let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
+            std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
+                table,
+                AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: hash(8),
+                },
+            ));
+        let broker = std::sync::Arc::new(KernelCapabilityBrokerV1::new());
+        let writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
+            service.clone(),
+            dir.path().to_path_buf(),
+            hash(10),
+            broker,
+        );
+        let lease_a = writer
+            .acquire_named(StorageWriterChannelV1::SessionLog, "session-abc")
+            .expect("named a");
+        assert!(lease_a.path().ends_with("session-log/session-abc"));
+        writer.write_record(&lease_a, b"seq=1").expect("write");
+        writer.finalize(lease_a).expect("finalize a");
+        let lease_b = writer
+            .acquire_named(StorageWriterChannelV1::SessionLog, "session-def")
+            .expect("named b");
+        writer.finalize(lease_b).expect("finalize b");
+        // Unsafe sub-key rejected before any filesystem access.
+        let error = writer
+            .acquire_named(StorageWriterChannelV1::SessionLog, "../escape")
+            .expect_err("unsafe");
+        assert!(matches!(
+            error,
+            ManagedStorageWriterErrorV1::LeafEscapesAnchor
+        ));
     }
 }
