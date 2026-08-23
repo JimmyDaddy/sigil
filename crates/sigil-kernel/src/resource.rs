@@ -954,6 +954,15 @@ pub enum StorageAdmissionSourceClassV1 {
     RecoveryAction,
 }
 
+/// Closed storage logical key kinds.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum StorageLogicalKeyKindV1 {
+    Object,
+    Stream,
+}
+
 /// Closed storage admission purpose classes.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,

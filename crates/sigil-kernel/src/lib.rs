@@ -30,6 +30,7 @@ pub mod intent_lineage;
 pub mod intent_operation;
 pub mod managed_execution;
 pub mod managed_file_access;
+pub mod managed_storage;
 pub mod memory;
 pub mod model_route;
 pub mod mutation;

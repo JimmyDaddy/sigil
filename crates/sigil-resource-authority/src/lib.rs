@@ -7,6 +7,8 @@
 pub mod allocator;
 pub mod arena;
 pub mod bootstrap;
+pub mod factory;
+pub mod file_access_stub;
 pub mod identity;
 pub mod journal;
 pub mod lease;
@@ -14,6 +16,7 @@ pub mod maintenance;
 pub mod provider_registry;
 pub mod quota;
 pub mod spawn_protocol;
+pub mod storage;
 
 pub use bootstrap::{
     AuthorityBootstrapObjectClassV1, AuthorityBootstrapRoots, BootstrapErrorV1,
