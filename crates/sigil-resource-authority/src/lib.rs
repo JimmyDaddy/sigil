@@ -5,8 +5,10 @@
 //! sink, and never imports authority local types in the reverse direction.
 
 pub mod bootstrap;
+pub mod identity;
 pub mod journal;
 pub mod lease;
+pub mod maintenance;
 pub mod provider_registry;
 pub mod quota;
 pub mod spawn_protocol;
