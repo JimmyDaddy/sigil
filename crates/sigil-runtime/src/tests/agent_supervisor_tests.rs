@@ -1334,7 +1334,8 @@ fn provider_capability_hash(capabilities: &ProviderCapabilities) -> Result<Strin
 }
 
 fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
-    AgentRunOptions {
+    tool_authority: None,
+        AgentRunOptions {
         workspace_root,
         max_turns: Some(4),
         tool_timeout_secs: 30,
@@ -1346,7 +1347,8 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
         permission_mode_override: None,
-    }
+    tool_authority: None,
+        }
 }
 
 fn step(id: &str) -> Result<TaskStepSpec> {

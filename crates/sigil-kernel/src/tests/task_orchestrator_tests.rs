@@ -10559,6 +10559,7 @@ fn options() -> AgentRunOptions {
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: crate::CompactionConfig::default(),
         permission_mode_override: None,
+        tool_authority: None,
     }
 }
 

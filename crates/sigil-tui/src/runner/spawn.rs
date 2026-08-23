@@ -179,7 +179,14 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 workspace_root.clone(),
                 interaction_mode,
                 Some(permission_mode_override.as_ref().clone()),
-            );
+            )
+            .with_tool_authority(std::sync::Arc::new(
+                authority_composition
+                    .as_ref()
+                    .expect("boot composition")
+                    .tool_authority
+                    .clone(),
+            ));
             let extension_network_admission = ExtensionProcessNetworkAdmission::new(
                 options.permission_context.network_policy,
                 false,

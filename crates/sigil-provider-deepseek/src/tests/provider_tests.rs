@@ -298,6 +298,7 @@ async fn real_agent_tool_turn_user_turn_and_resume_preserve_deepseek_cache_prefi
         permission_mode_override: None,
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
 
     let mut session = Session::new("deepseek", "deepseek-v4-flash")

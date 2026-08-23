@@ -40,6 +40,7 @@ pub fn build_run_options(
         ),
         memory_config: root_config.memory.clone(),
         compaction_config,
+        tool_authority: None,
     }
 }
 

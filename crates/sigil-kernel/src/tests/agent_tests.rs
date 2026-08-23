@@ -1026,6 +1026,7 @@ async fn agent_run_input_applies_output_token_ceiling_to_provider_request() -> R
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -3288,6 +3289,7 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -3371,6 +3373,7 @@ async fn final_answer_context_is_injected_before_the_post_tool_provider_request(
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -3430,6 +3433,7 @@ async fn evolving_final_answer_context_replaces_the_prior_snapshot() -> Result<(
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -3486,6 +3490,7 @@ async fn settled_final_answer_context_removes_the_prior_snapshot() -> Result<()>
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -3540,6 +3545,7 @@ async fn stable_final_answer_blocker_is_bounded_without_a_global_turn_limit() ->
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -3594,6 +3600,7 @@ async fn evolving_final_answer_blocker_replaces_its_transient_snapshot() -> Resu
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -3668,6 +3675,7 @@ async fn agent_tool_delegate_receives_root_logical_run_identity() -> Result<()> 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -3706,6 +3714,7 @@ async fn agent_forwards_tool_progress_without_persisting_progress_as_tool_messag
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -3783,6 +3792,7 @@ async fn agent_waits_for_foreground_terminal_result_before_next_provider_request
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -3858,6 +3868,7 @@ async fn agent_injects_durable_recorder_and_exact_route_into_tool_context() -> R
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -3910,6 +3921,7 @@ async fn required_agent_delegation_blocks_direct_final_answer() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -3968,6 +3980,7 @@ async fn required_agent_delegation_fails_before_provider_without_agent_tools() -
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -4028,6 +4041,7 @@ async fn required_agent_delegation_ignores_failed_agent_tool_before_final_answer
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -4104,6 +4118,7 @@ async fn required_agent_delegation_accepts_terminal_agent_tool_result() -> Resul
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -4158,6 +4173,7 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4323,6 +4339,7 @@ async fn agent_initial_frozen_request_is_dispatched_without_rebuilding_or_duplic
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4416,6 +4433,7 @@ async fn agent_initial_frozen_request_binds_only_its_first_physical_attempt() ->
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4473,6 +4491,7 @@ async fn agent_provider_turn_records_synced_physical_attempt_lifecycle() -> Resu
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4563,6 +4582,7 @@ async fn agent_final_answer_appends_not_applicable_readiness_for_read_only_run()
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4635,6 +4655,7 @@ async fn agent_final_answer_appends_inconclusive_readiness_for_external_process_
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4698,6 +4719,7 @@ async fn agent_final_answer_appends_missing_readiness_after_workspace_mutation()
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4779,6 +4801,7 @@ async fn agent_max_turns_appends_run_lifecycle_durable_events() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -4866,6 +4889,7 @@ async fn required_agent_delegation_ignores_spawn_agent_without_terminal_result()
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -4943,6 +4967,7 @@ async fn required_agent_delegation_ignores_non_terminal_agent_tool_result() -> R
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -5012,6 +5037,7 @@ async fn agent_persists_text_before_tool_call_on_assistant_message() -> Result<(
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5071,6 +5097,7 @@ async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Resu
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5136,6 +5163,7 @@ async fn agent_reconciles_terminal_start_mutation_when_terminal_cancel_finishes_
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5200,6 +5228,7 @@ async fn agent_run_input_transient_context_does_not_append_user_message() -> Res
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5258,6 +5287,7 @@ async fn agent_run_input_preserves_consecutive_same_content_as_distinct_user_ent
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5320,6 +5350,7 @@ async fn safe_persistence_retry_reuses_durable_user_id_without_duplicate_append(
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
 
     agent
@@ -5373,6 +5404,7 @@ async fn safe_persistence_user_url_is_exact_once_in_request_but_never_in_session
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5434,6 +5466,7 @@ async fn safe_persistence_uses_session_url_registrar_across_distinct_turns_and_o
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
 
     agent
@@ -5690,6 +5723,7 @@ async fn safe_persistence_follow_up_request_sees_source_id_without_raw_url_mater
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
     let raw_url = "https://example.com/report?token=known-follow-up-secret";
     agent
@@ -5759,6 +5793,7 @@ async fn agent_run_output_reports_approval_denials() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -5806,6 +5841,7 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5874,6 +5910,7 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -5985,6 +6022,7 @@ async fn task_guidance_semantics_are_selected_by_model_tool_call() -> Result<()>
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6073,6 +6111,7 @@ async fn task_guidance_model_can_choose_a_new_plan_version() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6164,6 +6203,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6277,6 +6317,7 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
     let mut exact_user = ModelMessage::user(exact_prompt);
     exact_user.id = durable_user.id.clone();
@@ -6436,6 +6477,7 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6489,6 +6531,7 @@ async fn task_participant_system_contract_precedes_the_step_prompt() -> Result<(
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6561,6 +6604,7 @@ async fn task_participant_forces_toolless_finalization_after_post_mutation_read_
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6649,6 +6693,7 @@ async fn task_participant_forces_toolless_finalization_after_repeated_semantic_f
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6849,6 +6894,7 @@ async fn task_participant_enters_repair_replan_after_empty_finalization() -> Res
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -6912,6 +6958,7 @@ async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -7006,6 +7053,7 @@ async fn automatic_task_routing_degrades_to_ordinary_conversation_after_two_unty
                 permission_mode_override: None,
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -7125,6 +7173,7 @@ async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_
                 permission_mode_override: None,
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -7296,6 +7345,7 @@ async fn queued_follow_up_is_injected_at_the_final_answer_gate_without_interrupt
                 permission_mode_override: None,
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -7393,6 +7443,7 @@ async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -7479,6 +7530,7 @@ async fn manual_task_routing_exposes_neither_automatic_policy_nor_tool() -> Resu
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -7567,6 +7619,7 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -7781,6 +7834,7 @@ async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Res
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -8064,6 +8118,7 @@ async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Re
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -8174,6 +8229,7 @@ async fn automatic_routing_plan_review_decision_records_route_and_starts_review(
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -8290,6 +8346,7 @@ async fn routing_microturn_executes_approved_memory_before_starting_plan_review(
                     writable: true,
                 },
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -8450,6 +8507,7 @@ async fn bound_writable_memory_routing_fails_closed_without_canonical_tools() ->
                     writable: true,
                 },
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -8530,6 +8588,7 @@ async fn manual_conversation_keeps_writable_memory_prompt_when_tools_are_availab
                     writable: true,
                 },
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -8616,6 +8675,7 @@ async fn review_first_capability_hides_the_direct_task_decision() -> Result<()> 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -8696,6 +8756,7 @@ async fn chat_decision_records_route_decision_without_effect_authority() -> Resu
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -9406,6 +9467,7 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -9481,6 +9543,7 @@ async fn expired_approval_has_no_user_decision_receipt_and_never_executes() -> R
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -9563,6 +9626,7 @@ async fn execution_replan_rejects_symlink_retargeted_to_protected_path_after_app
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut event_handler,
             &mut approval_handler,
@@ -9620,6 +9684,7 @@ async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> R
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
     let mut session = Session::new("mock-session-grant-read", "mock-model");
     let mut handler = RecordingEventHandler::default();
@@ -9732,6 +9797,7 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
     let mut session = Session::load_from_store(
         "mock-session-grant-cargo-check",
@@ -9838,6 +9904,7 @@ async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Resul
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10092,6 +10159,7 @@ async fn prepared_execution_rejects_approval_time_argument_changes() -> Result<(
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10152,6 +10220,7 @@ async fn agent_stops_after_max_turns_without_failing_the_run() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -10192,6 +10261,7 @@ async fn agent_returns_tool_error_when_permission_subject_is_invalid() -> Result
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10241,6 +10311,7 @@ async fn agent_returns_approval_required_in_headless_ask_mode() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10291,6 +10362,7 @@ async fn agent_tool_default_permission_mode_cannot_relax_local_baseline() -> Res
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10355,6 +10427,7 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10412,6 +10485,7 @@ async fn agent_requests_approval_for_external_directory_when_disabled_interactiv
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10468,6 +10542,7 @@ async fn agent_returns_external_directory_required_when_disabled_headless() -> R
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10527,6 +10602,7 @@ async fn agent_requests_approval_for_external_directory_default_ask() -> Result<
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10591,6 +10667,7 @@ async fn agent_allows_external_directory_when_all_gates_allow() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -10630,6 +10707,7 @@ async fn agent_tracks_response_handles_background_tasks_and_continuation_state()
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -10713,6 +10791,7 @@ async fn agent_restores_previous_response_handle_from_durable_control_state() ->
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -10759,6 +10838,7 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -11335,6 +11415,7 @@ async fn agent_returns_internal_tool_result_for_unknown_registered_name() -> Res
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -11385,6 +11466,7 @@ async fn agent_records_failed_execution_when_tool_returns_error() -> Result<()> 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -11436,6 +11518,7 @@ async fn agent_returns_invalid_input_when_egress_payload_audit_fails() -> Result
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -11484,6 +11567,7 @@ async fn agent_returns_invalid_input_when_permission_plan_fails() -> Result<()> 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -11537,6 +11621,7 @@ async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -11585,6 +11670,7 @@ async fn agent_records_internal_error_when_tool_execution_fails() -> Result<()> 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
             &mut approval_handler,
@@ -11641,6 +11727,7 @@ async fn agent_retries_confirmed_pre_dispatch_connect_failures_with_frozen_reque
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -11754,6 +11841,7 @@ async fn agent_recovers_zero_effect_tls_close_in_same_logical_turn() -> Result<(
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -12848,6 +12936,7 @@ async fn agent_bounds_confirmed_pre_dispatch_connect_retries() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -12918,6 +13007,7 @@ async fn bound_initial_physical_attempt_keeps_identity_then_uses_durable_recover
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -12985,6 +13075,7 @@ async fn agent_cancellation_during_connect_backoff_starts_no_new_attempt() -> Re
             permission_context: crate::PermissionEvaluationContext::default(),
             memory_config: MemoryConfig::with_enabled(false),
             compaction_config: CompactionConfig::default(),
+            tool_authority: None,
         },
         &mut handler,
     );
@@ -13067,6 +13158,7 @@ async fn agent_never_retries_an_unclassified_pre_stream_transport_error() -> Res
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -13127,6 +13219,7 @@ async fn agent_blocks_unclassified_provider_stream_errors_with_safe_recovery_con
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -13222,6 +13315,7 @@ async fn agent_persists_exact_pre_generation_context_rejection() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -13277,6 +13371,7 @@ async fn agent_never_marks_a_rejection_after_durable_output_as_pre_generation() 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -13334,6 +13429,7 @@ async fn agent_never_marks_a_rejection_after_observed_generation_as_pre_generati
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -13388,6 +13484,7 @@ async fn typed_provider_protocol_violation_is_durable_post_output_evidence() -> 
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -14014,6 +14111,7 @@ async fn agent_binds_text_only_continuation_state_to_final_assistant_message() -
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -14065,6 +14163,7 @@ async fn agent_binds_tool_continuation_state_without_reasoning_to_assistant_mess
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -14176,6 +14275,7 @@ async fn agent_surfaces_invalid_permission_plan_with_usage_snapshot() -> Result<
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -14254,6 +14354,7 @@ async fn agent_surfaces_invalid_tool_default_mode_and_egress_audit_errors() -> R
                     permission_context: crate::PermissionEvaluationContext::default(),
                     memory_config: MemoryConfig::with_enabled(false),
                     compaction_config: CompactionConfig::default(),
+                    tool_authority: None,
                 },
                 &mut handler,
             )
@@ -14319,6 +14420,7 @@ async fn agent_wraps_execute_errors_as_internal_tool_results() -> Result<()> {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -14556,6 +14658,7 @@ fn scripted_run_options(max_turns: usize) -> AgentRunOptions {
         permission_mode_override: None,
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     }
 }
 
@@ -16018,6 +16121,7 @@ async fn unknown_family_command_variants_share_command_family_session_grant() ->
         permission_mode_override: None,
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        tool_authority: None,
     };
     let mut session = Session::load_from_store(
         "mock-session-grant-unknown-family",

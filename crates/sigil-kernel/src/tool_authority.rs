@@ -26,9 +26,20 @@ pub enum KernelToolAuthorityErrorV1 {
 }
 
 /// Kernel-owned tool authority facade (broker + adjudicator, one per application).
+#[derive(Clone)]
 pub struct KernelToolAuthorityV1 {
     file_access: Arc<dyn ManagedFileAccessServiceV1>,
     broker: Arc<KernelCapabilityBrokerV1>,
+}
+
+impl std::fmt::Debug for KernelToolAuthorityV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KernelToolAuthorityV1")
+            .field("adjudicator", &"attached")
+            .field("broker", &"attached")
+            .finish()
+    }
 }
 
 impl KernelToolAuthorityV1 {

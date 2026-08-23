@@ -226,6 +226,8 @@ pub struct AgentRunOptions {
     pub permission_mode_override: Option<crate::PermissionModeOverride>,
     pub memory_config: MemoryConfig,
     pub compaction_config: CompactionConfig,
+    /// RFC-0071 R71.6: kernel tool authority facade for file-tool adjudication (None=legacy).
+    pub tool_authority: Option<std::sync::Arc<crate::tool_authority::KernelToolAuthorityV1>>,
 }
 
 struct ChannelToolProgressSink {
@@ -582,6 +584,18 @@ impl fmt::Debug for AgentRunInput {
                     .map(|_| "configured"),
             )
             .finish()
+    }
+}
+
+impl AgentRunOptions {
+    /// Attaches the tool authority facade (runtime composition provides the single instance).
+    #[must_use]
+    pub fn with_tool_authority(
+        mut self,
+        tool_authority: std::sync::Arc<crate::tool_authority::KernelToolAuthorityV1>,
+    ) -> Self {
+        self.tool_authority = Some(tool_authority);
+        self
     }
 }
 
@@ -3057,6 +3071,9 @@ where
                             options.permission_context.network_policy,
                             false,
                         );
+                if let Some(tool_authority) = options.tool_authority.as_ref() {
+                    tool_ctx = tool_ctx.with_tool_authority(tool_authority.clone());
+                }
                 tool_ctx = tool_ctx.with_logical_run_id(logical_run_id.clone());
                 if let Some(grant) = agent_invocation_grant.as_ref() {
                     tool_ctx = tool_ctx.with_agent_invocation_grant(grant.clone());

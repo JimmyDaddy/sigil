@@ -452,6 +452,7 @@ async fn hosted_tool_agent_emits_and_persists_only_finalized_text() {
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
                 permission_mode_override: None,
+                tool_authority: None,
             },
             &mut handler,
         )
@@ -568,6 +569,7 @@ fn hosted_options(workspace_root: &std::path::Path) -> AgentRunOptions {
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
         permission_mode_override: None,
+        tool_authority: None,
     }
 }
 
