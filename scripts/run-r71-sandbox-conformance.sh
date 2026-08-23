@@ -42,4 +42,8 @@ run_suite sandbox-environment cargo test -p sigil-sandbox --lib environment -- -
 run_suite sandbox-receipt cargo test -p sigil-sandbox --lib receipt -- --format terse
 run_suite sandbox-backends cargo test -p sigil-sandbox --lib backends -- --format terse
 run_suite sandbox-toolchain cargo test -p sigil-sandbox --lib toolchain -- --format terse
+run_suite sandbox-local cargo test -p sigil-sandbox --lib local -- --format terse
+run_suite sandbox-launch-plan cargo test -p sigil-sandbox --lib launch_plan -- --format terse
+run_suite sandbox-principal cargo test -p sigil-sandbox --lib principal -- --format terse
+run_suite sandbox-output cargo test -p sigil-sandbox --lib output -- --format terse
 echo "r71-sandbox-conformance: all fixtures passed"
