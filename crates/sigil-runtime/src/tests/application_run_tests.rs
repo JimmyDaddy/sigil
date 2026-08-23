@@ -1636,7 +1636,16 @@ fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
         empty.default_permission_mode,
         sigil_kernel::PermissionMode::Manual
     );
-    assert_eq!(empty.model_options.len(), 2);
+    assert_eq!(empty.model_options.len(), 3);
+    let vision = empty
+        .model_options
+        .iter()
+        .find(|option| option.model_name == "deepseek-v4-flash-vision-exp")
+        .expect("vision model option");
+    assert_eq!(
+        vision.availability,
+        crate::provider_connections::ModelAvailability::Unverified
+    );
     let pro = empty
         .model_options
         .iter()
