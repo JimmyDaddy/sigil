@@ -1,75 +1,1207 @@
-# RFC-0071 R71.0 characterization case ids.
-schema_version = 1
-manifest_hash = "r71-conformance-v1-012"
+# RFC-0071 R71.5 frozen conformance inventory: all 200 required fault cases.
+# Each case id maps exactly one injected frontier with a non-zero expected assertion count.
+# A runner implementing only part of a range, folding multiple frontiers into one case, or
+# filling holes with ignored/skipped cases fails.
+schema_version = 2
+manifest_hash = "r71-conformance-v2-200"
 
 [[cases]]
-case_id = "R71-C-001"
-case_name = "feedback_storage_fixture_is_explicitly_injected_isolated_root"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-001"
+case_name = "fault_EXP_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-002"
-case_name = "feedback_storage_fixture_never_inherits_active_session_scratch"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-002"
+case_name = "fault_EXP_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-003"
-case_name = "feedback_storage_fixture_no_follow_cleanup_completes"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-003"
+case_name = "fault_EXP_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-004"
-case_name = "descendant_symlink_is_leaf_report_not_followed"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-004"
+case_name = "fault_EXP_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-005"
-case_name = "poisoned_sibling_blocks_unrelated_session_provisioning"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-005"
+case_name = "fault_EXP_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-006"
-case_name = "gc_permanently_skips_invalid_namespace_without_quarantine"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-006"
+case_name = "fault_EXP_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-007"
-case_name = "same_session_double_lease_releases_early"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-007"
+case_name = "fault_EXP_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-008"
-case_name = "repeated_new_call_hits_same_provision_failure_without_blocker_gate"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-008"
+case_name = "fault_EXP_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-009"
-case_name = "two_terminal_tasks_release_early_while_sibling_live"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-009"
+case_name = "fault_EXP_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-010"
-case_name = "missing_home_xdg_falls_back_to_cwd_sigil_state_cache"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-010"
+case_name = "fault_EXP_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-011"
-case_name = "cargo_test_pipe_tail_false_green_guard"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-011"
+case_name = "fault_EXP_0011"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true
-
 [[cases]]
-case_id = "R71-C-012"
-case_name = "workspace_cross_session_blast_radius_is_measurement_only"
-fixture_class = "characterization"
+case_id = "R71-F-EXP-012"
+case_name = "fault_EXP_0012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-013"
+case_name = "fault_EXP_0013"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-014"
+case_name = "fault_EXP_0014"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-015"
+case_name = "fault_EXP_0015"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-016"
+case_name = "fault_EXP_0016"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-017"
+case_name = "fault_EXP_0017"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-018"
+case_name = "fault_EXP_0018"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-019"
+case_name = "fault_EXP_0019"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-020"
+case_name = "fault_EXP_0020"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-021"
+case_name = "fault_EXP_0021"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-022"
+case_name = "fault_EXP_0022"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-023"
+case_name = "fault_EXP_0023"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-EXP-024"
+case_name = "fault_EXP_0024"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-001"
+case_name = "fault_BOR_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-002"
+case_name = "fault_BOR_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-003"
+case_name = "fault_BOR_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-004"
+case_name = "fault_BOR_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-005"
+case_name = "fault_BOR_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-006"
+case_name = "fault_BOR_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-007"
+case_name = "fault_BOR_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-008"
+case_name = "fault_BOR_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-009"
+case_name = "fault_BOR_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-010"
+case_name = "fault_BOR_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-011"
+case_name = "fault_BOR_0011"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-012"
+case_name = "fault_BOR_0012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-013"
+case_name = "fault_BOR_0013"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-014"
+case_name = "fault_BOR_0014"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-015"
+case_name = "fault_BOR_0015"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-016"
+case_name = "fault_BOR_0016"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-017"
+case_name = "fault_BOR_0017"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOR-018"
+case_name = "fault_BOR_0018"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-001"
+case_name = "fault_BOOT_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-002"
+case_name = "fault_BOOT_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-003"
+case_name = "fault_BOOT_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-004"
+case_name = "fault_BOOT_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-005"
+case_name = "fault_BOOT_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-006"
+case_name = "fault_BOOT_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-007"
+case_name = "fault_BOOT_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-008"
+case_name = "fault_BOOT_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-009"
+case_name = "fault_BOOT_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BOOT-010"
+case_name = "fault_BOOT_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-001"
+case_name = "fault_REC_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-002"
+case_name = "fault_REC_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-003"
+case_name = "fault_REC_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-004"
+case_name = "fault_REC_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-005"
+case_name = "fault_REC_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-006"
+case_name = "fault_REC_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-007"
+case_name = "fault_REC_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-008"
+case_name = "fault_REC_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-009"
+case_name = "fault_REC_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-REC-010"
+case_name = "fault_REC_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-001"
+case_name = "fault_BRG_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-002"
+case_name = "fault_BRG_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-003"
+case_name = "fault_BRG_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-004"
+case_name = "fault_BRG_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-005"
+case_name = "fault_BRG_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-006"
+case_name = "fault_BRG_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-007"
+case_name = "fault_BRG_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-008"
+case_name = "fault_BRG_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-009"
+case_name = "fault_BRG_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-010"
+case_name = "fault_BRG_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-011"
+case_name = "fault_BRG_0011"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-BRG-012"
+case_name = "fault_BRG_0012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-001"
+case_name = "fault_MUT_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-002"
+case_name = "fault_MUT_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-003"
+case_name = "fault_MUT_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-004"
+case_name = "fault_MUT_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-005"
+case_name = "fault_MUT_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-006"
+case_name = "fault_MUT_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-007"
+case_name = "fault_MUT_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-008"
+case_name = "fault_MUT_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-009"
+case_name = "fault_MUT_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-010"
+case_name = "fault_MUT_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-011"
+case_name = "fault_MUT_0011"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-012"
+case_name = "fault_MUT_0012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-013"
+case_name = "fault_MUT_0013"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-014"
+case_name = "fault_MUT_0014"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-015"
+case_name = "fault_MUT_0015"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-016"
+case_name = "fault_MUT_0016"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-017"
+case_name = "fault_MUT_0017"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-018"
+case_name = "fault_MUT_0018"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-019"
+case_name = "fault_MUT_0019"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-020"
+case_name = "fault_MUT_0020"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-021"
+case_name = "fault_MUT_0021"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-MUT-022"
+case_name = "fault_MUT_0022"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-001"
+case_name = "fault_CAT_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-002"
+case_name = "fault_CAT_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-003"
+case_name = "fault_CAT_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-004"
+case_name = "fault_CAT_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-005"
+case_name = "fault_CAT_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-006"
+case_name = "fault_CAT_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-007"
+case_name = "fault_CAT_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-008"
+case_name = "fault_CAT_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-009"
+case_name = "fault_CAT_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CAT-010"
+case_name = "fault_CAT_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-001"
+case_name = "fault_ATT_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-002"
+case_name = "fault_ATT_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-003"
+case_name = "fault_ATT_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-004"
+case_name = "fault_ATT_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-005"
+case_name = "fault_ATT_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-006"
+case_name = "fault_ATT_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-007"
+case_name = "fault_ATT_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-008"
+case_name = "fault_ATT_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-009"
+case_name = "fault_ATT_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-010"
+case_name = "fault_ATT_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-011"
+case_name = "fault_ATT_0011"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-012"
+case_name = "fault_ATT_0012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-013"
+case_name = "fault_ATT_0013"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ATT-014"
+case_name = "fault_ATT_0014"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-001"
+case_name = "fault_CHILD_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-002"
+case_name = "fault_CHILD_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-003"
+case_name = "fault_CHILD_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-004"
+case_name = "fault_CHILD_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-005"
+case_name = "fault_CHILD_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-006"
+case_name = "fault_CHILD_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-007"
+case_name = "fault_CHILD_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CHILD-008"
+case_name = "fault_CHILD_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-UPD-001"
+case_name = "fault_UPD_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-UPD-002"
+case_name = "fault_UPD_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-UPD-003"
+case_name = "fault_UPD_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-UPD-004"
+case_name = "fault_UPD_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-UPD-005"
+case_name = "fault_UPD_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-UPD-006"
+case_name = "fault_UPD_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-001"
+case_name = "fault_KEY_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-002"
+case_name = "fault_KEY_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-003"
+case_name = "fault_KEY_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-004"
+case_name = "fault_KEY_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-005"
+case_name = "fault_KEY_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-006"
+case_name = "fault_KEY_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-007"
+case_name = "fault_KEY_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-008"
+case_name = "fault_KEY_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-009"
+case_name = "fault_KEY_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-KEY-010"
+case_name = "fault_KEY_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-001"
+case_name = "fault_SPN_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-002"
+case_name = "fault_SPN_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-003"
+case_name = "fault_SPN_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-004"
+case_name = "fault_SPN_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-005"
+case_name = "fault_SPN_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-006"
+case_name = "fault_SPN_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-007"
+case_name = "fault_SPN_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-008"
+case_name = "fault_SPN_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-009"
+case_name = "fault_SPN_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-010"
+case_name = "fault_SPN_0010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-011"
+case_name = "fault_SPN_0011"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-012"
+case_name = "fault_SPN_0012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-013"
+case_name = "fault_SPN_0013"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-014"
+case_name = "fault_SPN_0014"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-015"
+case_name = "fault_SPN_0015"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-016"
+case_name = "fault_SPN_0016"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-017"
+case_name = "fault_SPN_0017"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-018"
+case_name = "fault_SPN_0018"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-019"
+case_name = "fault_SPN_0019"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-020"
+case_name = "fault_SPN_0020"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-021"
+case_name = "fault_SPN_0021"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-022"
+case_name = "fault_SPN_0022"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-023"
+case_name = "fault_SPN_0023"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-024"
+case_name = "fault_SPN_0024"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-025"
+case_name = "fault_SPN_0025"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-026"
+case_name = "fault_SPN_0026"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-027"
+case_name = "fault_SPN_0027"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-028"
+case_name = "fault_SPN_0028"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-029"
+case_name = "fault_SPN_0029"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-030"
+case_name = "fault_SPN_0030"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-031"
+case_name = "fault_SPN_0031"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-SPN-032"
+case_name = "fault_SPN_0032"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-001"
+case_name = "fault_RET_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-002"
+case_name = "fault_RET_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-003"
+case_name = "fault_RET_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-004"
+case_name = "fault_RET_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-005"
+case_name = "fault_RET_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-006"
+case_name = "fault_RET_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-007"
+case_name = "fault_RET_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-RET-008"
+case_name = "fault_RET_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-001"
+case_name = "fault_JRN_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-002"
+case_name = "fault_JRN_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-003"
+case_name = "fault_JRN_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-004"
+case_name = "fault_JRN_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-005"
+case_name = "fault_JRN_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-006"
+case_name = "fault_JRN_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-007"
+case_name = "fault_JRN_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-JRN-008"
+case_name = "fault_JRN_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-001"
+case_name = "fault_ABR_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-002"
+case_name = "fault_ABR_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-003"
+case_name = "fault_ABR_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-004"
+case_name = "fault_ABR_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-005"
+case_name = "fault_ABR_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-006"
+case_name = "fault_ABR_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-007"
+case_name = "fault_ABR_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-ABR-008"
+case_name = "fault_ABR_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
 required = true

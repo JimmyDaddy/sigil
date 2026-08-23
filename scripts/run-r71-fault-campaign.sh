@@ -20,6 +20,29 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Verify the frozen 200-case manifest before running any fixture.
+python3 - "$ROOT/dev/governance/r71-conformance-inventory-v1.toml" <<'MANIFEST_CHECK'
+import sys, tomllib
+from pathlib import Path
+doc = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+cases = doc.get("cases", [])
+if len(cases) != 200:
+    print(f"FAIL: manifest must contain exactly 200 required fault cases, found {len(cases)}", file=sys.stderr)
+    sys.exit(1)
+ids = [c.get("case_id") for c in cases]
+if len(ids) != len(set(ids)):
+    print("FAIL: duplicate case ids", file=sys.stderr)
+    sys.exit(1)
+for c in cases:
+    if not c.get("required", False):
+        print(f"FAIL: case {c.get('case_id')} must be required", file=sys.stderr)
+        sys.exit(1)
+    if c.get("expected_assertion_count", 0) != 1:
+        print(f"FAIL: case {c.get('case_id')} expected assertion count must be 1", file=sys.stderr)
+        sys.exit(1)
+print(f"PASS(manifest): {len(cases)} exact fault cases frozen")
+MANIFEST_CHECK
+
 run_suite() {
   local label="$1"
   shift
