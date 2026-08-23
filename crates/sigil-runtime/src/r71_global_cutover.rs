@@ -361,6 +361,34 @@ impl RuntimeGlobalCutoverV1 {
     }
 }
 
+impl RuntimeGlobalCutoverV1 {
+    /// Legacy-epoch decision for boot paths that have not yet cut over: by contract the legacy
+    /// epoch requires no readiness probes. The manifest is content-addressed and persisted by
+    /// the boot owner; the session-open guard still applies (legacy sessions only).
+    pub fn legacy_decision(
+        instance_id: impl Into<String>,
+        application_generation: u64,
+        authority_generation: AuthorityGeneration,
+    ) -> Self {
+        let mut manifest = CutoverManifestV1 {
+            schema_version: 1,
+            application_instance_id: instance_id.into(),
+            selected_epoch: StartupEpochV1::Legacy,
+            application_generation,
+            authority_generation_digest: authority_generation.instance_hash,
+            mandatory_readiness: Vec::new(),
+            manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
+        };
+        manifest.manifest_hash = compute_manifest_hash(&manifest);
+        debug_assert!(validate_cutover_manifest(&manifest).is_ok());
+        Self {
+            manifest,
+            gate_ok: true,
+            gate_error: None,
+        }
+    }
+}
+
 /// Closed cutover manifest persistence error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CutoverPersistenceErrorV1 {
@@ -886,5 +914,17 @@ mod tests {
             error,
             sigil_kernel::cutover_manifest::CutoverErrorV1::AlreadyPublished
         ));
+    }
+    #[test]
+    fn resource_global_cutover_legacy_decision_is_content_addressed() {
+        let services = shadow_services(mock_issuer());
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let _ = (&services, &recovery);
+        let a = RuntimeGlobalCutoverV1::legacy_decision("inst-legacy-dec", 1, authority());
+        let b = RuntimeGlobalCutoverV1::legacy_decision("inst-legacy-dec", 1, authority());
+        assert_eq!(a.manifest().manifest_hash, b.manifest().manifest_hash);
+        assert!(a.gate().is_ok());
+        assert_eq!(a.manifest().mandatory_readiness.len(), 0);
+        assert_eq!(a.manifest().selected_epoch, StartupEpochV1::Legacy);
     }
 }

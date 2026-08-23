@@ -26,7 +26,6 @@ use tokio::{
     net::TcpListener,
 };
 
-use super::intent_cli::IntentCommand;
 use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
     RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
