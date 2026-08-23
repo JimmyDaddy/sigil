@@ -603,6 +603,10 @@ pub struct ToolContext {
     /// RFC-0071 R71.6: kernel-owned tool authority facade (file tools adjudicate through this
     /// before any borrowed-subject filesystem access); None on legacy paths.
     tool_authority: Option<Arc<crate::tool_authority::KernelToolAuthorityV1>>,
+    /// RFC-0071 R71.6: sealed V3 plan/decision for this call (file tools use the V3 file-access
+    /// ref for admission); None on the legacy V2 path.
+    v3_plan: Option<Arc<crate::permission_plan_v3::ToolPermissionPlanV3>>,
+    v3_decision: Option<Arc<crate::permission_plan_v3::ToolPermissionDecisionV3>>,
     progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
     cancellation: Option<crate::RunCancellationHandle>,
@@ -681,6 +685,8 @@ impl ToolContext {
             approved_subjects: Vec::new(),
             prepared_permission_plan: None,
             tool_authority: None,
+            v3_plan: None,
+            v3_decision: None,
             progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
             cancellation: None,
@@ -811,6 +817,51 @@ impl ToolContext {
     ) -> Self {
         self.tool_authority = Some(tool_authority);
         self
+    }
+
+    /// Sealed V3 plan for this call (None on the legacy V2 path).
+    #[must_use]
+    pub fn sealed_v3_plan(&self) -> Option<&crate::permission_plan_v3::ToolPermissionPlanV3> {
+        self.v3_plan.as_deref()
+    }
+
+    /// Sealed V3 decision for this call (None on the legacy V2 path).
+    #[must_use]
+    pub fn sealed_v3_decision(
+        &self,
+    ) -> Option<&crate::permission_plan_v3::ToolPermissionDecisionV3> {
+        self.v3_decision.as_deref()
+    }
+
+    /// Attaches the sealed V3 plan and its approved decision (single call; integrity is
+    /// enforced at adjudication time).
+    #[must_use]
+    pub fn with_v3_admission(
+        mut self,
+        plan: Arc<crate::permission_plan_v3::ToolPermissionPlanV3>,
+        decision: Option<Arc<crate::permission_plan_v3::ToolPermissionDecisionV3>>,
+    ) -> Self {
+        self.v3_plan = Some(plan);
+        self.v3_decision = decision;
+        self
+    }
+
+    /// Guards one file operation through the sealed V3 admission: None when no V3 plan is
+    /// attached (legacy V2 path), Err on refusal or decision drift (fail closed), the receipt
+    /// otherwise.
+    pub fn adjudicate_v3_file_operation(
+        &self,
+        operation: crate::managed_file_access::ManagedFileOperationV1,
+    ) -> Result<
+        Option<crate::managed_file_access::ManagedFileAccessResultV1>,
+        crate::tool_authority::KernelToolAuthorityErrorV1,
+    > {
+        crate::tool_authority::adjudicate_v3_file_operation(
+            self.sealed_v3_plan(),
+            self.sealed_v3_decision(),
+            self.tool_authority(),
+            operation,
+        )
     }
 
     /// Guards one borrowed-subject file operation through the attached authority: None when no

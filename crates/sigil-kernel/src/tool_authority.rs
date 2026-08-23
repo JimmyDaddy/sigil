@@ -163,6 +163,44 @@ pub fn adjudicate_guarded_tool_operation(
         .map(Some)
 }
 
+/// Builds the ToolPermissionPlan admission binding for a tool operation when the context
+/// carries the sealed V3 plan and decision (integrity: decision must bind the same plan hash;
+/// a mismatch fails closed). None when no V3 plan is attached (legacy V2 path).
+pub fn adjudicate_v3_file_operation(
+    v3_plan: Option<&crate::permission_plan_v3::ToolPermissionPlanV3>,
+    v3_decision: Option<&crate::permission_plan_v3::ToolPermissionDecisionV3>,
+    tool_authority: Option<&KernelToolAuthorityV1>,
+    operation: ManagedFileOperationV1,
+) -> Result<Option<ManagedFileAccessResultV1>, KernelToolAuthorityErrorV1> {
+    let Some(plan) = v3_plan else {
+        return Ok(None);
+    };
+    let Some(file_ref) = plan.managed_file_access_plan.as_ref() else {
+        return Err(KernelToolAuthorityErrorV1::BindingKind(
+            "tool declares no managed file access plan".to_owned(),
+        ));
+    };
+    // Decision integrity: the approved decision must bind the exact sealed plan; a drift here
+    // means the tool call was approved against a different plan and must be refused.
+    if let Some(decision) = v3_decision {
+        if decision.plan_hash != plan.plan_hash {
+            return Err(KernelToolAuthorityErrorV1::BindingKind(
+                "decision binds a different plan hash".to_owned(),
+            ));
+        }
+    }
+    let binding = v3_file_access_binding(
+        plan.plan_hash,
+        v3_decision
+            .map(|decision| decision.decision_hash)
+            .unwrap_or(CanonicalHash::from_bytes([0u8; 32])),
+        CanonicalHash::from_bytes([0u8; 32]),
+        CanonicalHash::from_bytes([0u8; 32]),
+        file_ref,
+    );
+    adjudicate_guarded_tool_operation(tool_authority, &binding, &file_ref.subject_ref, operation)
+}
+
 #[cfg(test)]
 #[path = "tests/tool_authority_mapping_tests.rs"]
 mod mapping_tests;
