@@ -112,3 +112,46 @@ fn operation_digest_for(
 #[cfg(test)]
 #[path = "tests/tool_authority_tests.rs"]
 mod tests;
+
+/// Builds the ToolPermissionPlan admission binding from the V3 file-access plan ref plus the
+/// decision/continuity digests the runtime holds (pure mapping; no I/O).
+pub fn v3_file_access_binding(
+    permission_plan_hash: CanonicalHash,
+    decision_hash: CanonicalHash,
+    approval_continuity_hash: CanonicalHash,
+    tool_start_event_digest: CanonicalHash,
+    file_ref: &crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1,
+) -> ManagedFileAdmissionBindingV1 {
+    ManagedFileAdmissionBindingV1::ToolPermissionPlan {
+        permission_plan_hash,
+        decision_hash,
+        approval_continuity_hash,
+        tool_start_event_digest,
+        file_access_plan_hash: file_ref.plan_hash,
+        file_subject_binding_hash: file_ref.subject_binding_hash,
+        file_resolver_proof_digest: file_ref.resolver_proof_digest,
+        file_authority_generation: file_ref.authority_generation,
+        workspace_mutation_activation: None,
+    }
+}
+
+/// Guards one tool file operation through the context's attached authority: None when no
+/// authority is attached (legacy path), Err on any refusal (fail closed), the receipt
+/// otherwise. Tools call this before any filesystem access when the subject is borrowed.
+pub fn adjudicate_guarded_tool_operation(
+    tool_authority: Option<&KernelToolAuthorityV1>,
+    binding: &ManagedFileAdmissionBindingV1,
+    subject_ref: &OpaquePermissionSubjectRef,
+    operation: ManagedFileOperationV1,
+) -> Result<Option<ManagedFileAccessResultV1>, KernelToolAuthorityErrorV1> {
+    let Some(authority) = tool_authority else {
+        return Ok(None);
+    };
+    authority
+        .adjudicate_tool_file_access(binding.clone(), subject_ref, operation)
+        .map(Some)
+}
+
+#[cfg(test)]
+#[path = "tests/tool_authority_mapping_tests.rs"]
+mod mapping_tests;

@@ -600,6 +600,9 @@ pub struct ToolContext {
     explicit_network_approval: bool,
     approved_subjects: Vec<ToolSubject>,
     prepared_permission_plan: Option<Arc<ToolPermissionPlanV2>>,
+    /// RFC-0071 R71.6: kernel-owned tool authority facade (file tools adjudicate through this
+    /// before any borrowed-subject filesystem access); None on legacy paths.
+    tool_authority: Option<Arc<crate::tool_authority::KernelToolAuthorityV1>>,
     progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
     cancellation: Option<crate::RunCancellationHandle>,
@@ -677,6 +680,7 @@ impl ToolContext {
             explicit_network_approval: false,
             approved_subjects: Vec::new(),
             prepared_permission_plan: None,
+            tool_authority: None,
             progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
             cancellation: None,
@@ -791,6 +795,41 @@ impl ToolContext {
     #[must_use]
     pub fn prepared_permission_plan(&self) -> Option<&ToolPermissionPlanV2> {
         self.prepared_permission_plan.as_deref()
+    }
+
+    /// RFC-0071 R71.6 tool authority facade attached to this context (None on legacy paths).
+    #[must_use]
+    pub fn tool_authority(&self) -> Option<&crate::tool_authority::KernelToolAuthorityV1> {
+        self.tool_authority.as_deref()
+    }
+
+    /// Attaches the tool authority facade (runtime composition provides the single instance).
+    #[must_use]
+    pub fn with_tool_authority(
+        mut self,
+        tool_authority: Arc<crate::tool_authority::KernelToolAuthorityV1>,
+    ) -> Self {
+        self.tool_authority = Some(tool_authority);
+        self
+    }
+
+    /// Guards one borrowed-subject file operation through the attached authority: None when no
+    /// authority is attached (legacy), Err on any refusal (fail closed), the receipt otherwise.
+    pub fn adjudicate_file_operation(
+        &self,
+        binding: &crate::managed_file_access::ManagedFileAdmissionBindingV1,
+        subject_ref: &crate::resource::OpaquePermissionSubjectRef,
+        operation: crate::managed_file_access::ManagedFileOperationV1,
+    ) -> Result<
+        Option<crate::managed_file_access::ManagedFileAccessResultV1>,
+        crate::tool_authority::KernelToolAuthorityErrorV1,
+    > {
+        crate::tool_authority::adjudicate_guarded_tool_operation(
+            self.tool_authority(),
+            binding,
+            subject_ref,
+            operation,
+        )
     }
 
     #[must_use]
