@@ -1,0 +1,17 @@
+[package]
+name = "sigil-resource-authority"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sigil-kernel = { path = "../sigil-kernel" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

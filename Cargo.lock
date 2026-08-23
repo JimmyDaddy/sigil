@@ -5632,6 +5632,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-process-observer"
+version = "0.0.1-beta.4"
+dependencies = [
+ "sigil-kernel",
+ "sigil-process",
+ "tempfile",
+]
+
+[[package]]
 name = "sigil-provider-anthropic"
 version = "0.0.1-beta.4"
 dependencies = [
@@ -5734,6 +5743,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-resource-authority"
+version = "0.0.1-beta.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "sigil-runtime"
 version = "0.0.1-beta.4"
 dependencies = [
@@ -5772,6 +5792,19 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "sigil-sandbox"
+version = "0.0.1-beta.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "sigil-process",
+ "sigil-resource-authority",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

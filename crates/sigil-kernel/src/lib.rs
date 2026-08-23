@@ -28,12 +28,15 @@ pub mod intent_impact;
 pub mod intent_layer;
 pub mod intent_lineage;
 pub mod intent_operation;
+pub mod managed_execution;
+pub mod managed_file_access;
 pub mod memory;
 pub mod model_route;
 pub mod mutation;
 pub mod orchestration;
 pub mod permission;
 pub mod permission_plan;
+pub mod permission_plan_v3;
 pub mod persistence;
 pub mod plan;
 pub mod plugin;
@@ -45,6 +48,8 @@ pub mod provider_request_material;
 pub mod provider_timeout;
 pub mod public_task_event;
 pub mod recovery;
+pub mod resource;
+pub mod resource_recovery_surface;
 pub mod resume;
 pub mod secret;
 pub mod session;
@@ -922,3 +927,7 @@ pub use write_isolation::{
     WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope, WriteLeaseState,
     apply_parent_changeset_mutation_batch, resolve_merge_review_parent_mutation,
 };
+
+#[cfg(test)]
+#[path = "resource_tests.rs"]
+mod resource_tests;

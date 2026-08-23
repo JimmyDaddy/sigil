@@ -1,0 +1,15 @@
+[package]
+name = "sigil-process-observer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sigil-kernel = { path = "../sigil-kernel" }
+sigil-process = { path = "../sigil-process" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
