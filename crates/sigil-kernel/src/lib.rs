@@ -3,6 +3,7 @@ pub mod agent_thread;
 pub mod approval;
 pub mod cache_layout;
 pub mod cancellation;
+pub mod capability_issuer;
 pub mod changeset;
 pub mod checkpoint;
 pub mod compaction_economics_v2;
