@@ -107,6 +107,25 @@ pub struct ToolFileAccessAdmissionTokenV1 {
 }
 
 impl ToolFileAccessAdmissionTokenV1 {
+    /// Kernel-broker-issued tool token (real admission; binding/op/subject are kernel-bound
+    /// at seal time, never fabricated by a consumer).
+    pub(crate) fn broker_issued(
+        binding: ManagedFileAdmissionBindingV1,
+        subject_binding_hash: CanonicalHash,
+        operation_digest: CanonicalHash,
+    ) -> Self {
+        Self {
+            binding,
+            subject_binding_hash,
+            operation_digest,
+            claim: NonCloneOneShotClaim {
+                _authenticator: OpaqueKernelCapabilityAuthenticatorV1::new(
+                    "broker-file-access".to_owned(),
+                ),
+            },
+        }
+    }
+
     /// Kernel-owned qualification fixture handle (R71.6 conformance only). Production
     /// issuance is the capability broker inside kernel; this constructor exists so the
     /// authority adjudicator conformance fixtures can build an exact token shape.

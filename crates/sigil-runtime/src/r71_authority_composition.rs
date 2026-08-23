@@ -28,6 +28,9 @@ pub struct RuntimeAuthorityCompositionV1 {
     pub services: RuntimeManagedResourceServicesV1,
     pub storage_writer: ManagedStorageWriterAdapterV1,
     pub declared_channels: BTreeSet<StorageWriterChannelV1>,
+    /// The composition's single real capability broker: surfaces seal/issue through this
+    /// (one-shot proofs; kernel-side binding).
+    pub broker: std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
 }
 
 /// Closed composition error.
@@ -117,12 +120,13 @@ pub fn compose_runtime_authority(
         storage,
         state_anchor.to_path_buf(),
         cutover_manifest_hash,
-        broker,
+        std::sync::Arc::clone(&broker),
     );
     Ok(RuntimeAuthorityCompositionV1 {
         services,
         storage_writer,
         declared_channels: declared.iter().copied().collect(),
+        broker: std::sync::Arc::clone(&broker),
     })
 }
 

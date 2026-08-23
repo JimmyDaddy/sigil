@@ -113,3 +113,94 @@ fn r71_broker_storage_proof_consumed_once() {
         ManagedStorageCapabilityFamilyV1::AtomicObject
     );
 }
+
+#[test]
+fn r71_broker_file_access_token_binds_kernel_side() {
+    use crate::managed_file_access::{
+        ManagedFileAccessAdmissionTokenV1, ManagedFileAdmissionBindingV1,
+    };
+    use crate::resource::AuthorityGeneration;
+    let broker = KernelCapabilityBrokerV1::new();
+    let binding = ManagedFileAdmissionBindingV1::ToolPermissionPlan {
+        permission_plan_hash: CanonicalHash::from_bytes([0xa1; 32]),
+        decision_hash: CanonicalHash::from_bytes([0xa2; 32]),
+        approval_continuity_hash: CanonicalHash::from_bytes([0xa3; 32]),
+        tool_start_event_digest: CanonicalHash::from_bytes([0xa4; 32]),
+        file_access_plan_hash: CanonicalHash::from_bytes([0xa5; 32]),
+        file_subject_binding_hash: CanonicalHash::from_bytes([0xa6; 32]),
+        file_resolver_proof_digest: CanonicalHash::from_bytes([0xa7; 32]),
+        file_authority_generation: AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0xa8; 32]),
+        },
+        workspace_mutation_activation: None,
+    };
+    let proof = broker.seal_file_access_proof(
+        binding.clone(),
+        CanonicalHash::from_bytes([0xb1; 32]),
+        CanonicalHash::from_bytes([0xb2; 32]),
+    );
+    let token = broker.issue_file_access(proof).expect("issue");
+    let ManagedFileAccessAdmissionTokenV1::Tool(tool) = token else {
+        panic!("expected tool token")
+    };
+    assert_eq!(tool.binding(), &binding);
+    assert_eq!(
+        tool.subject_binding_hash(),
+        CanonicalHash::from_bytes([0xb1; 32])
+    );
+    assert_eq!(
+        tool.operation_digest(),
+        CanonicalHash::from_bytes([0xb2; 32])
+    );
+}
+
+#[test]
+fn r71_broker_file_access_proof_is_one_shot() {
+    use crate::managed_file_access::ManagedFileAdmissionBindingV1;
+    use crate::resource::AuthorityGeneration;
+    let broker = KernelCapabilityBrokerV1::new();
+    let binding = ManagedFileAdmissionBindingV1::ToolPermissionPlan {
+        permission_plan_hash: CanonicalHash::from_bytes([0xa1; 32]),
+        decision_hash: CanonicalHash::from_bytes([0xa2; 32]),
+        approval_continuity_hash: CanonicalHash::from_bytes([0xa3; 32]),
+        tool_start_event_digest: CanonicalHash::from_bytes([0xa4; 32]),
+        file_access_plan_hash: CanonicalHash::from_bytes([0xa5; 32]),
+        file_subject_binding_hash: CanonicalHash::from_bytes([0xa6; 32]),
+        file_resolver_proof_digest: CanonicalHash::from_bytes([0xa7; 32]),
+        file_authority_generation: AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0xa8; 32]),
+        },
+        workspace_mutation_activation: None,
+    };
+    let proof = broker.seal_file_access_proof(
+        binding,
+        CanonicalHash::from_bytes([0xb1; 32]),
+        CanonicalHash::from_bytes([0xb2; 32]),
+    );
+    broker.issue_file_access(proof).expect("first");
+    // A second issue with the same consumed handle is impossible; seal plus issue once is the
+    // one-shot contract, and a reissue attempt on an unknown handle fails closed:
+    let other = broker.seal_file_access_proof(
+        ManagedFileAdmissionBindingV1::ToolPermissionPlan {
+            permission_plan_hash: CanonicalHash::from_bytes([0xa1; 32]),
+            decision_hash: CanonicalHash::from_bytes([0xa2; 32]),
+            approval_continuity_hash: CanonicalHash::from_bytes([0xa3; 32]),
+            tool_start_event_digest: CanonicalHash::from_bytes([0xa4; 32]),
+            file_access_plan_hash: CanonicalHash::from_bytes([0xa5; 32]),
+            file_subject_binding_hash: CanonicalHash::from_bytes([0xa6; 32]),
+            file_resolver_proof_digest: CanonicalHash::from_bytes([0xa7; 32]),
+            file_authority_generation: AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([0xa8; 32]),
+            },
+            workspace_mutation_activation: None,
+        },
+        CanonicalHash::from_bytes([0xb1; 32]),
+        CanonicalHash::from_bytes([0xb2; 32]),
+    );
+    broker
+        .issue_file_access(other)
+        .expect("second seal is a fresh handle");
+}

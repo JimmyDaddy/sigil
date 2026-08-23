@@ -282,6 +282,17 @@ pub struct KernelCapabilityBrokerV1 {
             ),
         >,
     >,
+    /// proof handle -> (binding, subject binding hash, operation digest) for tool file access.
+    file_access_bindings: std::sync::Mutex<
+        std::collections::BTreeMap<
+            String,
+            (
+                crate::managed_file_access::ManagedFileAdmissionBindingV1,
+                CanonicalHash,
+                CanonicalHash,
+            ),
+        >,
+    >,
     views: std::sync::Mutex<std::collections::BTreeMap<String, VerifiedExecutionBundleViewV1>>,
     sequence: std::sync::atomic::AtomicU64,
 }
@@ -292,6 +303,7 @@ impl KernelCapabilityBrokerV1 {
             table: std::sync::Mutex::new(KernelCapabilityTableV1::new()),
             proofs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             storage_families: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            file_access_bindings: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             views: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sequence: std::sync::atomic::AtomicU64::new(1),
         }
@@ -434,9 +446,22 @@ impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
 
     fn issue_file_access(
         &self,
-        _proof: SealedExecutionAdmissionProofV1,
+        proof: SealedExecutionAdmissionProofV1,
     ) -> Result<ManagedFileAccessAdmissionTokenV1, CapabilityIssueErrorV1> {
-        Err(CapabilityIssueErrorV1::FacetUnavailable)
+        use crate::managed_file_access::ToolFileAccessAdmissionTokenV1;
+        let (binding, subject_binding_hash, operation_digest) = self
+            .file_access_bindings
+            .lock()
+            .expect("file access bindings")
+            .remove(proof.handle_id.as_str())
+            .ok_or(CapabilityIssueErrorV1::UnknownOrConsumed)?;
+        Ok(ManagedFileAccessAdmissionTokenV1::Tool(
+            ToolFileAccessAdmissionTokenV1::broker_issued(
+                binding,
+                subject_binding_hash,
+                operation_digest,
+            ),
+        ))
     }
 
     fn verify_execution_bundle(
@@ -459,6 +484,32 @@ impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
 }
 
 impl KernelCapabilityBrokerV1 {
+    /// Seals a tool file-access admission proof; the binding, subject binding hash and
+    /// operation digest stay kernel-side (a consumer can never choose token content).
+    pub fn seal_file_access_proof(
+        &self,
+        binding: crate::managed_file_access::ManagedFileAdmissionBindingV1,
+        subject_binding_hash: CanonicalHash,
+        operation_digest: CanonicalHash,
+    ) -> SealedExecutionAdmissionProofV1 {
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let handle = format!("proof-{seq}");
+        let proof = SealedExecutionAdmissionProofV1 {
+            handle_id: crate::resource::OpaqueKernelProofHandleId::new(handle.clone()),
+            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(format!(
+                "auth-{seq}"
+            )),
+            kind: ProofKindV1::FileAccessTool,
+        };
+        self.file_access_bindings
+            .lock()
+            .expect("file access bindings")
+            .insert(handle, (binding, subject_binding_hash, operation_digest));
+        proof
+    }
+
     /// Issues the storage admission CAPABILITY for a sealed storage-namespace proof (the
     /// kernel port's admission parameter; the broker binds family/namespace kernel-side).
     pub fn issue_storage_namespace_capability(
