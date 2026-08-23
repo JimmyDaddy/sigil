@@ -39,6 +39,7 @@ run_suite() {
 }
 
 run_suite authority-bootstrap cargo test -p sigil-resource-authority --lib bootstrap -- --format terse
+run_suite authority-arena cargo test -p sigil-resource-authority --lib arena -- --format terse
 run_suite authority-lifecycle cargo test -p sigil-resource-authority --lib lease -- --format terse
 run_suite authority-journal cargo test -p sigil-resource-authority --lib journal -- --format terse
 run_suite authority-quota cargo test -p sigil-resource-authority --lib quota -- --format terse
