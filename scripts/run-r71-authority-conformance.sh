@@ -43,4 +43,7 @@ run_suite authority-arena cargo test -p sigil-resource-authority --lib arena -- 
 run_suite authority-lifecycle cargo test -p sigil-resource-authority --lib lease -- --format terse
 run_suite authority-journal cargo test -p sigil-resource-authority --lib journal -- --format terse
 run_suite authority-quota cargo test -p sigil-resource-authority --lib quota -- --format terse
+run_suite authority-identity cargo test -p sigil-resource-authority --lib identity -- --format terse
+run_suite authority-maintenance cargo test -p sigil-resource-authority --lib maintenance -- --format terse
+run_suite authority-allocator cargo test -p sigil-resource-authority --lib allocator -- --format terse
 echo "r71-authority-conformance: all fixtures passed"
