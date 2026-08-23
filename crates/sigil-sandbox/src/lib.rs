@@ -7,6 +7,7 @@
 pub mod backends;
 pub mod environment;
 pub mod launch_plan;
+pub mod local;
 pub mod provider;
 pub mod receipt;
 pub mod toolchain;
