@@ -92,6 +92,16 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
 ) -> Result<SpawnedAgentWorker> {
+    // RFC-0071 R71.6: the TUI surface selects the epoch exactly once per stable instance id
+    // (same manifest next to the config as CLI/HTTP) and fails closed before opening any
+    // session store; a later new-epoch binary rejects this legacy manifest.
+    let boot_cutover = std::sync::Arc::new(
+        sigil_runtime::r71_global_cutover::legacy_boot_decision(&config_path)
+            .map_err(anyhow::Error::new)?,
+    );
+    boot_cutover
+        .admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy)
+        .map_err(anyhow::Error::new)?;
     let attachment_lease = if let Some(attachment) = supplied_attachment {
         let store = JsonlSessionStore::new(&session_log_path)?;
         anyhow::ensure!(
@@ -186,6 +196,21 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 let _ = message_tx.send(WorkerMessage::Notice(
                     "连接配置已更新，已使用当前配置继续；服务端上下文缓存已重置。".to_owned(),
                 ));
+            }
+            // Session-open guard applies inside the worker too: every session store open in
+            // this epoch must be an admitted (legacy) open, fail closed otherwise.
+            if let Err(error) = boot_cutover.admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy) {
+                tracing::debug!(%error, "session epoch guard rejected the open");
+                send_worker_startup_recovery(
+                    &message_tx,
+                    sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
+                    vec![
+                        sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                        sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                    ],
+                    true,
+                );
+                return;
             }
             let store = match JsonlSessionStore::new(&session_log_path) {
                 Ok(store) => store,

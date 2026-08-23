@@ -387,6 +387,18 @@ impl RuntimeGlobalCutoverV1 {
             gate_error: None,
         }
     }
+
+    /// Session-open guard for this decision: the binary epoch is the manifest epoch, so a
+    /// surface that selected legacy admits legacy sessions only (a new-epoch binary would
+    /// reject them via the kernel guard).
+    pub fn admit_session_open(&self, session_epoch: StartupEpochV1) -> Result<(), CutoverErrorV1> {
+        sigil_kernel::cutover_manifest::admit_session_open(
+            sigil_kernel::cutover_manifest::SessionOpenAttemptV1 {
+                session_epoch,
+                binary_epoch: self.manifest.selected_epoch,
+            },
+        )
+    }
 }
 
 /// Closed cutover manifest persistence error.
@@ -459,15 +471,13 @@ pub enum CutoverBootErrorV1 {
     Guard(CutoverErrorV1),
 }
 
-/// Shared boot attachment for every surface (CLI headless/machine, HTTP serve, desktop
-/// launcher): selects the legacy epoch exactly once per stable instance id derived from the
-/// config seed, persists the content-addressed manifest next to it, runs the mandatory
-/// readiness guard (fail closed) and the legacy session-open guard. A failure aborts startup
-/// before any run is prepared.
-pub fn attach_legacy_boot_cutover(
-    services: crate::application_run::ApplicationRunServices,
+/// Legacy boot decision: selects the legacy epoch exactly once per stable instance id
+/// derived from the config seed, persists the content-addressed manifest next to it and
+/// replays an existing manifest instead of overwriting (tamper -> fail closed; valid but
+/// drifting generation -> AlreadyPublished). Shared by every boot surface.
+pub fn legacy_boot_decision(
     seed: &std::path::Path,
-) -> Result<crate::application_run::ApplicationRunServices, CutoverBootErrorV1> {
+) -> Result<RuntimeGlobalCutoverV1, CutoverBootErrorV1> {
     let instance_id = format!(
         "sigil:{}",
         sigil_kernel::external::sha256_hex(seed.to_string_lossy().as_bytes())
@@ -501,6 +511,18 @@ pub fn attach_legacy_boot_cutover(
             .save_manifest(&manifest_path)
             .map_err(CutoverBootErrorV1::Persistence)?;
     }
+    Ok(cutover)
+}
+
+/// Shared boot attachment for ApplicationRunServices surfaces (CLI headless/machine, HTTP
+/// serve, desktop launcher): selects the epoch via [legacy_boot_decision], attaches the
+/// decision and runs the mandatory readiness guard (fail closed) plus the legacy session-open
+/// guard. A failure aborts startup before any run is prepared.
+pub fn attach_legacy_boot_cutover(
+    services: crate::application_run::ApplicationRunServices,
+    seed: &std::path::Path,
+) -> Result<crate::application_run::ApplicationRunServices, CutoverBootErrorV1> {
+    let cutover = legacy_boot_decision(seed)?;
     let services = services.with_global_cutover(cutover);
     services
         .require_cutover_or_fail()
@@ -1047,5 +1069,22 @@ mod tests {
         let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
         let error = attach_legacy_boot_cutover(services, &seed).expect_err("tampered");
         assert!(matches!(error, CutoverBootErrorV1::Persistence(_)));
+    }
+    #[test]
+    fn resource_global_cutover_legacy_boot_decision_guards_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seed = dir.path().join("config.toml");
+        std::fs::write(&seed, b"[core]\n").expect("seed");
+        let decision = legacy_boot_decision(&seed).expect("decision");
+        assert!(decision.gate().is_ok());
+        assert_eq!(decision.manifest().selected_epoch, StartupEpochV1::Legacy);
+        // The decision itself enforces the session-open boundary (surface independent).
+        decision
+            .admit_session_open(StartupEpochV1::Legacy)
+            .expect("legacy open");
+        let error = decision
+            .admit_session_open(StartupEpochV1::NewCurrentSchema)
+            .expect_err("legacy binary rejects new session");
+        assert!(matches!(error, CutoverErrorV1::LegacyBinaryRejected));
     }
 }
