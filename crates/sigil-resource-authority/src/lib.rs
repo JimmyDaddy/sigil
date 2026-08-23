@@ -41,3 +41,11 @@ mod fault_journal_tests;
 #[cfg(test)]
 #[path = "tests/fault_bootstrap_tests.rs"]
 mod fault_bootstrap_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_recovery_tests.rs"]
+mod fault_recovery_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_authority_bootstrap_tests.rs"]
+mod fault_authority_bootstrap_tests;
