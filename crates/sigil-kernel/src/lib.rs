@@ -42,6 +42,7 @@ pub mod persistence;
 pub mod plan;
 pub mod plugin;
 pub mod process_environment;
+pub mod process_observation;
 pub mod projection;
 pub mod provider;
 pub mod provider_error;
