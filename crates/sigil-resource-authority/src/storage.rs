@@ -22,7 +22,9 @@ pub struct AuthorityStorageGrantTableV1 {
     grants: BTreeMap<String, StorageAdmissionGrantV1>,
     #[allow(dead_code)]
     consumed_capabilities: BTreeMap<String, ()>,
-    finalized_namespaces: BTreeMap<String, ()>,
+    /// Finalized namespace registry: one-shot per namespace (interior mutability because
+    /// finalize is &self on the kernel port).
+    finalized_namespaces: std::sync::Mutex<BTreeMap<String, ()>>,
 }
 
 impl AuthorityStorageGrantTableV1 {
@@ -30,8 +32,25 @@ impl AuthorityStorageGrantTableV1 {
         Self {
             grants: BTreeMap::new(),
             consumed_capabilities: BTreeMap::new(),
-            finalized_namespaces: BTreeMap::new(),
+            finalized_namespaces: std::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Mark the namespace bound to `handle` finalized exactly once.
+    fn record_finalized(
+        &self,
+        namespace_hash: &CanonicalHash,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        let key = namespace_hash.to_hex();
+        let mut finalized = self
+            .finalized_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::HandleFinalized)?;
+        if finalized.contains_key(&key) {
+            return Err(ManagedStorageErrorV1::HandleFinalized);
+        }
+        finalized.insert(key, ());
+        Ok(())
     }
 
     /// Registers a durable grant; duplicate grant ids are rejected.
@@ -102,13 +121,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
         let _ = reason;
-        if self
-            .table
-            .finalized_namespaces
-            .contains_key(&handle.namespace_hash.to_hex())
-        {
-            return Err(ManagedStorageErrorV1::HandleFinalized);
-        }
+        self.table.record_finalized(&handle.namespace_hash)?;
         let mut receipt = ManagedStorageStorageReceiptV1 {
             grant_id: OpaqueStorageGrantId::new("grant-1".to_owned()),
             grant_hash: CanonicalHash::from_bytes([1u8; 32]),

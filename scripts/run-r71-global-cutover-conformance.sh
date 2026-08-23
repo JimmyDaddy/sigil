@@ -47,4 +47,6 @@ run_suite kernel-current-schema-only cargo test -p sigil-kernel --lib current_sc
 run_suite sandbox-managed-execution cargo test -p sigil-sandbox --lib r71_managed -- --format terse
 # Runtime: application-global cutover coordinator + boot seam fail-closed behavior.
 run_suite runtime-global-cutover cargo test -p sigil-runtime --lib resource_global_cutover -- --format terse
+# Runtime: managed storage writer seam (admit -> owner-only leaf -> append -> finalize receipt).
+run_suite runtime-storage-writer cargo test -p sigil-runtime --lib r71_sw -- --format terse
 echo "r71-global-cutover-conformance: all fixtures passed"

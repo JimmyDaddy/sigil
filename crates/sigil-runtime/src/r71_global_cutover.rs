@@ -557,7 +557,13 @@ mod tests {
             semantic_owner: owner,
             purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
             purpose_hash: CanonicalHash::from_bytes([0x32; 32]),
-            namespace_hash: CanonicalHash::from_bytes([0x33; 32]),
+            namespace_hash: {
+                let mut ns = [0x33u8; 32];
+                for (index, byte) in grant_id.bytes().take(16).enumerate() {
+                    ns[index] = byte;
+                }
+                CanonicalHash::from_bytes(ns)
+            },
             journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
             journal_scope_hash: CanonicalHash::from_bytes([0x34; 32]),
             resource_ref: sigil_kernel::resource::ResourceRefV1 {
