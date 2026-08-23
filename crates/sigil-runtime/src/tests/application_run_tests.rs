@@ -942,6 +942,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         request,
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     )?;
 
     let lifecycle = application_conversation_lifecycle(&binding.session_log_path)?;
@@ -1410,6 +1411,7 @@ credential = {{ source = "none" }}
         unconfirmed,
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     ) {
         Ok(_) => panic!("unconfirmed egress change must not prepare a run"),
         Err(error) => error,
@@ -1434,6 +1436,7 @@ credential = {{ source = "none" }}
         stale_confirmation,
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     ) {
         Ok(_) => panic!("a recovery binding must stale when the durable frontier advances"),
         Err(error) => error,
@@ -1464,6 +1467,7 @@ credential = {{ source = "none" }}
         confirmed,
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     )?;
     assert_eq!(
         prepared.session.session_scope_id(),
@@ -1594,6 +1598,7 @@ credential = {{ source = "none" }}
         request,
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     )?;
     assert_eq!(
         prepared.session.session_scope_id(),
@@ -1814,6 +1819,7 @@ fn run_model_selection_switches_the_existing_session_and_rejects_stale_capabilit
             stale_effort,
             Arc::new(ApplicationSessionLeaseManager::new()),
             false,
+            None,
         ),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
@@ -1829,6 +1835,7 @@ fn run_model_selection_switches_the_existing_session_and_rejects_stale_capabilit
         request.clone(),
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     )?;
     assert_eq!(
         prepared.session.session_scope_id(),
@@ -1924,6 +1931,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         request,
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     )?;
     assert_eq!(
         prepared.session.session_scope_id(),
@@ -2040,6 +2048,7 @@ credential = { source = "none" }
             rejected,
             Arc::new(ApplicationSessionLeaseManager::new()),
             false,
+            None,
         ) {
             Ok(_) => panic!("replacement selection must require the exact route binding"),
             Err(error) => error,
@@ -2058,6 +2067,7 @@ credential = { source = "none" }
         ),
         Arc::new(ApplicationSessionLeaseManager::new()),
         false,
+        None,
     )?;
     assert_eq!(
         prepared.session.session_scope_id(),
@@ -6234,5 +6244,49 @@ max_plan_steps = 64
         Some(sigil_kernel::TaskExecutionPhaseV1::Completed)
     );
     assert!(tasks.active_blocker(&task_link.task_id).is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let state = temp.path().join("state");
+    let exec = temp.path().join("exec");
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&exec)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let planner: std::sync::Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+        std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        ));
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &exec,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x5a; 32]),
+        planner,
+        &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
+    )?;
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_authority_composition(composition);
+    let request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "inspect the workspace",
+        "run-composed-authority",
+    );
+    let prepared = prepare_application_run(request, &services).await?;
+    let options = prepared.run_options();
+    assert!(
+        options.tool_authority.is_some(),
+        "a boot composition must be handed to the agent run options"
+    );
     Ok(())
 }

@@ -947,6 +947,13 @@ impl PreparedApplicationRun {
         (self.execution, self.control)
     }
 
+    /// Returns the prepared agent run options (RFC-0071 R71.6: includes the composed kernel
+    /// tool authority when the boot surface attached a composition).
+    #[must_use]
+    pub fn run_options(&self) -> &AgentRunOptions {
+        &self.execution.options
+    }
+
     /// Commits one validated queued promotion behind the application ownership boundary, then
     /// replaces the ordinary run input.
     ///
@@ -3500,8 +3507,16 @@ async fn prepare_application_run_internal(
             })?;
     let session_leases = Arc::clone(&services.session_leases);
     let task_executor_attached = services.task_role_provider_builder.is_some();
+    let tool_authority = services
+        .authority_composition()
+        .map(|composition| std::sync::Arc::new(composition.tool_authority.clone()));
     let prepared = tokio::task::spawn_blocking(move || {
-        prepare_application_run_blocking(request, session_leases, task_executor_attached)
+        prepare_application_run_blocking(
+            request,
+            session_leases,
+            task_executor_attached,
+            tool_authority,
+        )
     })
     .await
     .map_err(|error| ApplicationRunPrepareError::Internal {
@@ -5247,6 +5262,7 @@ fn prepare_application_run_blocking(
     request: ApplicationRunRequest,
     session_leases: Arc<ApplicationSessionLeaseManager>,
     task_executor_attached: bool,
+    tool_authority: Option<std::sync::Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
 ) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
     if let Some(constraints) = request.constraints.as_ref()
         && (constraints.max_turns == 0
@@ -5518,6 +5534,12 @@ fn prepare_application_run_blocking(
         request.interaction.kernel_mode(),
         None,
     );
+    // RFC-0071 R71.6: the boot surface already composed the real authority; hand the kernel
+    // tool authority facade to the agent run so in-process file tools adjudicate against sealed
+    // V3 plans (absent composition: legacy/shadow runs simply keep None).
+    if let Some(authority) = tool_authority {
+        options = options.with_tool_authority(authority);
+    }
     if let Some(permission_mode) = request.permission_mode {
         options.permission_config.mode = permission_mode;
     }

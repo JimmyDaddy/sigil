@@ -183,7 +183,7 @@ pub async fn prepare_application_task_continuation(
     };
     let session_leases = Arc::clone(&services.session_leases);
     let prepared = tokio::task::spawn_blocking(move || {
-        prepare_application_run_blocking(blocking_request, session_leases, true)
+        prepare_application_run_blocking(blocking_request, session_leases, true, None)
     })
     .await
     .map_err(|error| ApplicationRunPrepareError::Internal {

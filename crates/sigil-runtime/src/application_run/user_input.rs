@@ -504,7 +504,12 @@ pub async fn prepare_application_user_input_decision(
     let session_leases = Arc::clone(&services.session_leases);
     let task_executor_attached = services.task_executor_attached();
     let prepared = tokio::task::spawn_blocking(move || {
-        prepare_application_run_blocking(blocking_request, session_leases, task_executor_attached)
+        prepare_application_run_blocking(
+            blocking_request,
+            session_leases,
+            task_executor_attached,
+            None,
+        )
     })
     .await
     .map_err(|error| ApplicationRunPrepareError::Internal {
