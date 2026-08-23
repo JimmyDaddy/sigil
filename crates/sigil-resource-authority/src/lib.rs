@@ -7,6 +7,7 @@
 pub mod allocator;
 pub mod arena;
 pub mod bootstrap;
+pub mod borrowed;
 pub mod factory;
 pub mod file_access_stub;
 pub mod identity;
@@ -15,6 +16,7 @@ pub mod lease;
 pub mod maintenance;
 pub mod provider_registry;
 pub mod quota;
+pub mod reconcile;
 pub mod spawn_protocol;
 pub mod storage;
 

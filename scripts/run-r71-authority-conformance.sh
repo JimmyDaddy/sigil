@@ -46,4 +46,8 @@ run_suite authority-quota cargo test -p sigil-resource-authority --lib quota -- 
 run_suite authority-identity cargo test -p sigil-resource-authority --lib identity -- --format terse
 run_suite authority-maintenance cargo test -p sigil-resource-authority --lib maintenance -- --format terse
 run_suite authority-allocator cargo test -p sigil-resource-authority --lib allocator -- --format terse
+run_suite authority-borrowed cargo test -p sigil-resource-authority --lib borrowed -- --format terse
+run_suite authority-reconcile cargo test -p sigil-resource-authority --lib reconcile -- --format terse
+run_suite authority-storage cargo test -p sigil-resource-authority --lib storage -- --format terse
+run_suite authority-factory cargo test -p sigil-resource-authority --lib factory -- --format terse
 echo "r71-authority-conformance: all fixtures passed"
