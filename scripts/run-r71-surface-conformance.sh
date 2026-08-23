@@ -10,16 +10,26 @@ cd "$ROOT"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run-r71-surface-conformance.sh
+Usage: scripts/run-r71-surface-conformance.sh [--epoch legacy|current]
+  --epoch current   additionally runs the R71.6 full-composition gate (red until every
+                    mandatory adapter is composed; no partial cutover claim).
 EOF
 }
 
+EPOCH="legacy"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    --epoch)
+      if [[ $# -lt 2 ]]; then echo "--epoch requires a value" >&2; exit 2; fi
+      EPOCH="$2"; shift 2 ;;
+    --epoch=*) EPOCH="${1#--epoch=}"; shift ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+if [[ "$EPOCH" != "legacy" && "$EPOCH" != "current" ]]; then
+  echo "--epoch must be legacy or current" >&2; exit 2
+fi
 
 run_suite() {
   local label="$1"
@@ -41,4 +51,8 @@ run_suite() {
 
 run_suite surface-facade cargo test -p sigil-runtime --lib r71_facade -- --format terse
 run_suite kernel-recovery-surface cargo test -p sigil-kernel --lib resource_recovery_surface -- --format terse
-echo "r71-surface-conformance: all fixtures passed"
+if [[ "$EPOCH" == "current" ]]; then
+  echo "--epoch current: running the R71.6 full-composition gate (red until every adapter is wired)"
+  run_suite full-composition-gate cargo test -p sigil-runtime --lib r71_full_composition_gate -- --ignored --format terse
+fi
+echo "r71-surface-conformance: all fixtures passed (epoch=$EPOCH)"

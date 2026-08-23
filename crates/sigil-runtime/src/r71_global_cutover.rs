@@ -1166,4 +1166,65 @@ mod tests {
             assert!(matches!(error, CutoverErrorV1::LegacySessionUnavailable));
         }
     }
+    /// R71.6 acceptance instrument: the fully composed new-epoch surface must pass the
+    /// mandatory readiness gate. Red until every adapter (execution, file access, all seven
+    /// storage writers, extension admission, desktop borrowed/product-updater seams) is
+    /// composed - that is exactly the fail-closed guarantee: no partial cutover claim.
+    #[test]
+    #[ignore = "R71.6 acceptance instrument: red until every mandatory adapter is composed; enabled by --epoch current"]
+    fn r71_full_composition_gate() {
+        use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let exec = dir.path().join("exec");
+        std::fs::create_dir_all(&state).expect("state dir");
+        std::fs::create_dir_all(state.join("cache")).expect("cache dir");
+        std::fs::create_dir_all(&exec).expect("exec dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("mode");
+            std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ));
+        let projection: Arc<dyn sigil_kernel::managed_projection::ManagedProjectionServiceV1> =
+            Arc::new(CutoverStubProjectionServiceV1);
+        let composition = crate::r71_authority_composition::compose_runtime_authority(
+            &state,
+            &exec,
+            CanonicalHash::from_bytes([0x55; 32]),
+            planner,
+            projection,
+            &[
+                Ch::SessionLog,
+                Ch::SessionLifecycleLog,
+                Ch::InputHistory,
+                Ch::DurableMemory,
+                Ch::SessionCatalog,
+                Ch::ArtifactStaging,
+                Ch::AdapterDurableState,
+            ],
+        )
+        .expect("compose");
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let cutover = RuntimeGlobalCutoverV1::evaluate(
+            "inst-full",
+            1,
+            authority(),
+            &composition.services,
+            &recovery,
+            StartupEpochV1::NewCurrentSchema,
+        );
+        match cutover.gate() {
+            Ok(()) => {}
+            Err(error) => {
+                panic!(
+                    "new-epoch composition must be fully wired before gate Ok; still failing: {error:?}"
+                );
+            }
+        }
+    }
 }
