@@ -947,6 +947,26 @@ impl AppState {
     ) {
         self.managed_history_writer = Some(std::sync::Arc::clone(&composition.storage_writer));
         self.authority_composition = Some(composition);
+        // RFC-0071 R71.6: route the session writer and input history to the authority-declared
+        // managed leaves (the worker/store read and write the same leaves; no dual write).
+        self.session_log_path = self
+            .managed_session_log_path()
+            .unwrap_or_else(|| self.session_log_path.clone());
+        self.load_input_history();
+    }
+
+    /// Authority-declared managed session-log leaf for the CURRENT session (opaque stem as the
+    /// per-session key); None when no writer is attached (tests / legacy boot).
+    fn managed_session_log_path(&self) -> Option<std::path::PathBuf> {
+        let writer = self.managed_history_writer.as_ref()?;
+        let stem = self.session_log_path.file_stem()?.to_str()?;
+        writer
+            .managed_named_leaf_path(
+                sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                stem,
+            )
+            .ok()
+            .map(|path| path.join("records.jsonl"))
     }
 
     /// The boot authority composition (None before boot attachment). Used by the production
@@ -1111,6 +1131,9 @@ impl AppState {
         app.session_log_path = app
             .session_log_dir
             .join(format!("session-{}.jsonl", app.session_id));
+        if let Some(path) = app.managed_session_log_path() {
+            app.session_log_path = path;
+        }
         app.load_input_history();
         app.seed_connection_inventory_offline(root_config);
         app.refresh_memory_summary();
@@ -1245,6 +1268,9 @@ impl AppState {
         app.session_log_path = app
             .session_log_dir
             .join(format!("session-{}.jsonl", app.session_id));
+        if let Some(path) = app.managed_session_log_path() {
+            app.session_log_path = path;
+        }
         app.load_input_history();
         app.bootstrap_setup();
         app.refresh_usage_sidebar_cache();

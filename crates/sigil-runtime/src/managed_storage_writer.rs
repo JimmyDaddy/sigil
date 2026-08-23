@@ -180,6 +180,25 @@ impl ManagedStorageWriterAdapterV1 {
         }
     }
 
+    /// Authority-declared managed NAMED leaf path (validating, non-creating) so consumers can
+    /// route per-session reads to the same leaf the writer uses.
+    pub fn managed_named_leaf_path(
+        &self,
+        channel: StorageWriterChannelV1,
+        key: &str,
+    ) -> Result<PathBuf, ManagedStorageWriterErrorV1> {
+        if key.is_empty()
+            || key.len() > 64
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        {
+            return Err(ManagedStorageWriterErrorV1::LeafEscapesAnchor);
+        }
+        let (_, _, leaf) = channel.mapping();
+        Ok(self.leaf_path(leaf)?.join(key))
+    }
+
     /// Authority-declared managed leaf path for a channel without creating anything: read and
     /// write paths never diverge, so consumers route stored reads through the same leaf.
     pub fn managed_leaf_path(
