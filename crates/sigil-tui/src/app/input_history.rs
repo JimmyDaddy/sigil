@@ -80,12 +80,14 @@ impl AppState {
         // RFC-0071 R71.6 managed seam: when the authority's storage writer is attached, the
         // single input-history location is the authority-declared managed leaf (read and write
         // never diverge; no dual write).
-        if let Some(writer) = &self.managed_history_writer {
-            if let Ok(path) = writer.managed_leaf_path(
-                sigil_runtime::managed_storage_writer::StorageWriterChannelV1::InputHistory,
-            ) {
-                return path.join("records.jsonl");
-            }
+        if let Some(path) = self.managed_history_writer.as_ref().and_then(|writer| {
+            writer
+                .managed_leaf_path(
+                    sigil_runtime::managed_storage_writer::StorageWriterChannelV1::InputHistory,
+                )
+                .ok()
+        }) {
+            return path.join("records.jsonl");
         }
         self.sigil_paths.input_history_file.clone()
     }

@@ -949,7 +949,10 @@ impl AppState {
         self.authority_composition = Some(composition);
     }
 
-    /// The boot authority composition (None before boot attachment).
+    /// The boot authority composition (None before boot attachment). Used by the production
+    /// launcher; test builds route composition through the launcher builder so the accessor can
+    /// be unused in that cfg.
+    #[allow(dead_code)]
     pub(crate) fn authority_composition(
         &self,
     ) -> Option<
