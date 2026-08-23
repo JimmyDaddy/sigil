@@ -553,6 +553,15 @@ pub struct AppState {
     pub workspace_root: PathBuf,
     workspace_git_status: Option<WorkspaceGitStatus>,
     pub sigil_paths: SigilPaths,
+    /// RFC-0071 R71.6: single managed input-history writer (authority-declared leaf); None
+    /// keeps the legacy path (tests / legacy boot).
+    managed_history_writer: Option<
+        std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+    /// RFC-0071 R71.6: the boot authority composition shared with the worker.
+    authority_composition: Option<
+        std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+    >,
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
     pub session_id: String,
@@ -929,6 +938,26 @@ impl AppState {
         }
     }
 
+    /// Attaches the boot authority composition (single call at boot).
+    pub fn set_authority_composition(
+        &mut self,
+        composition: std::sync::Arc<
+            sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1,
+        >,
+    ) {
+        self.managed_history_writer = Some(std::sync::Arc::clone(&composition.storage_writer));
+        self.authority_composition = Some(composition);
+    }
+
+    /// The boot authority composition (None before boot attachment).
+    pub(crate) fn authority_composition(
+        &self,
+    ) -> Option<
+        &std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+    > {
+        self.authority_composition.as_ref()
+    }
+
     pub fn from_root_config(config_path: &Path, root_config: &RootConfig) -> Self {
         let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let workspace_root =
@@ -974,6 +1003,8 @@ impl AppState {
             workspace_root,
             workspace_git_status,
             sigil_paths,
+            managed_history_writer: None,
+            authority_composition: None,
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
@@ -1106,6 +1137,8 @@ impl AppState {
             workspace_root: workspace_root.clone(),
             workspace_git_status,
             sigil_paths,
+            managed_history_writer: None,
+            authority_composition: None,
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,

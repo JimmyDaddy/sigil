@@ -78,6 +78,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive(
         interaction_mode,
         route_directive,
         None,
+        None,
     )
 }
 
@@ -88,6 +89,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     workspace_root: PathBuf,
     interaction_mode: InteractionMode,
     route_directive: WorkerSessionRouteDirective,
+    authority_composition: Option<
+        std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+    >,
     supplied_attachment: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
@@ -102,49 +106,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     boot_cutover
         .admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy)
         .map_err(anyhow::Error::new)?;
-    // RFC-0071 R71.6: compose the authority surface once at boot (transitional shadow planner;
-    // the same spine as CLI/HTTP). Declared channels = writers this surface owns. A failed
-    // composition aborts startup: the app never runs without a consistent authority surface.
-    let authority_composition = {
-        use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Ch;
-        let paths = sigil_runtime::resolve_sigil_paths(
-            &root_config.storage,
-            &root_config.session,
-            &workspace_root,
-        );
-        for anchor in [&paths.state_root, &paths.scratch_root] {
-            std::fs::create_dir_all(anchor).map_err(anyhow::Error::new)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(anchor, std::fs::Permissions::from_mode(0o700))
-                    .map_err(anyhow::Error::new)?;
-            }
-        }
-        std::fs::create_dir_all(paths.state_root.join("cache")).map_err(anyhow::Error::new)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                paths.state_root.join("cache"),
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .map_err(anyhow::Error::new)?;
-        }
-        let planner = std::sync::Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
-            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-        ));
-        std::sync::Arc::new(
-            sigil_runtime::r71_authority_composition::compose_runtime_authority(
-                &paths.state_root,
-                &paths.scratch_root,
-                boot_cutover.manifest().manifest_hash,
-                planner,
-                &[Ch::SessionLog, Ch::InputHistory, Ch::SessionCatalog],
-            )
-            .map_err(anyhow::Error::new)?,
-        )
-    };
+    // RFC-0071 R71.6: the worker consumes the boot composition shared via the launcher (None
+    // only for test wrappers; production boot always composes in the launcher).
+    let authority_composition = authority_composition;
     let attachment_lease = if let Some(attachment) = supplied_attachment {
         let store = sigil_runtime::r71_global_cutover::guarded_session_open(
             &session_log_path,
@@ -180,8 +144,8 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         .name("sigil-agent-worker".to_owned())
         .spawn(move || {
             tracing::debug!(
-                channels = ?authority_composition.declared_channels,
-                "rfc-0071: authority composition attached (session-log/input-history/session-catalog)"
+                attached = authority_composition.is_some(),
+                "rfc-0071: authority composition state"
             );
             let Some(runtime) = report_runtime_build_result(build_worker_runtime(), &message_tx)
             else {

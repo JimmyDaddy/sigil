@@ -137,6 +137,16 @@ pub struct ManagedStorageWriterAdapterV1 {
         Option<std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>>,
 }
 
+impl std::fmt::Debug for ManagedStorageWriterAdapterV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedStorageWriterAdapterV1")
+            .field("state_anchor", &self.state_anchor)
+            .field("issuer_attached", &self.storage_issuer.is_some())
+            .finish()
+    }
+}
+
 impl ManagedStorageWriterAdapterV1 {
     /// Creates the adapter. `state_anchor` must be the authority-verified bootstrap state anchor
     /// (owner-only, no-follow); the adapter validates it before any acquire.
@@ -168,6 +178,16 @@ impl ManagedStorageWriterAdapterV1 {
             cutover_manifest_hash,
             storage_issuer: Some(storage_issuer),
         }
+    }
+
+    /// Authority-declared managed leaf path for a channel without creating anything: read and
+    /// write paths never diverge, so consumers route stored reads through the same leaf.
+    pub fn managed_leaf_path(
+        &self,
+        channel: StorageWriterChannelV1,
+    ) -> Result<PathBuf, ManagedStorageWriterErrorV1> {
+        let (_, _, leaf) = channel.mapping();
+        self.leaf_path(leaf)
     }
 
     fn leaf_path(&self, leaf: &str) -> Result<PathBuf, ManagedStorageWriterErrorV1> {

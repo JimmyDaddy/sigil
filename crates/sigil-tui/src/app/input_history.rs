@@ -77,11 +77,45 @@ impl AppState {
     }
 
     fn input_history_path(&self) -> std::path::PathBuf {
+        // RFC-0071 R71.6 managed seam: when the authority's storage writer is attached, the
+        // single input-history location is the authority-declared managed leaf (read and write
+        // never diverge; no dual write).
+        if let Some(writer) = &self.managed_history_writer {
+            if let Ok(path) = writer.managed_leaf_path(
+                sigil_runtime::managed_storage_writer::StorageWriterChannelV1::InputHistory,
+            ) {
+                return path.join("records.jsonl");
+            }
+        }
         self.sigil_paths.input_history_file.clone()
     }
 
     fn persist_input_history(&self) {
         if !input_history_persistence_enabled() {
+            return;
+        }
+        if let Some(writer) = &self.managed_history_writer {
+            // Single current-lease write: admit -> authority-declared leaf -> append -> finalize.
+            let result = (|| -> Result<()> {
+                let lease = writer
+                    .acquire(
+                        sigil_runtime::managed_storage_writer::StorageWriterChannelV1::InputHistory,
+                    )
+                    .context("input history managed acquire")?;
+                for prompt in &self.composer.input_history {
+                    let safe = sigil_kernel::safe_persistence_text(prompt);
+                    writer
+                        .write_record(&lease, serde_json::to_string(&safe)?.as_bytes())
+                        .context("input history managed write")?;
+                }
+                writer
+                    .finalize(lease)
+                    .context("input history managed finalize")?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                tracing::error!(%error, "managed input history persist failed");
+            }
             return;
         }
         let _ = write_input_history(&self.input_history_path(), &self.composer.input_history);

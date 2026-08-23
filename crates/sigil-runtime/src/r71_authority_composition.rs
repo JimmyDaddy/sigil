@@ -26,11 +26,21 @@ use crate::managed_storage_writer::{
 /// Composed runtime authority surface (everything a new-epoch boot needs once).
 pub struct RuntimeAuthorityCompositionV1 {
     pub services: RuntimeManagedResourceServicesV1,
-    pub storage_writer: ManagedStorageWriterAdapterV1,
+    pub storage_writer: std::sync::Arc<ManagedStorageWriterAdapterV1>,
     pub declared_channels: BTreeSet<StorageWriterChannelV1>,
     /// The composition's single real capability broker: surfaces seal/issue through this
     /// (one-shot proofs; kernel-side binding).
     pub broker: std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
+}
+
+impl std::fmt::Debug for RuntimeAuthorityCompositionV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeAuthorityCompositionV1")
+            .field("declared_channels", &self.declared_channels)
+            .field("projection_backed", &self.services.projection_backed)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Closed composition error.
@@ -120,12 +130,12 @@ pub fn compose_runtime_authority(
         file_access,
         crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
     );
-    let storage_writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
+    let storage_writer = std::sync::Arc::new(ManagedStorageWriterAdapterV1::with_storage_issuer(
         storage,
         state_anchor.to_path_buf(),
         cutover_manifest_hash,
         std::sync::Arc::clone(&broker),
-    );
+    ));
     Ok(RuntimeAuthorityCompositionV1 {
         services,
         storage_writer,

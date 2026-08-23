@@ -775,6 +775,57 @@ where
     let app = match load_result {
         Ok(root_config) => {
             let mut app = AppState::from_root_config(&config_path, &root_config);
+            // RFC-0071 R71.6: compose the authority surface once at boot and share it with the
+            // worker and the UI (input history through the managed seam). A failed composition
+            // aborts startup: no run without a consistent authority surface.
+            {
+                use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Ch;
+                let paths = sigil_runtime::resolve_sigil_paths(
+                    &root_config.storage,
+                    &root_config.session,
+                    &app.workspace_root,
+                );
+                for anchor in [&paths.state_root, &paths.scratch_root] {
+                    std::fs::create_dir_all(anchor).map_err(anyhow::Error::new)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(anchor, std::fs::Permissions::from_mode(0o700))
+                            .map_err(anyhow::Error::new)?;
+                    }
+                }
+                std::fs::create_dir_all(paths.state_root.join("cache"))
+                    .map_err(anyhow::Error::new)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(
+                        paths.state_root.join("cache"),
+                        std::fs::Permissions::from_mode(0o700),
+                    )
+                    .map_err(anyhow::Error::new)?;
+                }
+                let manifest_hash =
+                    sigil_runtime::r71_global_cutover::legacy_boot_decision(&config_path)
+                        .map_err(anyhow::Error::new)?
+                        .manifest()
+                        .manifest_hash;
+                let planner =
+                    std::sync::Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+                        sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+                    ));
+                let composition = std::sync::Arc::new(
+                    sigil_runtime::r71_authority_composition::compose_runtime_authority(
+                        &paths.state_root,
+                        &paths.scratch_root,
+                        manifest_hash,
+                        planner,
+                        &[Ch::SessionLog, Ch::InputHistory, Ch::SessionCatalog],
+                    )
+                    .map_err(anyhow::Error::new)?,
+                );
+                app.set_authority_composition(composition);
+            }
             if app.workspace_is_trusted_from_history() {
                 restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
                 let trust_ready = match app.ensure_current_workspace_trust_decision(
@@ -1710,6 +1761,7 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
                 .map(str::to_owned),
             explicit_selection: app.pending_session_route_selection().cloned(),
         },
+        app.authority_composition().cloned(),
         app.worker_session_attachment(),
     )?;
     Ok(WorkerRuntime {
