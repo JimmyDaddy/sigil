@@ -60,6 +60,19 @@ pub struct EnvironmentProfileRefV1 {
 /// Closed bound on managed execution agreement environment entries (never unbounded envs).
 pub const MAX_MANAGED_EXECUTION_ENV_ENTRIES: usize = 128;
 
+/// Closed bound on agreed argv entries (the plan is never an unbounded argv).
+pub const MAX_MANAGED_EXECUTION_ARGV_ENTRIES: usize = 64;
+
+/// Closed bound on total agreed argv bytes (bounded agreement, never host-sized payloads).
+pub const MAX_MANAGED_EXECUTION_ARGV_BYTES: usize = 64 * 1024;
+
+/// Exact total of argv encoded bytes (closed bound check helper).
+pub fn argv_encoded_bytes(argv: &[OsString]) -> usize {
+    argv.iter()
+        .map(|arg| arg.as_os_str().as_encoded_bytes().len())
+        .sum()
+}
+
 /// Canonical environment digest: exact key=value bytes, sorted by key. Planner and sandbox
 /// recompute the same digest so environment is planner-authoritative (the sandbox never
 /// accepts an unagreed environment, and a drift fails closed).

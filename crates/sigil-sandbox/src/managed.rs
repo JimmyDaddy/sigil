@@ -131,13 +131,19 @@ impl SandboxManagedExecutionServiceV1 {
             .planner
             .plan_execution(plan_request)
             .map_err(|_| ManagedExecutionErrorV1::ExecutionPlanDrift)?;
-        if draft.draft_hash != request.execution_plan_draft_hash {
-            return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
-        }
+        // Closed-bound agreement first: over-bound argv/env never executes partially (the
+        // bound is an admission precondition, not a plan-drift comparison).
         if request.environment.len()
             > sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ENV_ENTRIES
+            || request.argv.len()
+                > sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ARGV_ENTRIES
+            || sigil_kernel::managed_execution::argv_encoded_bytes(&request.argv)
+                > sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ARGV_BYTES
         {
             return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        if draft.draft_hash != request.execution_plan_draft_hash {
+            return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
         }
         if draft.environment_digest
             != sigil_kernel::managed_execution::canonical_environment_digest(&request.environment)
@@ -1198,5 +1204,41 @@ mod tests {
             canonical_environment_digest(&a),
             canonical_environment_digest(&c)
         );
+    }
+
+    #[test]
+    fn r71_managed_over_bound_agreement_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svc = service(false, dir.path());
+        let too_few_envs = {
+            let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
+            request.environment = Vec::new();
+            request
+        };
+        // argv over the closed entry bound: fail closed, never partial execution.
+        let mut argv = Vec::new();
+        for index in 0..=sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ARGV_ENTRIES {
+            argv.push(OsString::from(format!("arg-{index}")));
+        }
+        let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
+        request.argv = argv;
+        let error = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+            .expect_err("over-bound argv must refuse");
+        assert!(matches!(error, ManagedExecutionErrorV1::AdmissionMismatch));
+        // env over the closed entry bound: fail closed.
+        let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
+        request.environment = (0
+            ..=sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ENV_ENTRIES)
+            .map(|index| {
+                (
+                    OsString::from(format!("K{index}")),
+                    OsString::from(index.to_string()),
+                )
+            })
+            .collect();
+        let error = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+            .expect_err("over-bound env must refuse");
+        assert!(matches!(error, ManagedExecutionErrorV1::AdmissionMismatch));
+        let _ = too_few_envs;
     }
 }
