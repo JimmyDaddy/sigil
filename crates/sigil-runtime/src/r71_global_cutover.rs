@@ -1219,8 +1219,15 @@ mod tests {
         match cutover.gate() {
             Ok(()) => {}
             Err(error) => {
+                let red: Vec<_> = cutover
+                    .manifest()
+                    .mandatory_readiness
+                    .iter()
+                    .filter(|probe| !probe.passed)
+                    .map(|probe| format!("{:?}", probe.adapter))
+                    .collect();
                 panic!(
-                    "new-epoch composition must be fully wired before gate Ok; still failing: {error:?}"
+                    "new-epoch composition must be fully wired before gate Ok; still failing: {error:?}; red adapters: {red:?}"
                 );
             }
         }
