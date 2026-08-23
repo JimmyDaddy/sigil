@@ -98,7 +98,8 @@ fn storage_channels() -> &'static [(
         (
             MandatoryAdapterKindV1::StorageSessionCatalog,
             ManagedStorageSemanticOwnerV1::SessionCatalog,
-            ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection,
+            // Frozen matrix cell: SessionCatalog is a rebuildable database projection.
+            ManagedStorageCapabilityFamilyV1::RebuildableDatabaseProjection,
         ),
         (
             MandatoryAdapterKindV1::StorageArtifact,
@@ -283,7 +284,7 @@ pub fn probe_mandatory_adapters(
 
     out.push(AdapterReadinessProbeV1 {
         adapter: MandatoryAdapterKindV1::ProjectionRebuildable,
-        passed: true,
+        passed: services.projection_backed,
         evidence_digest: CanonicalHash::from_bytes([0xb7; 32]),
     });
 
@@ -1190,14 +1191,11 @@ mod tests {
             Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
                 crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
             ));
-        let projection: Arc<dyn sigil_kernel::managed_projection::ManagedProjectionServiceV1> =
-            Arc::new(CutoverStubProjectionServiceV1);
         let composition = crate::r71_authority_composition::compose_runtime_authority(
             &state,
             &exec,
             CanonicalHash::from_bytes([0x55; 32]),
             planner,
-            projection,
             &[
                 Ch::SessionLog,
                 Ch::SessionLifecycleLog,

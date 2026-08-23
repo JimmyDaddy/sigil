@@ -63,7 +63,8 @@ impl StorageWriterChannelV1 {
             ),
             Self::SessionCatalog => (
                 ManagedStorageSemanticOwnerV1::SessionCatalog,
-                ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection,
+                // Frozen matrix cell: SessionCatalog is a rebuildable database projection.
+                ManagedStorageCapabilityFamilyV1::RebuildableDatabaseProjection,
                 "session-catalog",
             ),
             Self::ArtifactStaging => (

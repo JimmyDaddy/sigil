@@ -29,6 +29,9 @@ pub struct RuntimeManagedResourceServicesV1 {
     pub execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1,
     /// Actual seam kind behind `file_access`.
     pub file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1,
+    /// True when the composed projection port is the production records-backed rebuildable
+    /// projection service (R71.6 probe reads this truthfully).
+    pub projection_backed: bool,
 }
 
 impl RuntimeManagedResourceServicesV1 {
@@ -49,6 +52,7 @@ impl RuntimeManagedResourceServicesV1 {
             capability_issuer,
             execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1::ShadowPlaceholder,
             file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1::ShadowPlaceholder,
+            projection_backed: false,
         }
     }
 
@@ -71,6 +75,7 @@ impl RuntimeManagedResourceServicesV1 {
             capability_issuer,
             execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1::SandboxBacked,
             file_access_seam,
+            projection_backed: true,
         }
     }
 }

@@ -54,7 +54,6 @@ pub fn compose_runtime_authority(
     execution_temp_root: &Path,
     cutover_manifest_hash: CanonicalHash,
     planner: Arc<dyn ManagedExecutionPlannerV1>,
-    projection: Arc<dyn ManagedProjectionServiceV1>,
     declared: &[StorageWriterChannelV1],
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
     // The real kernel capability broker is the single issuer for this composition: execution
@@ -108,10 +107,15 @@ pub fn compose_runtime_authority(
         file_access.clone() as Arc<dyn ManagedFileAccessServiceV1>,
     )
     .build_bundle();
+    let records_projection = std::sync::Arc::new(
+        crate::runtime_records_projection::RuntimeRecordsProjectionServiceV1::new(
+            state_anchor.to_path_buf(),
+        ),
+    );
     let services = RuntimeManagedResourceServicesV1::compose_sandbox_backed(
         bundle,
         broker.clone() as Arc<dyn KernelCapabilityIssuerV1>,
-        projection,
+        records_projection as Arc<dyn ManagedProjectionServiceV1>,
         execution,
         file_access,
         crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
@@ -144,22 +148,6 @@ mod tests {
     use crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1;
     use sigil_kernel::cutover_manifest::MandatoryAdapterKindV1;
 
-    struct CompositionStubProjectionServiceV1;
-
-    #[async_trait::async_trait]
-    impl ManagedProjectionServiceV1 for CompositionStubProjectionServiceV1 {
-        async fn open_rebuildable_projection(
-            &self,
-            _handle: &sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1,
-            _request: sigil_kernel::managed_projection::OpenProjectionConnectionRequestV1,
-        ) -> Result<
-            Box<dyn sigil_kernel::managed_projection::ManagedProjectionConnectionV1>,
-            sigil_kernel::managed_projection::ProjectionErrorV1,
-        > {
-            Err(sigil_kernel::managed_projection::ProjectionErrorV1::ConnectionClosed)
-        }
-    }
-
     #[test]
     fn r71_composition_declared_channel_writes_and_probes_exactly() {
         use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
@@ -179,14 +167,11 @@ mod tests {
             Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
                 crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
             ));
-        let projection: Arc<dyn sigil_kernel::managed_projection::ManagedProjectionServiceV1> =
-            Arc::new(CompositionStubProjectionServiceV1);
         let composition = crate::r71_authority_composition::compose_runtime_authority(
             &state,
             &exec,
             CanonicalHash::from_bytes([0x55; 32]),
             planner,
-            projection,
             &[Ch::SessionLog],
         )
         .expect("compose");
