@@ -49,3 +49,11 @@ mod fault_recovery_tests;
 #[cfg(test)]
 #[path = "tests/fault_authority_bootstrap_tests.rs"]
 mod fault_authority_bootstrap_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_key_tests.rs"]
+mod fault_key_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_retire_tests.rs"]
+mod fault_retire_tests;
