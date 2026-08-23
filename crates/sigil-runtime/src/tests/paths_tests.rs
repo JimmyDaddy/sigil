@@ -127,6 +127,11 @@ fn resolves_windows_defaults_from_home_when_local_app_data_is_missing() {
     );
 }
 
+/// RFC-0071 R71.0 characterization edge: with no HOME and no XDG state/cache, the current
+/// resolver silently falls back to cwd-relative ".sigil-state" / ".sigil-cache" roots. Any
+/// writer that then creates those directories pollutes the workspace (observed in session
+/// 5ff39a6d...: crate-local .sigil-state artifacts). R71.2 replaces this fallback with
+/// authority bootstrap roots; this test locks the observed behavior until that cutover.
 #[test]
 fn resolver_defaults_to_relative_roots_without_home_or_xdg() {
     let workspace = tempfile::tempdir().expect("tempdir");

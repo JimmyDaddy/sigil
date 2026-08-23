@@ -3,14 +3,16 @@ use std::fs;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{ModelMessage, SessionLogEntry, ToolResultMeta};
 use sigil_runtime::support::{SUPPORT_BUNDLES_DIRECTORY_NAME, SupportBuildInfo, SupportBundleV1};
-use tempfile::tempdir;
 
-use super::super::tests::common::{test_config, v2_tool_result_entry};
+use super::super::tests::common::{TestFixtureRoot, test_config, v2_tool_result_entry};
 use super::*;
 
-fn feedback_app() -> anyhow::Result<AppState> {
-    let temp = tempdir()?;
-    let workspace = temp.keep();
+/// RFC-0071 R71.0: the feedback fixture workspace must live in an explicitly isolated,
+/// RAII-owned root (never an active SessionScratch inherited through TMPDIR) and must be removed
+/// with no-follow cleanup when the test returns.
+fn feedback_fixture() -> anyhow::Result<(AppState, TestFixtureRoot)> {
+    let fixture = TestFixtureRoot::new("sigil-tui-feedback-workspace");
+    let workspace = fixture.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
     let mut config = test_config();
     config.workspace.root = workspace.display().to_string();
@@ -22,7 +24,7 @@ fn feedback_app() -> anyhow::Result<AppState> {
         "aarch64-apple-darwin",
         "test",
     ));
-    Ok(app)
+    Ok((app, fixture))
 }
 
 fn open_feedback(app: &mut AppState) -> anyhow::Result<()> {
@@ -33,7 +35,7 @@ fn open_feedback(app: &mut AppState) -> anyhow::Result<()> {
 
 #[test]
 fn feedback_preview_is_private_and_writes_nothing_before_enter() -> anyhow::Result<()> {
-    let mut app = feedback_app()?;
+    let (mut app, _fixture) = feedback_fixture()?;
     let timeline_count = app.timeline.len();
     let event_count = app.events.len();
     let durable_entry_count = app.session_browser.current_entries.len();
@@ -69,7 +71,7 @@ fn feedback_modal_owns_input_and_exports_only_redacted_coarse_facts() -> anyhow:
         "PRIVATE-ASSISTANT-CANARY",
         "PRIVATE-TOOL-CANARY",
     ];
-    let mut app = feedback_app()?;
+    let (mut app, _fixture) = feedback_fixture()?;
     app.session_browser
         .current_entries
         .push(SessionLogEntry::User(ModelMessage::user(canaries[0])));
@@ -183,7 +185,7 @@ fn feedback_modal_owns_input_and_exports_only_redacted_coarse_facts() -> anyhow:
 
 #[test]
 fn feedback_export_accepts_terminal_newline_key_code() -> anyhow::Result<()> {
-    let mut app = feedback_app()?;
+    let (mut app, _fixture) = feedback_fixture()?;
     open_feedback(&mut app)?;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::NONE))?;
@@ -200,7 +202,7 @@ fn feedback_export_accepts_terminal_newline_key_code() -> anyhow::Result<()> {
 fn feedback_export_failure_stays_in_modal_and_can_be_cancelled() -> anyhow::Result<()> {
     use std::os::unix::fs::symlink;
 
-    let mut app = feedback_app()?;
+    let (mut app, _fixture) = feedback_fixture()?;
     open_feedback(&mut app)?;
     let external = app.workspace_root.join("external-support");
     fs::create_dir_all(&external)?;

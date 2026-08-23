@@ -767,3 +767,13 @@ pub fn delete_session_scratch_namespace(
 #[cfg(test)]
 #[path = "tests/scratch_namespace_tests.rs"]
 mod tests;
+
+/// RFC-0071 R71.0 characterization fixtures. They lock the observed causal edges of session
+/// 5ff39a6d-5225-4533-8c1f-b64c0c81abb7 without changing production semantics: descendant
+/// symlink poisoning, workspace-wide sibling blast radius, GC permanently skipping invalid
+/// namespaces, same-session double lease early release, and repeated provisioning failures across
+/// distinct tool call ids without a durable active-blocker admission gate. Strict decoders,
+/// real directory state and deterministic walks only -- no fabricated numbers.
+#[cfg(test)]
+#[path = "tests/r71_characterization_tests.rs"]
+mod r71_characterization;

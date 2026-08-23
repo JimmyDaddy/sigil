@@ -1,0 +1,75 @@
+# RFC-0071 R71.0 characterization case ids.
+schema_version = 1
+manifest_hash = "r71-conformance-v1-012"
+
+[[cases]]
+case_id = "R71-C-001"
+case_name = "feedback_storage_fixture_is_explicitly_injected_isolated_root"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-002"
+case_name = "feedback_storage_fixture_never_inherits_active_session_scratch"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-003"
+case_name = "feedback_storage_fixture_no_follow_cleanup_completes"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-004"
+case_name = "descendant_symlink_is_leaf_report_not_followed"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-005"
+case_name = "poisoned_sibling_blocks_unrelated_session_provisioning"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-006"
+case_name = "gc_permanently_skips_invalid_namespace_without_quarantine"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-007"
+case_name = "same_session_double_lease_releases_early"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-008"
+case_name = "repeated_new_call_hits_same_provision_failure_without_blocker_gate"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-009"
+case_name = "two_terminal_tasks_release_early_while_sibling_live"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-010"
+case_name = "missing_home_xdg_falls_back_to_cwd_sigil_state_cache"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-011"
+case_name = "cargo_test_pipe_tail_false_green_guard"
+fixture_class = "characterization"
+required = true
+
+[[cases]]
+case_id = "R71-C-012"
+case_name = "workspace_cross_session_blast_radius_is_measurement_only"
+fixture_class = "characterization"
+required = true

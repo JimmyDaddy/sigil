@@ -1,0 +1,46 @@
+# RFC-0071 section 9.5: shipping targets baseline (R71.0).
+# Authoritative manifest for nonshipping target proofs. R71.0 records the three release-owner
+# commands as migration blockers while they still ship inside the sigil binary; R71.4 moves them
+# to the nonshipping sigil-release-tools package and clears the blockers.
+
+schema_version = 1
+
+[shipping_roots]
+paths = [
+  "crates/sigil/sigil",
+  "apps/desktop/src-tauri/sigil-desktop-app",
+  "apps/desktop/src-tauri/sigil (bundled sidecar)",
+  "npm package/archive",
+  "release workflow artifacts",
+]
+
+[[shipping_roots.cargo_targets]]
+package = "sigil"
+bin = "sigil"
+
+[[shipping_roots.cargo_targets]]
+package = "sigil-desktop-app"
+bin = "sigil-desktop-app"
+
+[[release_only]]
+target_package = "sigil-release-tools"
+bins = [
+  "sigil-model-eval",
+  "sigil-model-eval-route-contract",
+  "sigil-model-eval-rollout-manifest",
+]
+publish = false
+
+[[migration_blockers]]
+# R71.0 baseline: these commands still ship inside the sigil binary as hidden commands.
+# R71.4 moves them to sigil-release-tools; R71.6 readiness requires blockers = 0.
+kind = "release_command_in_shipping_binary"
+package = "sigil"
+bin = "sigil"
+commands = [
+  "model-eval",
+  "model-eval-route-contract",
+  "model-eval-rollout-manifest",
+]
+status = "blocked"
+resolve_slice = "R71.4"

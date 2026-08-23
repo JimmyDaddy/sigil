@@ -1,8 +1,102 @@
 use super::*;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
-static TEST_STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Environment variable used by scripts/run-r71-characterization.sh to explicitly inject an
+/// isolated fixture root that must never inherit an active SessionScratch.
+pub(crate) const TEST_ISOLATED_ROOT_ENV: &str = "SIGIL_TEST_ISOLATED_ROOT";
+
+/// Process-wide registry keeping every isolated fixture root alive until test-process exit.
+/// Static values with a destructor are dropped when main returns, which deletes the roots
+/// without requiring per-test cleanup wiring.
+static TEST_FIXTURE_ROOTS: OnceLock<Mutex<Vec<tempfile::TempDir>>> = OnceLock::new();
+
+fn fixture_roots() -> &'static Mutex<Vec<tempfile::TempDir>> {
+    TEST_FIXTURE_ROOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Returns true when candidate is the active SessionScratch directory (or a descendant of it).
+///
+/// RFC-0071 section 2: restricted execution injects both SIGIL_SCRATCH_DIR and TMPDIR with the
+/// same session scratch root, so std::env::temp_dir() inside that process tree silently returns the
+/// session scratch namespace. Any fixture created there can poison the namespace (temporary
+/// symlink fixtures, storage roots, support bundles) and later block every shell/terminal spawn.
+/// The one authoritative active-scratch identity is SIGIL_SCRATCH_DIR: restricted execution
+/// always injects it alongside TMPDIR with the same session scratch root. A bare user TMPDIR is
+/// a normal OS temp directory and is never treated as a scratch namespace by itself.
+fn is_within_active_session_scratch(candidate: &Path) -> bool {
+    let Some(scratch) = std::env::var_os("SIGIL_SCRATCH_DIR") else {
+        return false;
+    };
+    let scratch = Path::new(&scratch);
+    candidate == scratch || candidate.starts_with(scratch)
+}
+
+/// Resolves the base directory for isolated test fixtures.
+///
+/// RFC-0071 R71.0: a fixture root must be explicitly injected (through SIGIL_TEST_ISOLATED_ROOT,
+/// provided by scripts/run-r71-characterization.sh) or an OS temp directory that is proven not to
+/// be an active session scratch. std::env::temp_dir() alone is never trusted: it inherits
+/// TMPDIR, which restricted execution binds to the session scratch namespace.
+fn isolated_fixture_base() -> PathBuf {
+    if let Some(root) = std::env::var_os(TEST_ISOLATED_ROOT_ENV) {
+        return PathBuf::from(root);
+    }
+    let temp = std::env::temp_dir();
+    assert!(
+        !is_within_active_session_scratch(&temp),
+        "RFC-0071 R71.0: refusing to create a test fixture under the active SessionScratch (TMPDIR currently resolves to {}). Run this suite through scripts/run-r71-characterization.sh, which injects an explicitly isolated root; never inherit the session scratch namespace.",
+        temp.display()
+    );
+    temp
+}
+
+/// Creates a unique isolated storage root and pins it for the process lifetime.
+fn isolated_fixture_root(label: &str) -> PathBuf {
+    let base = isolated_fixture_base();
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("{label}-{}-", std::process::id()))
+        .tempdir_in(&base)
+        .expect("isolated fixture root must be creatable");
+    let path = temp.path().to_path_buf();
+    let mut roots = fixture_roots().lock().expect("fixture root registry lock");
+    roots.push(temp);
+    path
+}
+
+/// RAII guard for one explicit isolated fixture directory.
+///
+/// The root is created under the explicitly injected/verified isolated base (never an active
+/// SessionScratch) and removed with no-follow semantics on drop, including on panic unwinding.
+pub(crate) struct TestFixtureRoot {
+    temp: Option<tempfile::TempDir>,
+}
+
+impl TestFixtureRoot {
+    pub(crate) fn new(label: &str) -> Self {
+        let base = isolated_fixture_base();
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("{label}-{}-", std::process::id()))
+            .tempdir_in(&base)
+            .expect("isolated fixture root must be creatable");
+        Self { temp: Some(temp) }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.temp
+            .as_ref()
+            .expect("fixture root must be alive")
+            .path()
+    }
+
+    /// Asserts that no-follow cleanup completed and the directory no longer exists.
+    pub(crate) fn assert_cleaned(&mut self) {
+        assert!(
+            self.temp.take().is_some(),
+            "fixture root was already cleaned"
+        );
+    }
+}
 
 pub(crate) fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentityV2 {
     sigil_kernel::ApprovalRequestIdentityV2 {
@@ -18,11 +112,7 @@ pub(crate) fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalReq
 }
 
 pub(crate) fn test_config() -> RootConfig {
-    let storage_id = TEST_STORAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let storage_root = std::env::temp_dir().join(format!(
-        "sigil-tui-test-storage-{}-{storage_id}",
-        std::process::id()
-    ));
+    let storage_root = isolated_fixture_root("sigil-tui-test-storage");
     let skills = sigil_kernel::SkillConfig {
         user_skills: false,
         user_agents: false,
@@ -681,4 +771,48 @@ pub(crate) fn inject_write_file_approval(app: &mut AppState, preview: ToolPrevie
         command_permission_matches: Vec::new(),
         preview: Some(preview),
     })
+}
+
+#[cfg(test)]
+mod r71_fixture_root_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn r71_fixture_root_never_resolves_into_sigil_scratch() {
+        // No SIGIL_SCRATCH_DIR in the test process (unless a restricted runner set it): the
+        // authoritative guard must only refuse when the scratch identity is actually injected.
+        unsafe {
+            let previous = std::env::var_os("SIGIL_SCRATCH_DIR");
+            // Guarded by the assertion below on the normal path; direct helper check first.
+            std::env::remove_var("SIGIL_SCRATCH_DIR");
+            let temp = std::env::temp_dir();
+            assert!(
+                !is_within_active_session_scratch(&temp),
+                "plain OS temp must not be classified as session scratch"
+            );
+            if let Some(previous) = previous {
+                std::env::set_var("SIGIL_SCRATCH_DIR", previous);
+            }
+        }
+    }
+
+    #[test]
+    fn r71_fixture_root_cleans_up_with_no_follow_symlink() {
+        use std::os::unix::fs::symlink;
+        let mut fixture = TestFixtureRoot::new("r71-cleanup-assert");
+        let root_path = fixture.path().to_path_buf();
+        let inside = root_path.join("nested");
+        fs::create_dir_all(&inside).expect("nested fixture dir");
+        let outside = root_path.join("outside-target");
+        fs::create_dir_all(&outside).expect("outside target");
+        symlink(&outside, inside.join("leaf-link")).expect("symlink fixture");
+        // Stale TempDir removal must not follow the symlink (cleanup is no-follow).
+        assert!(root_path.exists());
+        fixture.assert_cleaned();
+        assert!(
+            !root_path.exists(),
+            "no-follow cleanup must remove the whole fixture root"
+        );
+    }
 }
