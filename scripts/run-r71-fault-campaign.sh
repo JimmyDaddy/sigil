@@ -53,6 +53,7 @@ run_suite fault-mut cargo test -p sigil-resource-authority --lib r71_f_mut -- --
 run_suite fault-cat cargo test -p sigil-resource-authority --lib r71_f_cat -- --format terse
 run_suite fault-att cargo test -p sigil-resource-authority --lib r71_f_att -- --format terse
 run_suite fault-exp cargo test -p sigil-resource-authority --lib r71_f_exp -- --format terse
+run_suite fault-spn cargo test -p sigil-sandbox --lib r71_f_spn -- --format terse
 run_suite contract-goldens bash scripts/check-r71-contract-goldens.sh
 run_suite authority-fixtures bash scripts/run-r71-authority-conformance.sh
 echo "r71-fault-campaign: all fixtures passed"

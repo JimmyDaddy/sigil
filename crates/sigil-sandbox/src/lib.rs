@@ -23,3 +23,7 @@ pub use receipt::{
     EnforcementVerificationErrorV1, ReadIsolationCompletenessV1, ReadIsolationRequirementV1,
     SandboxPlatformSupportV1, verify_enforcement,
 };
+
+#[cfg(test)]
+#[path = "tests/fault_spawn_tests.rs"]
+mod fault_spawn_tests;
