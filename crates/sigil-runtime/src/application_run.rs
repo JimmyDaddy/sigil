@@ -1870,6 +1870,10 @@ struct ApplicationSessionTitleRequest {
     session_log_path: PathBuf,
     session_id: String,
     prompt: String,
+    /// RFC-0071 R71.6: composed storage writer backing the title journal (managed lifecycle
+    /// namespaces); None keeps the legacy path-rooted journal.
+    managed_writer:
+        Option<std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>>,
 }
 
 /// Non-critical maintenance produced by a completed foreground application run.
@@ -1907,8 +1911,22 @@ impl ApplicationPostRunMaintenance {
                 session_log_path,
                 session_id,
                 prompt,
+                managed_writer: None,
             }),
         }
+    }
+
+    /// Attaches the composed storage writer so the title journal writes through managed
+    /// session-lifecycle namespaces (RFC-0071 R71.6).
+    #[must_use]
+    pub fn with_managed_writer(
+        mut self,
+        writer: std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    ) -> Self {
+        if let Some(request) = self.session_title.as_mut() {
+            request.managed_writer = Some(writer);
+        }
+        self
     }
 
     /// Executes all bounded, non-critical maintenance associated with the completed run.
@@ -1926,6 +1944,7 @@ impl ApplicationPostRunMaintenance {
                 request.session_log_path,
                 request.session_id,
                 request.prompt,
+                request.managed_writer,
             )
             .await?;
         }
@@ -3771,6 +3790,9 @@ async fn prepare_application_run_internal(
                 session_log_path: session_path.clone(),
                 session_id: session_id.clone(),
                 prompt: prompt.clone(),
+                managed_writer: services
+                    .authority_composition()
+                    .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
             }
         });
     let conversation_lifecycle = session

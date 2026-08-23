@@ -43,6 +43,9 @@ pub async fn generate_and_persist_session_title(
     session_log_path: PathBuf,
     session_id: String,
     prompt: String,
+    managed_writer: Option<
+        std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> Result<()> {
     let paths =
         crate::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
@@ -55,11 +58,15 @@ pub async fn generate_and_persist_session_title(
         generate_session_title(provider.as_ref(), &model_ref.model_id, &session_id, &prompt)
             .await?;
     let lifecycle = LocalSessionLifecycleService::new(
-        paths.workspace_id,
+        paths.workspace_id.clone(),
         paths.session_log_dir,
         paths.session_exports_root,
     )
     .with_lifecycle_journal_path(paths.session_lifecycle_journal);
+    let lifecycle = match managed_writer {
+        Some(writer) => lifecycle.with_managed_writer(writer, paths.workspace_id)?,
+        None => lifecycle,
+    };
     let persistence = SessionTitlePersistence {
         lifecycle,
         session_ref,
