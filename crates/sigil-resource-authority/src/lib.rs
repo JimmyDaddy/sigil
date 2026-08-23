@@ -69,3 +69,7 @@ mod fault_child_tests;
 #[cfg(test)]
 #[path = "tests/fault_updater_tests.rs"]
 mod fault_updater_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_borrowed_tests.rs"]
+mod fault_borrowed_tests;
