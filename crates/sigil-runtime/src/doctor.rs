@@ -146,6 +146,44 @@ pub struct DoctorReportOptions<'a> {
     pub plugin_trust_entries: Option<&'a [PluginTrustEntry]>,
 }
 
+/// RFC-0071 R71.6: cutover epoch state for the shared doctor (four surfaces read the same
+/// manifest next to the config). Read-only; a corrupted manifest is an Error so the startup
+/// blocker is visible in doctor before any run.
+pub(crate) fn check_cutover(report: &mut DoctorReport, config_path: &Path) {
+    match crate::r71_global_cutover::inspect_cutover_manifest(config_path) {
+        Ok(None) => report.push(
+            DoctorStatus::Ok,
+            "cutover:epoch",
+            "legacy epoch not published (no cutover manifest); legacy boot is the current state",
+        ),
+        Ok(Some(manifest)) => {
+            let hash = manifest.manifest_hash.to_hex();
+            report.push(
+                DoctorStatus::Ok,
+                "cutover:epoch",
+                format!(
+                    "epoch={} instance={} manifest={}..{}",
+                    match manifest.selected_epoch {
+                        sigil_kernel::cutover_manifest::StartupEpochV1::Legacy => "legacy",
+                        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema => {
+                            "new-current-schema"
+                        }
+                    },
+                    manifest.application_instance_id,
+                    &hash[..8],
+                    &hash[hash.len() - 8..]
+                ),
+            );
+        }
+        Err(error) => report.push_with_remediation(
+            DoctorStatus::Error,
+            "cutover:manifest",
+            error.to_string(),
+            Some("the persisted cutover manifest is tampered or corrupted; startup fails closed until it is restored or removed"),
+        ),
+    }
+}
+
 /// Builds a local diagnostics report without starting providers or MCP servers.
 #[must_use]
 pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorReport {
@@ -165,6 +203,7 @@ pub fn build_doctor_report_with_options(
         "config:path",
         config_path.display().to_string(),
     );
+    check_cutover(&mut report, config_path);
 
     if !config_path.exists() {
         report.push_with_remediation(

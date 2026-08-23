@@ -1941,3 +1941,55 @@ impl Drop for EnvScope {
         }
     }
 }
+
+#[test]
+fn doctor_reports_cutover_epoch_state_without_side_effects() -> Result<()> {
+    let temp = tempdir()?;
+    // No manifest yet: the shared doctor reports the unpublised legacy state, read-only.
+    let missing = build_doctor_report(&temp.path().join("config-missing.toml"), temp.path());
+    let epoch = missing
+        .checks
+        .iter()
+        .find(|check| check.name == "cutover:epoch")
+        .expect("cutover:epoch check");
+    assert_eq!(epoch.status, DoctorStatus::Ok);
+    assert!(
+        !missing
+            .checks
+            .iter()
+            .any(|check| check.name == "cutover:manifest")
+    );
+
+    // Publish a legacy manifest next to the config, then rebuild: the doctor shows the exact
+    // epoch/instance/manifest digest without mutating it.
+    let seed = temp.path().join("config.toml");
+    fs::write(&seed, "[core]\nmodel = \"deepseek\"\n")?;
+    let decision = crate::r71_global_cutover::legacy_boot_decision(&seed)?;
+    let manifest_path = temp.path().join(".sigil-cutover-manifest.json");
+    let before = fs::read_to_string(&manifest_path)?;
+    let report = build_doctor_report(&seed, temp.path());
+    let epoch = report
+        .checks
+        .iter()
+        .find(|check| check.name == "cutover:epoch")
+        .expect("cutover:epoch check");
+    assert!(epoch.message.starts_with("epoch=legacy"));
+    let after = fs::read_to_string(&manifest_path)?;
+    assert_eq!(before, after, "doctor must not mutate the manifest");
+    drop(decision);
+
+    // Corrupt the manifest: doctor reports the startup blocker as an error.
+    fs::write(
+        &manifest_path,
+        "{\"schema_version\":1,\"application_generation\":9}",
+    )?;
+    let report = build_doctor_report(&seed, temp.path());
+    let blocker = report
+        .checks
+        .iter()
+        .find(|check| check.name == "cutover:manifest")
+        .expect("cutover:manifest check");
+    assert_eq!(blocker.status, DoctorStatus::Error);
+    assert!(report.has_errors());
+    Ok(())
+}

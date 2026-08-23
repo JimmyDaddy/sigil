@@ -533,6 +533,23 @@ pub fn attach_legacy_boot_cutover(
     Ok(services)
 }
 
+/// Read-only cutover manifest inspection for doctor/support surfaces: returns None when not
+/// yet published and the validated manifest otherwise. Never writes (doctor must stay side
+/// effect free); a tampered or corrupted manifest surfaces as an error so startup blockers
+/// become visible before a run is attempted.
+pub fn inspect_cutover_manifest(
+    seed: &std::path::Path,
+) -> Result<Option<CutoverManifestV1>, CutoverPersistenceErrorV1> {
+    let manifest_path = seed
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".sigil-cutover-manifest.json");
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    RuntimeGlobalCutoverV1::load_and_validate_manifest(&manifest_path).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
