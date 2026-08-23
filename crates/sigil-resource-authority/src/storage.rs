@@ -25,6 +25,9 @@ pub struct AuthorityStorageGrantTableV1 {
     /// Finalized namespace registry: one-shot per namespace (interior mutability because
     /// finalize is &self on the kernel port).
     finalized_namespaces: std::sync::Mutex<BTreeMap<String, ()>>,
+    /// Probe-claim sequence: every kernel-owned startup-probe claim gets a distinct probe
+    /// namespace so probes and shadow writer claims never share a finalized namespace.
+    probe_sequence: std::sync::atomic::AtomicU64,
 }
 
 impl AuthorityStorageGrantTableV1 {
@@ -33,7 +36,14 @@ impl AuthorityStorageGrantTableV1 {
             grants: BTreeMap::new(),
             consumed_capabilities: BTreeMap::new(),
             finalized_namespaces: std::sync::Mutex::new(BTreeMap::new()),
+            probe_sequence: std::sync::atomic::AtomicU64::new(1),
         }
+    }
+
+    /// Next distinct probe namespace sequence (descendant proof: probes never share ns).
+    fn next_probe_sequence(&self) -> u64 {
+        self.probe_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Mark the namespace bound to `handle` finalized exactly once.
@@ -96,7 +106,10 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         request: ManagedStorageAdmissionRequestV1,
         capability: ValidatedStorageAdmissionCapabilityV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1> {
-        let _ = capability;
+        // Kernel-owned startup readiness probes use a dedicated probe namespace: the probe
+        // must never finalize (consume) the production grant namespace, or the next writer
+        // batch for that channel would be refused as already finalized.
+        let probe = capability.handle_id.as_str() == "startup-probe";
         // Family-exact closure: any unrelated grant must not masquerade as readiness for a
         // different capability family (R71.6 cutover probe depends on this exactness).
         let Some(grant) = self.table.grants.values().find(|grant| {
@@ -105,13 +118,40 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         }) else {
             return Err(ManagedStorageErrorV1::FamilyMismatch);
         };
+        let (handle_id, namespace_hash, authenticator) = if probe {
+            let mut probe_ns = [0x9fu8; 32];
+            let seq = self.table.next_probe_sequence();
+            probe_ns[24..].copy_from_slice(&seq.to_be_bytes());
+            probe_ns[0] = match grant.capability_family {
+                sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::AppendLog => 1,
+                sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::AtomicObject => 2,
+                sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection => 3,
+                sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::StreamingArtifact => 4,
+                sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::ArtifactStore => 5,
+                sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::RebuildableDatabaseProjection => 6,
+                sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::SemanticLeaseLedger => 7,
+            };
+            (
+                sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
+                    "handle-probe-storage-1".to_owned(),
+                ),
+                CanonicalHash::from_bytes(probe_ns),
+                OpaqueKernelCapabilityAuthenticatorV1::new("auth-probe-storage-1".to_owned()),
+            )
+        } else {
+            (
+                sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
+                    "handle-storage-1".to_owned(),
+                ),
+                grant.namespace_hash,
+                OpaqueKernelCapabilityAuthenticatorV1::new("auth-storage-1".to_owned()),
+            )
+        };
         Ok(ManagedStorageNamespaceHandleV1::new(
-            sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
-                "handle-storage-1".to_owned(),
-            ),
-            grant.namespace_hash,
+            handle_id,
+            namespace_hash,
             grant.capability_family,
-            OpaqueKernelCapabilityAuthenticatorV1::new("auth-storage-1".to_owned()),
+            authenticator,
         ))
     }
 

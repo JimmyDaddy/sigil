@@ -20,7 +20,7 @@ use sigil_kernel::resource::{
 };
 
 /// Closed semantic writer channel (row-aligned with the R71.6 mandatory adapter kinds).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StorageWriterChannelV1 {
     SessionLog,
     SessionLifecycleLog,
@@ -108,6 +108,11 @@ pub struct ManagedStorageWriterLeaseV1 {
 }
 
 impl ManagedStorageWriterLeaseV1 {
+    /// Admitted namespace digest (the authority-one-shot identity for this lease).
+    pub fn namespace_digest(&self) -> CanonicalHash {
+        self.handle.namespace_hash
+    }
+
     /// Authority-declared physical directory (owner-only, no-follow). The consumer never derives
     /// this from env/cwd; it is the authority bootstrap layout.
     pub fn path(&self) -> &Path {
@@ -259,6 +264,60 @@ impl ManagedStorageWriterAdapterV1 {
     }
 }
 
+/// Authority-form grant for one declared writer channel (R71.6 production composition:
+/// a declared writer is a registered grant, so the cutover probe reflects exactly what is
+/// composed and nothing more).
+pub fn grant_for_channel(
+    channel: StorageWriterChannelV1,
+    seed: u8,
+) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+    use sigil_kernel::resource::{AuthorityGeneration, OpaqueStorageGrantId, ResourceOwnerScopeV1};
+    let (semantic_owner, capability_family, leaf) = channel.mapping();
+    let mut ns = [seed; 32];
+    ns[0] = leaf.as_bytes()[0];
+    sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+        grant_id: OpaqueStorageGrantId::new(format!("grant-writer-{leaf}")),
+        admission_hash: CanonicalHash::from_bytes([0x21; 32]),
+        semantic_owner,
+        purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+        purpose_hash: CanonicalHash::from_bytes([0x22; 32]),
+        namespace_hash: CanonicalHash::from_bytes(ns),
+        journal_scope: ResourceJournalScopeV1::Application,
+        journal_scope_hash: CanonicalHash::from_bytes([0x24; 32]),
+        resource_ref: sigil_kernel::resource::ResourceRefV1 {
+            resource_id: sigil_kernel::resource::OpaqueResourceId::new(format!("res-{leaf}")),
+            kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
+            owner_scope: ResourceOwnerScopeV1::Application,
+            journal_scope: ResourceJournalScopeV1::Application,
+            generation: 1,
+        },
+        resource_binding_digest: CanonicalHash::from_bytes([0x25; 32]),
+        physical_binding_hash: CanonicalHash::from_bytes([0x26; 32]),
+        resource_kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
+        owner_scope: ResourceOwnerScopeV1::Application,
+        capability_family,
+        retention_policy: sigil_kernel::resource::ResourceRetentionPolicyV1::SessionPolicy,
+        quota_profile: sigil_kernel::resource::ResourceQuotaProfileV1 {
+            class: sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
+            max_bytes: 1024 * 1024,
+            max_entries: 1024,
+            max_open_holders: 1,
+            max_age_ms: None,
+            hard_runtime_enforcement_required: true,
+            profile_hash: CanonicalHash::from_bytes([0x27; 32]),
+        },
+        semantic_schema: sigil_kernel::resource::OpaqueSemanticSchemaId::new(format!(
+            "schema-{leaf}"
+        )),
+        authority_generation: AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x28; 32]),
+        },
+        journal_admission_sequence: 1,
+        grant_hash: CanonicalHash::from_bytes([0x29; 32]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +466,7 @@ mod tests {
             .expect("acquire");
         let path = lease.path().to_path_buf();
         let channel = lease.channel();
+        let namespace_digest = lease.namespace_digest();
         writer.finalize(lease).expect("first finalize");
         // A second finalize of the same namespace is refused by the authority.
         let error = writer
@@ -415,7 +475,7 @@ mod tests {
                     sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
                         "handle-storage-1".to_owned(),
                     ),
-                    hash(3),
+                    namespace_digest,
                     ManagedStorageCapabilityFamilyV1::AppendLog,
                     sigil_kernel::resource::OpaqueKernelCapabilityAuthenticatorV1::new(
                         "auth-storage-1".to_owned(),
