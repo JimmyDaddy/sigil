@@ -796,6 +796,7 @@ impl Tool for TerminalReadTool {
                 network_effect: None,
                 subjects: vec![terminal_task_subject(&task_id)],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }
@@ -912,6 +913,7 @@ impl Tool for TerminalWaitTool {
                 network_effect: None,
                 subjects: vec![terminal_task_subject(&task_id)],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }
@@ -1194,6 +1196,7 @@ impl Tool for TerminalResizeTool {
                 network_effect: None,
                 subjects: vec![terminal_task_subject(&task_id)],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }
@@ -1267,6 +1270,7 @@ impl Tool for TerminalCancelTool {
                 network_effect: None,
                 subjects: vec![terminal_task_subject(&task_id)],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }

@@ -6951,6 +6951,7 @@ fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
         semantic_scope: background_draft.semantic_scope,
         tool_default_mode: background_draft.tool_default_mode,
         analysis_bindings: background_draft.analysis_bindings,
+        managed_file_access: None,
         plan_hash: "sha256:test-background-plan".to_owned(),
         safe_summary: background_draft.safe_summary,
     };

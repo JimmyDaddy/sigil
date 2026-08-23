@@ -430,6 +430,7 @@ impl Tool for ApplyChangeSetTool {
                 step_count: u32::try_from(parsed.files.len()).unwrap_or(u32::MAX),
                 workspace_code_steps: u32::try_from(parsed.files.len()).unwrap_or(u32::MAX),
             },
+            managed_file_access: None,
         })
     }
 

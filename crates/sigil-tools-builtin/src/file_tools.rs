@@ -116,6 +116,7 @@ impl Tool for ReadFileTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
+                managed_file_access: Some(read_file_access_ref(&ctx.workspace_root, &path)?),
             },
         )
     }
@@ -127,6 +128,14 @@ impl Tool for ReadFileTool {
             .unwrap_or(DEFAULT_READ_LIMIT_LINES)
             .min(HARD_READ_LIMIT_LINES);
         let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
+        // RFC-0071 R71.6: any borrowed-subject read adjudicates through the sealed V3 admission
+        // before the filesystem is touched; refusal fails the tool call closed (legacy paths
+        // without a V3 plan defer).
+        if let Err(error) = ctx.adjudicate_v3_file_operation(
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::Read,
+        ) {
+            return Err(anyhow::anyhow!("managed file access refused: {error}"));
+        }
         let artifact_store = ctx.tool_artifact_store().cloned();
         let artifact_call_id = call_id.clone();
         let loaded = run_blocking_io("read_file", move || {
@@ -441,6 +450,47 @@ fn attach_streaming_artifact(result: ToolResult, artifact: StreamingArtifactCapt
     }
 }
 
+/// RFC-0071 R71.6: read_file declares its managed file-access ref: subject binding is the
+/// normalized path, operation digest is the closed read tag; generation / resolver proof /
+/// plan hash are sealed by the host at adjudication (the tool never owns them).
+fn read_file_access_ref(
+    workspace_root: &std::path::Path,
+    path: &str,
+) -> Result<sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1> {
+    use sha2::Digest;
+    use sigil_kernel::resource::CanonicalHash;
+    let resolved = resolve_workspace_path(workspace_root, path)?;
+    let normalized = lexically_normalize_path(&resolved)?
+        .to_string_lossy()
+        .into_owned();
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(normalized.as_bytes());
+    let subject_binding_hash = CanonicalHash::from_bytes(hasher.finalize().into());
+    let mut op = sha2::Sha256::new();
+    op.update(b"read:file");
+    op.update(&normalized.as_bytes()[..]);
+    let operation_digest = CanonicalHash::from_bytes(op.finalize().into());
+    Ok(
+        sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1 {
+            plan_id: sigil_kernel::resource::OpaqueManagedFileAccessPlanId::new(format!(
+                "read-file:{}",
+                normalized.trim_start_matches('/').replace(['/', '.'], "-")
+            )),
+            subject_ref: sigil_kernel::resource::OpaquePermissionSubjectRef::new(
+                normalized.clone(),
+            ),
+            subject_binding_hash,
+            operation_digest,
+            authority_generation: sigil_kernel::resource::AuthorityGeneration {
+                epoch: 0,
+                instance_hash: CanonicalHash::from_bytes([0u8; 32]),
+            },
+            resolver_proof_digest: CanonicalHash::from_bytes([0u8; 32]),
+            plan_hash: CanonicalHash::from_bytes([0u8; 32]),
+        },
+    )
+}
+
 fn read_file_language(path: &str) -> Option<&'static str> {
     let extension = Path::new(path)
         .extension()
@@ -569,6 +619,7 @@ impl Tool for WriteFileTool {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
+            managed_file_access: None,
         })
     }
 
@@ -706,6 +757,7 @@ impl Tool for EditFileTool {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
+            managed_file_access: None,
         })
     }
 
@@ -849,6 +901,7 @@ impl Tool for DeleteFileTool {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
+            managed_file_access: None,
         })
     }
 
@@ -957,6 +1010,7 @@ impl Tool for ListTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }
@@ -1056,6 +1110,7 @@ impl Tool for GlobTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, ".")?],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }
@@ -1147,6 +1202,7 @@ impl Tool for GrepTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }

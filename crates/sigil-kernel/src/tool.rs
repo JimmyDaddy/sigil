@@ -2605,6 +2605,9 @@ pub struct DeclaredToolPermissionFacts {
     pub network_effect: Option<NetworkEffect>,
     pub subjects: Vec<ToolSubject>,
     pub tool_default_mode: Option<ApprovalMode>,
+    /// RFC-0071 R71.6: declared managed file-access ref (file tools fill this; the host seals
+    /// generation/binding hash at adjudication).
+    pub managed_file_access: Option<crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1>,
 }
 
 /// Builds one V2 draft from a typed tool's already-decoded facts.
@@ -2641,6 +2644,7 @@ pub fn declared_tool_permission_plan(
                 ToolOperation::ExecuteWorkspaceCheckCommand
             )),
         },
+        managed_file_access: facts.managed_file_access,
     })
 }
 
@@ -2739,6 +2743,7 @@ pub trait Tool: Send + Sync {
                 network_effect: spec.network_effect,
                 subjects: Vec::new(),
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }

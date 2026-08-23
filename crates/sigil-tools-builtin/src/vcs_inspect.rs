@@ -204,6 +204,7 @@ impl Tool for VcsInspectTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, ".")?],
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }

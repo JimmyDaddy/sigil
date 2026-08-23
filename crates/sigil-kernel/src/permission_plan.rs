@@ -210,6 +210,10 @@ pub struct ToolPermissionPlanDraft {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub analysis_bindings: BTreeMap<String, String>,
     pub safe_summary: ToolPermissionSummary,
+    /// RFC-0071 R71.6: declared managed file-access reference (the tool knows subject and
+    /// operation; the host seals generation/binding at adjudication).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_file_access: Option<crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1>,
 }
 
 /// Immutable permission input shared by policy, approval, execution and audit.
@@ -230,6 +234,8 @@ pub struct ToolPermissionPlanV2 {
     pub tool_default_mode: Option<ApprovalMode>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub analysis_bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_file_access: Option<crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1>,
     pub plan_hash: String,
     pub safe_summary: ToolPermissionSummary,
 }
@@ -275,6 +281,7 @@ impl ToolPermissionPlanV2 {
             semantic_scope: draft.semantic_scope,
             tool_default_mode: draft.tool_default_mode,
             analysis_bindings: draft.analysis_bindings,
+            managed_file_access: draft.managed_file_access,
             plan_hash,
             safe_summary: draft.safe_summary,
         })

@@ -936,6 +936,7 @@ impl ShellCommandAnalysis {
             tool_default_mode: None,
             analysis_bindings: self.analysis_bindings.clone(),
             safe_summary: self.safe_summary.clone(),
+            managed_file_access: None,
         }
     }
 }
