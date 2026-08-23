@@ -1805,6 +1805,7 @@ impl Tool for McpActivateServerTool {
                 network_effect,
                 subjects,
                 tool_default_mode,
+                managed_file_access: None,
             },
         )
     }

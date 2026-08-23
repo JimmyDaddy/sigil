@@ -140,6 +140,7 @@ fn declared_test_permission_plan<T: Tool + ?Sized>(
             network_effect: spec.network_effect,
             subjects,
             tool_default_mode,
+            managed_file_access: None,
         },
     )
 }
@@ -1635,6 +1636,7 @@ impl Tool for ReadPathTool {
                 detail: path.to_owned(),
                 ..crate::ToolPermissionSummary::default()
             },
+            managed_file_access: None,
         })
     }
 
@@ -1719,6 +1721,7 @@ impl Tool for BashCargoCheckFamilyTool {
                 step_count: 1,
                 workspace_code_steps: 1,
             },
+            managed_file_access: None,
         })
     }
 
@@ -13919,6 +13922,7 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
                 detail: "test fixture".to_owned(),
                 ..crate::ToolPermissionSummary::default()
             },
+            managed_file_access: None,
         },
     )?;
     let identity = crate::ApprovalRequestIdentityV2 {
@@ -16009,6 +16013,7 @@ impl Tool for BashUnknownFamilyTool {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
+            managed_file_access: None,
         })
     }
 

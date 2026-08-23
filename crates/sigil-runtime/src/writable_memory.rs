@@ -1236,6 +1236,7 @@ fn memory_write_permission_plan(
         containment: Default::default(),
         semantic_scope: Some(semantic_scope),
         tool_default_mode: Some(ApprovalMode::Ask),
+        managed_file_access: None,
         analysis_bindings: BTreeMap::from([
             ("planner".to_owned(), "durable_memory_v1".to_owned()),
             ("scope".to_owned(), scope_label.to_owned()),

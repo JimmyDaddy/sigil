@@ -297,6 +297,7 @@ impl Tool for ApprovalRequiredReadTool {
                 network_effect: None,
                 subjects: Vec::new(),
                 tool_default_mode: Some(ApprovalMode::Ask),
+                managed_file_access: None,
             },
         )
     }
@@ -8519,6 +8520,7 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
         permission_mode_override: None,
+        tool_authority: None,
     }
 }
 

@@ -250,6 +250,7 @@ async fn gemini_hosted_provider_evidence_finalizes_to_safe_source_and_unicode_ci
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
                 permission_mode_override: None,
+                tool_authority: None,
             },
             &mut handler,
         )

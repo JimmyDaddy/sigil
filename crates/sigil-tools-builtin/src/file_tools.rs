@@ -116,7 +116,7 @@ impl Tool for ReadFileTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
-                managed_file_access: Some(read_file_access_ref(&ctx.workspace_root, &path)?),
+                managed_file_access: Some(read_file_access_ref(&ctx.workspace_root, path)?),
             },
         )
     }
@@ -468,7 +468,7 @@ fn read_file_access_ref(
     let subject_binding_hash = CanonicalHash::from_bytes(hasher.finalize().into());
     let mut op = sha2::Sha256::new();
     op.update(b"read:file");
-    op.update(&normalized.as_bytes()[..]);
+    op.update(normalized.as_bytes());
     let operation_digest = CanonicalHash::from_bytes(op.finalize().into());
     Ok(
         sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1 {

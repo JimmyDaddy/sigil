@@ -1082,6 +1082,7 @@ fn code_read_permission_plan(
         containment: Default::default(),
         semantic_scope: Some(semantic_scope),
         tool_default_mode: None,
+        managed_file_access: None,
         analysis_bindings: BTreeMap::from([(
             "planner".to_owned(),
             "code_intelligence_v2".to_owned(),
@@ -1117,6 +1118,7 @@ fn prepared_code_mutation_permission_plan(
         // reusable semantic grant for a dynamic LSP response.
         semantic_scope: None,
         tool_default_mode: None,
+        managed_file_access: None,
         analysis_bindings: BTreeMap::from([
             ("planner".to_owned(), planner.to_owned()),
             (

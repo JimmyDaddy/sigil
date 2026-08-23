@@ -327,6 +327,7 @@ fn webfetch_permission_plan(
         containment: Default::default(),
         semantic_scope: Some(semantic_scope),
         tool_default_mode: None,
+        managed_file_access: None,
         analysis_bindings: BTreeMap::from([("planner".to_owned(), "webfetch_v2".to_owned())]),
         safe_summary: ToolPermissionSummary {
             title: "Fetch observed web source".to_owned(),

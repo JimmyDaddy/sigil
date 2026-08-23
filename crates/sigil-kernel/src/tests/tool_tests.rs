@@ -205,6 +205,7 @@ impl Tool for RegistryFixtureTool {
                 network_effect: None,
                 subjects: Vec::new(),
                 tool_default_mode: Some(ApprovalMode::Ask),
+                managed_file_access: None,
             },
         )
     }

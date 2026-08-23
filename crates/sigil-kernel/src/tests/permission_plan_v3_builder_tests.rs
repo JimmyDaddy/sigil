@@ -8,9 +8,9 @@ use crate::permission_plan_v3::{
 use crate::permission_plan_v3_builder::{build_v3_decision, build_v3_plan};
 use crate::resource::{
     AuthorityGeneration, BoundedVec, CanonicalHash, EnforcementRequirementClassV1,
-    EnvironmentProfileClassV1, OpaqueApprovalRequestId, OpaqueManagedFileAccessPlanId,
-    OpaquePermissionDecisionId, OpaquePermissionSubjectRef, OpaqueToolCallId,
-    RequestedEnforcementV1, ResourceJournalScopeV1, ResourceRequirementSetV1,
+    OpaqueApprovalRequestId, OpaqueManagedFileAccessPlanId, OpaquePermissionDecisionId,
+    OpaquePermissionSubjectRef, OpaqueToolCallId, RequestedEnforcementV1, ResourceJournalScopeV1,
+    ResourceRequirementSetV1,
 };
 
 fn core() -> ToolPermissionPlanCoreV3 {
@@ -188,9 +188,10 @@ fn r71_v3_plan_from_approved_v2_is_sealed_deterministic() {
             step_count: 0,
             workspace_code_steps: 0,
         },
+        managed_file_access: None,
     };
-    let a = v3_plan_from_v2(&v2, None);
-    let b = v3_plan_from_v2(&v2, None);
+    let a = v3_plan_from_v2(&v2);
+    let b = v3_plan_from_v2(&v2);
     assert_eq!(a.plan_hash, b.plan_hash);
     assert_ne!(a.plan_hash, CanonicalHash::from_bytes([0u8; 32]));
     // Unspecified containment stays ExplicitUnconfined (transitional V3 classes).
@@ -198,8 +199,11 @@ fn r71_v3_plan_from_approved_v2_is_sealed_deterministic() {
         a.requested_enforcement.requirement,
         EnforcementRequirementClassV1::ExplicitUnconfined
     );
-    // Sealing with a file ref changes the bound hash (the admission is content-covering).
-    let with_ref = v3_plan_from_v2(&v2, Some(file_ref()));
+    // Sealing with a declared file ref changes the bound hash (the transform reads the ref
+    // from the approved plan; the admission stays content-covering).
+    let mut v2_with_ref = v2.clone();
+    v2_with_ref.managed_file_access = Some(file_ref());
+    let with_ref = v3_plan_from_v2(&v2_with_ref);
     assert_ne!(a.plan_hash, with_ref.plan_hash);
     assert_eq!(with_ref.managed_file_access_plan, Some(file_ref()));
 }

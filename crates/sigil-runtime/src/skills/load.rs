@@ -152,6 +152,7 @@ impl Tool for LoadSkillTool {
             containment: Default::default(),
             semantic_scope,
             tool_default_mode: None,
+            managed_file_access: None,
             analysis_bindings: BTreeMap::from([
                 ("planner".to_owned(), "load_skill_v2".to_owned()),
                 (

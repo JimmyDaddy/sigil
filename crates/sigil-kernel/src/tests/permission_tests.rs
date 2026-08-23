@@ -1548,6 +1548,7 @@ fn session_grant_availability_reports_one_typed_reason_or_none() {
         ]),
         plan_hash: "sha256:test".to_owned(),
         safe_summary: ToolPermissionSummary::default(),
+        managed_file_access: None,
     };
     let available = tool_approval_session_grant_availability_for_plan(&decision, &plan);
     assert!(available.is_available());

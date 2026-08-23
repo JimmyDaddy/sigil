@@ -39,6 +39,7 @@ impl Tool for DynamicNetworkTool {
                 network_effect,
                 subjects: Vec::new(),
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }

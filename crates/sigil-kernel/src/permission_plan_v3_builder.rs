@@ -57,6 +57,7 @@ pub fn build_v3_plan(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_v3_decision(
     plan: &ToolPermissionPlanV3,
     decision_id: crate::resource::OpaquePermissionDecisionId,
@@ -126,12 +127,11 @@ pub fn build_v3_decision(
 /// lands). The sealed hash is computed canonically (never re-encodes from DTO text).
 pub fn v3_plan_from_v2(
     v2_plan: &crate::permission_plan::ToolPermissionPlanV2,
-    managed_file_access_plan: Option<ManagedFileAccessPlanDraftRefV1>,
 ) -> ToolPermissionPlanV3 {
     let core = ToolPermissionPlanCoreV3 {
         tool_name: v2_plan.tool_name.clone(),
-        access: v2_plan.access.clone(),
-        operation: v2_plan.operation.clone(),
+        access: v2_plan.access,
+        operation: v2_plan.operation,
         effects: v2_plan.effects.clone(),
         subjects: v2_plan.subjects.clone(),
         analysis: v2_plan.analysis.clone(),
@@ -150,7 +150,7 @@ pub fn v3_plan_from_v2(
         },
         Vec::new(),
         Vec::new(),
-        managed_file_access_plan,
+        v2_plan.managed_file_access.clone(),
         ResourceJournalScopeV1::Application,
         enforcement_from_containment(&v2_plan.containment),
     )

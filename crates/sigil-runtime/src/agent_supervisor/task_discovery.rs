@@ -625,6 +625,7 @@ impl Tool for TaskDiscoveryTool {
             analysis: ToolAnalysisStatus::Complete,
             containment: Default::default(),
             semantic_scope: Some(semantic_scope),
+            managed_file_access: None,
             tool_default_mode: Some(ApprovalMode::Allow),
             analysis_bindings: BTreeMap::from([
                 ("planner".to_owned(), "task_discovery_v2".to_owned()),

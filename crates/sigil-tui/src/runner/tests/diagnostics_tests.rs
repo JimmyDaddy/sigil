@@ -121,6 +121,7 @@ impl Tool for DiagnosticsTestTool {
                 network_effect: spec.network_effect,
                 subjects,
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }

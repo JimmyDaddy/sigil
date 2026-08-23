@@ -4960,7 +4960,6 @@ where
         .with_v3_admission(
             std::sync::Arc::new(crate::permission_plan_v3_builder::v3_plan_from_v2(
                 &current_plan,
-                None,
             )),
             None,
         );
@@ -6074,9 +6073,7 @@ where
         execution_tool_ctx = execution_tool_ctx
             .with_prepared_permission_plan(plan.clone())
             .with_v3_admission(
-                std::sync::Arc::new(crate::permission_plan_v3_builder::v3_plan_from_v2(
-                    &plan, None,
-                )),
+                std::sync::Arc::new(crate::permission_plan_v3_builder::v3_plan_from_v2(&plan)),
                 None,
             );
     }

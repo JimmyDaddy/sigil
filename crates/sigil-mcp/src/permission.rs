@@ -256,6 +256,7 @@ pub fn mcp_tool_permission_plan(
         containment: ExecutionContainmentRequest::default(),
         semantic_scope: Some(semantic_scope),
         tool_default_mode: Some(trust.approval_default),
+        managed_file_access: None,
         analysis_bindings: BTreeMap::from([
             (
                 "execution_backend".to_owned(),

@@ -274,6 +274,7 @@ impl Tool for AgentTool {
             containment: Default::default(),
             semantic_scope: Some(semantic_scope),
             tool_default_mode,
+            managed_file_access: None,
             analysis_bindings: BTreeMap::from([(
                 "planner".to_owned(),
                 "agent_thread_v2".to_owned(),

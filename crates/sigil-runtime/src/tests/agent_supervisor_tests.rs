@@ -1225,6 +1225,7 @@ impl Tool for ApprovalRouteTool {
                 network_effect: None,
                 subjects: Vec::new(),
                 tool_default_mode: Some(ApprovalMode::Ask),
+                managed_file_access: None,
             },
         )
     }
@@ -1334,8 +1335,7 @@ fn provider_capability_hash(capabilities: &ProviderCapabilities) -> Result<Strin
 }
 
 fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
-    tool_authority: None,
-        AgentRunOptions {
+    AgentRunOptions {
         workspace_root,
         max_turns: Some(4),
         tool_timeout_secs: 30,
@@ -1347,8 +1347,8 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
         permission_mode_override: None,
-    tool_authority: None,
-        }
+        tool_authority: None,
+    }
 }
 
 fn step(id: &str) -> Result<TaskStepSpec> {

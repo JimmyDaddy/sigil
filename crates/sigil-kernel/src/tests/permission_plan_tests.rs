@@ -32,6 +32,7 @@ fn draft() -> ToolPermissionPlanDraft {
             step_count: 1,
             workspace_code_steps: 1,
         },
+        managed_file_access: None,
     }
 }
 
@@ -79,6 +80,7 @@ fn destructive_mcp_draft() -> ToolPermissionPlanDraft {
             step_count: 1,
             workspace_code_steps: 0,
         },
+        managed_file_access: None,
     }
 }
 

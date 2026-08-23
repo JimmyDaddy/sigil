@@ -352,6 +352,7 @@ impl Tool for NetworkSessionGrantProbe {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
+            managed_file_access: None,
         })
     }
 
@@ -415,6 +416,7 @@ impl Tool for NetworkContextProbe {
                 network_effect,
                 subjects: Vec::new(),
                 tool_default_mode: None,
+                managed_file_access: None,
             },
         )
     }

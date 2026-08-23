@@ -1615,6 +1615,7 @@ where
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
                 permission_mode_override: None,
+                tool_authority: None,
             },
             &mut handler,
             approval_handler,

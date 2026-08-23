@@ -415,6 +415,7 @@ fn test_run_options(workspace_root: &Path) -> AgentRunOptions {
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
         permission_mode_override: None,
+        tool_authority: None,
     }
 }
 

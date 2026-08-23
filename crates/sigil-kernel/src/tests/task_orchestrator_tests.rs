@@ -3382,6 +3382,7 @@ impl Tool for ApprovalRequiredTool {
                 network_effect: None,
                 subjects: Vec::new(),
                 tool_default_mode: Some(crate::ApprovalMode::Ask),
+                managed_file_access: None,
             },
         )
     }

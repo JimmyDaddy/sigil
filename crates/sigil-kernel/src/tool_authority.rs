@@ -182,12 +182,12 @@ pub fn adjudicate_v3_file_operation(
     };
     // Decision integrity: the approved decision must bind the exact sealed plan; a drift here
     // means the tool call was approved against a different plan and must be refused.
-    if let Some(decision) = v3_decision {
-        if decision.plan_hash != plan.plan_hash {
-            return Err(KernelToolAuthorityErrorV1::BindingKind(
-                "decision binds a different plan hash".to_owned(),
-            ));
-        }
+    if let Some(decision) = v3_decision
+        && decision.plan_hash != plan.plan_hash
+    {
+        return Err(KernelToolAuthorityErrorV1::BindingKind(
+            "decision binds a different plan hash".to_owned(),
+        ));
     }
     let binding = v3_file_access_binding(
         plan.plan_hash,

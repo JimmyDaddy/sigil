@@ -171,8 +171,7 @@ fn plan_review_provider_capabilities() -> ProviderCapabilities {
 }
 
 fn plan_review_test_options(workspace_root: &std::path::Path) -> AgentRunOptions {
-    tool_authority: None,
-        AgentRunOptions {
+    AgentRunOptions {
         workspace_root: workspace_root.to_path_buf(),
         max_turns: None,
         tool_timeout_secs: 5,
@@ -184,8 +183,8 @@ fn plan_review_test_options(workspace_root: &std::path::Path) -> AgentRunOptions
         permission_mode_override: None,
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
-    tool_authority: None,
-        }
+        tool_authority: None,
+    }
 }
 
 fn submitted_draft_chunks(call_id: &str) -> Vec<Result<ProviderChunk>> {
