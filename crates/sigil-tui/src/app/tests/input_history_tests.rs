@@ -106,3 +106,68 @@ fn app_input_history_path_uses_resolved_state_file() {
 
     assert_eq!(app.input_history_path(), app.sigil_paths.input_history_file);
 }
+
+#[test]
+fn r71_tui_managed_leaves_reroute_session_and_history_round_trip() -> Result<()> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Ch;
+    // Env: tests persist input history only when explicitly enabled.
+    // SAFETY: test-scoped env var, restored before the test returns.
+    unsafe { std::env::set_var("SIGIL_TUI_TEST_PERSIST_INPUT_HISTORY", "1") };
+    let dir = tempfile::tempdir()?;
+    let state = dir.path().join("state");
+    for anchor in [&state, &state.join("cache"), &dir.path().join("exec")] {
+        std::fs::create_dir_all(anchor)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(anchor, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    let exec = dir.path().join("exec");
+    let planner = std::sync::Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+        sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+    ));
+    let manifest_hash = sigil_kernel::resource::CanonicalHash::from_bytes([0x44; 32]);
+    let composition = std::sync::Arc::new(
+        sigil_runtime::r71_authority_composition::compose_runtime_authority(
+            &state,
+            &exec,
+            manifest_hash,
+            planner,
+            &[Ch::SessionLog, Ch::InputHistory],
+        )?,
+    );
+    let config = crate::app::tests::common::test_config();
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    // Pin paths to the tempdir (env-independent), keeping the session stem stable.
+    let session_id = app.session_id.clone();
+    app.session_log_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&app.session_log_dir)?;
+    app.session_log_path = app
+        .session_log_dir
+        .join(format!("session-{session_id}.jsonl"));
+    app.sigil_paths.input_history_file = dir.path().join("history/input-history.jsonl");
+    app.set_authority_composition(composition);
+
+    // Session log reroutes to the managed named leaf; the store open is guarded.
+    assert!(
+        app.session_log_path
+            .to_string_lossy()
+            .contains("/managed/session-log/")
+    );
+    assert!(
+        app.session_log_path
+            .ends_with(format!("session-{session_id}/records.jsonl"))
+    );
+    // Input history reroutes to its managed leaf and persists through the writer.
+    assert!(
+        app.input_history_path()
+            .ends_with("managed/input-history/records.jsonl")
+    );
+    app.record_input_history("managed-roundtrip-prompt".to_owned());
+    let content = std::fs::read_to_string(app.input_history_path())?;
+    assert!(content.contains("managed-roundtrip-prompt"));
+    // SAFETY: restores the test-scoped env var.
+    unsafe { std::env::remove_var("SIGIL_TUI_TEST_PERSIST_INPUT_HISTORY") };
+    Ok(())
+}
