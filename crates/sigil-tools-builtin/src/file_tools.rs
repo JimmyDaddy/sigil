@@ -116,7 +116,7 @@ impl Tool for ReadFileTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
-                managed_file_access: Some(read_file_access_ref(&ctx.workspace_root, path)?),
+                managed_file_access: Some(file_access_ref(&ctx.workspace_root, path, "read-file")?),
             },
         )
     }
@@ -450,16 +450,19 @@ fn attach_streaming_artifact(result: ToolResult, artifact: StreamingArtifactCapt
     }
 }
 
-/// RFC-0071 R71.6: read_file declares its managed file-access ref: subject binding is the
-/// normalized path, operation digest is the closed read tag; generation / resolver proof /
-/// plan hash are sealed by the host at adjudication (the tool never owns them).
-fn read_file_access_ref(
+/// RFC-0071 R71.6: one managed file-access ref builder for every in-process file tool.
+///
+/// The subject binding is the normalized path (or the workspace root for pattern scopes),
+/// the operation digest is the closed scope tag + subject binding; generation / resolver
+/// proof / plan hash are sealed by the host at adjudication (the tool never owns them).
+fn file_access_ref(
     workspace_root: &std::path::Path,
-    path: &str,
+    subject: &str,
+    scope: &str,
 ) -> Result<sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1> {
     use sha2::Digest;
     use sigil_kernel::resource::CanonicalHash;
-    let resolved = resolve_workspace_path(workspace_root, path)?;
+    let resolved = resolve_workspace_path(workspace_root, subject)?;
     let normalized = lexically_normalize_path(&resolved)?
         .to_string_lossy()
         .into_owned();
@@ -467,13 +470,14 @@ fn read_file_access_ref(
     hasher.update(normalized.as_bytes());
     let subject_binding_hash = CanonicalHash::from_bytes(hasher.finalize().into());
     let mut op = sha2::Sha256::new();
-    op.update(b"read:file");
+    op.update(scope.as_bytes());
+    op.update(b"::");
     op.update(normalized.as_bytes());
     let operation_digest = CanonicalHash::from_bytes(op.finalize().into());
     Ok(
         sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1 {
             plan_id: sigil_kernel::resource::OpaqueManagedFileAccessPlanId::new(format!(
-                "read-file:{}",
+                "{scope}:{}",
                 normalized.trim_start_matches('/').replace(['/', '.'], "-")
             )),
             subject_ref: sigil_kernel::resource::OpaquePermissionSubjectRef::new(
@@ -581,6 +585,7 @@ impl Tool for WriteFileTool {
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let content = required_string(args, "content")?;
+        let path = required_string(args, "path")?;
         let operation = write_file_permission_operation(ctx, args)?;
         let mut effects = BTreeSet::from([ToolPermissionEffect::FileWrite]);
         if operation == ToolOperation::OverwriteFile {
@@ -597,10 +602,7 @@ impl Tool for WriteFileTool {
             access: ToolAccess::Write,
             operation,
             effects,
-            subjects: vec![tool_path_subject(
-                &ctx.workspace_root,
-                required_string(args, "path")?,
-            )?],
+            subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
             analysis: ToolAnalysisStatus::Complete,
             containment: Default::default(),
             semantic_scope: Some(semantic_scope),
@@ -619,7 +621,7 @@ impl Tool for WriteFileTool {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
-            managed_file_access: None,
+            managed_file_access: Some(file_access_ref(&ctx.workspace_root, path, "write-file")?),
         })
     }
 
@@ -627,6 +629,11 @@ impl Tool for WriteFileTool {
         let path = required_string(&args, "path")?.to_owned();
         let content = required_string(&args, "content")?.to_owned();
         let resolved = resolve_tool_path(&ctx.workspace_root, &path)?;
+        if let Err(error) = ctx.adjudicate_v3_file_operation(
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::Write,
+        ) {
+            return Err(anyhow::anyhow!("managed file access refused: {error}"));
+        }
         let result_path = if resolved.scope == ToolSubjectScope::Workspace {
             resolved.normalized
         } else {
@@ -727,6 +734,7 @@ impl Tool for EditFileTool {
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let old_text = required_string(args, "old_text")?;
         let new_text = required_string(args, "new_text")?;
+        let path = required_string(args, "path")?;
         let mut semantic_scope = ToolSemanticScope::new("workspace:file_edit", 1);
         semantic_scope.qualifiers.insert(
             "replacement_sha256".to_owned(),
@@ -739,10 +747,7 @@ impl Tool for EditFileTool {
                 ToolPermissionEffect::FileRead,
                 ToolPermissionEffect::FileWrite,
             ]),
-            subjects: vec![tool_path_subject(
-                &ctx.workspace_root,
-                required_string(args, "path")?,
-            )?],
+            subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
             analysis: ToolAnalysisStatus::Complete,
             containment: Default::default(),
             semantic_scope: Some(semantic_scope),
@@ -757,7 +762,7 @@ impl Tool for EditFileTool {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
-            managed_file_access: None,
+            managed_file_access: Some(file_access_ref(&ctx.workspace_root, path, "edit-file")?),
         })
     }
 
@@ -766,6 +771,11 @@ impl Tool for EditFileTool {
         let old_text = required_string(&args, "old_text")?.to_owned();
         let new_text = required_string(&args, "new_text")?.to_owned();
         let resolved = resolve_tool_path(&ctx.workspace_root, &path)?;
+        if let Err(error) = ctx.adjudicate_v3_file_operation(
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
+        ) {
+            return Err(anyhow::anyhow!("managed file access refused: {error}"));
+        }
         let result_path = if resolved.scope == ToolSubjectScope::Workspace {
             resolved.normalized
         } else {
@@ -876,6 +886,7 @@ impl Tool for DeleteFileTool {
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let path = required_string(args, "path")?;
         Ok(ToolPermissionPlanDraft {
             access: ToolAccess::Write,
             operation: ToolOperation::DeleteFile,
@@ -883,10 +894,7 @@ impl Tool for DeleteFileTool {
                 ToolPermissionEffect::FileRead,
                 ToolPermissionEffect::FileDelete,
             ]),
-            subjects: vec![tool_path_subject(
-                &ctx.workspace_root,
-                required_string(args, "path")?,
-            )?],
+            subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
             analysis: ToolAnalysisStatus::Complete,
             containment: Default::default(),
             semantic_scope: None,
@@ -901,7 +909,7 @@ impl Tool for DeleteFileTool {
                 step_count: 1,
                 workspace_code_steps: 0,
             },
-            managed_file_access: None,
+            managed_file_access: Some(file_access_ref(&ctx.workspace_root, path, "delete-file")?),
         })
     }
 
@@ -909,6 +917,11 @@ impl Tool for DeleteFileTool {
         let path = required_string(&args, "path")?.to_owned();
         let result_path = resolve_tool_path(&ctx.workspace_root, &path)?.normalized;
         let target = resolve_delete_file_target(&ctx.workspace_root, &path)?;
+        if let Err(error) = ctx.adjudicate_v3_file_operation(
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete,
+        ) {
+            return Err(anyhow::anyhow!("managed file access refused: {error}"));
+        }
         let workspace_root = ctx.workspace_root.clone();
         let mutation_recorder = ctx.mutation_recorder.clone();
         let path_for_delete = result_path.clone();
@@ -1010,13 +1023,18 @@ impl Tool for ListTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
-                managed_file_access: None,
+                managed_file_access: Some(file_access_ref(&ctx.workspace_root, path, "list-dir")?),
             },
         )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let path = optional_string(&args, "path").unwrap_or(".").to_owned();
+        if let Err(error) = ctx.adjudicate_v3_file_operation(
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::List,
+        ) {
+            return Err(anyhow::anyhow!("managed file access refused: {error}"));
+        }
         let recursive = args
             .get("recursive")
             .and_then(Value::as_bool)
@@ -1110,13 +1128,22 @@ impl Tool for GlobTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, ".")?],
                 tool_default_mode: None,
-                managed_file_access: None,
+                managed_file_access: Some(file_access_ref(
+                    &ctx.workspace_root,
+                    ".",
+                    "glob-pattern",
+                )?),
             },
         )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let pattern = required_string(&args, "pattern")?.to_owned();
+        if let Err(error) = ctx.adjudicate_v3_file_operation(
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::Glob,
+        ) {
+            return Err(anyhow::anyhow!("managed file access refused: {error}"));
+        }
         let limit = optional_usize(&args, "limit")?
             .unwrap_or(DEFAULT_GLOB_LIMIT)
             .min(HARD_GLOB_LIMIT);
@@ -1202,7 +1229,11 @@ impl Tool for GrepTool {
                 network_effect: None,
                 subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
-                managed_file_access: None,
+                managed_file_access: Some(file_access_ref(
+                    &ctx.workspace_root,
+                    path,
+                    "grep-subject",
+                )?),
             },
         )
     }
@@ -1210,6 +1241,11 @@ impl Tool for GrepTool {
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let pattern = required_string(&args, "pattern")?.to_owned();
         let root = optional_string(&args, "path").unwrap_or(".").to_owned();
+        if let Err(error) = ctx.adjudicate_v3_file_operation(
+            sigil_kernel::managed_file_access::ManagedFileOperationV1::Grep,
+        ) {
+            return Err(anyhow::anyhow!("managed file access refused: {error}"));
+        }
         let limit = optional_usize(&args, "limit")?
             .unwrap_or(DEFAULT_GREP_LIMIT)
             .min(HARD_GREP_LIMIT);

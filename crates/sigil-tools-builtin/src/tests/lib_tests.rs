@@ -217,6 +217,50 @@ fn tool_context_with_mutation_recorder(workspace: &Path, timeout_secs: u64) -> R
         .with_mutation_recorder(MutationEventRecorder::new(store)))
 }
 
+#[test]
+fn r71_every_in_process_file_tool_declares_a_managed_file_access_ref() -> Result<()> {
+    use sigil_kernel::resource::CanonicalHash;
+    let temp = tempfile::tempdir()?;
+    let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
+    let refs = [
+        ReadFileTool
+            .permission_plan(&ctx, &json!({ "path": "src/lib.rs" }))?
+            .managed_file_access,
+        WriteFileTool
+            .permission_plan(&ctx, &json!({ "path": "src/lib.rs", "content": "x" }))?
+            .managed_file_access,
+        EditFileTool
+            .permission_plan(
+                &ctx,
+                &json!({ "path": "src/lib.rs", "old_text": "a", "new_text": "b" }),
+            )?
+            .managed_file_access,
+        DeleteFileTool
+            .permission_plan(&ctx, &json!({ "path": "src/lib.rs" }))?
+            .managed_file_access,
+        ListTool
+            .permission_plan(&ctx, &json!({ "path": "src" }))?
+            .managed_file_access,
+        GlobTool
+            .permission_plan(&ctx, &json!({ "pattern": "**/*.rs" }))?
+            .managed_file_access,
+        GrepTool
+            .permission_plan(&ctx, &json!({ "pattern": "fn", "path": "src" }))?
+            .managed_file_access,
+    ];
+    for file_ref in refs {
+        let file_ref = file_ref.ok_or_else(|| {
+            anyhow::anyhow!("in-process file tool must declare a file-access ref")
+        })?;
+        assert_ne!(
+            file_ref.subject_binding_hash,
+            CanonicalHash::from_bytes([0u8; 32]),
+            "the subject binding must be the closed normalized path binding"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn read_tool_artifact_returns_body_only_as_transient_context() -> Result<()> {
     let temp = tempfile::tempdir()?;
