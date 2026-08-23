@@ -18,6 +18,7 @@ pub mod maintenance;
 pub mod provider_registry;
 pub mod quota;
 pub mod reconcile;
+pub mod semantic_matrix;
 pub mod spawn_protocol;
 pub mod storage;
 
