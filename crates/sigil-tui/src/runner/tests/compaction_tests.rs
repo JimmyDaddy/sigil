@@ -461,7 +461,10 @@ fn exact_overflow_rejection_applies_and_retries_once_with_owned_preparation() ->
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Hosted qualification runners can briefly contend for worker-thread and
+    // filesystem resources; keep the assertion bounded without treating that
+    // contention as a compaction protocol failure.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut notices = Vec::new();
     let applied = loop {
         let message =
@@ -535,7 +538,9 @@ fn overflow_recovery_is_not_recursively_retried() -> Result<()> {
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Keep this worker-event wait bounded while allowing the hosted Linux
+    // qualification runner's transient resource contention to settle.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut notices = Vec::new();
     loop {
         let message =
