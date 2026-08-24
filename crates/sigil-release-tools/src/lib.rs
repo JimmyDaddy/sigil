@@ -4,7 +4,95 @@
 //! root. It owns the three release-owner commands (model-eval, model-eval-route-contract,
 //! model-eval-rollout-manifest) removed from the shipping `sigil` binary.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use sigil_resource_authority::release_output::{
+    AuthorityBorrowedReleaseOutputServiceV1, BORROWED_RELEASE_OUTPUT_SCHEMA_VERSION,
+    BorrowedReleaseOutputEntryV1, BorrowedReleaseOutputOperationV1, BorrowedReleaseOutputRequestV1,
+    BorrowedReleaseOutputServiceV1,
+};
+
+/// Release-tool-owned output publisher. The runtime receives only this narrow port; the
+/// authority service fixes the invocation root and returns closed receipts for every write.
+#[derive(Debug)]
+pub struct ReleaseOutputOwnerV1 {
+    service: Arc<AuthorityBorrowedReleaseOutputServiceV1>,
+}
+
+impl ReleaseOutputOwnerV1 {
+    pub fn new(output_root: impl Into<PathBuf>) -> Self {
+        Self {
+            service: Arc::new(AuthorityBorrowedReleaseOutputServiceV1::new(output_root)),
+        }
+    }
+
+    pub fn publish_file(&self, destination: &Path, content: &[u8]) -> anyhow::Result<()> {
+        self.service
+            .publish(BorrowedReleaseOutputRequestV1 {
+                schema_version: BORROWED_RELEASE_OUTPUT_SCHEMA_VERSION,
+                capsule_id: sigil_kernel::resource::OpaqueRegistrationCapsuleId::new(format!(
+                    "release-file-{}",
+                    uuid::Uuid::new_v4()
+                )),
+                operation: BorrowedReleaseOutputOperationV1::File,
+                destination: destination.to_owned(),
+                content: content.to_vec(),
+                entries: Vec::new(),
+            })
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
+    pub fn publish_tree(
+        &self,
+        destination: &Path,
+        entries: &[(PathBuf, Vec<u8>)],
+    ) -> anyhow::Result<()> {
+        self.service
+            .publish(BorrowedReleaseOutputRequestV1 {
+                schema_version: BORROWED_RELEASE_OUTPUT_SCHEMA_VERSION,
+                capsule_id: sigil_kernel::resource::OpaqueRegistrationCapsuleId::new(format!(
+                    "release-tree-{}",
+                    uuid::Uuid::new_v4()
+                )),
+                operation: BorrowedReleaseOutputOperationV1::Tree,
+                destination: destination.to_owned(),
+                content: Vec::new(),
+                entries: entries
+                    .iter()
+                    .map(|(relative_path, content)| BorrowedReleaseOutputEntryV1 {
+                        relative_path: relative_path.clone(),
+                        content: content.clone(),
+                    })
+                    .collect(),
+            })
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+}
+
+impl sigil_runtime::model_eval::ReleaseOutputOwnerV1 for ReleaseOutputOwnerV1 {
+    fn prepare_tree_root(&self, root: &Path) -> anyhow::Result<()> {
+        self.service
+            .prepare_tree_root(root)
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
+    fn publish_file(&self, destination: &Path, content: &[u8]) -> anyhow::Result<()> {
+        Self::publish_file(self, destination, content)
+    }
+
+    fn publish_tree(
+        &self,
+        destination: &Path,
+        entries: &[(PathBuf, Vec<u8>)],
+    ) -> anyhow::Result<()> {
+        Self::publish_tree(self, destination, entries)
+    }
+}
 
 pub const FROZEN_ORCHESTRATION_CASE_COUNT: usize = 50;
 

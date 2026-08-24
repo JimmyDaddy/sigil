@@ -1266,9 +1266,11 @@ mod tests {
         let state = dir.path().join("state");
         let exec = dir.path().join("exec");
         let config_path = dir.path().join("sigil.toml");
+        let release_root = dir.path().join("release-owner");
         std::fs::create_dir_all(&state).expect("state dir");
         std::fs::create_dir_all(state.join("cache")).expect("cache dir");
         std::fs::create_dir_all(&exec).expect("exec dir");
+        std::fs::create_dir_all(&release_root).expect("release root");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1298,6 +1300,18 @@ mod tests {
                 ],
             )
             .expect("compose");
+        let composition = {
+            let mut composition = composition;
+            let release_output = std::sync::Arc::new(
+                sigil_resource_authority::release_output::AuthorityBorrowedReleaseOutputServiceV1::new(
+                    &release_root,
+                ),
+            );
+            composition.services = composition
+                .services
+                .with_optional_borrowed_release_output(Some(release_output));
+            composition
+        };
         let recovery = RuntimeResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-full",

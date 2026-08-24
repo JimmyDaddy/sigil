@@ -768,6 +768,7 @@ fn model_eval_campaign_requires_environment_credential_before_output_creation() 
                 max_cost_microusd: 500_000,
                 campaign_timeout: Duration::from_secs(10),
                 output_dir: output_dir.clone(),
+                release_output_owner: None,
             },
             &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
         ))
@@ -819,6 +820,7 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
                 max_cost_microusd: 500_000,
                 campaign_timeout: Duration::from_secs(10),
                 output_dir: temp.path().join("campaign"),
+                release_output_owner: None,
             },
             &services,
         )
@@ -910,6 +912,7 @@ corpus_version = "rfc-0063-v1"
                 max_cost_microusd: 500_000,
                 campaign_timeout: Duration::from_secs(10),
                 output_dir: temp.path().join("missing-contract"),
+                release_output_owner: None,
             },
             &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
         )
@@ -931,6 +934,7 @@ corpus_version = "rfc-0063-v1"
                 max_cost_microusd: 500_000,
                 campaign_timeout: Duration::from_secs(10),
                 output_dir: temp.path().join("campaign"),
+                release_output_owner: None,
             },
             &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
         )
@@ -1163,6 +1167,7 @@ fn all_committed_model_eval_fixtures_satisfy_structured_acceptance() {
                     max_cost_microusd: 500_000,
                     campaign_timeout: Duration::from_secs(30),
                     output_dir: temp.path().join("campaign"),
+                    release_output_owner: None,
                 },
                 &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
             )

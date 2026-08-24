@@ -33,6 +33,9 @@ fn main() -> anyhow::Result<()> {
     } else {
         launch_cwd.join(&args.output)
     };
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let contract = sigil_runtime::model_eval::build_model_eval_orchestration_route_contract(
         &sigil_runtime::model_eval::ModelEvalRouteContractBuildRequest {
             config_path: args.config_path,
@@ -45,7 +48,12 @@ fn main() -> anyhow::Result<()> {
             "candidate CLI and runtime build metadata disagree; rebuild the frozen binary"
         );
     }
-    sigil_runtime::model_eval::write_model_eval_orchestration_route_contract(&contract, &output)?;
+    let owner = sigil_release_tools::ReleaseOutputOwnerV1::new(
+        output
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("route contract output has no parent"))?,
+    );
+    owner.publish_file(&output, toml::to_string_pretty(&contract)?.as_bytes())?;
     println!("wrote {}", output.display());
     Ok(())
 }

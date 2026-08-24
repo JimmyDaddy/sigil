@@ -1,17 +1,18 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sigil_kernel::{
     ControlEntry, EvalEvidenceKind, EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalResult,
     EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary, JsonlSessionStore,
     MODEL_EVAL_REPORT_SCHEMA_VERSION, ModelEvalAssertionResultV3,
     ModelEvalCostConfidence as ReportCostConfidence, ModelEvalExecutionStatus,
-    ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalUsage,
+    ModelEvalReportCampaignV3, ModelEvalReportManifestV3, ModelEvalReportRecordV3, ModelEvalUsage,
     ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION, OrchestrationEvalIdentityV1,
     OrchestrationEvalObservationV1, OrchestrationEvalReportCampaignV1,
-    OrchestrationEvalReportRecordV1, OrchestrationEvalRouteIdentityV1, ProjectionCursor,
-    RootConfig, RunStatus, Session, SessionLogEntry, ToolErrorKind, ToolExecutionStatus,
-    VerificationVerdict, write_model_eval_report_v3, write_orchestration_eval_report_v1,
+    OrchestrationEvalReportManifestV1, OrchestrationEvalReportRecordV1,
+    OrchestrationEvalRouteIdentityV1, ProjectionCursor, RootConfig, RunStatus, Session,
+    SessionLogEntry, ToolErrorKind, ToolExecutionStatus, VerificationVerdict,
+    write_model_eval_report_v3, write_orchestration_eval_report_v1,
 };
 
 use crate::application_run::ApplicationRunTerminalStatus;
@@ -27,6 +28,18 @@ use super::{
 pub fn write_model_eval_campaign_report(
     campaign: &ModelEvalCampaignExecution,
 ) -> Result<sigil_kernel::ModelEvalReportArtifactsV3> {
+    write_model_eval_campaign_report_with_owner(campaign, None)
+}
+
+/// Writes one release report through the nonshipping owner port. Kernel report rendering remains
+/// the schema authority; the temporary render tree is never the user-visible release output.
+pub fn write_model_eval_campaign_report_with_owner(
+    campaign: &ModelEvalCampaignExecution,
+    owner: Option<&dyn super::ReleaseOutputOwnerV1>,
+) -> Result<sigil_kernel::ModelEvalReportArtifactsV3> {
+    if let Some(owner) = owner {
+        return write_model_eval_campaign_report_owned(campaign, owner);
+    }
     let records = campaign
         .runs
         .iter()
@@ -73,6 +86,94 @@ pub fn write_model_eval_campaign_report(
         )?;
     }
     Ok(artifacts)
+}
+
+fn write_model_eval_campaign_report_owned(
+    campaign: &ModelEvalCampaignExecution,
+    owner: &dyn super::ReleaseOutputOwnerV1,
+) -> Result<sigil_kernel::ModelEvalReportArtifactsV3> {
+    let render_root = tempfile::tempdir().context("failed to create report render root")?;
+    let records = campaign
+        .runs
+        .iter()
+        .map(build_model_eval_report_record)
+        .collect::<Result<Vec<_>>>()?;
+    let rendered = sigil_kernel::write_model_eval_report_v3(
+        render_root.path(),
+        &ModelEvalReportCampaignV3 {
+            campaign_id: campaign.campaign_id.clone(),
+            started_at_unix_ms: campaign.started_at_unix_ms,
+            ended_at_unix_ms: campaign.ended_at_unix_ms,
+            requested_repetitions: campaign.planned_runs,
+            charged_microusd: campaign.charged_microusd,
+            records: records.clone(),
+        },
+    )?;
+    let results_path = campaign.output_dir.join("results.jsonl");
+    let summary_path = campaign.output_dir.join("summary.md");
+    let manifest_path = campaign.output_dir.join("manifest.json");
+    owner.publish_file(&results_path, &fs::read(rendered.results_jsonl_path)?)?;
+    owner.publish_file(&summary_path, &fs::read(rendered.summary_path)?)?;
+    let mut manifest: ModelEvalReportManifestV3 =
+        serde_json::from_slice(&fs::read(rendered.manifest_path)?)?;
+    manifest.results_jsonl_path = results_path.clone();
+    manifest.summary_path = summary_path.clone();
+    owner.publish_file(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
+    if let Some(contract) = &campaign.orchestration_route_contract {
+        let corpus_digest = campaign
+            .orchestration_corpus_digest
+            .as_ref()
+            .expect("preflight binds a corpus digest to every orchestration contract");
+        let orchestration_records = campaign
+            .runs
+            .iter()
+            .zip(records)
+            .map(|(execution, model_eval)| {
+                build_orchestration_eval_report_record(
+                    execution,
+                    model_eval,
+                    contract,
+                    corpus_digest,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let orchestration_dir = campaign.output_dir.join("orchestration");
+        let render_orchestration_dir = render_root.path().join("orchestration");
+        sigil_kernel::write_orchestration_eval_report_v1(
+            &render_orchestration_dir,
+            &OrchestrationEvalReportCampaignV1 {
+                campaign_id: campaign.campaign_id.clone(),
+                started_at_unix_ms: campaign.started_at_unix_ms,
+                ended_at_unix_ms: campaign.ended_at_unix_ms,
+                requested_repetitions: orchestration_records.len(),
+                records: orchestration_records,
+            },
+        )?;
+        let mut orchestration_manifest: OrchestrationEvalReportManifestV1 =
+            serde_json::from_slice(&fs::read(render_orchestration_dir.join("manifest.json"))?)?;
+        orchestration_manifest.results_jsonl_path = orchestration_dir.join("results.jsonl");
+        orchestration_manifest.summary_path = orchestration_dir.join("summary.md");
+        let entries = vec![
+            (
+                PathBuf::from("results.jsonl"),
+                fs::read(render_orchestration_dir.join("results.jsonl"))?,
+            ),
+            (
+                PathBuf::from("summary.md"),
+                fs::read(render_orchestration_dir.join("summary.md"))?,
+            ),
+            (
+                PathBuf::from("manifest.json"),
+                serde_json::to_vec_pretty(&orchestration_manifest)?,
+            ),
+        ];
+        owner.publish_tree(&orchestration_dir, &entries)?;
+    }
+    Ok(sigil_kernel::ModelEvalReportArtifactsV3 {
+        results_jsonl_path: results_path,
+        summary_path,
+        manifest_path,
+    })
 }
 
 fn build_orchestration_eval_report_record(

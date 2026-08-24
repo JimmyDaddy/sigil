@@ -33,6 +33,14 @@ fn main() -> anyhow::Result<()> {
     } else {
         launch_cwd.join(&args.output_dir)
     };
+    if let Some(parent) = output_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let release_output_owner = std::sync::Arc::new(sigil_release_tools::ReleaseOutputOwnerV1::new(
+        output_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("model eval output has no parent"))?,
+    ));
     let orchestration_route_contract = args
         .orchestration_route_contract
         .map(|path| {
@@ -63,6 +71,7 @@ fn main() -> anyhow::Result<()> {
                     )?,
                     campaign_timeout: std::time::Duration::from_secs(args.timeout_secs),
                     output_dir,
+                    release_output_owner: Some(release_output_owner),
                 },
                 &services,
             )

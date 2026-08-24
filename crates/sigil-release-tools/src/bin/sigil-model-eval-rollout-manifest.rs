@@ -26,9 +26,17 @@ fn main() -> anyhow::Result<()> {
     } else {
         launch_cwd.join(&args.output)
     };
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let report = sigil_runtime::load_orchestration_eval_report_manifest(&report)?;
     let manifest = sigil_runtime::build_orchestration_rollout_manifest(&report)?;
-    sigil_runtime::write_orchestration_rollout_manifest(&manifest, &output)?;
+    let owner = sigil_release_tools::ReleaseOutputOwnerV1::new(
+        output
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("rollout manifest output has no parent"))?,
+    );
+    owner.publish_file(&output, serde_json::to_vec_pretty(&manifest)?.as_slice())?;
     println!("wrote {}", output.display());
     Ok(())
 }

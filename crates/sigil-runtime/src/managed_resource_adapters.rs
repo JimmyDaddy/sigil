@@ -61,6 +61,10 @@ pub struct RuntimeManagedResourceServicesV1 {
     /// Host-private borrowed configuration owner for the server's root config.
     pub borrowed_configuration:
         Option<Arc<dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1>>,
+    /// Nonshipping release-owner file/tree service. It is attached only by release qualification
+    /// composition; normal shipping boot does not expose a release output writer.
+    pub borrowed_release_output:
+        Option<Arc<dyn sigil_resource_authority::release_output::BorrowedReleaseOutputServiceV1>>,
     /// Whether the desktop product-state updater is attached to its real owner route.
     pub product_state_updater_seam: crate::r71_global_cutover::RuntimeProductStateSeamV1,
     /// Whether native support-save is attached to its host-private registration route.
@@ -297,6 +301,7 @@ impl RuntimeManagedResourceServicesV1 {
             product_updater: None,
             borrowed_native_save: bundle.borrowed_native_save.clone(),
             borrowed_configuration: None,
+            borrowed_release_output: None,
             product_state_updater_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
             borrowed_native_save_seam: if bundle.borrowed_native_save.is_some() {
@@ -339,6 +344,7 @@ impl RuntimeManagedResourceServicesV1 {
             product_updater: None,
             borrowed_native_save: bundle.borrowed_native_save.clone(),
             borrowed_configuration: None,
+            borrowed_release_output: None,
             product_state_updater_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
             borrowed_native_save_seam: if bundle.borrowed_native_save.is_some() {
@@ -419,6 +425,23 @@ impl RuntimeManagedResourceServicesV1 {
             crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
         };
         self.borrowed_configuration = borrowed_configuration;
+        self
+    }
+
+    /// Attaches the real nonshipping release-owner file/tree service.
+    #[must_use]
+    pub fn with_optional_borrowed_release_output(
+        mut self,
+        borrowed_release_output: Option<
+            Arc<dyn sigil_resource_authority::release_output::BorrowedReleaseOutputServiceV1>,
+        >,
+    ) -> Self {
+        self.borrowed_release_output_seam = if borrowed_release_output.is_some() {
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
+        } else {
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+        };
+        self.borrowed_release_output = borrowed_release_output;
         self
     }
 

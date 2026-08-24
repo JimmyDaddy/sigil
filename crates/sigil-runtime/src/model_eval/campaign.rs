@@ -42,6 +42,7 @@ pub struct ModelEvalCampaignRequest {
     pub max_cost_microusd: u64,
     pub campaign_timeout: Duration,
     pub output_dir: PathBuf,
+    pub release_output_owner: Option<Arc<dyn super::ReleaseOutputOwnerV1>>,
 }
 
 /// Secret-free generated config and paths used by one model-eval repetition.
@@ -313,7 +314,12 @@ pub async fn run_model_eval_campaign(
         .context("model eval planned run count overflowed")?;
     let reservation_microusd_per_run =
         model_eval_reservation_microusd(request.max_cost_microusd, planned_runs)?;
-    let output_dir = create_campaign_output_dir(&request.output_dir)?;
+    let output_dir = if let Some(owner) = request.release_output_owner.as_deref() {
+        owner.prepare_tree_root(&request.output_dir)?;
+        request.output_dir.clone()
+    } else {
+        create_campaign_output_dir(&request.output_dir)?
+    };
     let campaign_id = format!("model-eval-{}", uuid::Uuid::new_v4());
     let deadline = Instant::now()
         .checked_add(request.campaign_timeout)
@@ -393,7 +399,11 @@ pub async fn run_model_eval_campaign(
         orchestration_corpus_digest,
         runs,
     };
-    super::write_model_eval_campaign_report(&campaign)?;
+    if let Some(owner) = request.release_output_owner.as_deref() {
+        super::write_model_eval_campaign_report_with_owner(&campaign, Some(owner))?;
+    } else {
+        super::write_model_eval_campaign_report(&campaign)?;
+    }
     sync_directory(&campaign.output_dir)?;
     Ok(campaign)
 }

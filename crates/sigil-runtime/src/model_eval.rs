@@ -10,6 +10,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{OrchestrationEvalCaseClass, ToolRegistryScope};
 
+/// Nonshipping release owner used by the release-tool binaries for candidate file/tree output.
+/// Runtime keeps the port generic and never constructs a release writer itself.
+pub trait ReleaseOutputOwnerV1: std::fmt::Debug + Send + Sync {
+    fn prepare_tree_root(&self, root: &Path) -> anyhow::Result<()>;
+    fn publish_file(&self, destination: &Path, content: &[u8]) -> anyhow::Result<()>;
+    fn publish_tree(
+        &self,
+        destination: &Path,
+        entries: &[(PathBuf, Vec<u8>)],
+    ) -> anyhow::Result<()>;
+}
+
 mod campaign;
 pub use campaign::*;
 mod report;

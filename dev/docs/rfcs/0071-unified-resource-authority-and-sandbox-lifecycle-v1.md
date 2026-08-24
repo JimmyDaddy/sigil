@@ -10097,6 +10097,8 @@ pnpm --dir apps/desktop check
 
 **R71.7 borrowed-configuration implementation amendment**：provider setup 与 default-model 的 Desktop production writer 现在冻结为 `Tauri command -> sigil-desktop typed host-private client -> sigil-http private loopback route -> AuthorityBorrowedConfigurationServiceV1`。私有 capsule 只携带 bounded typed request 与 one-shot opaque id；authority 固定 server-owned config root，在 update lock 内重验 expected-current bytes，执行首次 bootstrap 或 versioned atomic replace，并返回包含 previous/committed identity 与 observation version、但不含 raw path/token 的 closed receipt。公开 settings DTO/OpenAPI 仍只返回 secret-free result；旧 `RootConfig::save_if_unchanged`/direct replace 不再是 Desktop production writer，isolated/shadow composition 没有该 service 时 probe 必须保持 RED。
 
+**R71.7 borrowed-release-output implementation amendment**：nonshipping `sigil-release-tools` 现在通过 runtime 的 path-agnostic `ReleaseOutputOwnerV1` port 使用 fixed-root `AuthorityBorrowedReleaseOutputServiceV1`。单文件输出使用 one-shot capsule、no-follow parent observation、staged create-new、file fsync 与 parent fsync；campaign/orchestration tree 使用 absent-root reservation、safe-relative bounded entry plan、entry-by-entry fsync 与 partial receipt frontier，绝不采用已有 root 或扫描/覆盖未知 entries。runtime 在 owner 模式下先用临时 render tree 生成 kernel-owned report schema，再由 owner publish 最终 file/tree；manifest 路径重写为最终输出路径，不泄漏 render temp path。普通 shipping boot 不 attach release owner；full composition qualification 只在注入真实 service 后翻转 `BorrowedReleaseOutput` seam，shadow/isolated composition 继续 RED。
+
 **Schema/失败**：只保留current route；已有V3 session fixed-forward，不能降级解释。删除后若gate失败则不发布，而不是恢复部分legacy adapter。
 
 **验收命令**：

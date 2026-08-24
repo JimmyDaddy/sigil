@@ -21,6 +21,7 @@ pub mod native_save;
 pub mod provider_registry;
 pub mod quota;
 pub mod reconcile;
+pub mod release_output;
 pub mod semantic_matrix;
 pub mod spawn_protocol;
 pub mod storage;
