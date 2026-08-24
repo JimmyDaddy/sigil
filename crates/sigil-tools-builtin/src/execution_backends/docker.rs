@@ -414,7 +414,10 @@ pub(crate) fn ensure_docker_available(backend: &DockerExecutionBackend) -> Resul
 }
 
 pub(crate) fn docker_check(docker: &Path, args: &[&str], failure_context: &str) -> Result<()> {
-    let output = command_output_with_timeout(docker, args, Duration::from_secs(3))
+    // Docker daemon/CLI startup can be delayed by hosted-runner load even when the bounded
+    // command itself is healthy; keep the preflight fail-closed while avoiding a false timeout
+    // during the full R71 qualification suite.
+    let output = command_output_with_timeout(docker, args, Duration::from_secs(10))
         .with_context(|| format!("failed to run docker availability check: {failure_context}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
