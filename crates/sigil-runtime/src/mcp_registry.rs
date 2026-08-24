@@ -686,6 +686,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust(
         runtime_event_handler,
         workspace_trust,
         None,
+        None,
     )
 }
 
@@ -719,6 +720,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
         Some(RuntimeTerminalLifecycleRoute::Bound(
             terminal_lifecycle_sink,
         )),
+        None,
     )
 }
 
@@ -736,6 +738,32 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
     workspace_trust: WorkspaceTrust,
     terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
 ) -> Result<RuntimeToolSurface> {
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        workspace_trust,
+        terminal_lifecycle_factory,
+        None,
+    )
+}
+
+/// Builds the lazy-MCP tool surface with terminal lifecycle and managed Extension routes.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    workspace_trust: WorkspaceTrust,
+    terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+) -> Result<RuntimeToolSurface> {
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_terminal_lifecycle(
         root_config,
         provider_capabilities,
@@ -746,6 +774,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
         Some(RuntimeTerminalLifecycleRoute::Factory(
             terminal_lifecycle_factory,
         )),
+        managed_extension_execution,
     )
 }
 
@@ -763,6 +792,9 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     workspace_trust: WorkspaceTrust,
     terminal_lifecycle_route: Option<RuntimeTerminalLifecycleRoute>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     let _declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -791,7 +823,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         workspace_root,
         elicitation_handler,
         runtime_event_handler,
-        None,
+        managed_extension_execution,
     );
     Ok(RuntimeToolSurface {
         registry,
@@ -993,6 +1025,41 @@ pub async fn activate_mcp_tools_from_product_surface(
     egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
     presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
 ) -> Result<LazyMcpActivationResult> {
+    activate_mcp_tools_from_product_surface_with_managed_extension_execution(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        runtime_event_handler,
+        mutation_recorder,
+        network_admission,
+        egress_recorder,
+        presenter,
+        None,
+    )
+    .await
+}
+
+/// Activates configured MCP servers with the product-surface and managed Extension routes.
+#[allow(clippy::too_many_arguments)]
+pub async fn activate_mcp_tools_from_product_surface_with_managed_extension_execution(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+    network_admission: ExtensionProcessNetworkAdmission,
+    egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+) -> Result<LazyMcpActivationResult> {
     let remote_servers = root_config
         .mcp_servers
         .iter()
@@ -1021,7 +1088,7 @@ pub async fn activate_mcp_tools_from_product_surface(
         runtime_event_handler,
         mutation_recorder,
         None,
-        None,
+        managed_extension_execution,
         network_admission,
     )
     .await?;
@@ -1638,6 +1705,37 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_an
     mutation_recorder: Option<MutationEventRecorder>,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<McpRefreshResult> {
+    refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission_and_managed_extension_execution(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        runtime_event_handler,
+        mutation_recorder,
+        network_admission,
+        None,
+    )
+    .await
+}
+
+/// Refreshes one MCP server with explicit network admission and managed Extension execution.
+#[allow(clippy::too_many_arguments)]
+pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission_and_managed_extension_execution(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: &str,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+    network_admission: ExtensionProcessNetworkAdmission,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+) -> Result<McpRefreshResult> {
     refresh_mcp_server_tools_inner(
         registry,
         root_config,
@@ -1648,6 +1746,7 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_an
         runtime_event_handler,
         mutation_recorder,
         network_admission,
+        managed_extension_execution,
     )
     .await
 }
@@ -1667,6 +1766,41 @@ pub async fn refresh_mcp_server_tools_from_product_surface(
     network_admission: ExtensionProcessNetworkAdmission,
     egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
     presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+) -> Result<McpRefreshResult> {
+    refresh_mcp_server_tools_from_product_surface_with_managed_extension_execution(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        runtime_event_handler,
+        mutation_recorder,
+        network_admission,
+        egress_recorder,
+        presenter,
+        None,
+    )
+    .await
+}
+
+/// Refreshes one configured MCP server through the product and managed Extension routes.
+#[allow(clippy::too_many_arguments)]
+pub async fn refresh_mcp_server_tools_from_product_surface_with_managed_extension_execution(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: &str,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+    network_admission: ExtensionProcessNetworkAdmission,
+    egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 ) -> Result<McpRefreshResult> {
     let server = root_config
         .mcp_servers
@@ -1697,6 +1831,7 @@ pub async fn refresh_mcp_server_tools_from_product_surface(
         runtime_event_handler,
         mutation_recorder,
         network_admission,
+        managed_extension_execution,
     )
     .await
 }
@@ -1712,6 +1847,9 @@ async fn refresh_mcp_server_tools_inner(
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     mutation_recorder: Option<MutationEventRecorder>,
     network_admission: ExtensionProcessNetworkAdmission,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 ) -> Result<McpRefreshResult> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -1745,6 +1883,9 @@ async fn refresh_mcp_server_tools_inner(
         .with_handlers(elicitation_handler, runtime_event_handler)
         .with_network_admission(network_admission)
         .with_strict_registration();
+    if let Some(route) = managed_extension_execution {
+        registration_options = registration_options.with_managed_extension_execution(route);
+    }
     if let Some(recorder) = mutation_recorder {
         registration_options = registration_options.with_mutation_recorder(recorder);
     }

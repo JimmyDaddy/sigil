@@ -30,6 +30,9 @@ pub(in crate::runner) struct WorkerCommandContext<'a, P> {
     pub(in crate::runner) mcp_event_handler: &'a Arc<ChannelMcpRuntimeEventHandler>,
     pub(in crate::runner) role_provider_builder: &'a Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) context_resolver: &'a sigil_runtime::RequestContextResolver,
+    pub(in crate::runner) managed_extension_execution: &'a Option<
+        Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
     pub(in crate::runner) state: &'a mut WorkerLoopState,
 }
 

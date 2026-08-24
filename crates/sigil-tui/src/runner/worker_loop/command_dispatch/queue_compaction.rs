@@ -22,6 +22,7 @@ where
         mcp_event_handler: _,
         role_provider_builder: _,
         context_resolver,
+        managed_extension_execution: _,
         state,
     } = context;
     let mut command_result = Some(command);

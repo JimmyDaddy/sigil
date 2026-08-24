@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::mpsc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 
 use anyhow::Result;
 use serde_json::json;
@@ -124,6 +129,26 @@ while True:
 "#,
     )?;
     Ok(())
+}
+
+fn test_authority_composition(
+    root: &std::path::Path,
+) -> Result<Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>> {
+    let state_root = root.join("authority-state");
+    fs::create_dir_all(state_root.join("cache"))?;
+    let execution_temp_root = root.join("authority-execution-temp");
+    fs::create_dir_all(&execution_temp_root)?;
+    Ok(Arc::new(
+        sigil_runtime::r71_authority_composition::compose_runtime_authority(
+            &state_root,
+            &execution_temp_root,
+            sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
+            Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+                sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            &[],
+        )?,
+    ))
 }
 
 #[test]
@@ -446,13 +471,19 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         ..McpServerConfig::default()
     });
 
-    let (command_tx, message_rx) = spawn_agent_worker(
+    let spawned = super::super::spawn::spawn_agent_worker_with_route_directive_and_attachment(
         root_config,
         workspace_root.join("sigil.toml"),
         session_log_path.clone(),
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
+        super::super::spawn::WorkerSessionRouteDirective::default(),
+        Some(test_authority_composition(temp.path())?),
+        None,
     )?;
+    let command_tx = spawned.command_tx;
+    let message_rx = spawned.message_rx;
+    drop(spawned.join_handle);
     let ready = loop {
         let message = recv_message(&message_rx)?;
         if matches!(

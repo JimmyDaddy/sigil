@@ -335,6 +335,20 @@ where
     )
 }
 
+fn test_managed_extension_execution(
+    workspace_root: &Path,
+) -> Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1> {
+    Arc::new(
+        sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1::new(
+            Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+                sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            workspace_root.to_path_buf(),
+        ),
+    )
+}
+
 pub(super) fn spawn_test_worker_with_role_provider_builder<P>(
     root_config: RootConfig,
     session_log_path: PathBuf,
@@ -362,6 +376,7 @@ where
         WorkerMcpRuntimeEventSender::new(event_tx.clone()),
     ));
     let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
+    let managed_extension_execution = Some(test_managed_extension_execution(&workspace_root));
     let handle = thread::Builder::new()
         .name("sigil-test-agent-worker".to_owned())
         .spawn(move || {
@@ -392,6 +407,7 @@ where
                     event_handler: mcp_event_handler,
                     role_provider_builder,
                     context_resolver,
+                    managed_extension_execution,
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,

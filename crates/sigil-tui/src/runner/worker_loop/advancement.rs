@@ -76,6 +76,9 @@ pub(in crate::runner) struct WorkerAdvancementContext<'a, P> {
     pub(in crate::runner) mcp_event_handler: &'a Arc<ChannelMcpRuntimeEventHandler>,
     pub(in crate::runner) role_provider_builder: &'a Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) context_resolver: &'a sigil_runtime::RequestContextResolver,
+    pub(in crate::runner) managed_extension_execution: &'a Option<
+        Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
     pub(in crate::runner) state: &'a mut WorkerLoopState,
 }
 
@@ -93,6 +96,7 @@ impl<'a, P> WorkerAdvancementContext<'a, P> {
             mcp_event_handler: self.mcp_event_handler,
             role_provider_builder: self.role_provider_builder,
             context_resolver: self.context_resolver,
+            managed_extension_execution: self.managed_extension_execution,
             state: &mut *self.state,
         }
     }
@@ -1024,6 +1028,7 @@ where
         message_tx,
         elicitation_handler,
         mcp_event_handler,
+        managed_extension_execution,
         state,
         ..
     } = context;
@@ -1161,6 +1166,7 @@ where
                 .current
                 .as_ref()
                 .and_then(|session| session.egress_audit_recorder().ok()),
+            managed_extension_execution.as_ref().map(Arc::clone),
             &mut state.refresh.pending_mcp_servers,
         );
         state.refresh.next_mcp_retry_at = if shared_registry_blocked {

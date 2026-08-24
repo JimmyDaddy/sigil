@@ -135,6 +135,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         event_handler: mcp_event_handler,
         role_provider_builder,
         context_resolver,
+        managed_extension_execution,
     } = mcp_handlers;
     let WorkerLoopTerminalRuntime {
         lifecycle_router: terminal_lifecycle_router,
@@ -348,6 +349,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         mcp_event_handler: &mcp_event_handler,
                         role_provider_builder: &role_provider_builder,
                         context_resolver: &context_resolver,
+                        managed_extension_execution: &managed_extension_execution,
                         state: &mut state,
                     },
                     command,
@@ -373,6 +375,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 mcp_event_handler: &mcp_event_handler,
                 role_provider_builder: &role_provider_builder,
                 context_resolver: &context_resolver,
+                managed_extension_execution: &managed_extension_execution,
                 state: &mut state,
             });
             continue;
@@ -400,6 +403,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         mcp_event_handler: &mcp_event_handler,
                         role_provider_builder: &role_provider_builder,
                         context_resolver: &context_resolver,
+                        managed_extension_execution: &managed_extension_execution,
                         state: &mut state,
                     },
                     command,
@@ -425,6 +429,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 mcp_event_handler: &mcp_event_handler,
                 role_provider_builder: &role_provider_builder,
                 context_resolver: &context_resolver,
+                managed_extension_execution: &managed_extension_execution,
                 state: &mut state,
             });
             continue;
@@ -444,6 +449,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 mcp_event_handler: &mcp_event_handler,
                 role_provider_builder: &role_provider_builder,
                 context_resolver: &context_resolver,
+                managed_extension_execution: &managed_extension_execution,
                 state: &mut state,
             }),
             WorkerAdvancementControl::SkipCommandPoll

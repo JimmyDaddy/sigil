@@ -21,6 +21,7 @@ where
         mcp_event_handler,
         role_provider_builder: _,
         context_resolver: _,
+        managed_extension_execution,
         state,
     } = context;
     let mut command_result = Some(command);
@@ -117,7 +118,7 @@ where
                             message_tx.clone(),
                         ),
                     );
-                match runtime.block_on(sigil_runtime::activate_mcp_tools_from_product_surface(
+                match runtime.block_on(sigil_runtime::activate_mcp_tools_from_product_surface_with_managed_extension_execution(
                     agent.tool_registry_mut(),
                     root_config,
                     provider_capabilities,
@@ -132,6 +133,7 @@ where
                     ),
                     egress_recorder,
                     disclosure_presenter,
+                    managed_extension_execution.as_ref().map(Arc::clone),
                 )) {
                     Ok(result) if result.matched_servers == 0 => {
                         let _ = message_tx.send(WorkerMessage::McpActivationStatus {

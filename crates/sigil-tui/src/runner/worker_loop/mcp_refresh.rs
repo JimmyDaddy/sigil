@@ -7,6 +7,9 @@ pub(in crate::runner) struct WorkerLoopMcpHandlers {
     pub(in crate::runner) event_handler: Arc<ChannelMcpRuntimeEventHandler>,
     pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) context_resolver: sigil_runtime::RequestContextResolver,
+    pub(in crate::runner) managed_extension_execution: Option<
+        Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -21,6 +24,9 @@ pub(in crate::runner) fn refresh_pending_mcp_servers<P>(
     mcp_event_handler: Arc<ChannelMcpRuntimeEventHandler>,
     mutation_recorder: Option<MutationEventRecorder>,
     egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
+    managed_extension_execution: Option<
+        Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
     pending_mcp_refreshes: &mut BTreeSet<String>,
 ) -> bool
 where
@@ -55,7 +61,7 @@ where
             ),
         );
         match runtime.block_on(
-            sigil_runtime::refresh_mcp_server_tools_from_product_surface(
+            sigil_runtime::refresh_mcp_server_tools_from_product_surface_with_managed_extension_execution(
                 agent.tool_registry_mut(),
                 root_config,
                 provider_capabilities,
@@ -70,6 +76,7 @@ where
                 ),
                 egress_recorder.clone(),
                 disclosure_presenter,
+                managed_extension_execution.clone(),
             ),
         ) {
             Ok(result) if result.matched_servers == 0 => {

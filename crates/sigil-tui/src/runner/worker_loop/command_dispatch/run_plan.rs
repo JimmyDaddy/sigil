@@ -48,6 +48,7 @@ where
         mcp_event_handler: _,
         role_provider_builder,
         context_resolver,
+        managed_extension_execution: _,
         state,
     } = context;
 

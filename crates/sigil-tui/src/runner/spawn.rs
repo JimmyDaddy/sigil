@@ -185,6 +185,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     composition.tool_authority.clone(),
                 ));
             }
+            let managed_extension_execution = authority_composition
+                .as_ref()
+                .map(|composition| Arc::clone(&composition.extension_execution));
             let extension_network_admission = ExtensionProcessNetworkAdmission::new(
                 options.permission_context.network_policy,
                 false,
@@ -276,7 +279,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 dyn sigil_kernel::TerminalLifecycleSinkFactory,
             > =
                 Arc::new(terminal_lifecycle_router.clone());
-            let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory(
+            let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution(
                     &root_config,
                     &provider_capabilities,
                     workspace_root.clone(),
@@ -284,6 +287,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     mcp_event_handler.clone(),
                     workspace_trust,
                     terminal_lifecycle_factory,
+                    managed_extension_execution.clone(),
                 ) {
                     Ok(surface) => surface,
                     Err(error) => {
@@ -316,7 +320,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                         super::egress_disclosure_bridge::AutoAcceptDisclosurePresenter,
                     )
                 };
-            sigil_runtime::attach_remote_mcp_activation_presenter(
+            sigil_runtime::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
                 &mut registry,
                 &root_config,
                 &provider_capabilities,
@@ -324,6 +328,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 elicitation_handler.clone(),
                 mcp_event_handler.clone(),
                 Arc::clone(&disclosure_presenter),
+                managed_extension_execution.clone(),
             );
             if let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
                 &mut registry,
@@ -357,6 +362,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 egress_recorder,
                 disclosure_presenter,
                 extension_network_admission,
+                managed_extension_execution.clone(),
             );
             let managed_artifact_store = match authority_composition.as_ref() {
                 Some(composition)
@@ -402,6 +408,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     event_handler: mcp_event_handler,
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
+                    managed_extension_execution,
                 },
                 WorkerLoopTerminalRuntime::new(
                     terminal_lifecycle_router,
@@ -505,6 +512,9 @@ fn spawn_eager_mcp_startup_tasks(
     egress_recorder: EgressAuditRecorder,
     disclosure_presenter: Arc<dyn EgressDisclosurePresenter>,
     network_admission: ExtensionProcessNetworkAdmission,
+    managed_extension_execution: Option<
+        Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 ) {
     for server in root_config
         .mcp_servers
@@ -554,7 +564,7 @@ fn spawn_eager_mcp_startup_tasks(
                     process_launch_receipts: Vec::new(),
                 })
             } else {
-                sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
+                sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission_and_managed_extension_execution(
                     &mut registry,
                     &root_config,
                     &provider_capabilities,
@@ -564,6 +574,7 @@ fn spawn_eager_mcp_startup_tasks(
                     mcp_event_handler,
                     Some(mutation_recorder),
                     network_admission,
+                    managed_extension_execution.clone(),
                 )
                 .await
             }
