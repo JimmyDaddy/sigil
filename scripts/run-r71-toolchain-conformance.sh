@@ -57,6 +57,7 @@ rustup_home="${RUSTUP_HOME:-}"
 if command -v rustup >/dev/null; then
   rustup_home="$(rustup show home 2>/dev/null || true)"
 fi
+cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
 
 fixture_home="$(mktemp -d -t sigil-r71-toolchain-XXXXXX)"
 trap 'rm -rf -- "$fixture_home"' EXIT
@@ -66,6 +67,7 @@ export HOME="$fixture_home"
 if [[ -n "$rustup_home" ]]; then
   export RUSTUP_HOME="$rustup_home"
 fi
+export CARGO_HOME="$cargo_home"
 export CARGO_NET_OFFLINE=true
 export CARGO_TERM_COLOR=never
 export GIT_TERMINAL_PROMPT=0
