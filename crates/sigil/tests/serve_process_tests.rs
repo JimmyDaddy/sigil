@@ -529,11 +529,14 @@ fn desktop_server_ignores_incompatible_previous_protocol_state_namespace() {
 
     let server = spawn_desktop_serve(&workspace, &config_path, token);
 
+    let current_root = http_server_state_root(&workspace, "http-server-v4");
     assert!(
-        http_server_state_root(&workspace, "http-server-v4")
-            .join("protocol-events.json")
-            .is_file(),
+        current_root.is_dir(),
         "current server state should use a fresh namespace"
+    );
+    assert!(
+        !current_root.join("protocol-events.json").exists(),
+        "an empty legacy journal should not be materialized before its first event"
     );
     assert_eq!(
         fs::read(&previous_journal).expect("previous journal should remain readable"),
@@ -560,12 +563,10 @@ fn desktop_server_isolates_invalid_current_protocol_replay_state() {
 
     let server = spawn_desktop_serve(&workspace, &config_path, token);
 
-    let rebuilt: serde_json::Value = serde_json::from_slice(
-        &fs::read(&journal_path).expect("rebuilt journal should remain readable"),
-    )
-    .expect("rebuilt journal should be valid JSON");
-    assert_eq!(rebuilt["schema_version"], 3);
-    assert_eq!(rebuilt["events"], serde_json::json!([]));
+    assert!(
+        !journal_path.exists(),
+        "the quarantined legacy journal should not be recreated before its first event"
+    );
     let quarantined = fs::read_dir(&server_root)
         .expect("server state directory should remain readable")
         .filter_map(Result::ok)
@@ -583,10 +584,6 @@ fn desktop_server_isolates_invalid_current_protocol_replay_state() {
 
     let output = close_desktop_owner_and_wait(server);
     assert_eq!(output.status.code(), Some(0));
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("invalid HTTP replay state was isolated and rebuilt")
-    );
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
