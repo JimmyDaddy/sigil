@@ -147,6 +147,30 @@ impl HttpDurableProtocolJournal {
         })
     }
 
+    /// Opens the replay journal and, for rebuildable legacy content, quarantines that source
+    /// through the HTTP replay owner before retrying with an empty journal. Current-schema boot
+    /// uses this only as a one-time legacy import boundary; all subsequent writes are redirected
+    /// by `attach_managed_writer` to the authority-admitted adapter namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the journal cannot be opened, the invalid source cannot be safely
+    /// isolated, or the rebuilt journal cannot be initialized.
+    pub fn open_with_replay_rebuild(
+        path: impl Into<PathBuf>,
+        max_events: usize,
+    ) -> Result<Self, HttpProtocolJournalError> {
+        let path = path.into();
+        match Self::open(path.clone(), max_events) {
+            Ok(journal) => Ok(journal),
+            Err(error) if error.permits_replay_rebuild() => {
+                quarantine_invalid_replay_source(&path)?;
+                Self::open(path, max_events)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Switches the current-schema replay owner to the composed managed adapter state writer.
     /// Existing legacy state is imported once; all later snapshots are written only through the
     /// admitted adapter durable-state namespace.
@@ -358,6 +382,32 @@ impl HttpDurableProtocolJournal {
             atomic_replace(&self.path, &bytes).map_err(HttpProtocolJournalError::io)
         }
     }
+}
+
+fn quarantine_invalid_replay_source(path: &Path) -> Result<(), HttpProtocolJournalError> {
+    let canonical_path =
+        canonical_durable_path(path.to_path_buf()).map_err(HttpProtocolJournalError::io)?;
+    let metadata = fs::symlink_metadata(&canonical_path).map_err(HttpProtocolJournalError::io)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(HttpProtocolJournalError::io(std::io::Error::other(
+            "invalid HTTP replay state is not a regular owned file",
+        )));
+    }
+    let parent = canonical_path.parent().ok_or_else(|| {
+        HttpProtocolJournalError::io(std::io::Error::other(
+            "invalid HTTP replay state has no parent directory",
+        ))
+    })?;
+    let file_name = canonical_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            HttpProtocolJournalError::io(std::io::Error::other(
+                "invalid HTTP replay state has no valid file name",
+            ))
+        })?;
+    let quarantine_name = format!("{file_name}.invalid-{}", uuid::Uuid::new_v4().simple());
+    fs::rename(&canonical_path, parent.join(quarantine_name)).map_err(HttpProtocolJournalError::io)
 }
 
 impl Drop for HttpDurableProtocolJournal {

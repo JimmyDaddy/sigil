@@ -8,7 +8,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Component, Path, PathBuf},
-    process::Command,
     time::Instant,
 };
 

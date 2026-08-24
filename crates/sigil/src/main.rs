@@ -877,35 +877,11 @@ fn load_serve_root_config(config_path: &Path) -> RootConfig {
 
 #[cfg(not(test))]
 fn open_serve_protocol_journal(server_root: &Path) -> Result<HttpDurableProtocolJournal> {
-    let path = server_root.join(HTTP_PROTOCOL_JOURNAL_FILE);
-    match HttpDurableProtocolJournal::open(&path, 4_096) {
-        Ok(journal) => Ok(journal),
-        Err(error) if error.permits_replay_rebuild() => {
-            quarantine_invalid_protocol_journal(&path)?;
-            eprintln!(
-                "warning: invalid HTTP replay state was isolated and rebuilt; conversation data was not modified"
-            );
-            HttpDurableProtocolJournal::open(path, 4_096).map_err(Into::into)
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(not(test))]
-fn quarantine_invalid_protocol_journal(path: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        anyhow::bail!("invalid HTTP replay state is not a regular owned file");
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("invalid HTTP replay state has no parent directory"))?;
-    let quarantine_name = format!(
-        "{HTTP_PROTOCOL_JOURNAL_FILE}.invalid-{}",
-        uuid::Uuid::new_v4().simple()
-    );
-    std::fs::rename(path, parent.join(quarantine_name))?;
-    Ok(())
+    HttpDurableProtocolJournal::open_with_replay_rebuild(
+        server_root.join(HTTP_PROTOCOL_JOURNAL_FILE),
+        4_096,
+    )
+    .map_err(Into::into)
 }
 
 #[cfg(not(test))]

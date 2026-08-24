@@ -1512,6 +1512,10 @@ R71.7 的工程 gate 同时把 resource/process inventory 与 Cargo graph 作为
 import 越界和 kernel path type 回流。R71.5 frozen conformance manifest 与 inventory baseline
 分开维护，baseline generator 不得重写前者。
 
+HTTP ProtocolReplay 的损坏 legacy snapshot 只允许由 `sigil-http` journal owner 在一次性
+import/rebuild 边界隔离；CLI/serve 不得直接执行 rename。current-schema attachment 完成后，
+后续 replay 写入必须走 authority-admitted managed adapter namespace。
+
 用户态 state/cache path 解析属于同一边界：`SIGIL_STATE_HOME`、`SIGIL_CACHE_HOME` 或平台
 用户目录缺失时，runtime 必须停止当前启动并报告不可解析，而不能把 `.sigil-state`、
 `.sigil-cache` 或 mutation artifact 写入当前工作目录。兼容调用方仍可保持现有 path object

@@ -85,18 +85,18 @@ crate_name = "sigil-desktop"
 module = "crates/sigil-desktop/src/launcher.rs"
 constructor = "SpawnCall"
 line = 227
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
+class = "trusted-product"
+owner = "DesktopProcessSupervisor"
+root_source = "ConfiguredPlatformBootstrapLocation"
+input_taint = "UserConfiguration"
+child_access = "None"
+admission_contract = "TrustedHostOperation"
+resource_contract = "HostProcessLifecycle"
+lifecycle_contract = "ProcessTreeOwner"
+receipt_contract = "ProcessObservationReceipt"
 reachability_proof_digest = "scanner-line:launcher.rs:227"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0006"
@@ -104,59 +104,40 @@ crate_name = "sigil-desktop"
 module = "crates/sigil-desktop/src/launcher.rs"
 constructor = "CommandNew"
 line = 399
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
+class = "trusted-product"
+owner = "DesktopProcessSupervisor"
+root_source = "ConfiguredPlatformBootstrapLocation"
+input_taint = "UserConfiguration"
+child_access = "None"
+admission_contract = "TrustedHostOperation"
+resource_contract = "HostProcessLifecycle"
+lifecycle_contract = "ProcessTreeOwner"
+receipt_contract = "ProcessObservationReceipt"
 reachability_proof_digest = "scanner-line:launcher.rs:399"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0007"
-crate_name = "sigil-kernel"
-module = "crates/sigil-kernel/src/verification/snapshot.rs"
-constructor = "CommandNew"
-line = 296
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:snapshot.rs:296"
-test_case_ids = []
-exception_rfc = "none"
-
-[[sites]]
-site_id = "P-0008"
 crate_name = "sigil-process-observer"
 module = "crates/sigil-process-observer/src/lib.rs"
 constructor = "CommandNew"
 line = 134
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
+class = "trusted-product"
+owner = "ProcessObserver"
+root_source = "ConfiguredPlatformBootstrapLocation"
+input_taint = "None"
+child_access = "None"
+admission_contract = "HostObservation"
+resource_contract = "HostProcessObservation"
+lifecycle_contract = "ObserverLifecycle"
+receipt_contract = "ProcessObservationReceipt"
 reachability_proof_digest = "scanner-line:lib.rs:134"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0009"
+site_id = "P-0008"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/build.rs"
 constructor = "CommandNew"
@@ -175,7 +156,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0010"
+site_id = "P-0009"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/build.rs"
 constructor = "CommandNew"
@@ -194,273 +175,273 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0011"
+site_id = "P-0010"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_supervisor/begin.rs"
 constructor = "CommandNew"
 line = 662
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Workspace"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
 reachability_proof_digest = "scanner-line:begin.rs:662"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "P-0011"
+crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/definition_file_io.rs"
+constructor = "CommandNew"
+line = 131
+class = "trusted-product"
+owner = "DefinitionFileHostHelper"
+root_source = "ConfiguredPlatformBootstrapLocation"
+input_taint = "UserConfiguration"
+child_access = "None"
+admission_contract = "TrustedHostOperation"
+resource_contract = "HostProcessLifecycle"
+lifecycle_contract = "ProcessTreeOwner"
+receipt_contract = "ProcessObservationReceipt"
+reachability_proof_digest = "scanner-line:definition_file_io.rs:131"
+test_case_ids = []
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0012"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/definition_file_io.rs"
-constructor = "CommandNew"
-line = 131
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:definition_file_io.rs:131"
+constructor = "SpawnCall"
+line = 137
+class = "trusted-product"
+owner = "DefinitionFileHostHelper"
+root_source = "ConfiguredPlatformBootstrapLocation"
+input_taint = "UserConfiguration"
+child_access = "None"
+admission_contract = "TrustedHostOperation"
+resource_contract = "HostProcessLifecycle"
+lifecycle_contract = "ProcessTreeOwner"
+receipt_contract = "ProcessObservationReceipt"
+reachability_proof_digest = "scanner-line:definition_file_io.rs:137"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0013"
 crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/definition_file_io.rs"
-constructor = "SpawnCall"
-line = 137
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:definition_file_io.rs:137"
+module = "crates/sigil-runtime/src/doctor/terminal.rs"
+constructor = "CommandNew"
+line = 406
+class = "trusted-product"
+owner = "DoctorHostCapabilityProbe"
+root_source = "ConfiguredPlatformBootstrapLocation"
+input_taint = "None"
+child_access = "None"
+admission_contract = "HostObservation"
+resource_contract = "HostProcessObservation"
+lifecycle_contract = "ObserverLifecycle"
+receipt_contract = "ProcessObservationReceipt"
+reachability_proof_digest = "scanner-line:terminal.rs:406"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0014"
 crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/doctor/terminal.rs"
+module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "CommandNew"
-line = 406
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:terminal.rs:406"
+line = 2328
+class = "managed-execution"
+owner = "IsolatedWorkspaceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Workspace"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:isolated_workspace.rs:2328"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0015"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
-constructor = "CommandNew"
-line = 2328
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:isolated_workspace.rs:2328"
+constructor = "SpawnCall"
+line = 2337
+class = "managed-execution"
+owner = "IsolatedWorkspaceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Workspace"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:isolated_workspace.rs:2337"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0016"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
-constructor = "SpawnCall"
-line = 2337
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:isolated_workspace.rs:2337"
+constructor = "CommandNew"
+line = 2425
+class = "managed-execution"
+owner = "IsolatedWorkspaceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Workspace"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:isolated_workspace.rs:2425"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0017"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
-constructor = "CommandNew"
-line = 2425
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:isolated_workspace.rs:2425"
+constructor = "SpawnCall"
+line = 2435
+class = "managed-execution"
+owner = "IsolatedWorkspaceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Workspace"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:isolated_workspace.rs:2435"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0018"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/isolated_workspace.rs"
-constructor = "SpawnCall"
-line = 2435
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:isolated_workspace.rs:2435"
+crate_name = "sigil-sandbox"
+module = "crates/sigil-sandbox/src/managed.rs"
+constructor = "CommandNew"
+line = 157
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "ExtensionConfiguration"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed.rs:157"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0019"
 crate_name = "sigil-sandbox"
 module = "crates/sigil-sandbox/src/managed.rs"
-constructor = "CommandNew"
-line = 157
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:managed.rs:157"
+constructor = "SpawnCall"
+line = 169
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "ExtensionConfiguration"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed.rs:169"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0020"
 crate_name = "sigil-sandbox"
 module = "crates/sigil-sandbox/src/managed.rs"
-constructor = "SpawnCall"
-line = 169
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:managed.rs:169"
+constructor = "CommandNew"
+line = 673
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "ExtensionConfiguration"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed.rs:673"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0021"
 crate_name = "sigil-sandbox"
 module = "crates/sigil-sandbox/src/managed.rs"
-constructor = "CommandNew"
-line = 673
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:managed.rs:673"
+constructor = "SpawnCall"
+line = 682
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "ExtensionConfiguration"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed.rs:682"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0022"
 crate_name = "sigil-sandbox"
 module = "crates/sigil-sandbox/src/managed.rs"
-constructor = "SpawnCall"
-line = 682
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:managed.rs:682"
+constructor = "CommandNew"
+line = 734
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "ExtensionConfiguration"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed.rs:734"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0023"
 crate_name = "sigil-sandbox"
 module = "crates/sigil-sandbox/src/managed.rs"
-constructor = "CommandNew"
-line = 734
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:managed.rs:734"
+constructor = "SpawnCall"
+line = 743
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "ExtensionConfiguration"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed.rs:743"
 test_case_ids = []
-exception_rfc = "none"
+exception_rfc = "0071"
 
 [[sites]]
 site_id = "P-0024"
-crate_name = "sigil-sandbox"
-module = "crates/sigil-sandbox/src/managed.rs"
-constructor = "SpawnCall"
-line = 743
-class = "unclassified"
-owner = "unclassified"
-root_source = "unclassified"
-input_taint = "unclassified"
-child_access = "unclassified"
-admission_contract = "unclassified"
-resource_contract = "unclassified"
-lifecycle_contract = "unclassified"
-receipt_contract = "unclassified"
-reachability_proof_digest = "scanner-line:managed.rs:743"
-test_case_ids = []
-exception_rfc = "none"
-
-[[sites]]
-site_id = "P-0025"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/bubblewrap.rs"
 constructor = "CommandNew"
@@ -479,7 +460,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0026"
+site_id = "P-0025"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/docker.rs"
 constructor = "CommandNew"
@@ -498,7 +479,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0027"
+site_id = "P-0026"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/docker.rs"
 constructor = "CommandNew"
@@ -517,7 +498,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0028"
+site_id = "P-0027"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/local.rs"
 constructor = "CommandNew"
@@ -536,7 +517,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0029"
+site_id = "P-0028"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/mod.rs"
 constructor = "CommandNew"
@@ -555,7 +536,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0030"
+site_id = "P-0029"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/mod.rs"
 constructor = "CommandNew"
@@ -574,7 +555,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0031"
+site_id = "P-0030"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/mod.rs"
 constructor = "SpawnCall"
@@ -593,7 +574,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0032"
+site_id = "P-0031"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/seatbelt.rs"
 constructor = "CommandNew"
@@ -612,7 +593,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0033"
+site_id = "P-0032"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/process_group.rs"
 constructor = "CommandNew"
@@ -631,7 +612,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0034"
+site_id = "P-0033"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/manager.rs"
 constructor = "CommandNew"
@@ -650,7 +631,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0035"
+site_id = "P-0034"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/manager.rs"
 constructor = "SpawnCall"
@@ -669,7 +650,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0036"
+site_id = "P-0035"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/worker.rs"
 constructor = "CommandNew"
@@ -688,7 +669,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0037"
+site_id = "P-0036"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/vcs_inspect.rs"
 constructor = "CommandNew"
@@ -707,7 +688,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0038"
+site_id = "P-0037"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/vcs_inspect.rs"
 constructor = "SpawnCall"
@@ -726,7 +707,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0039"
+site_id = "P-0038"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/launcher.rs"
 constructor = "CommandNew"
@@ -745,7 +726,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0040"
+site_id = "P-0039"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/launcher.rs"
 constructor = "SpawnCall"
@@ -764,7 +745,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0041"
+site_id = "P-0040"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/runner/diagnostics.rs"
 constructor = "CommandNew"
@@ -783,7 +764,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0042"
+site_id = "P-0041"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/workspace_git.rs"
 constructor = "CommandNew"
@@ -802,7 +783,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "P-0043"
+site_id = "P-0042"
 crate_name = "sigil-updater"
 module = "crates/sigil-updater/src/apply.rs"
 constructor = "CommandNew"

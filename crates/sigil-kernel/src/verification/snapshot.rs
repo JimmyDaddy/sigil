@@ -1,5 +1,7 @@
 use super::*;
 
+use ignore::WalkBuilder;
+
 /// Derives the stable workspace id used by verification snapshots for a workspace root.
 ///
 /// # Errors
@@ -293,31 +295,99 @@ fn git_snapshot_paths(workspace_root: &Path, scope: &VerificationScope) -> Optio
     if !scope.tracked_files_only || !scope.include.is_empty() {
         return None;
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    let git_dir = git_dir(workspace_root)?;
+    let mut paths = read_git_index_paths(&git_dir)?;
+    let mut walker = WalkBuilder::new(workspace_root);
+    walker
+        .hidden(false)
+        .parents(true)
+        .ignore(true)
+        .git_global(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(true)
+        .follow_links(false)
+        .filter_entry(|entry| entry.path().file_name() != Some(std::ffi::OsStr::new(".git")));
+    for result in walker.build() {
+        let entry = result.ok()?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() && !file_type.is_symlink() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(workspace_root)
+            .ok()?
+            .to_path_buf();
+        paths.push(relative);
     }
-    let mut paths = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-        .filter_map(|raw| std::str::from_utf8(raw).ok())
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
     Some(paths)
+}
+
+fn git_dir(workspace_root: &Path) -> Option<PathBuf> {
+    let dot_git = workspace_root.join(".git");
+    let metadata = fs::symlink_metadata(&dot_git).ok()?;
+    if metadata.is_dir() {
+        return Some(dot_git);
+    }
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let content = fs::read_to_string(dot_git).ok()?;
+    let git_dir = content.strip_prefix("gitdir:")?.trim();
+    let git_dir = PathBuf::from(git_dir);
+    if git_dir.is_absolute() {
+        Some(git_dir)
+    } else {
+        Some(workspace_root.join(git_dir))
+    }
+}
+
+fn read_git_index_paths(git_dir: &Path) -> Option<Vec<PathBuf>> {
+    let bytes = fs::read(git_dir.join("index")).ok()?;
+    if bytes.len() < 12 || &bytes[..4] != b"DIRC" {
+        return None;
+    }
+    let version = u32::from_be_bytes(bytes[4..8].try_into().ok()?);
+    if !matches!(version, 2 | 3) {
+        return None;
+    }
+    let count = u32::from_be_bytes(bytes[8..12].try_into().ok()?) as usize;
+    let entry_hash_bytes = git_index_hash_bytes(git_dir).unwrap_or(20);
+    // ctime/mtime (16), dev/ino/mode/uid/gid/size (24), object id, and flags (2).
+    let fixed_entry_bytes = 42 + entry_hash_bytes;
+    let mut cursor = 12usize;
+    let mut paths = Vec::with_capacity(count);
+    for _ in 0..count {
+        if cursor.checked_add(fixed_entry_bytes)? > bytes.len() {
+            return None;
+        }
+        let entry = &bytes[cursor..];
+        let name_start = fixed_entry_bytes;
+        let name_end = entry[name_start..].iter().position(|byte| *byte == 0)? + name_start;
+        paths.push(PathBuf::from(
+            String::from_utf8_lossy(&entry[name_start..name_end]).into_owned(),
+        ));
+        let entry_end = cursor.checked_add(name_end + 1)?;
+        let entry_name_bytes = name_end - name_start + 1;
+        let padding = (8 - (fixed_entry_bytes + entry_name_bytes) % 8) % 8;
+        cursor = entry_end.checked_add(padding)?;
+        if cursor > bytes.len() {
+            return None;
+        }
+    }
+    Some(paths)
+}
+
+fn git_index_hash_bytes(git_dir: &Path) -> Option<usize> {
+    let config = fs::read_to_string(git_dir.join("config")).ok()?;
+    config
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("objectFormat = "))
+        .map(|format| if format.trim() == "sha256" { 32 } else { 20 })
 }
 
 fn collect_snapshot_entries_for_paths(

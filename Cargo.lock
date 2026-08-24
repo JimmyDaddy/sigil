@@ -5580,6 +5580,7 @@ dependencies = [
  "globset",
  "hmac",
  "httpdate",
+ "ignore",
  "keyring",
  "libc",
  "ring",

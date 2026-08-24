@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 
@@ -46,8 +47,32 @@ def test_process_imports_are_not_spawn_sites() -> None:
     assert all(site["constructor"] not in {"ProcessCommand", "TokioProcess"} for site in sites)
 
 
+def test_read_only_open_options_are_not_producers() -> None:
+    context = scanner._Ctx(
+        "let mut options = OpenOptions::new();\n"
+        "options.read(true);\n"
+        "let file = options.open(path);"
+    )
+    assert not context.is_writable_open_options(0)
+    writable = scanner._Ctx(
+        "let mut options = OpenOptions::new();\n"
+        "options.write(true).create_new(true);\n"
+        "let file = options.open(path);"
+    )
+    assert writable.is_writable_open_options(0)
+
+
+def test_function_declaration_named_persist_is_not_a_write_site() -> None:
+    context = scanner._Ctx("pub async fn persist(record: &Record) -> Result<()> {")
+    assert not any(
+        re.search(pattern, context.lines[0])
+        for pattern, constructor in scanner.PRODUCER_PATTERNS
+        if constructor == "DirectWriteOrAtomicReplace"
+    )
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("r71 inventory scanner tests: 4 passed")
+    print("r71 inventory scanner tests: 6 passed")

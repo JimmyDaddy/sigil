@@ -41,7 +41,7 @@ PRODUCER_PATTERNS = [
     (r"\bFile::create_new\(", "CreateOrOpenFile"),
     (r"fs::write\(", "DirectWriteOrAtomicReplace"),
     (r"write_atomic", "DirectWriteOrAtomicReplace"),
-    (r"\bpersist\(", "DirectWriteOrAtomicReplace"),
+    (r"\.persist\(", "DirectWriteOrAtomicReplace"),
     (r"\bfs::rename\(", "DirectWriteOrAtomicReplace"),
     (r"\bConnection::open(?:_with_flags)?\(", "DatabaseOrSidecar"),
     (r"worktree\s*\(", "WorktreeOrCheckout"),
@@ -169,6 +169,19 @@ class _Ctx:
     def cfg_test_or_mod_tests(self, index: int) -> bool:
         return self.test_lines[index]
 
+    def is_writable_open_options(self, index: int) -> bool:
+        """Distinguish a read-only OpenOptions builder from a filesystem producer."""
+        window = "\n".join(self.code_lines[index : index + 32])
+        open_end = window.find(".open(")
+        if open_end >= 0:
+            window = window[:open_end]
+        return bool(
+            re.search(
+                r"\.(?:write|append|create|create_new|truncate)\(\s*true\s*\)",
+                window,
+            )
+        )
+
 
 def rust_sources(root: Path) -> list[Path]:
     sources: list[Path] = []
@@ -219,6 +232,12 @@ def scan_sites(root: Path) -> dict[str, list[dict]]:
                     break
             for pattern, constructor in PRODUCER_PATTERNS:
                 if re.search(pattern, line):
+                    if (
+                        constructor == "CreateOrOpenFile"
+                        and "OpenOptions::new" in line
+                        and not ctx.is_writable_open_options(index)
+                    ):
+                        continue
                     key = ("producer", rel, index + 1, constructor)
                     if key in seen:
                         continue

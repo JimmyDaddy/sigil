@@ -17,6 +17,7 @@ fs2.workspace = true
 globset.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
+ignore.workspace = true
 keyring.workspace = true
 libc.workspace = true
 ring.workspace = true
