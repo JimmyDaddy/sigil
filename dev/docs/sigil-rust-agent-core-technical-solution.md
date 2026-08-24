@@ -1520,6 +1520,8 @@ import/rebuild 边界隔离；CLI/serve 不得直接执行 rename。current-sche
 用户目录缺失时，runtime 必须停止当前启动并报告不可解析，而不能把 `.sigil-state`、
 `.sigil-cache` 或 mutation artifact 写入当前工作目录。兼容调用方仍可保持现有 path object
 接口，但只能以 fail-closed termination 表达缺失 authority bootstrap，不能制造隐式可写 root。
+同一规则覆盖 plan-review 等非主 run 的 tool assembly：shipping runtime 必须用已解析的
+`SigilPaths` 注入 artifact/task/scratch roots，不能重新调用相对路径 compatibility helper。
 
 - `roots/list` 返回入口层已解析的 workspace root，runtime 必须把 TUI / CLI 的 effective workspace root 传入 MCP 注册流程
 - `notifications/progress` 映射到 TUI live panel，不写重复 timeline，避免远端 server 用 progress 刷爆用户界面

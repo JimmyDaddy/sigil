@@ -6457,7 +6457,25 @@ where
     let outcome = (async {
         let provider = crate::build_provider_for_model_ref_async(root_config, &model_ref).await?;
         let mut base_registry = sigil_kernel::ToolRegistry::new();
-        sigil_tools_builtin::register_builtin_tools(&mut base_registry);
+        let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+        let builtin_paths = sigil_tools_builtin::BuiltinToolPaths {
+            changesets_root: paths.changesets_root.clone(),
+            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+            terminal_tasks_root: paths.terminal_tasks_root.clone(),
+            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root: paths.scratch_root.clone(),
+            scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: sigil_tools_builtin::ScratchQuota::default(),
+        };
+        let execution_backend = crate::build_configured_execution_backend(root_config)?;
+        sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+            &mut base_registry,
+            builtin_paths,
+            execution_backend,
+            &root_config.execution,
+            None,
+            None,
+        );
         crate::register_agent_tools(&mut base_registry, root_config)?;
         let tool_registry =
             crate::build_plan_review_tool_registry(&base_registry, root_config).into_registry();
