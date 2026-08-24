@@ -29,6 +29,8 @@ pub enum StorageWriterChannelV1 {
     SessionCatalog,
     ArtifactStaging,
     AdapterDurableState,
+    AdapterEgressDisclosure,
+    AdapterIdempotencyLedger,
 }
 
 impl StorageWriterChannelV1 {
@@ -76,8 +78,22 @@ impl StorageWriterChannelV1 {
                 ManagedStorageSemanticOwnerV1::AdapterDurableState(
                     AdapterDurableStateClassV1::ProtocolReplay,
                 ),
-                ManagedStorageCapabilityFamilyV1::AtomicObject,
-                "adapter-durable-state",
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                "adapter-protocol-replay",
+            ),
+            Self::AdapterEgressDisclosure => (
+                ManagedStorageSemanticOwnerV1::AdapterDurableState(
+                    AdapterDurableStateClassV1::EgressDisclosure,
+                ),
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                "adapter-egress-disclosure",
+            ),
+            Self::AdapterIdempotencyLedger => (
+                ManagedStorageSemanticOwnerV1::AdapterDurableState(
+                    AdapterDurableStateClassV1::IdempotencyLedger,
+                ),
+                ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection,
+                "adapter-idempotency-ledger",
             ),
         }
     }
@@ -439,6 +455,61 @@ impl ManagedStorageWriterAdapterV1 {
             }
         }
         Ok(())
+    }
+
+    /// Reads the owner-controlled record object for an admitted namespace without following
+    /// symlinks or exposing the physical root to the semantic adapter.
+    pub fn read_record_bytes(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ManagedStorageWriterErrorV1> {
+        let record_file = lease.path.join("records.jsonl");
+        let metadata = match std::fs::symlink_metadata(&record_file) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ManagedStorageWriterErrorV1::Io(error.to_string()));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "managed record object must be a regular file".to_owned(),
+            ));
+        }
+        if metadata.len() > max_bytes as u64 {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "managed record object exceeds {max_bytes} bytes"
+            )));
+        }
+        let bytes = std::fs::read(&record_file)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if bytes.len() > max_bytes {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "managed record object exceeds {max_bytes} bytes"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// Replaces the owner-controlled record object atomically. This is used only by semantic
+    /// adapters whose durable state is rebuilt from one bounded canonical snapshot; the caller
+    /// still holds the admitted namespace for the whole replacement.
+    pub fn replace_record_bytes(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        bytes: &[u8],
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        let record_file = lease.path.join("records.jsonl");
+        if let Ok(metadata) = std::fs::symlink_metadata(&record_file)
+            && (metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "managed record object must be a regular file".to_owned(),
+            ));
+        }
+        sigil_kernel::atomic_publish_private_file(&record_file, bytes)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))
     }
 
     /// Finalizes the namespace; the receipt is the durable writer fact for the batch.

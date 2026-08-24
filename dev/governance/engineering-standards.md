@@ -212,6 +212,7 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 - control state 不能只存在运行内存
 - 入口层追加普通 control state 时优先复用 runtime session-control helper，避免 TUI / CLI / HTTP adapter 各自实现不同的 append/reload 行为
 - response handle、continuation state、prefix snapshot、compaction record 等 durable control state 要有显式查询/恢复路径
+- current-schema HTTP adapter durable state 必须按 `ProtocolReplay`、`EgressDisclosure`、`IdempotencyLedger` 分别取得 authority-declared managed namespace；每类 writer 只通过 owner-managed lease 读写 bounded state，legacy 文件只能作为一次性导入源，不能在 managed attachment 后继续 direct write
 - tool-output pressure、aging eligibility 和 artifact reachability 必须由 active incremental projection 随 append 前进；steady-state worker 通过 source-change wake/coalescing 调度，不得固定 cadence 轮询、全量重放 JSONL 或长期持有 data-file lock
 - deterministic tool-output aging 必须先于 semantic compaction，并通过 exact frontier + context epoch compare-and-publish 激活；当前 epoch 的 cached prefix 不原地改写
 - 任何恢复相关设计，都要优先考虑“进程重启后是否还能正确继续”

@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,9 @@ use crate::{
     HttpVerificationRerunCommandReceipt,
     durable_io::{acquire_exclusive_lease, atomic_replace, canonical_durable_path, read_bounded},
 };
+use sigil_runtime::managed_storage_writer::{
+    ManagedStorageWriterAdapterV1, ManagedStorageWriterLeaseV1, StorageWriterChannelV1,
+};
 
 const HTTP_COMMAND_STORE_SCHEMA_VERSION: u32 = 1;
 const MAX_HTTP_COMMAND_IDENTITIES: usize = 4_096;
@@ -29,9 +32,72 @@ pub(crate) const HTTP_DURABLE_COMMAND_PROMPT_OMISSION: &str =
 pub struct HttpDurableCommandStore {
     path: PathBuf,
     max_identities: usize,
-    server_epoch: u64,
+    server_epoch: Mutex<u64>,
     state: Mutex<HttpCommandStoreState>,
+    managed_writer: Mutex<Option<ManagedCommandWriter>>,
+    legacy_path_created_by_open: bool,
     _lease: File,
+}
+
+struct ManagedCommandWriter {
+    writer: Arc<ManagedStorageWriterAdapterV1>,
+    lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
+}
+
+impl ManagedCommandWriter {
+    fn new(
+        writer: Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<Self, HttpCommandStoreError> {
+        let lease = writer
+            .acquire_named(StorageWriterChannelV1::AdapterIdempotencyLedger, key)
+            .map_err(|error| HttpCommandStoreError::io(std::io::Error::other(error.to_string())))?;
+        Ok(Self {
+            writer,
+            lease: Mutex::new(Some(lease)),
+        })
+    }
+
+    fn read_snapshot(&self) -> Result<Vec<u8>, HttpCommandStoreError> {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| HttpCommandStoreError::Unavailable)?;
+        let Some(lease) = lease.as_ref() else {
+            return Err(HttpCommandStoreError::Unavailable);
+        };
+        self.writer
+            .read_record_bytes(lease, MAX_HTTP_COMMAND_STORE_BYTES)
+            .map_err(|error| HttpCommandStoreError::io(std::io::Error::other(error.to_string())))
+    }
+
+    fn replace_snapshot(&self, bytes: &[u8]) -> Result<(), HttpCommandStoreError> {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| HttpCommandStoreError::Unavailable)?;
+        let Some(lease) = lease.as_ref() else {
+            return Err(HttpCommandStoreError::Unavailable);
+        };
+        self.writer
+            .replace_record_bytes(lease, bytes)
+            .map_err(|error| HttpCommandStoreError::io(std::io::Error::other(error.to_string())))
+    }
+
+    fn finalize(&self) {
+        let Ok(mut lease) = self.lease.lock() else {
+            return;
+        };
+        if let Some(lease) = lease.take() {
+            let _ = self.writer.finalize(lease);
+        }
+    }
+}
+
+impl Drop for ManagedCommandWriter {
+    fn drop(&mut self) {
+        self.finalize();
+    }
 }
 
 impl std::fmt::Debug for HttpDurableCommandStore {
@@ -72,6 +138,7 @@ impl HttpDurableCommandStore {
             });
         }
         let path = canonical_durable_path(path.into()).map_err(HttpCommandStoreError::io)?;
+        let path_existed = std::fs::symlink_metadata(&path).is_ok();
         let lease = acquire_exclusive_lease(&path).map_err(HttpCommandStoreError::io)?;
         let mut state = if path.exists() {
             let bytes = read_bounded(&path, MAX_HTTP_COMMAND_STORE_BYTES)
@@ -98,14 +165,81 @@ impl HttpDurableCommandStore {
                 .ok_or_else(|| HttpCommandStoreError::Corrupt {
                     message: "server epoch exhausted".to_owned(),
                 })?;
+        // Preserve the legacy store's epoch-on-open behavior until a current-schema boot has
+        // successfully attached its managed ledger. The attachment removes only this process'
+        // newly-created compatibility file after importing it into the authority owner.
         persist_state(&path, &state)?;
         Ok(Self {
             path,
             max_identities,
-            server_epoch: state.server_epoch,
+            server_epoch: Mutex::new(state.server_epoch),
             state: Mutex::new(state),
+            managed_writer: Mutex::new(None),
+            legacy_path_created_by_open: !path_existed,
             _lease: lease,
         })
+    }
+
+    /// Attaches command identity persistence to the composed managed idempotency ledger.
+    /// Existing legacy state is imported once and the server epoch advances when a managed
+    /// ledger from a previous process is reopened.
+    pub(crate) fn attach_managed_writer(
+        &self,
+        writer: Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<(), HttpCommandStoreError> {
+        let managed = ManagedCommandWriter::new(writer, key)?;
+        let managed_bytes = managed.read_snapshot()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HttpCommandStoreError::Unavailable)?;
+        let had_managed_state = !managed_bytes.is_empty();
+        let mut candidate = if had_managed_state {
+            decode_state(&managed_bytes)?
+        } else {
+            state.clone()
+        };
+        if candidate.entries.len() > self.max_identities {
+            return Err(HttpCommandStoreError::CapacityExceeded {
+                retained: candidate.entries.len(),
+                capacity: self.max_identities,
+            });
+        }
+        candidate.seal_incomplete();
+        if had_managed_state {
+            candidate.server_epoch = candidate.server_epoch.checked_add(1).ok_or_else(|| {
+                HttpCommandStoreError::Corrupt {
+                    message: "server epoch exhausted".to_owned(),
+                }
+            })?;
+        }
+        let bytes = encode_state(&candidate)?;
+        managed.replace_snapshot(&bytes)?;
+        *state = candidate.clone();
+        let mut epoch = self
+            .server_epoch
+            .lock()
+            .map_err(|_| HttpCommandStoreError::Unavailable)?;
+        *epoch = candidate.server_epoch;
+        drop(epoch);
+        let mut attached = self
+            .managed_writer
+            .lock()
+            .map_err(|_| HttpCommandStoreError::Unavailable)?;
+        if attached.is_some() {
+            return Err(HttpCommandStoreError::Unavailable);
+        }
+        *attached = Some(managed);
+        if self.legacy_path_created_by_open {
+            std::fs::remove_file(&self.path).map_err(HttpCommandStoreError::io)?;
+            if let Some(parent) = self.path.parent() {
+                File::open(parent)
+                    .and_then(|file| file.sync_all())
+                    .map_err(HttpCommandStoreError::io)?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns the canonical durable store path.
@@ -115,7 +249,10 @@ impl HttpDurableCommandStore {
     }
 
     pub(crate) fn server_epoch(&self) -> u64 {
-        self.server_epoch
+        *self
+            .server_epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn reserve(
@@ -143,7 +280,7 @@ impl HttpDurableCommandStore {
                         .get_mut(&identity.key)
                         .ok_or(HttpCommandStoreError::ReservationMissing)?
                         .completion = HttpStoredCommandCompletion::Reserved;
-                    persist_state(&self.path, &candidate)?;
+                    self.persist_state(&candidate)?;
                     *state = candidate;
                 }
                 return Ok(HttpStoredCommandClaim::Execute);
@@ -163,7 +300,7 @@ impl HttpDurableCommandStore {
                 completion: HttpStoredCommandCompletion::Reserved,
             },
         );
-        persist_state(&self.path, &candidate)?;
+        self.persist_state(&candidate)?;
         *state = candidate;
         Ok(HttpStoredCommandClaim::Execute)
     }
@@ -200,9 +337,22 @@ impl HttpDurableCommandStore {
             .get_mut(&identity.key)
             .ok_or(HttpCommandStoreError::ReservationMissing)?
             .completion = completion;
-        persist_state(&self.path, &candidate)?;
+        self.persist_state(&candidate)?;
         *state = candidate;
         Ok(())
+    }
+
+    fn persist_state(&self, state: &HttpCommandStoreState) -> Result<(), HttpCommandStoreError> {
+        let bytes = encode_state(state)?;
+        let managed = self
+            .managed_writer
+            .lock()
+            .map_err(|_| HttpCommandStoreError::Unavailable)?;
+        if let Some(managed) = managed.as_ref() {
+            managed.replace_snapshot(&bytes)
+        } else {
+            atomic_replace(&self.path, &bytes).map_err(HttpCommandStoreError::io)
+        }
     }
 }
 
@@ -537,6 +687,11 @@ struct HttpCommandStoreFileEntry {
 }
 
 fn persist_state(path: &Path, state: &HttpCommandStoreState) -> Result<(), HttpCommandStoreError> {
+    let bytes = encode_state(state)?;
+    atomic_replace(path, &bytes).map_err(HttpCommandStoreError::io)
+}
+
+fn encode_state(state: &HttpCommandStoreState) -> Result<Vec<u8>, HttpCommandStoreError> {
     let bytes = serde_json::to_vec(&HttpCommandStoreFile::from_state(state)).map_err(|error| {
         HttpCommandStoreError::Corrupt {
             message: error.to_string(),
@@ -548,7 +703,15 @@ fn persist_state(path: &Path, state: &HttpCommandStoreState) -> Result<(), HttpC
             limit: MAX_HTTP_COMMAND_STORE_BYTES,
         });
     }
-    atomic_replace(path, &bytes).map_err(HttpCommandStoreError::io)
+    Ok(bytes)
+}
+
+fn decode_state(bytes: &[u8]) -> Result<HttpCommandStoreState, HttpCommandStoreError> {
+    serde_json::from_slice::<HttpCommandStoreFile>(bytes)
+        .map_err(|error| HttpCommandStoreError::Corrupt {
+            message: error.to_string(),
+        })?
+        .into_state()
 }
 
 #[cfg(test)]

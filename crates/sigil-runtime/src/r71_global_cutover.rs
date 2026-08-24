@@ -134,7 +134,7 @@ fn storage_channels() -> &'static [(
             ManagedStorageSemanticOwnerV1::AdapterDurableState(
                 AdapterDurableStateClassV1::ProtocolReplay,
             ),
-            ManagedStorageCapabilityFamilyV1::AtomicObject,
+            ManagedStorageCapabilityFamilyV1::AppendLog,
         ),
     ];
     CHANNELS

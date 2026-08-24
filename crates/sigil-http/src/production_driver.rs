@@ -798,7 +798,7 @@ impl HttpProductionRunDriver {
             ));
         }
         let services = ApplicationRunServices::new(Arc::new(
-            HttpDurableEgressDisclosurePresenter::new(disclosure_journal),
+            HttpDurableEgressDisclosurePresenter::new(Arc::clone(&disclosure_journal)),
         ))
         .with_task_role_provider_builder(Arc::new(
             sigil_runtime::agent_supervisor::task_role_runtime::RuntimeTaskRoleProviderBuilder,
@@ -832,6 +832,20 @@ impl HttpProductionRunDriver {
                     .with_managed_session_log_root(managed_session_log_root)
                     .map_err(|error| HttpRunDriverError::new(error.to_string()))?,
             );
+        }
+        if current_schema && let Some(composition) = services.authority_composition() {
+            event_bus
+                .attach_managed_protocol_replay(
+                    Arc::clone(&composition.storage_writer),
+                    "http-protocol-replay",
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+            disclosure_journal
+                .attach_managed_writer(
+                    Arc::clone(&composition.storage_writer),
+                    "http-egress-disclosure",
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         }
         Ok(Self {
             options,
@@ -882,6 +896,18 @@ impl HttpProductionRunDriver {
         self: &Arc<Self>,
         command_store: Arc<HttpDurableCommandStore>,
     ) -> Result<Arc<HttpSessionRunRegistry>, HttpRunDriverError> {
+        let current_schema = self.services.cutover().is_some_and(|cutover| {
+            cutover.manifest().selected_epoch
+                == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+        });
+        if current_schema && let Some(composition) = self.services.authority_composition() {
+            command_store
+                .attach_managed_writer(
+                    Arc::clone(&composition.storage_writer),
+                    "http-idempotency-ledger",
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        }
         let driver: Arc<dyn HttpRunDriver> = self.clone();
         let registry = Arc::new(
             HttpSessionRunRegistry::with_durable_command_store(driver, command_store)

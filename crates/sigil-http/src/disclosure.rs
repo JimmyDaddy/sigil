@@ -16,6 +16,9 @@ use thiserror::Error;
 use crate::durable_io::{
     acquire_exclusive_lease, atomic_replace, canonical_durable_path, read_bounded,
 };
+use sigil_runtime::managed_storage_writer::{
+    ManagedStorageWriterAdapterV1, ManagedStorageWriterLeaseV1, StorageWriterChannelV1,
+};
 
 /// Schema version for synthetic HTTP disclosure replay events.
 pub const HTTP_EGRESS_DISCLOSURE_SCHEMA_VERSION: u32 = 1;
@@ -68,9 +71,88 @@ pub struct HttpDurableEgressDisclosureRecord {
 pub struct HttpDurableEgressDisclosureJournal {
     path: PathBuf,
     max_records: usize,
-    sink_fingerprint: String,
+    sink_fingerprint: Mutex<String>,
     state: Mutex<HttpDurableDisclosureState>,
+    managed_writer: Mutex<Option<ManagedDisclosureWriter>>,
     _lease: File,
+}
+
+struct ManagedDisclosureWriter {
+    writer: Arc<ManagedStorageWriterAdapterV1>,
+    lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
+}
+
+impl ManagedDisclosureWriter {
+    fn new(
+        writer: Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<Self, HttpDurableDisclosureError> {
+        let lease = writer
+            .acquire_named(StorageWriterChannelV1::AdapterEgressDisclosure, key)
+            .map_err(|error| {
+                HttpDurableDisclosureError::io(std::io::Error::other(error.to_string()))
+            })?;
+        Ok(Self {
+            writer,
+            lease: Mutex::new(Some(lease)),
+        })
+    }
+
+    fn read_snapshot(&self) -> Result<Vec<u8>, HttpDurableDisclosureError> {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| HttpDurableDisclosureError::Unavailable)?;
+        let Some(lease) = lease.as_ref() else {
+            return Err(HttpDurableDisclosureError::Unavailable);
+        };
+        self.writer
+            .read_record_bytes(lease, MAX_HTTP_DISCLOSURE_JOURNAL_BYTES)
+            .map_err(|error| {
+                HttpDurableDisclosureError::io(std::io::Error::other(error.to_string()))
+            })
+    }
+
+    fn replace_snapshot(&self, bytes: &[u8]) -> Result<(), HttpDurableDisclosureError> {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| HttpDurableDisclosureError::Unavailable)?;
+        let Some(lease) = lease.as_ref() else {
+            return Err(HttpDurableDisclosureError::Unavailable);
+        };
+        self.writer
+            .replace_record_bytes(lease, bytes)
+            .map_err(|error| {
+                HttpDurableDisclosureError::io(std::io::Error::other(error.to_string()))
+            })
+    }
+
+    fn namespace_digest(&self) -> Result<String, HttpDurableDisclosureError> {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| HttpDurableDisclosureError::Unavailable)?;
+        let Some(lease) = lease.as_ref() else {
+            return Err(HttpDurableDisclosureError::Unavailable);
+        };
+        Ok(lease.namespace_digest().to_hex())
+    }
+
+    fn finalize(&self) {
+        let Ok(mut lease) = self.lease.lock() else {
+            return;
+        };
+        if let Some(lease) = lease.take() {
+            let _ = self.writer.finalize(lease);
+        }
+    }
+}
+
+impl Drop for ManagedDisclosureWriter {
+    fn drop(&mut self) {
+        self.finalize();
+    }
 }
 
 impl std::fmt::Debug for HttpDurableEgressDisclosureJournal {
@@ -101,6 +183,7 @@ impl HttpDurableEgressDisclosureJournal {
             });
         }
         let path = canonical_durable_path(path.into()).map_err(HttpDurableDisclosureError::io)?;
+        let path_existed = std::fs::symlink_metadata(&path).is_ok();
         let lease = acquire_exclusive_lease(&path).map_err(HttpDurableDisclosureError::io)?;
         let mut state = if path.exists() {
             let bytes = read_bounded(&path, MAX_HTTP_DISCLOSURE_JOURNAL_BYTES)
@@ -114,14 +197,60 @@ impl HttpDurableEgressDisclosureJournal {
             HttpDurableDisclosureState::default()
         };
         state.trim(max_records);
-        persist_disclosure_state(&path, &state)?;
+        if path_existed {
+            persist_disclosure_state(&path, &state)?;
+        }
         Ok(Self {
-            sink_fingerprint: disclosure_sink_fingerprint(&path),
+            sink_fingerprint: Mutex::new(disclosure_sink_fingerprint(&path)),
             path,
             max_records,
             state: Mutex::new(state),
+            managed_writer: Mutex::new(None),
             _lease: lease,
         })
+    }
+
+    /// Attaches the current-schema disclosure owner to the composed managed adapter state.
+    /// Existing legacy state is imported once; subsequent publication uses only the admitted
+    /// owner namespace and returns receipts bound to that namespace identity.
+    pub(crate) fn attach_managed_writer(
+        &self,
+        writer: Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<(), HttpDurableDisclosureError> {
+        let managed = ManagedDisclosureWriter::new(writer, key)?;
+        let managed_bytes = managed.read_snapshot()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HttpDurableDisclosureError::Unavailable)?;
+        let mut candidate = if managed_bytes.is_empty() {
+            state.clone()
+        } else {
+            decode_disclosure_state(&managed_bytes)?
+        };
+        candidate.trim(self.max_records);
+        let bytes = encode_disclosure_state(&candidate)?;
+        managed.replace_snapshot(&bytes)?;
+        let namespace = managed.namespace_digest()?;
+        *state = candidate;
+        let mut attached = self
+            .managed_writer
+            .lock()
+            .map_err(|_| HttpDurableDisclosureError::Unavailable)?;
+        if attached.is_some() {
+            return Err(HttpDurableDisclosureError::Unavailable);
+        }
+        *attached = Some(managed);
+        drop(attached);
+        // The durable receipt must identify the admitted managed sink, not the legacy path that
+        // was used only as an import source.
+        let mut fingerprint = self
+            .sink_fingerprint
+            .lock()
+            .map_err(|_| HttpDurableDisclosureError::Unavailable)?;
+        *fingerprint = format!("http-managed-disclosure-v1:{namespace}");
+        Ok(())
     }
 
     /// Returns the canonical production journal path.
@@ -132,8 +261,11 @@ impl HttpDurableEgressDisclosureJournal {
 
     /// Returns the receipt-bound fingerprint of this concrete durable sink.
     #[must_use]
-    pub fn sink_fingerprint(&self) -> &str {
-        &self.sink_fingerprint
+    pub fn sink_fingerprint(&self) -> String {
+        self.sink_fingerprint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Durably publishes one safe disclosure and returns its replay record.
@@ -172,9 +304,25 @@ impl HttpDurableEgressDisclosureJournal {
         candidate.next_sequence = sequence;
         candidate.records.push(record.clone());
         candidate.trim(self.max_records);
-        persist_disclosure_state(&self.path, &candidate)?;
+        self.persist_state(&candidate)?;
         *state = candidate;
         Ok(record)
+    }
+
+    fn persist_state(
+        &self,
+        state: &HttpDurableDisclosureState,
+    ) -> Result<(), HttpDurableDisclosureError> {
+        let bytes = encode_disclosure_state(state)?;
+        let managed = self
+            .managed_writer
+            .lock()
+            .map_err(|_| HttpDurableDisclosureError::Unavailable)?;
+        if let Some(managed) = managed.as_ref() {
+            managed.replace_snapshot(&bytes)
+        } else {
+            atomic_replace(&self.path, &bytes).map_err(HttpDurableDisclosureError::io)
+        }
     }
 
     /// Replays the retained disclosure suffix after an optional cursor.
@@ -366,7 +514,8 @@ impl EgressDisclosurePresenter for HttpDurableEgressDisclosurePresenter {
             .await
             .map_err(|_| DisclosurePresentationError::WriteFailed)?
             .map_err(|_| DisclosurePresentationError::WriteFailed)?;
-        disclosure.presentation_receipt(self.journal.sink_fingerprint())
+        let sink_fingerprint = self.journal.sink_fingerprint();
+        disclosure.presentation_receipt(&sink_fingerprint)
     }
 }
 
@@ -374,6 +523,13 @@ fn persist_disclosure_state(
     path: &Path,
     state: &HttpDurableDisclosureState,
 ) -> Result<(), HttpDurableDisclosureError> {
+    let bytes = encode_disclosure_state(state)?;
+    atomic_replace(path, &bytes).map_err(HttpDurableDisclosureError::io)
+}
+
+fn encode_disclosure_state(
+    state: &HttpDurableDisclosureState,
+) -> Result<Vec<u8>, HttpDurableDisclosureError> {
     let bytes =
         serde_json::to_vec(&HttpDurableDisclosureFile::from_state(state)).map_err(|error| {
             HttpDurableDisclosureError::Corrupt {
@@ -386,7 +542,17 @@ fn persist_disclosure_state(
             limit: MAX_HTTP_DISCLOSURE_JOURNAL_BYTES,
         });
     }
-    atomic_replace(path, &bytes).map_err(HttpDurableDisclosureError::io)
+    Ok(bytes)
+}
+
+fn decode_disclosure_state(
+    bytes: &[u8],
+) -> Result<HttpDurableDisclosureState, HttpDurableDisclosureError> {
+    serde_json::from_slice::<HttpDurableDisclosureFile>(bytes)
+        .map_err(|error| HttpDurableDisclosureError::Corrupt {
+            message: error.to_string(),
+        })?
+        .into_state()
 }
 
 fn disclosure_cursor(sequence: u64) -> String {

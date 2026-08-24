@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use sigil_kernel::resource::CanonicalHash;
 use sigil_kernel::{
     ApprovalRequestIdentityV2, MAX_EVENT_BYTES, PublicRunEvent, PublicRunEventKind,
     PublicTaskPlanStep, TerminalLifecycleEvent, TerminalReadinessStatus, TerminalTaskId,
@@ -57,6 +58,39 @@ fn durable_event_for(session_id: &str, run_id: &str, sequence: u64) -> HttpProto
         },
     ))
     .expect("test event should have a durable cursor")
+}
+
+fn managed_writer(
+    temp: &tempfile::TempDir,
+) -> Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    let state = temp.path().join("state");
+    let execution = temp.path().join("execution");
+    std::fs::create_dir_all(state.join("cache")).expect("state roots");
+    std::fs::create_dir_all(&execution).expect("execution root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+            .expect("state mode");
+        std::fs::set_permissions(state.join("cache"), std::fs::Permissions::from_mode(0o700))
+            .expect("cache mode");
+        std::fs::set_permissions(&execution, std::fs::Permissions::from_mode(0o700))
+            .expect("execution mode");
+    }
+    let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+        Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        ));
+    let composition = sigil_runtime::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution,
+        CanonicalHash::from_bytes([0xa3; 32]),
+        planner,
+        &[Channel::AdapterDurableState],
+    )
+    .expect("managed protocol composition");
+    composition.storage_writer
 }
 
 fn terminal_event(session_id: &str, run_id: &str) -> HttpProtocolEvent {
@@ -180,6 +214,50 @@ fn durable_journal_replays_after_process_reopen() {
 
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].run_event.sequence, 2);
+}
+
+#[test]
+fn current_schema_protocol_replay_uses_managed_namespace_and_reopens_from_it() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let legacy_path = temp.path().join("legacy-protocol.json");
+    let writer = managed_writer(&temp);
+    let managed_path = writer
+        .managed_named_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::AdapterDurableState,
+            "http-protocol-replay",
+        )
+        .expect("managed protocol leaf")
+        .join("records.jsonl");
+    {
+        let journal =
+            HttpDurableProtocolJournal::open(&legacy_path, 16).expect("journal should initialize");
+        journal
+            .attach_managed_writer(Arc::clone(&writer), "http-protocol-replay")
+            .expect("managed writer should attach");
+        journal
+            .append(durable_event(1))
+            .expect("event should persist");
+        assert!(
+            !legacy_path.exists(),
+            "new current-schema boot must not create legacy state"
+        );
+        assert!(
+            managed_path.exists(),
+            "managed protocol record should exist"
+        );
+    }
+
+    let fresh_writer = managed_writer(&temp);
+    let reopened = HttpDurableProtocolJournal::open(&legacy_path, 16)
+        .expect("journal should reopen from managed state");
+    reopened
+        .attach_managed_writer(fresh_writer, "http-protocol-replay")
+        .expect("managed writer should reattach");
+    let replay = reopened
+        .replay_run_after("session-1", "run-1", None)
+        .expect("managed event should replay");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].run_event.sequence, 1);
 }
 
 #[test]

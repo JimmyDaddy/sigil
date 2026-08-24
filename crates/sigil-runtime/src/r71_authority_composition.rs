@@ -328,7 +328,15 @@ pub fn attach_boot_authority_to_services(
         config_path,
         cutover.manifest().manifest_hash,
         planner,
-        &[Ch::SessionLog, Ch::InputHistory, Ch::SessionCatalog],
+        &[
+            Ch::SessionLog,
+            Ch::InputHistory,
+            Ch::SessionCatalog,
+            Ch::ArtifactStaging,
+            Ch::AdapterDurableState,
+            Ch::AdapterEgressDisclosure,
+            Ch::AdapterIdempotencyLedger,
+        ],
     )
     .map_err(BootAuthorityErrorV1::Composition)?;
     let services = crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)

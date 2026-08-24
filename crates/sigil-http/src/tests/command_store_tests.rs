@@ -13,6 +13,7 @@ use crate::{
         HttpStoredCommandCompletion, HttpStoredCommandIdentity, HttpStoredCommandKey,
     },
 };
+use sigil_kernel::resource::CanonicalHash;
 use sigil_kernel::{
     IntegrationPlanId, IntegrationPromotionStatus, TaskId, TaskIntegrationReviewRequest,
     TerminalReadinessStatus, TerminalTaskStatus, VerificationVerdict,
@@ -28,6 +29,39 @@ fn identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
         kind: "start".to_owned(),
         fingerprint_sha256: fingerprint.to_string().repeat(64),
     }
+}
+
+fn managed_writer(
+    temp: &tempfile::TempDir,
+) -> std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    let state = temp.path().join("state");
+    let execution = temp.path().join("execution");
+    std::fs::create_dir_all(state.join("cache")).expect("state roots");
+    std::fs::create_dir_all(&execution).expect("execution root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+            .expect("state mode");
+        std::fs::set_permissions(state.join("cache"), std::fs::Permissions::from_mode(0o700))
+            .expect("cache mode");
+        std::fs::set_permissions(&execution, std::fs::Permissions::from_mode(0o700))
+            .expect("execution mode");
+    }
+    let planner: std::sync::Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+        std::sync::Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        ));
+    let composition = sigil_runtime::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution,
+        CanonicalHash::from_bytes([0xa2; 32]),
+        planner,
+        &[Channel::AdapterIdempotencyLedger],
+    )
+    .expect("managed command composition");
+    composition.storage_writer
 }
 
 fn user_input_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
@@ -235,6 +269,50 @@ fn intent_drop_receipt(command_id: &str) -> HttpIntentDropCommandReceipt {
         "replayed": false
     }))
     .expect("Intent Drop receipt fixture should decode")
+}
+
+#[test]
+fn current_schema_command_store_uses_managed_idempotency_ledger() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let legacy_path = temp.path().join("legacy-commands.json");
+    let writer = managed_writer(&temp);
+    let managed_path = writer
+        .managed_named_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::AdapterIdempotencyLedger,
+            "http-idempotency-ledger",
+        )
+        .expect("managed idempotency leaf")
+        .join("records.jsonl");
+    {
+        let store = HttpDurableCommandStore::open(&legacy_path, 8)
+            .expect("command store should initialize");
+        assert_eq!(store.server_epoch(), 1);
+        store
+            .attach_managed_writer(std::sync::Arc::clone(&writer), "http-idempotency-ledger")
+            .expect("managed writer should attach");
+        assert!(matches!(
+            store.reserve(identity("managed-command", 'a')),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        assert!(
+            !legacy_path.exists(),
+            "new current-schema boot must not create legacy state"
+        );
+        assert!(managed_path.exists(), "managed command record should exist");
+    }
+
+    let fresh_writer = managed_writer(&temp);
+    let reopened = HttpDurableCommandStore::open(&legacy_path, 8)
+        .expect("command store should reopen from managed state");
+    reopened
+        .attach_managed_writer(fresh_writer, "http-idempotency-ledger")
+        .expect("managed writer should reattach");
+    assert_eq!(reopened.server_epoch(), 2);
+    assert!(matches!(
+        reopened.reserve(identity("managed-command", 'a')),
+        Ok(HttpStoredCommandClaim::Existing(completion))
+            if *completion == HttpStoredCommandCompletion::Aborted
+    ));
 }
 
 #[test]

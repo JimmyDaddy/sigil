@@ -1028,6 +1028,25 @@ impl HttpLiveEventBus {
         self.durable_journal.is_some()
     }
 
+    pub(crate) fn attach_managed_protocol_replay(
+        &self,
+        writer: std::sync::Arc<
+            sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1,
+        >,
+        key: &str,
+    ) -> Result<(), HttpEventPublishError> {
+        let Some(journal) = self.durable_journal.as_ref() else {
+            return Err(HttpEventPublishError::Journal {
+                message: "managed protocol replay requires a durable journal".to_owned(),
+            });
+        };
+        journal
+            .attach_managed_writer(writer, key)
+            .map_err(|error| HttpEventPublishError::Journal {
+                message: error.to_string(),
+            })
+    }
+
     /// Records one run event and broadcasts it to active subscribers.
     ///
     /// # Errors

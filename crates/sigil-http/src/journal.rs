@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -16,6 +16,9 @@ use crate::sse::{
     HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HttpProtocolCursor, HttpProtocolEvent,
     HttpProtocolReplayError,
 };
+use sigil_runtime::managed_storage_writer::{
+    ManagedStorageWriterAdapterV1, ManagedStorageWriterLeaseV1, StorageWriterChannelV1,
+};
 
 const HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION: u32 = 3;
 pub(crate) const MAX_HTTP_PROTOCOL_JOURNAL_EVENTS: usize = 4_096;
@@ -26,7 +29,71 @@ pub struct HttpDurableProtocolJournal {
     path: PathBuf,
     max_events: usize,
     state: Mutex<HttpProtocolJournalState>,
+    managed_writer: Mutex<Option<ManagedProtocolReplayWriter>>,
     _lease: File,
+}
+
+struct ManagedProtocolReplayWriter {
+    writer: std::sync::Arc<ManagedStorageWriterAdapterV1>,
+    lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
+}
+
+impl ManagedProtocolReplayWriter {
+    fn new(
+        writer: std::sync::Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<Self, HttpProtocolJournalError> {
+        let lease = writer
+            .acquire_named(StorageWriterChannelV1::AdapterDurableState, key)
+            .map_err(|error| {
+                HttpProtocolJournalError::io(std::io::Error::other(error.to_string()))
+            })?;
+        Ok(Self {
+            writer,
+            lease: Mutex::new(Some(lease)),
+        })
+    }
+
+    fn read_snapshot(&self) -> Result<Vec<u8>, HttpProtocolJournalError> {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        let Some(lease) = lease.as_ref() else {
+            return Err(HttpProtocolJournalError::Unavailable);
+        };
+        self.writer
+            .read_record_bytes(lease, MAX_HTTP_PROTOCOL_JOURNAL_BYTES)
+            .map_err(|error| HttpProtocolJournalError::io(std::io::Error::other(error.to_string())))
+    }
+
+    fn replace_snapshot(&self, bytes: &[u8]) -> Result<(), HttpProtocolJournalError> {
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        let Some(lease) = lease.as_ref() else {
+            return Err(HttpProtocolJournalError::Unavailable);
+        };
+        self.writer
+            .replace_record_bytes(lease, bytes)
+            .map_err(|error| HttpProtocolJournalError::io(std::io::Error::other(error.to_string())))
+    }
+
+    fn finalize(&self) {
+        let Ok(mut lease) = self.lease.lock() else {
+            return;
+        };
+        if let Some(lease) = lease.take() {
+            let _ = self.writer.finalize(lease);
+        }
+    }
+}
+
+impl Drop for ManagedProtocolReplayWriter {
+    fn drop(&mut self) {
+        self.finalize();
+    }
 }
 
 impl HttpDurableProtocolJournal {
@@ -46,6 +113,7 @@ impl HttpDurableProtocolJournal {
             });
         }
         let path = canonical_durable_path(path.into()).map_err(HttpProtocolJournalError::io)?;
+        let path_existed = fs::symlink_metadata(&path).is_ok();
         let lease = acquire_exclusive_lease(&path).map_err(HttpProtocolJournalError::io)?;
         let mut state = if path.exists() {
             let bytes_on_disk = path.metadata().map_err(HttpProtocolJournalError::io)?.len();
@@ -67,13 +135,51 @@ impl HttpDurableProtocolJournal {
         };
         state.seal_recovered_streams();
         state.trim(max_events)?;
-        persist_state(&path, &state)?;
+        if path_existed {
+            persist_state(&path, &state)?;
+        }
         Ok(Self {
             path,
             max_events,
             state: Mutex::new(state),
+            managed_writer: Mutex::new(None),
             _lease: lease,
         })
+    }
+
+    /// Switches the current-schema replay owner to the composed managed adapter state writer.
+    /// Existing legacy state is imported once; all later snapshots are written only through the
+    /// admitted adapter durable-state namespace.
+    pub(crate) fn attach_managed_writer(
+        &self,
+        writer: std::sync::Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<(), HttpProtocolJournalError> {
+        let managed = ManagedProtocolReplayWriter::new(writer, key)?;
+        let managed_bytes = managed.read_snapshot()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        let mut candidate = if managed_bytes.is_empty() {
+            state.clone()
+        } else {
+            decode_state(&managed_bytes)?
+        };
+        candidate.seal_recovered_streams();
+        candidate.trim(self.max_events)?;
+        let bytes = encode_state(&candidate)?;
+        managed.replace_snapshot(&bytes)?;
+        *state = candidate;
+        let mut attached = self
+            .managed_writer
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        if attached.is_some() {
+            return Err(HttpProtocolJournalError::Unavailable);
+        }
+        *attached = Some(managed);
+        Ok(())
     }
 
     /// Returns the canonical journal path.
@@ -132,7 +238,7 @@ impl HttpDurableProtocolJournal {
             candidate.close_stream(&key)?;
         }
         candidate.trim(self.max_events)?;
-        persist_state(&self.path, &candidate)?;
+        self.persist_state(&candidate)?;
         *state = candidate;
         Ok(())
     }
@@ -150,7 +256,7 @@ impl HttpDurableProtocolJournal {
         let mut candidate = state.clone();
         let key = HttpProtocolStreamKey::new(session_id, run_id);
         candidate.close_stream(&key)?;
-        persist_state(&self.path, &candidate)?;
+        self.persist_state(&candidate)?;
         *state = candidate;
         Ok(())
     }
@@ -235,6 +341,32 @@ impl HttpDurableProtocolJournal {
             .high_watermarks
             .get(&HttpProtocolStreamKey::new(session_id, run_id))
             .map(|watermark| watermark.accepts_events))
+    }
+
+    fn persist_state(
+        &self,
+        state: &HttpProtocolJournalState,
+    ) -> Result<(), HttpProtocolJournalError> {
+        let bytes = encode_state(state)?;
+        let managed = self
+            .managed_writer
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        if let Some(managed) = managed.as_ref() {
+            managed.replace_snapshot(&bytes)
+        } else {
+            atomic_replace(&self.path, &bytes).map_err(HttpProtocolJournalError::io)
+        }
+    }
+}
+
+impl Drop for HttpDurableProtocolJournal {
+    fn drop(&mut self) {
+        if let Ok(mut managed) = self.managed_writer.lock()
+            && let Some(managed) = managed.take()
+        {
+            managed.finalize();
+        }
     }
 }
 
@@ -675,6 +807,11 @@ fn persist_state(
     path: &Path,
     state: &HttpProtocolJournalState,
 ) -> Result<(), HttpProtocolJournalError> {
+    let bytes = encode_state(state)?;
+    atomic_replace(path, &bytes).map_err(HttpProtocolJournalError::io)
+}
+
+fn encode_state(state: &HttpProtocolJournalState) -> Result<Vec<u8>, HttpProtocolJournalError> {
     let bytes =
         serde_json::to_vec(&HttpProtocolJournalFile::from_state(state)).map_err(|error| {
             HttpProtocolJournalError::Corrupt {
@@ -687,7 +824,15 @@ fn persist_state(
             limit: MAX_HTTP_PROTOCOL_JOURNAL_BYTES,
         });
     }
-    atomic_replace(path, &bytes).map_err(HttpProtocolJournalError::io)
+    Ok(bytes)
+}
+
+fn decode_state(bytes: &[u8]) -> Result<HttpProtocolJournalState, HttpProtocolJournalError> {
+    serde_json::from_slice::<HttpProtocolJournalFile>(bytes)
+        .map_err(|error| HttpProtocolJournalError::Corrupt {
+            message: error.to_string(),
+        })?
+        .into_state()
 }
 
 #[cfg(test)]
