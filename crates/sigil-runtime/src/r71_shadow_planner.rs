@@ -169,6 +169,10 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
                 .unwrap_or("cmd"),
             self.config.schema_version
         ));
+        let environment_profile_class = match request.purpose {
+            ExecutionPurposeV1::ExtensionProcess => EnvironmentProfileClassV1::ExtensionProcess,
+            _ => EnvironmentProfileClassV1::FreshIsolatedHome,
+        };
         let draft = ManagedExecutionPlanDraftV1 {
             draft_id,
             argv_digest,
@@ -179,7 +183,7 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
             resource_plan_hash: canonical_digest(b"shadow-resource-plan-hash-1"),
             resource_requirements,
             environment_profile: sigil_kernel::managed_execution::EnvironmentProfileRefV1 {
-                profile_class: EnvironmentProfileClassV1::FreshIsolatedHome,
+                profile_class: environment_profile_class,
                 profile_hash: canonical_digest(b"shadow-env-profile-1"),
             },
             toolchain_plan_hash: CanonicalHash::from_bytes([0u8; 32]),

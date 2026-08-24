@@ -210,6 +210,7 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 
 - application 启动只选择一次 epoch（legacy 或 new current-schema），选择结果以 content-addressed 的 startup cutover manifest 呈现；同一 application instance 发布不同 manifest 即 fixed-forward 拒绝
 - new current-schema epoch 的 mandatory adapter readiness 任一 probe 失败，application 必须 fail closed，不得部分启动；对 18 个 mandatory adapter channel 的 probe 必须是真实调用（storage admit/finalize round trip、surface contract 校验、admission gate 可达性），不得用空跑或"无输出即通过"代替
+- ExecutionExtension 的 production seam 必须由同一 composed `ManagedExecutionServiceV1` 提供：runtime 只能把已解析的 long-lived stdio plan 映射为 planner/broker 绑定的 managed request，sandbox 通过真实注入 launcher 启动并返回 opaque managed process lifecycle；Local 缺少 launcher 时必须保持 `ProviderUnavailable`，不得回退到裸 MCP `Child`
 - 发布 new epoch 后，当前 binary 只创建/读取 current-schema session；old-schema session 明确 unavailable，不得按旧 schema 解释
 - 禁止 per-consumer flag、V2/V3 dual write、legacy allocator fallback 与 active process provider 切换
 - 该 epoch 选择的 gate 测试与 conformance runner：`cargo test -p sigil-runtime resource_global_cutover`、`cargo test -p sigil-kernel current_schema_only`、`./scripts/run-r71-global-cutover-conformance.sh`

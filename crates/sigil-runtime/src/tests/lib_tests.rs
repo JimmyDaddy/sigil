@@ -1253,6 +1253,7 @@ async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Resu
     let temp = tempfile::tempdir()?;
     let launcher = super::ConfiguredMcpProcessLauncher {
         execution: sigil_kernel::ExecutionConfig::default(),
+        managed_extension_execution: None,
     };
     let launch = launcher.launch(McpProcessLaunchRequest {
         server_name: "local".to_owned(),
@@ -1277,7 +1278,9 @@ async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Resu
         Some(ExecutionSandboxProfile::Unconfined)
     );
 
-    let mut child = launch.child;
+    let mut child = launch
+        .child
+        .expect("configured launcher must return a child");
     let _ = child.kill().await;
     Ok(())
 }
@@ -1290,6 +1293,7 @@ async fn configured_mcp_process_launcher_network_ask_without_evidence_is_zero_sp
     let marker = temp.path().join("configured-ask-rejected-spawned");
     let launcher = super::ConfiguredMcpProcessLauncher {
         execution: sigil_kernel::ExecutionConfig::default(),
+        managed_extension_execution: None,
     };
     let result = launcher.launch(McpProcessLaunchRequest {
         server_name: "configured-ask-rejected".to_owned(),
@@ -1335,6 +1339,7 @@ async fn configured_mcp_process_launcher_network_ask_with_evidence_spawns() -> R
     let marker = temp.path().join("configured-ask-approved-spawned");
     let launcher = super::ConfiguredMcpProcessLauncher {
         execution: sigil_kernel::ExecutionConfig::default(),
+        managed_extension_execution: None,
     };
     let mut launch = launcher.launch(McpProcessLaunchRequest {
         server_name: "configured-ask-approved".to_owned(),
@@ -1357,11 +1362,85 @@ async fn configured_mcp_process_launcher_network_ask_with_evidence_spawns() -> R
         declaration: None,
     })?;
 
-    assert!(launch.child.wait().await?.success());
+    assert!(
+        launch
+            .child
+            .as_mut()
+            .expect("configured launcher must return a child")
+            .wait()
+            .await?
+            .success()
+    );
     assert!(
         marker.exists(),
         "explicit evidence should admit configured spawn"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_mcp_process_launcher_managed_route_drives_real_mcp_stdio() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("managed_route_mcp_server.py");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion":"2025-06-18","serverInfo":{"name":"managed-route","version":"1.0.0"},"capabilities":{}}
+    elif method == "tools/list":
+        result = {"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}
+    else:
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}) + "\n")
+    sys.stdout.flush()
+"#,
+    )?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
+    let route = Arc::new(
+        crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1::new(
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            temp.path().to_path_buf(),
+        ),
+    );
+    let launcher = super::ConfiguredMcpProcessLauncher {
+        execution: sigil_kernel::ExecutionConfig::default(),
+        managed_extension_execution: Some(route),
+    };
+    let server = mcp_server_config! {
+        name: "managed-route".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.to_string_lossy().into_owned()],
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    };
+    let mut registry = ToolRegistry::new();
+    let report = sigil_mcp::register_mcp_tools_with_report(
+        &mut registry,
+        std::slice::from_ref(&server),
+        sigil_mcp::McpToolRegistrationOptions::eager()?
+            .with_capabilities(&provider_capabilities)
+            .with_working_dir(temp.path().to_path_buf())
+            .with_process_launcher(Arc::new(launcher)),
+    )
+    .await?;
+    assert_eq!(report.process_launch_receipts.len(), 1);
+    assert!(
+        registry
+            .specs()
+            .iter()
+            .any(|spec| spec.name.ends_with("__echo"))
+    );
+    let tools = registry.drain_by_name_prefix("");
+    shutdown_registered_tools(&tools).await?;
     Ok(())
 }
 
@@ -1486,7 +1565,15 @@ async fn planned_mcp_process_returns_owned_child_and_denied_receipt() -> Result<
         sigil_mcp::McpProcessClass::LocalStdioSandboxed
     );
     let _process_owner = launch.process_owner;
-    assert!(launch.child.wait().await?.success());
+    assert!(
+        launch
+            .child
+            .as_mut()
+            .expect("configured launcher must return a child")
+            .wait()
+            .await?
+            .success()
+    );
     Ok(())
 }
 
@@ -1496,6 +1583,7 @@ async fn configured_mcp_process_launcher_creates_killable_process_group() -> Res
     let temp = tempfile::tempdir()?;
     let launcher = super::ConfiguredMcpProcessLauncher {
         execution: sigil_kernel::ExecutionConfig::default(),
+        managed_extension_execution: None,
     };
     let launch = launcher.launch(McpProcessLaunchRequest {
         server_name: "process-group".to_owned(),
@@ -1509,7 +1597,9 @@ async fn configured_mcp_process_launcher_creates_killable_process_group() -> Res
         network_admission: ExtensionProcessNetworkAdmission::default(),
         declaration: None,
     })?;
-    let mut child = launch.child;
+    let mut child = launch
+        .child
+        .expect("configured launcher must return a child");
     let process_id = child.id().expect("configured MCP child should have a pid");
     let process_group = tokio::process::Command::new("ps")
         .args(["-o", "pgid=", "-p", &process_id.to_string()])
@@ -1539,6 +1629,7 @@ fn configured_mcp_process_launcher_local_required_sandbox_fails_closed() {
             ExecutionSandboxFallback::Deny,
             None,
         ),
+        managed_extension_execution: None,
     };
     let result = launcher.launch(McpProcessLaunchRequest {
         server_name: "local".to_owned(),
@@ -1584,6 +1675,7 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
             ExecutionSandboxFallback::Deny,
             None,
         ),
+        managed_extension_execution: None,
     };
     let launch = launcher.launch(McpProcessLaunchRequest {
         server_name: "seatbelt".to_owned(),
@@ -1620,7 +1712,11 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
         Some(ExecutionSandboxProfile::BuildNetworked)
     );
 
-    let output = launch.child.wait_with_output().await?;
+    let output = launch
+        .child
+        .expect("configured launcher must return a child")
+        .wait_with_output()
+        .await?;
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("outside-denied"),
         "stdout: {} stderr: {}",
@@ -2805,6 +2901,7 @@ fn lazy_mcp_activation_tool_is_not_registered_without_lazy_servers() -> Result<(
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        None,
     );
 
     assert!(registry.spec_for("mcp_activate_server").is_none());
@@ -2856,6 +2953,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        None,
     );
 
     let spec = registry
@@ -3061,6 +3159,7 @@ fn mcp_activate_server_tool_respects_disabled_egress_logging() -> Result<()> {
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        None,
     );
 
     let audit = registry.egress_audit(

@@ -24,9 +24,11 @@ use sigil_kernel::{
     VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
     safe_persistence_json_value, validate_extension_process_network_admission,
 };
+#[cfg(test)]
+use tokio::process::ChildStdout;
 use tokio::{
-    io::{AsyncReadExt, BufReader},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    io::{AsyncWrite, BufReader},
+    process::{Child, Command},
     sync::Mutex,
     task::JoinHandle,
 };

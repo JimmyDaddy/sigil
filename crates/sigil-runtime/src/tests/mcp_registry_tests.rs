@@ -97,6 +97,7 @@ credential = { source = "none" }
         &root_config,
         &declarations,
         Some(Arc::new(SessionMcpPluginTrustSource::new(trust_path))),
+        None,
     )
     .expect("launcher should build");
     let request = launcher
@@ -194,6 +195,7 @@ credential = { source = "none" }
         &root_config,
         &declarations,
         Some(Arc::new(SessionMcpPluginTrustSource::new(trust_path))),
+        None,
     )
     .expect("launcher should build");
     let request = launcher
@@ -251,9 +253,13 @@ credential = { source = "none" }
 "#,
     )
     .expect("root config should parse");
-    let launcher =
-        declaration_mcp_process_launcher(&root_config, std::slice::from_ref(&declaration), None)
-            .expect("root launcher should build");
+    let launcher = declaration_mcp_process_launcher(
+        &root_config,
+        std::slice::from_ref(&declaration),
+        None,
+        None,
+    )
+    .expect("root launcher should build");
 
     fs::rename(&workspace, fixture.path().join("workspace-original"))
         .expect("captured workspace should move");

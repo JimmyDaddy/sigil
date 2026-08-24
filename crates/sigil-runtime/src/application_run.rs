@@ -32,8 +32,8 @@ use sigil_kernel::{
 use crate::{
     activate_eager_remote_mcp_server,
     application_queue::{ApplicationQueuedRunPrepareError, PreparedApplicationQueuedRunInput},
-    attach_remote_mcp_activation_presenter, attach_session_url_capability_store,
-    context_candidates_from_safe_sources, current_unix_time_ms,
+    attach_session_url_capability_store, context_candidates_from_safe_sources,
+    current_unix_time_ms,
     product_view::{ApplicationAgentActivityView, agent_activity_product_view_from_entries},
     resolve_sigil_paths, secret_redactor_for_root_config, unsupported_mcp_elicitation_handler,
     unsupported_mcp_runtime_event_handler,
@@ -3346,7 +3346,10 @@ async fn assemble_application_tool_surface(
     tool_scope: Option<&ToolRegistryScope>,
     terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
 ) -> Result<(crate::RuntimeToolSurface, Vec<String>)> {
-    let surface = crate::mcp_registry::build_tool_surface_with_terminal_lifecycle(
+    let managed_extension_execution = services
+        .authority_composition()
+        .map(|composition| std::sync::Arc::clone(&composition.extension_execution));
+    let surface = crate::mcp_registry::build_tool_surface_with_terminal_lifecycle_and_managed_extension_execution(
         root_config,
         provider_capabilities,
         workspace_root.to_path_buf(),
@@ -3361,6 +3364,7 @@ async fn assemble_application_tool_surface(
         services
             .authority_composition()
             .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
+        managed_extension_execution.clone(),
     )
     .await?;
     // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run
@@ -3400,7 +3404,7 @@ async fn assemble_application_tool_surface(
     } = surface;
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
-    attach_remote_mcp_activation_presenter(
+    crate::mcp_registry::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
         &mut registry,
         root_config,
         provider_capabilities,
@@ -3408,6 +3412,7 @@ async fn assemble_application_tool_surface(
         Arc::clone(&elicitation_handler),
         runtime_event_handler,
         Arc::clone(&services.disclosure_presenter),
+        managed_extension_execution,
     );
     let eager_remote_servers = root_config
         .mcp_servers

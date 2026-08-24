@@ -25,6 +25,29 @@ fn r71_broker_seal_issue_verify_round_trip() {
 }
 
 #[test]
+fn r71_broker_extension_seal_issue_verify_round_trip() {
+    let broker = KernelCapabilityBrokerV1::new();
+    let proof = broker.seal_execution_proof(
+        ProofKindV1::ExecutionExtension,
+        "extension-process",
+        b"mcp-extension-attempt".to_vec(),
+    );
+    let bundle = broker.issue_execution(proof).expect("issue extension");
+    assert!(matches!(
+        bundle,
+        IssuedExecutionAdmissionBundleV1::Extension { .. }
+    ));
+    let view = broker
+        .verify_execution_bundle(bundle)
+        .expect("verify extension");
+    assert_eq!(view.purpose, "extension-process");
+    assert_eq!(
+        view.physical_attempt_id,
+        Some(b"mcp-extension-attempt".to_vec())
+    );
+}
+
+#[test]
 fn r71_broker_bundle_verify_is_one_shot() {
     let broker = KernelCapabilityBrokerV1::new();
     let proof = broker.seal_execution_proof(ProofKindV1::ExecutionOneShot, "tool-a", vec![1]);

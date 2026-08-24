@@ -1,4 +1,5 @@
 use super::*;
+use crate::process::McpManagedProcessController;
 
 pub(super) struct McpServerObservedIdentity {
     /// Stable command/executable pin material used only for version pin validation.
@@ -108,7 +109,8 @@ impl std::error::Error for McpPostSpawnStartupError {
 
 pub(super) struct McpClient {
     pub(super) _child: Mutex<Option<Child>>,
-    pub(super) _process_owner: sigil_process::ProcessTreeOwnerGuard,
+    pub(super) _process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
+    pub(super) _managed_process: Mutex<Option<McpManagedProcessController>>,
     pub(super) _process_receipt: McpProcessLaunchReceipt,
     pub(super) _stderr_task: Mutex<Option<JoinHandle<McpStderrSummary>>>,
     pub(super) _stderr_monitor_task: std::sync::Mutex<Option<JoinHandle<()>>>,
@@ -145,8 +147,8 @@ pub(super) enum McpConnectionState {
 }
 
 pub(super) struct Connection {
-    pub(super) stdin: ChildStdin,
-    pub(super) stdout: BufReader<ChildStdout>,
+    pub(super) stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    pub(super) stdout: BufReader<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
     pub(super) next_id: u64,
 }
 
@@ -214,29 +216,60 @@ impl McpClient {
                 secret_redactor.add_secret_carrier(secret.clone());
             }
         }
-        let launch = process_launcher.launch(launch_request)?;
+        let launch = process_launcher.launch_async(launch_request).await?;
         let startup_receipt = launch.receipt.clone();
         let startup = async move {
             let McpProcessLaunch {
                 mut child,
                 process_owner,
+                mut managed,
                 receipt,
             } = launch;
-
-            let stdin = child.stdin.take();
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-            let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
-                let cleanup = terminate_mcp_process(&mut child).await;
-                return Err(McpPostSpawnStartupError::new(
-                    startup_receipt.clone(),
-                    anyhow!("missing stdio pipe for MCP server {}", config.name),
-                    McpCleanupEvidence {
-                        completed: cleanup.completed,
-                        reason: cleanup.reason,
-                    },
-                ));
-            };
+            let (stdin, stdout, stderr, managed_controller, legacy_child) =
+                if let Some(mut child) = child.take() {
+                    let stdin = child.stdin.take();
+                    let stdout = child.stdout.take();
+                    let stderr = child.stderr.take();
+                    let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
+                        let cleanup = terminate_mcp_process(&mut child).await;
+                        return Err(McpPostSpawnStartupError::new(
+                            startup_receipt.clone(),
+                            anyhow!("missing stdio pipe for MCP server {}", config.name),
+                            McpCleanupEvidence {
+                                completed: cleanup.completed,
+                                reason: cleanup.reason,
+                            },
+                        ));
+                    };
+                    (
+                        Box::new(stdin) as Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+                        Box::new(stdout) as Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+                        Box::new(stderr) as Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+                        None,
+                        Some(child),
+                    )
+                } else if let Some(managed) = managed.take() {
+                    (
+                        managed.stdio.stdin,
+                        managed.stdio.stdout,
+                        managed.stdio.stderr,
+                        Some(managed.controller),
+                        None,
+                    )
+                } else {
+                    return Err(McpPostSpawnStartupError::new(
+                        startup_receipt.clone(),
+                        anyhow!(
+                            "MCP server {} launch returned no process transport",
+                            config.name
+                        ),
+                        McpCleanupEvidence {
+                            completed: false,
+                            reason: "launch returned neither legacy nor managed process transport"
+                                .to_owned(),
+                        },
+                    ));
+                };
             let (stderr_fault_sender, stderr_fault_receiver) = tokio::sync::oneshot::channel();
             let stderr_faulted = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stderr_fault = Arc::new(std::sync::Mutex::new(None));
@@ -248,8 +281,9 @@ impl McpClient {
             ));
 
             let client = Arc::new(Self {
-                _child: Mutex::new(Some(child)),
+                _child: Mutex::new(legacy_child),
                 _process_owner: process_owner,
+                _managed_process: Mutex::new(managed_controller),
                 _process_receipt: receipt,
                 _stderr_task: Mutex::new(Some(stderr_task)),
                 _stderr_monitor_task: std::sync::Mutex::new(None),
@@ -948,10 +982,13 @@ impl McpClient {
                 Some(mut child) => terminate_mcp_process(&mut child).await,
                 None => super::process::McpProcessCleanupSummary {
                     completed: true,
-                    reason: "MCP process cleanup already completed".to_owned(),
+                    reason: "MCP legacy process cleanup not required".to_owned(),
                 },
             }
         };
+        if let Some(mut managed_process) = self._managed_process.lock().await.take() {
+            cleanup = managed_process.terminate().await;
+        }
         #[cfg(windows)]
         drop(connection_until_tree_cleanup);
 
@@ -1382,7 +1419,10 @@ pub(super) async fn write_error_response(
     .await
 }
 
-pub(super) async fn write_message(stdin: &mut ChildStdin, value: &Value) -> Result<()> {
+pub(super) async fn write_message<W>(stdin: &mut W, value: &Value) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     write_ndjson_message(stdin, value).await?;
     Ok(())
 }

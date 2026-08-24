@@ -27,6 +27,7 @@ pub struct SealedExecutionAdmissionProofV1 {
 pub enum ProofKindV1 {
     ExecutionOneShot,
     ExecutionTerminal,
+    ExecutionExtension,
     FileAccessTool,
     FileAccessSessionExport,
     StorageNamespace,
@@ -412,6 +413,14 @@ impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
                 )),
             },
             ProofKindV1::ExecutionTerminal => IssuedExecutionAdmissionBundleV1::Terminal {
+                consumer_token: crate::resource::OpaqueResourceId::new(format!(
+                    "token:{purpose}:{seq}"
+                )),
+                resource_capability: crate::resource::OpaqueResourceId::new(format!(
+                    "cap:{purpose}:{seq}"
+                )),
+            },
+            ProofKindV1::ExecutionExtension => IssuedExecutionAdmissionBundleV1::Extension {
                 consumer_token: crate::resource::OpaqueResourceId::new(format!(
                     "token:{purpose}:{seq}"
                 )),

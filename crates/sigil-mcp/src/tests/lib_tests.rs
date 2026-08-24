@@ -528,7 +528,7 @@ async fn local_mcp_process_launcher_marks_stdio_outside_sandbox() -> Result<()> 
         Some(sigil_kernel::ExecutionSandboxProfile::Unconfined)
     );
 
-    let mut child = launch.child;
+    let mut child = launch.child.expect("local launcher must return a child");
     let _ = child.kill().await;
     Ok(())
 }
@@ -598,7 +598,15 @@ async fn mcp_process_network_ask_with_explicit_approval_spawns() -> Result<()> {
         declaration: None,
     })?;
 
-    assert!(launch.child.wait().await?.success());
+    assert!(
+        launch
+            .child
+            .as_mut()
+            .expect("local launcher must return a child")
+            .wait()
+            .await?
+            .success()
+    );
     assert!(
         marker.exists(),
         "explicit network approval should admit spawn"
@@ -675,12 +683,19 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
     let mut isolated = run(&[])?;
     let mut isolated_stdout = isolated
         .child
+        .as_mut()
+        .expect("local launcher must return a child")
         .stdout
         .take()
         .expect("isolated stdout should be piped");
     let mut isolated_output = String::new();
     isolated_stdout.read_to_string(&mut isolated_output).await?;
-    isolated.child.wait().await?;
+    isolated
+        .child
+        .as_mut()
+        .expect("local launcher must return a child")
+        .wait()
+        .await?;
     assert!(isolated_output.starts_with("unset|"));
     assert!(!isolated_output.ends_with("|unset"));
 
@@ -696,12 +711,19 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
     assert_eq!(metadata["mcp_environment_grant_names"], "HOME");
     let mut granted_stdout = granted
         .child
+        .as_mut()
+        .expect("local launcher must return a child")
         .stdout
         .take()
         .expect("granted stdout should be piped");
     let mut granted_output = String::new();
     granted_stdout.read_to_string(&mut granted_output).await?;
-    granted.child.wait().await?;
+    granted
+        .child
+        .as_mut()
+        .expect("local launcher must return a child")
+        .wait()
+        .await?;
     assert!(granted_output.starts_with(&format!("{home}|")));
     Ok(())
 }

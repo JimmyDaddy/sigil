@@ -9,6 +9,7 @@
 //! prove it; real backends (Seatbelt / bwrap / Docker cidfile / Windows helper-ACL) land in R71.8.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -68,6 +69,106 @@ fn env_hash(env: &BTreeMap<String, String>) -> CanonicalHash {
 pub struct SandboxManagedExecutionServiceV1 {
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     execution_temp_root: PathBuf,
+    extension_launcher: Option<Arc<dyn ManagedExtensionLaunchServiceV1>>,
+}
+
+/// Observed enforcement returned by the host-injected extension launcher. The sandbox owns the
+/// final receipt; this value only describes the backend that the injected launcher is prepared to
+/// invoke for this exact extension plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedExtensionLaunchEnforcementV1 {
+    pub requested: RequestedEnforcementV1,
+    pub backend: SandboxBackendClassV1,
+    pub completeness: EnforcementCompletenessV1,
+    pub effective_access: std::collections::BTreeSet<ResourceAccessV1>,
+    pub effective_capability_set_hash: CanonicalHash,
+    pub proof_set_hash: CanonicalHash,
+}
+
+/// Host-private extension launch seam. A launcher is bound to one resolved long-lived process
+/// plan and is injected into the sandbox service for that launch only. It is deliberately not a
+/// generic execution fallback: absence of this seam keeps Extension admission fail closed.
+pub trait ManagedExtensionLaunchServiceV1: Send + Sync {
+    fn enforcement(&self) -> ManagedExtensionLaunchEnforcementV1;
+
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
+/// Real command-backed extension launcher used by the runtime route. The command and cwd are
+/// host-private launch material originating from a sealed `LongLivedStdioProcessPlan`; no caller
+/// can replace them through the managed request after the plan has been bound.
+pub struct CommandManagedExtensionLaunchServiceV1 {
+    program: PathBuf,
+    args: Vec<OsString>,
+    cwd: PathBuf,
+    environment: Vec<(OsString, OsString)>,
+    enforcement: ManagedExtensionLaunchEnforcementV1,
+}
+
+impl CommandManagedExtensionLaunchServiceV1 {
+    #[must_use]
+    pub fn new(
+        program: PathBuf,
+        args: Vec<OsString>,
+        cwd: PathBuf,
+        environment: Vec<(OsString, OsString)>,
+        enforcement: ManagedExtensionLaunchEnforcementV1,
+    ) -> Self {
+        Self {
+            program,
+            args,
+            cwd,
+            environment,
+            enforcement,
+        }
+    }
+
+    fn expected_argv(&self) -> Vec<OsString> {
+        std::iter::once(self.program.as_os_str().to_os_string())
+            .chain(self.args.iter().cloned())
+            .collect()
+    }
+}
+
+impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 {
+    fn enforcement(&self) -> ManagedExtensionLaunchEnforcementV1 {
+        self.enforcement.clone()
+    }
+
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        if request.argv != self.expected_argv()
+            || request.environment
+                != self
+                    .environment
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>()
+        {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        let mut command = Command::new(&self.program);
+        command
+            .args(&self.args)
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(environment)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command
+            .spawn()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
+    }
 }
 
 /// Purpose class derived from the issued bundle (never from the consumer request text).
@@ -89,6 +190,10 @@ struct PreparedLocalRunV1 {
     env: BTreeMap<String, String>,
     environment_binding_hash: CanonicalHash,
     resource_receipt: ResourceEnforcementReceiptV1,
+    effective_backend: SandboxBackendClassV1,
+    enforcement_completeness: EnforcementCompletenessV1,
+    effective_capability_set_hash: CanonicalHash,
+    enforcement_proof_hash: CanonicalHash,
 }
 
 impl SandboxManagedExecutionServiceV1 {
@@ -98,7 +203,17 @@ impl SandboxManagedExecutionServiceV1 {
         Self {
             planner,
             execution_temp_root,
+            extension_launcher: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_extension_launcher(
+        mut self,
+        launcher: Arc<dyn ManagedExtensionLaunchServiceV1>,
+    ) -> Self {
+        self.extension_launcher = Some(launcher);
+        self
     }
 
     fn prepare(
@@ -114,8 +229,9 @@ impl SandboxManagedExecutionServiceV1 {
         let execution_purpose = match purpose {
             SigilPurpose::OneShot => sigil_kernel::managed_execution::ExecutionPurposeV1::OneShot,
             SigilPurpose::Terminal => sigil_kernel::managed_execution::ExecutionPurposeV1::Terminal,
-            // Extension admission is config-grant scoped; Local cannot serve it.
-            SigilPurpose::Extension => return Err(ManagedExecutionErrorV1::ProviderUnavailable),
+            SigilPurpose::Extension => {
+                sigil_kernel::managed_execution::ExecutionPurposeV1::ExtensionProcess
+            }
         };
         let plan_request = ManagedExecutionPlanRequestV1 {
             argv: request.argv.clone(),
@@ -152,21 +268,58 @@ impl SandboxManagedExecutionServiceV1 {
             return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
         }
         // Planner-authoritative enforcement: the consumer never self-declares confinement.
-        let requested_enforcement = match draft.environment_profile.profile_class {
-            EnvironmentProfileClassV1::ExplicitUnconfined => RequestedEnforcementV1 {
-                requirement: EnforcementRequirementClassV1::ExplicitUnconfined,
-                deny_ambient_system_temp_write: false,
-                deny_ambient_home_write: false,
-                deny_ungranted_workspace_write: false,
-                require_process_tree_ownership: false,
-                require_network_policy: false,
-                requested_capability_set_hash: zero_hash(),
-                profile_hash: draft.environment_profile.profile_hash,
+        let (
+            requested_enforcement,
+            effective_backend,
+            enforcement_completeness,
+            effective_capability_set_hash,
+            enforcement_proof_hash,
+            effective_access,
+        ) = match purpose {
+            SigilPurpose::Extension => {
+                let Some(launcher) = &self.extension_launcher else {
+                    return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+                };
+                let enforcement = launcher.enforcement();
+                if enforcement.requested.profile_hash != draft.environment_profile.profile_hash {
+                    return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
+                }
+                (
+                    enforcement.requested,
+                    enforcement.backend,
+                    enforcement.completeness,
+                    enforcement.effective_capability_set_hash,
+                    enforcement.proof_set_hash,
+                    enforcement.effective_access,
+                )
+            }
+            _ => match draft.environment_profile.profile_class {
+                EnvironmentProfileClassV1::ExplicitUnconfined => (
+                    RequestedEnforcementV1 {
+                        requirement: EnforcementRequirementClassV1::ExplicitUnconfined,
+                        deny_ambient_system_temp_write: false,
+                        deny_ambient_home_write: false,
+                        deny_ungranted_workspace_write: false,
+                        require_process_tree_ownership: false,
+                        require_network_policy: false,
+                        requested_capability_set_hash: zero_hash(),
+                        profile_hash: draft.environment_profile.profile_hash,
+                    },
+                    SandboxBackendClassV1::LocalUnconfined,
+                    EnforcementCompletenessV1::None,
+                    zero_hash(),
+                    zero_hash(),
+                    std::collections::BTreeSet::new(),
+                ),
+                _ => return Err(ManagedExecutionErrorV1::ConfinementUnproven),
             },
-            _ => return Err(ManagedExecutionErrorV1::ConfinementUnproven),
         };
-        crate::local::local_confinement_guard(crate::local::LocalRunPolicyV1::ExplicitUnconfined)
+        if effective_backend == SandboxBackendClassV1::LocalUnconfined {
+            crate::local::local_confinement_guard(
+                crate::local::LocalRunPolicyV1::ExplicitUnconfined,
+            )
             .map_err(|_| ManagedExecutionErrorV1::ConfinementUnproven)?;
+        }
 
         let launch_plan = SealedSandboxLaunchPlanV1::build(
             request.admission_ref.as_str().to_owned(),
@@ -217,13 +370,30 @@ impl SandboxManagedExecutionServiceV1 {
             journal_scope: ResourceJournalScopeV1::Application,
             generation: 1,
         };
+        let requested_policy = match requested_enforcement.requirement {
+            EnforcementRequirementClassV1::ExplicitUnconfined => {
+                AccessWideningPolicyV1::ExplicitUnconfined
+            }
+            EnforcementRequirementClassV1::RequiredDeclaredSuperset { declaration_hash } => {
+                AccessWideningPolicyV1::AllowDeclaredSuperset { declaration_hash }
+            }
+            EnforcementRequirementClassV1::RequiredExact
+            | EnforcementRequirementClassV1::Preferred => AccessWideningPolicyV1::Exact,
+        };
+        let observed_access = if effective_backend == SandboxBackendClassV1::LocalUnconfined {
+            std::collections::BTreeSet::new()
+        } else if effective_access.is_empty() {
+            access.clone()
+        } else {
+            effective_access.clone()
+        };
         let resource_receipt = verify_enforcement(
             &resource_ref,
             &access,
-            &AccessWideningPolicyV1::ExplicitUnconfined,
-            &std::collections::BTreeSet::new(),
-            SandboxBackendClassV1::LocalUnconfined,
-            EnforcementCompletenessV1::None,
+            &requested_policy,
+            &observed_access,
+            effective_backend,
+            enforcement_completeness,
         )
         .map_err(|_| ManagedExecutionErrorV1::ConfinementUnproven)?;
 
@@ -236,6 +406,10 @@ impl SandboxManagedExecutionServiceV1 {
             env,
             environment_binding_hash,
             resource_receipt,
+            effective_backend,
+            enforcement_completeness,
+            effective_capability_set_hash,
+            enforcement_proof_hash,
         })
     }
 
@@ -249,12 +423,12 @@ impl SandboxManagedExecutionServiceV1 {
             sandbox_binding_hash: prepared.launch_plan.launch_plan_hash,
             requested_enforcement: prepared.requested_enforcement.clone(),
             effective_enforcement: EffectiveEnforcementV1 {
-                backend: SandboxBackendClassV1::LocalUnconfined,
-                completeness: EnforcementCompletenessV1::None,
-                effective_capability_set_hash: zero_hash(),
+                backend: prepared.effective_backend,
+                completeness: prepared.enforcement_completeness,
+                effective_capability_set_hash: prepared.effective_capability_set_hash,
                 access_widening_set_hash: zero_hash(),
                 functional_probe_hash: prepared.launch_plan.launch_plan_hash,
-                proof_set_hash: zero_hash(),
+                proof_set_hash: prepared.enforcement_proof_hash,
             },
             resources: vec![prepared.resource_receipt.clone()],
             enforcement_proof_set_hash: prepared.launch_plan.launch_plan_hash,
@@ -437,7 +611,7 @@ fn spawn_drain(
     mut pipe: impl Read + Send + 'static,
     channel: ManagedProcessOutputChannelV1,
     cap: u64,
-    frame_tx: std::sync::mpsc::Sender<BoundedProcessOutputFrameV1>,
+    frame_tx: tokio::sync::mpsc::Sender<BoundedProcessOutputFrameV1>,
     state: Arc<Mutex<CapState>>,
 ) {
     std::thread::spawn(move || {
@@ -456,7 +630,7 @@ fn spawn_drain(
                     drop(guard);
                     if fit_fully && read > 0 {
                         let payload = chunk[..read].to_vec();
-                        let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
+                        let _ = frame_tx.blocking_send(BoundedProcessOutputFrameV1 {
                             channel,
                             sequence,
                             payload,
@@ -472,7 +646,7 @@ fn spawn_drain(
             .lock()
             .map(|guard| guard.observed > cap)
             .unwrap_or(false);
-        let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
+        let _ = frame_tx.blocking_send(BoundedProcessOutputFrameV1 {
             channel,
             sequence,
             payload: Vec::new(),
@@ -543,24 +717,32 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         bundle: IssuedExecutionAdmissionBundleV1,
         request: ManagedExecutionRequestV1,
     ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
-        if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. }) {
+        let is_extension = matches!(bundle, IssuedExecutionAdmissionBundleV1::Extension { .. });
+        if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. }) && !is_extension {
             return Err(ManagedExecutionErrorV1::AdmissionMismatch);
         }
         if request.limits.pty_required || request.capture.pty {
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
         let prepared = self.prepare(&bundle, &request)?;
-        let mut command = Command::new(&request.argv[0]);
-        command
-            .args(request.argv.iter().skip(1))
-            .env_clear()
-            .envs(prepared.env.iter())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let mut child = if is_extension {
+            let Some(launcher) = &self.extension_launcher else {
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            };
+            launcher.launch(&request, &prepared.env)?
+        } else {
+            let mut command = Command::new(&request.argv[0]);
+            command
+                .args(request.argv.iter().skip(1))
+                .env_clear()
+                .envs(prepared.env.iter())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            command
+                .spawn()
+                .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?
+        };
         let cap = request.limits.max_output_bytes;
         let stdout_pipe = child
             .stdout
@@ -571,7 +753,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             .take()
             .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
         let stdin_pipe = child.stdin.take();
-        let (frame_tx, frame_rx) = std::sync::mpsc::channel::<BoundedProcessOutputFrameV1>();
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
         let handle_stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
         let handle_stderr_cap = Arc::new(Mutex::new(CapState::new(cap)));
         spawn_drain(
@@ -609,7 +791,7 @@ struct LocalPersistentProcessHandleV1 {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdin_open: Arc<AtomicBool>,
-    frame_rx: Option<std::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
+    frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
     stdout_cap: Arc<Mutex<CapState>>,
     stderr_cap: Arc<Mutex<CapState>>,
     attempt_id: PhysicalAttemptId,
@@ -618,7 +800,7 @@ struct LocalPersistentProcessHandleV1 {
 }
 
 struct LocalPersistentOutputStreamV1 {
-    rx: std::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>,
+    rx: tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>,
 }
 
 #[async_trait]
@@ -626,7 +808,7 @@ impl ManagedProcessOutputStreamV1 for LocalPersistentOutputStreamV1 {
     async fn next_frame(
         &mut self,
     ) -> Result<Option<BoundedProcessOutputFrameV1>, ManagedProcessControlErrorV1> {
-        Ok(self.rx.recv().ok())
+        Ok(self.rx.recv().await)
     }
 }
 
@@ -752,8 +934,8 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
             }
         };
         // Drain whatever the pipes still hold so EOF markers land (bounded by pipe content).
-        if let Some(rx) = self.frame_rx.take() {
-            while let Ok(frame) = rx.recv_timeout(Duration::from_millis(300)) {
+        if let Some(mut rx) = self.frame_rx.take() {
+            while let Some(frame) = rx.recv().await {
                 let _ = frame;
             }
         }
@@ -798,12 +980,12 @@ impl LocalPersistentProcessHandleV1 {
             sandbox_binding_hash: prepared.launch_plan.launch_plan_hash,
             requested_enforcement: prepared.requested_enforcement.clone(),
             effective_enforcement: EffectiveEnforcementV1 {
-                backend: SandboxBackendClassV1::LocalUnconfined,
-                completeness: EnforcementCompletenessV1::None,
-                effective_capability_set_hash: zero_hash(),
+                backend: prepared.effective_backend,
+                completeness: prepared.enforcement_completeness,
+                effective_capability_set_hash: prepared.effective_capability_set_hash,
                 access_widening_set_hash: zero_hash(),
                 functional_probe_hash: prepared.launch_plan.launch_plan_hash,
-                proof_set_hash: zero_hash(),
+                proof_set_hash: prepared.enforcement_proof_hash,
             },
             resources: vec![prepared.resource_receipt.clone()],
             enforcement_proof_set_hash: prepared.launch_plan.launch_plan_hash,
@@ -1126,6 +1308,54 @@ mod tests {
         // The drain thread retained the echoed bytes under the cap.
         assert_eq!(receipt.process.stdout_summary.retained_bytes, 5);
         assert!(!receipt.process.stdout_summary.truncated);
+    }
+
+    #[test]
+    fn r71_managed_extension_uses_injected_real_command_launcher() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let enforcement = ManagedExtensionLaunchEnforcementV1 {
+            requested: RequestedEnforcementV1 {
+                requirement: EnforcementRequirementClassV1::ExplicitUnconfined,
+                deny_ambient_system_temp_write: false,
+                deny_ambient_home_write: false,
+                deny_ungranted_workspace_write: false,
+                require_process_tree_ownership: false,
+                require_network_policy: false,
+                requested_capability_set_hash: zero_hash(),
+                profile_hash: zero_hash(),
+            },
+            backend: SandboxBackendClassV1::LocalUnconfined,
+            completeness: EnforcementCompletenessV1::None,
+            effective_access: std::collections::BTreeSet::new(),
+            effective_capability_set_hash: zero_hash(),
+            proof_set_hash: zero_hash(),
+        };
+        let launcher = Arc::new(CommandManagedExtensionLaunchServiceV1::new(
+            PathBuf::from("/bin/sh"),
+            vec![OsString::from("-c"), OsString::from("printf extension")],
+            std::env::current_dir().expect("cwd"),
+            Vec::new(),
+            enforcement,
+        ));
+        let svc = service(false, dir.path()).with_extension_launcher(launcher);
+        let mut handle = futures::executor::block_on(svc.start_persistent(
+            bundle("extension"),
+            exec_request(&["/bin/sh", "-c", "printf extension"], false),
+        ))
+        .expect("extension spawn");
+        let mut stream = handle.take_output_stream().expect("stream");
+        let mut output = Vec::new();
+        while let Some(frame) = futures::executor::block_on(stream.next_frame()).expect("frame") {
+            if !frame.end_of_stream {
+                output.extend(frame.payload);
+            }
+        }
+        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("finalize");
+        assert_eq!(output, b"extension");
+        assert!(matches!(
+            receipt.process.termination,
+            ProcessTerminationV1::Exited { code: 0 }
+        ));
     }
 
     #[test]

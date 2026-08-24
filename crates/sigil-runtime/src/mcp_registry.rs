@@ -67,6 +67,8 @@ pub struct McpDeclarationRegistrationOptions {
     network_admission: ExtensionProcessNetworkAdmission,
     expected_process_subject: Option<ToolSubject>,
     plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
+    managed_extension_execution:
+        Option<Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>>,
     strict_registration: bool,
 }
 
@@ -81,6 +83,7 @@ impl McpDeclarationRegistrationOptions {
             network_admission: ExtensionProcessNetworkAdmission::default(),
             expected_process_subject: None,
             plugin_trust_source: None,
+            managed_extension_execution: None,
             strict_registration: false,
         }
     }
@@ -125,6 +128,15 @@ impl McpDeclarationRegistrationOptions {
     #[must_use]
     pub fn with_plugin_trust_session_log(self, session_log_path: impl Into<PathBuf>) -> Self {
         self.with_plugin_trust_source(Arc::new(SessionMcpPluginTrustSource::new(session_log_path)))
+    }
+
+    #[must_use]
+    pub fn with_managed_extension_execution(
+        mut self,
+        route: Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    ) -> Self {
+        self.managed_extension_execution = Some(route);
+        self
     }
 
     #[must_use]
@@ -180,6 +192,7 @@ pub async fn register_mcp_server_declarations(
                 root_config,
                 &stdio_declarations,
                 options.plugin_trust_source,
+                options.managed_extension_execution,
             )?)
             .with_network_admission(options.network_admission);
     if let Some(recorder) = options.mutation_recorder {
@@ -333,6 +346,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
         network_admission,
         None,
         None,
+        None,
     )
     .await?
     .registry)
@@ -388,6 +402,39 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
         std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
 ) -> Result<RuntimeToolSurface> {
+    build_tool_surface_with_terminal_lifecycle_and_managed_extension_execution(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        mutation_recorder,
+        workspace_trust,
+        network_admission,
+        terminal_lifecycle_sink,
+        scratch_control,
+        managed_memory_writer,
+        None,
+    )
+    .await
+}
+
+/// Builds the runtime tool surface with the authority-owned managed extension lifecycle route.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_tool_surface_with_terminal_lifecycle_and_managed_extension_execution(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    mutation_recorder: MutationEventRecorder,
+    workspace_trust: WorkspaceTrust,
+    network_admission: ExtensionProcessNetworkAdmission,
+    terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
+    scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+    managed_memory_writer: Option<
+        std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+) -> Result<RuntimeToolSurface> {
     build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
         provider_capabilities,
@@ -400,6 +447,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
         network_admission,
         scratch_control,
         managed_memory_writer,
+        managed_extension_execution,
     )
     .await
 }
@@ -472,6 +520,7 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         network_admission,
         None,
         None,
+        None,
     )
     .await?
     .registry)
@@ -491,6 +540,9 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     external_scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
     managed_memory_writer: Option<
         std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) -> Result<RuntimeToolSurface> {
     let declarations =
@@ -525,6 +577,9 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
             Arc::clone(&runtime_event_handler),
         )
         .with_network_admission(network_admission);
+    if let Some(route) = managed_extension_execution.clone() {
+        registration_options = registration_options.with_managed_extension_execution(route);
+    }
     if let Some(recorder) = mutation_recorder {
         registration_options = registration_options.with_mutation_recorder(recorder);
     }
@@ -544,6 +599,7 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         workspace_root,
         elicitation_handler,
         runtime_event_handler,
+        managed_extension_execution,
     );
     Ok(RuntimeToolSurface {
         registry,
@@ -735,6 +791,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         workspace_root,
         elicitation_handler,
         runtime_event_handler,
+        None,
     );
     Ok(RuntimeToolSurface {
         registry,
@@ -910,6 +967,7 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
         runtime_event_handler,
         mutation_recorder,
         None,
+        None,
         network_admission,
     )
     .await
@@ -963,6 +1021,7 @@ pub async fn activate_mcp_tools_from_product_surface(
         runtime_event_handler,
         mutation_recorder,
         None,
+        None,
         network_admission,
     )
     .await?;
@@ -998,6 +1057,9 @@ async fn activate_lazy_mcp_tools_detailed_inner(
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     mutation_recorder: Option<MutationEventRecorder>,
     expected_process_subject: Option<ToolSubject>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<LazyMcpActivationResult> {
     let declarations =
@@ -1020,6 +1082,9 @@ async fn activate_lazy_mcp_tools_detailed_inner(
     let mut registration_options = McpDeclarationRegistrationOptions::new(McpServerStartup::Lazy)
         .with_handlers(elicitation_handler, runtime_event_handler)
         .with_network_admission(network_admission);
+    if let Some(route) = managed_extension_execution {
+        registration_options = registration_options.with_managed_extension_execution(route);
+    }
     if let Some(recorder) = mutation_recorder {
         registration_options = registration_options.with_mutation_recorder(recorder);
     }
@@ -1148,6 +1213,9 @@ fn declaration_mcp_process_launcher(
     root_config: &RootConfig,
     declarations: &[ResolvedMcpServerDeclaration],
     plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 ) -> Result<Arc<dyn McpProcessLauncher>> {
     if plugin_trust_source.is_none()
         && let Some(declaration) = declarations.iter().find(|declaration| {
@@ -1165,6 +1233,7 @@ fn declaration_mcp_process_launcher(
     Ok(Arc::new(DeclarationAwareMcpProcessLauncher {
         configured: ConfiguredMcpProcessLauncher {
             execution: root_config.execution.clone(),
+            managed_extension_execution,
         },
         declarations: declarations_by_effective_name(declarations)?,
         plugin_trust_source,
@@ -1218,7 +1287,7 @@ impl DeclarationAwareMcpProcessLauncher {
     }
 }
 
-impl McpProcessLauncher for DeclarationAwareMcpProcessLauncher {
+impl DeclarationAwareMcpProcessLauncher {
     fn resolve_launch_request(
         &self,
         config: &McpServerConfig,
@@ -1263,7 +1332,10 @@ impl McpProcessLauncher for DeclarationAwareMcpProcessLauncher {
         Ok(request)
     }
 
-    fn launch(&self, mut request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+    fn validate_and_prepare_request(
+        &self,
+        mut request: McpProcessLaunchRequest,
+    ) -> Result<McpProcessLaunchRequest> {
         let declaration = self.declarations.get(&request.server_name).ok_or_else(|| {
             anyhow!(
                 "missing resolved MCP declaration for effective server {}",
@@ -1324,29 +1396,83 @@ impl McpProcessLauncher for DeclarationAwareMcpProcessLauncher {
         request.command = launch.executable.to_string_lossy().into_owned();
         request.working_dir = Some(launch.cwd);
         request.classification = launch.classification;
-        self.configured.launch(request)
+        Ok(request)
+    }
+}
+
+#[async_trait::async_trait]
+impl McpProcessLauncher for DeclarationAwareMcpProcessLauncher {
+    fn resolve_launch_request(
+        &self,
+        config: &McpServerConfig,
+        fallback_working_dir: Option<PathBuf>,
+    ) -> Result<McpProcessLaunchRequest> {
+        DeclarationAwareMcpProcessLauncher::resolve_launch_request(
+            self,
+            config,
+            fallback_working_dir,
+        )
+    }
+
+    fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        self.configured
+            .launch(self.validate_and_prepare_request(request)?)
+    }
+
+    async fn launch_async(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        self.configured
+            .launch_async(self.validate_and_prepare_request(request)?)
+            .await
     }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct ConfiguredMcpProcessLauncher {
     pub(super) execution: sigil_kernel::ExecutionConfig,
+    pub(super) managed_extension_execution:
+        Option<Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>>,
 }
 
+#[async_trait::async_trait]
 impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        if self.managed_extension_execution.is_some() {
+            bail!("managed MCP extension launch requires the async lifecycle");
+        }
+        let plan = self.build_plan(&request)?;
+        launch_planned_mcp_process(request, plan)
+    }
+
+    async fn launch_async(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        let plan = self.build_plan(&request)?;
+        validate_planned_mcp_process_network(&request, &plan)?;
+        if let Some(route) = &self.managed_extension_execution {
+            let handle = route
+                .start_persistent(&request.server_name, plan.clone())
+                .await
+                .map_err(|error| anyhow!("managed MCP extension launch failed: {error}"))?;
+            return McpProcessLaunch::managed(handle, mcp_process_launch_receipt(&request, &plan));
+        }
+        launch_planned_mcp_process(request, plan)
+    }
+}
+
+impl ConfiguredMcpProcessLauncher {
+    fn build_plan(
+        &self,
+        request: &McpProcessLaunchRequest,
+    ) -> Result<sigil_tools_builtin::LongLivedStdioProcessPlan> {
         let cwd = request
             .working_dir
             .clone()
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let plan = sigil_tools_builtin::long_lived_stdio_process_plan(
+        sigil_tools_builtin::long_lived_stdio_process_plan(
             &self.execution,
             &request.command,
             &request.args,
             &cwd,
             &request.environment,
-        )?;
-        launch_planned_mcp_process(request, plan)
+        )
     }
 }
 
@@ -1354,14 +1480,7 @@ pub(super) fn launch_planned_mcp_process(
     request: McpProcessLaunchRequest,
     plan: sigil_tools_builtin::LongLivedStdioProcessPlan,
 ) -> Result<McpProcessLaunch> {
-    sigil_kernel::validate_extension_process_network_admission(
-        plan.sandbox_profile,
-        Some(NetworkEffect::Unknown),
-        request.network_admission,
-        plan.backend_capabilities,
-        &plan.network,
-        format!("mcp_server:{}", request.server_name),
-    )?;
+    validate_planned_mcp_process_network(&request, &plan)?;
     let mut command = Command::new(&plan.program);
     command
         .args(&plan.args)
@@ -1379,6 +1498,28 @@ pub(super) fn launch_planned_mcp_process(
     let child = command
         .spawn()
         .with_context(|| format!("failed to spawn MCP server {}", request.server_name))?;
+    McpProcessLaunch::owned(child, mcp_process_launch_receipt(&request, &plan))
+        .context("failed to establish MCP process-tree ownership")
+}
+
+fn validate_planned_mcp_process_network(
+    request: &McpProcessLaunchRequest,
+    plan: &sigil_tools_builtin::LongLivedStdioProcessPlan,
+) -> Result<()> {
+    Ok(sigil_kernel::validate_extension_process_network_admission(
+        plan.sandbox_profile,
+        Some(NetworkEffect::Unknown),
+        request.network_admission,
+        plan.backend_capabilities,
+        &plan.network,
+        format!("mcp_server:{}", request.server_name),
+    )?)
+}
+
+fn mcp_process_launch_receipt(
+    request: &McpProcessLaunchRequest,
+    plan: &sigil_tools_builtin::LongLivedStdioProcessPlan,
+) -> sigil_mcp::McpProcessLaunchReceipt {
     let coverage = if plan.sandboxed {
         sigil_mcp::McpProcessCoverage::LocalStdioSandboxed
     } else {
@@ -1389,26 +1530,22 @@ pub(super) fn launch_planned_mcp_process(
     } else {
         request.classification
     };
-    McpProcessLaunch::owned(
-        child,
-        McpProcessLaunchReceipt {
-            server_name: request.server_name,
-            classification,
-            coverage,
-            backend: Some(plan.backend),
-            backend_capabilities: Some(plan.backend_capabilities),
-            sandbox_profile: Some(plan.sandbox_profile),
-            network: plan.network,
-            environment_policy: plan.environment.policy(),
-            environment_baseline_names: plan.environment.baseline_names().to_vec(),
-            environment_grant_names: plan.environment.grant_names().to_vec(),
-            environment_static_fingerprint: plan.environment.static_fingerprint().to_owned(),
-            environment_live_fingerprint: plan.environment.live_fingerprint().to_owned(),
-            launch_static_fingerprint: request.launch_static_fingerprint,
-            declaration: request.declaration,
-        },
-    )
-    .context("failed to establish MCP process-tree ownership")
+    sigil_mcp::McpProcessLaunchReceipt {
+        server_name: request.server_name.clone(),
+        classification,
+        coverage,
+        backend: Some(plan.backend),
+        backend_capabilities: Some(plan.backend_capabilities),
+        sandbox_profile: Some(plan.sandbox_profile),
+        network: plan.network.clone(),
+        environment_policy: plan.environment.policy(),
+        environment_baseline_names: plan.environment.baseline_names().to_vec(),
+        environment_grant_names: plan.environment.grant_names().to_vec(),
+        environment_static_fingerprint: plan.environment.static_fingerprint().to_owned(),
+        environment_live_fingerprint: plan.environment.live_fingerprint().to_owned(),
+        launch_static_fingerprint: request.launch_static_fingerprint.clone(),
+        declaration: request.declaration.clone(),
+    }
 }
 
 /// Refreshes provider-visible tools for one configured MCP server.
@@ -1680,6 +1817,9 @@ pub(super) fn register_lazy_mcp_activation_tool(
     workspace_root: PathBuf,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 ) {
     if !root_config.mcp_servers.iter().any(|server| {
         server.startup == McpServerStartup::Lazy || server.streamable_http().is_some()
@@ -1693,6 +1833,7 @@ pub(super) fn register_lazy_mcp_activation_tool(
         workspace_root,
         elicitation_handler,
         runtime_event_handler,
+        managed_extension_execution,
         remote_presenter: None,
     }));
 }
@@ -1707,6 +1848,31 @@ pub fn attach_remote_mcp_activation_presenter(
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+) {
+    attach_remote_mcp_activation_presenter_with_managed_extension_execution(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        presenter,
+        None,
+    );
+}
+
+/// Rebinds the activation tool to both the remote disclosure presenter and managed stdio route.
+pub fn attach_remote_mcp_activation_presenter_with_managed_extension_execution(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
 ) {
     crate::web_fetch_tool::register_web_fetch_tool(registry, root_config, Arc::clone(&presenter));
     crate::web_search_tool::register_web_search_tool(
@@ -1739,6 +1905,7 @@ pub fn attach_remote_mcp_activation_presenter(
         workspace_root,
         elicitation_handler,
         runtime_event_handler,
+        managed_extension_execution,
         remote_presenter: Some(presenter),
     }));
 }
@@ -1751,6 +1918,8 @@ struct McpActivateServerTool {
     workspace_root: PathBuf,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    managed_extension_execution:
+        Option<Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>>,
     remote_presenter: Option<Arc<dyn sigil_kernel::EgressDisclosurePresenter>>,
 }
 
@@ -1959,6 +2128,7 @@ impl Tool for McpActivateServerTool {
             Arc::clone(&self.runtime_event_handler),
             ctx.mutation_recorder.clone(),
             expected_process_subject,
+            self.managed_extension_execution.clone(),
             ExtensionProcessNetworkAdmission::new(
                 ctx.network_policy(),
                 ctx.explicit_network_approval(),

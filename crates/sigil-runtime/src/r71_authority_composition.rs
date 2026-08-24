@@ -18,6 +18,7 @@ use sigil_kernel::managed_projection::ManagedProjectionServiceV1;
 use sigil_kernel::managed_storage::ManagedStorageServiceV1;
 use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash, ResourceJournalScopeV1};
 
+use crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1;
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
 use crate::managed_storage_writer::{
     ManagedStorageWriterAdapterV1, StorageWriterChannelV1, grant_for_channel,
@@ -34,6 +35,8 @@ pub struct RuntimeAuthorityCompositionV1 {
     /// Kernel-owned tool authority facade: in-process file tools seal -> issue -> adjudicate
     /// through this (one-shot tool tokens; never fabricated by a tool).
     pub tool_authority: sigil_kernel::tool_authority::KernelToolAuthorityV1,
+    /// Managed Extension route used by eager/lazy MCP stdio activation.
+    pub extension_execution: std::sync::Arc<RuntimeManagedExtensionExecutionRouteV1>,
 }
 
 impl std::fmt::Debug for RuntimeAuthorityCompositionV1 {
@@ -121,10 +124,15 @@ pub fn compose_runtime_authority(
     );
     let execution: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionServiceV1> = Arc::new(
         sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
-            planner,
+            Arc::clone(&planner),
             execution_temp_root.to_path_buf(),
         ),
     );
+    let extension_execution = std::sync::Arc::new(RuntimeManagedExtensionExecutionRouteV1::new(
+        Arc::clone(&planner),
+        Arc::clone(&broker),
+        execution_temp_root.to_path_buf(),
+    ));
     let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
         authority,
         storage.clone() as Arc<dyn ManagedStorageServiceV1>,
@@ -136,14 +144,16 @@ pub fn compose_runtime_authority(
             state_anchor.to_path_buf(),
         ),
     );
-    let services = RuntimeManagedResourceServicesV1::compose_sandbox_backed(
-        bundle,
-        broker.clone() as Arc<dyn KernelCapabilityIssuerV1>,
-        records_projection as Arc<dyn ManagedProjectionServiceV1>,
-        execution,
-        Arc::clone(&file_access),
-        crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
-    );
+    let services =
+        RuntimeManagedResourceServicesV1::compose_sandbox_backed_with_extension_execution(
+            bundle,
+            broker.clone() as Arc<dyn KernelCapabilityIssuerV1>,
+            records_projection as Arc<dyn ManagedProjectionServiceV1>,
+            execution,
+            Arc::clone(&file_access),
+            crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
+            Arc::clone(&extension_execution),
+        );
     let storage_writer = std::sync::Arc::new(ManagedStorageWriterAdapterV1::with_storage_issuer(
         storage,
         state_anchor.to_path_buf(),
@@ -159,6 +169,7 @@ pub fn compose_runtime_authority(
             Arc::clone(&file_access),
             Arc::clone(&broker),
         ),
+        extension_execution,
     })
 }
 

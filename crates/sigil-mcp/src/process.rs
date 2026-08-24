@@ -1,6 +1,14 @@
 use super::*;
 use std::collections::VecDeque;
 
+use sigil_kernel::managed_execution::{
+    BoundedProcessInputV1, ManagedProcessHandleV1, ManagedProcessOutputChannelV1,
+    ManagedProcessOutputStreamV1, ProcessCancelReasonV1,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
+
 const MCP_STDERR_HEAD_LIMIT_BYTES: usize = 16 * 1024;
 const MCP_STDERR_TAIL_LIMIT_BYTES: usize = 48 * 1024;
 const MCP_STDERR_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
@@ -351,9 +359,37 @@ pub(super) fn mcp_backend_capability_labels(
 }
 
 pub struct McpProcessLaunch {
-    pub child: Child,
-    pub process_owner: sigil_process::ProcessTreeOwnerGuard,
+    pub child: Option<Child>,
+    pub process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
+    pub(super) managed: Option<McpManagedProcess>,
     pub receipt: McpProcessLaunchReceipt,
+}
+
+pub(super) struct McpManagedProcess {
+    pub(super) stdio: McpManagedProcessStdio,
+    pub(super) controller: McpManagedProcessController,
+}
+
+pub(super) struct McpManagedProcessStdio {
+    pub(super) stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    pub(super) stdout: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+    pub(super) stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+}
+
+pub(super) struct McpManagedProcessController {
+    command_tx: mpsc::Sender<ManagedProcessCommand>,
+    join: Option<
+        JoinHandle<
+            Result<
+                sigil_kernel::managed_execution::ManagedExecutionReceiptV1,
+                sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+            >,
+        >,
+    >,
+}
+
+enum ManagedProcessCommand {
+    Cancel(oneshot::Sender<()>),
 }
 
 impl McpProcessLaunch {
@@ -368,13 +404,170 @@ impl McpProcessLaunch {
     pub fn owned(mut child: Child, receipt: McpProcessLaunchReceipt) -> Result<Self> {
         let process_owner = assign_mcp_process_owner(&mut child)?;
         Ok(Self {
-            child,
-            process_owner,
+            child: Some(child),
+            process_owner: Some(process_owner),
+            managed: None,
+            receipt,
+        })
+    }
+
+    /// Adapts one opaque managed process handle to the three async stdio streams consumed by the
+    /// MCP JSON-RPC client. The bridge owns the handle and remains responsible for cancel and
+    /// finalization; the client never receives a platform child or settlement primitive.
+    pub fn managed(
+        mut handle: Box<dyn ManagedProcessHandleV1>,
+        receipt: McpProcessLaunchReceipt,
+    ) -> Result<Self> {
+        let output = handle
+            .take_output_stream()
+            .map_err(|error| anyhow!("failed to acquire managed MCP output stream: {error}"))?;
+        let (client_stdin, bridge_stdin) = duplex(64 * 1024);
+        let (bridge_stdout, client_stdout) = duplex(64 * 1024);
+        let (bridge_stderr, client_stderr) = duplex(64 * 1024);
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let join = tokio::spawn(run_managed_process_bridge(
+            handle,
+            output,
+            bridge_stdin,
+            bridge_stdout,
+            bridge_stderr,
+            command_rx,
+        ));
+        Ok(Self {
+            child: None,
+            process_owner: None,
+            managed: Some(McpManagedProcess {
+                stdio: McpManagedProcessStdio {
+                    stdin: Box::new(client_stdin),
+                    stdout: Box::new(client_stdout),
+                    stderr: Box::new(client_stderr),
+                },
+                controller: McpManagedProcessController {
+                    command_tx,
+                    join: Some(join),
+                },
+            }),
             receipt,
         })
     }
 }
 
+impl McpManagedProcessController {
+    pub(super) async fn terminate(&mut self) -> McpProcessCleanupSummary {
+        let Some(join) = self.join.take() else {
+            return McpProcessCleanupSummary::completed(
+                "managed MCP process cleanup already completed",
+            );
+        };
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self
+            .command_tx
+            .send(ManagedProcessCommand::Cancel(ack_tx))
+            .await
+            .is_err()
+        {
+            return McpProcessCleanupSummary::failed(
+                "managed MCP process bridge stopped before cancellation",
+            );
+        }
+        match tokio::time::timeout(Duration::from_secs(4), join).await {
+            Ok(Ok(Ok(_))) => {
+                let _ = ack_rx.await;
+                McpProcessCleanupSummary::completed("managed MCP process cancelled and finalized")
+            }
+            Ok(Ok(Err(error))) => McpProcessCleanupSummary::failed(format!(
+                "managed MCP process finalization failed: {error}"
+            )),
+            Ok(Err(error)) => McpProcessCleanupSummary::failed(format!(
+                "managed MCP process bridge failed: {error}"
+            )),
+            Err(_) => McpProcessCleanupSummary::failed(
+                "managed MCP process cancellation exceeded bounded grace",
+            ),
+        }
+    }
+}
+
+async fn run_managed_process_bridge(
+    mut handle: Box<dyn ManagedProcessHandleV1>,
+    mut output: Box<dyn ManagedProcessOutputStreamV1>,
+    mut stdin: DuplexStream,
+    mut stdout: DuplexStream,
+    mut stderr: DuplexStream,
+    mut commands: mpsc::Receiver<ManagedProcessCommand>,
+) -> Result<
+    sigil_kernel::managed_execution::ManagedExecutionReceiptV1,
+    sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+> {
+    let mut input = vec![0u8; 16 * 1024];
+    let mut stdin_closed = false;
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    let mut cancelling = false;
+    let mut cancel_ack = None;
+    loop {
+        tokio::select! {
+            command = commands.recv(), if !cancelling => {
+                if let Some(ManagedProcessCommand::Cancel(ack)) = command {
+                    let _ = handle.cancel(ProcessCancelReasonV1::ParentShutdown).await;
+                    cancelling = true;
+                    cancel_ack = Some(ack);
+                }
+            }
+            read = stdin.read(&mut input), if !stdin_closed && !cancelling => {
+                match read {
+                    Ok(0) => {
+                        let _ = handle.close_stdin().await;
+                        stdin_closed = true;
+                    }
+                    Ok(size) => {
+                        handle
+                            .write_stdin(BoundedProcessInputV1 { payload: input[..size].to_vec() })
+                            .await
+                            .map_err(|_| {
+                                sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain
+                            })?;
+                    }
+                    Err(_) => {
+                        let _ = handle.close_stdin().await;
+                        stdin_closed = true;
+                    }
+                }
+            }
+            frame = output.next_frame() => {
+                let Some(frame) = frame.map_err(|_| {
+                    sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain
+                })? else {
+                    stdout_eof = true;
+                    stderr_eof = true;
+                    continue;
+                };
+                let target = match frame.channel {
+                    ManagedProcessOutputChannelV1::Stdout | ManagedProcessOutputChannelV1::Pty => &mut stdout,
+                    ManagedProcessOutputChannelV1::Stderr => &mut stderr,
+                };
+                if !frame.payload.is_empty() {
+                    let _ = target.write_all(&frame.payload).await;
+                }
+                if frame.end_of_stream {
+                    match frame.channel {
+                        ManagedProcessOutputChannelV1::Stdout | ManagedProcessOutputChannelV1::Pty => stdout_eof = true,
+                        ManagedProcessOutputChannelV1::Stderr => stderr_eof = true,
+                    }
+                }
+            }
+        }
+        if stdout_eof && stderr_eof {
+            let receipt = handle.wait_and_finalize().await;
+            if let Some(ack) = cancel_ack.take() {
+                let _ = ack.send(());
+            }
+            return receipt;
+        }
+    }
+}
+
+#[async_trait::async_trait]
 pub trait McpProcessLauncher: Send + Sync {
     /// Resolves declaration-aware launch material before process-subject and pin validation.
     ///
@@ -394,6 +587,14 @@ pub trait McpProcessLauncher: Send + Sync {
     /// Returns an error when the configured process cannot be spawned or a required sandbox
     /// coverage cannot be provided.
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch>;
+
+    /// Launches one process through an async lifecycle authority when available.
+    ///
+    /// The default preserves compatibility for local synchronous launchers. Managed launchers
+    /// override this method so the caller never has to unwrap a platform child.
+    async fn launch_async(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        self.launch(request)
+    }
 }
 
 #[derive(Debug)]
@@ -513,7 +714,7 @@ impl McpStderrFault {
 }
 
 pub(super) async fn drain_mcp_stderr(
-    stderr: ChildStderr,
+    stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     hard_limit_sender: tokio::sync::oneshot::Sender<McpStderrFault>,
     faulted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     fault_record: std::sync::Arc<std::sync::Mutex<Option<McpStderrFault>>>,

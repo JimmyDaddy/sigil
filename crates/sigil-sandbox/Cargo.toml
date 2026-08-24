@@ -12,6 +12,7 @@ sigil-process = { path = "../sigil-process" }
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
