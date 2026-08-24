@@ -41,8 +41,13 @@ def test_filename_does_not_count_as_database_producer() -> None:
     )
 
 
+def test_process_imports_are_not_spawn_sites() -> None:
+    sites = scanner.scan_sites(ROOT)["process_sites"]
+    assert all(site["constructor"] not in {"ProcessCommand", "TokioProcess"} for site in sites)
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("r71 inventory scanner tests: 3 passed")
+    print("r71 inventory scanner tests: 4 passed")

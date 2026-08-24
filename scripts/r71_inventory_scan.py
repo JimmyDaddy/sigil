@@ -24,9 +24,8 @@ from pathlib import Path
 
 PROCESS_PATTERNS = [
     (r"Command::new\(", "CommandNew"),
-    (r"\bprocess::Command\b", "ProcessCommand"),
+    (r"\btokio::process::Command::new\(", "CommandNew"),
     (r"\.spawn\(\s*\)", "SpawnCall"),
-    (r"tokio::process::", "TokioProcess"),
 ]
 
 PRODUCER_PATTERNS = [
