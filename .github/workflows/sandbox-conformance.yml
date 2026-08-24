@@ -116,6 +116,7 @@ jobs:
         shell: bash
         env:
           SIGIL_R71_EVIDENCE_DIR: ${{ runner.temp }}/r71-evidence/linux-bubblewrap
+          RUST_TEST_THREADS: "2"
         run: |
           set -euo pipefail
           bash scripts/run-r71-release-qualification.sh \

@@ -112,6 +112,8 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
 
 #[test]
 fn setup_explicitly_replaces_an_existing_malformed_config() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset(DEFAULT_SETUP_API_KEY_ENV);
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(&config_path, "this = [is malformed")?;
