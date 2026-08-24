@@ -948,7 +948,7 @@ async fn serve_command(
     )?);
     let registry = driver.build_registry(command_store)?;
     let session_catalog = std::sync::Arc::new(SessionCatalogProjectionService::new(
-        lifecycle,
+        driver.session_lifecycle().cloned().unwrap_or(lifecycle),
         &paths.session_catalog_db,
     ));
     let warm_catalog = std::sync::Arc::clone(&session_catalog);

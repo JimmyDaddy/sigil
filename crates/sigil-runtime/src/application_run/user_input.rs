@@ -503,12 +503,14 @@ pub async fn prepare_application_user_input_decision(
     };
     let session_leases = Arc::clone(&services.session_leases);
     let task_executor_attached = services.task_executor_attached();
+    let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
-        prepare_application_run_blocking(
+        prepare_application_run_blocking_with_writer(
             blocking_request,
             session_leases,
             task_executor_attached,
             None,
+            managed_session_log_writer,
         )
     })
     .await
@@ -533,6 +535,7 @@ pub async fn prepare_application_user_input_decision(
         interaction,
         redactor,
         route_transition,
+        managed_session_log,
         ..
     } = prepared;
     if session.session_scope_id() != request.expected_session_scope_id {
@@ -705,6 +708,7 @@ pub async fn prepare_application_user_input_decision(
                 physical_attempt_id,
             }),
             route_transition,
+            managed_session_log,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {

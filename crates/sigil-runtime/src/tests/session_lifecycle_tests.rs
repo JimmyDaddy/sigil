@@ -2184,3 +2184,80 @@ fn managed_lifecycle_journal_round_trips_under_admitted_namespace() -> Result<()
     );
     Ok(())
 }
+
+#[test]
+fn managed_session_log_source_is_cataloged_and_reopened() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_dir = temp.path().join("legacy-sessions");
+    let managed_root = temp.path().join("state/managed/session-log");
+    let session_key = "session-managed";
+    let managed_session = managed_root.join(session_key).join("records.jsonl");
+    fs::create_dir_all(managed_session.parent().expect("managed session parent"))?;
+    finalized_session(&managed_session, "managed source")?;
+    let expected_session_id = JsonlSessionStore::read_event_records(&managed_session)?
+        .first()
+        .expect("managed session has a record")
+        .session_id()
+        .to_owned();
+
+    let service = LocalSessionLifecycleService::new(
+        "workspace-managed",
+        &session_dir,
+        temp.path().join("exports"),
+    )
+    .with_managed_session_log_root(&managed_root)?;
+    let catalog = service.catalog()?;
+    assert_eq!(catalog.entries.len(), 1);
+    assert_eq!(
+        catalog.entries[0].session_ref,
+        sigil_kernel::SessionRef::new_relative("session-managed.jsonl")?
+    );
+    assert_eq!(
+        catalog.entries[0].session_id.as_deref(),
+        Some(expected_session_id.as_str())
+    );
+
+    let binding = service.resolve_session_for_reopen(
+        &sigil_kernel::SessionRef::new_relative("session-managed.jsonl")?,
+        &expected_session_id,
+    )?;
+    assert_eq!(binding.session_log_path, managed_session.canonicalize()?);
+    Ok(())
+}
+
+#[test]
+fn managed_session_catalog_cold_starts_and_rebuilds_many_sources() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let managed_root = temp.path().join("state/managed/session-log");
+    for index in 0..64 {
+        let path = managed_root
+            .join(format!("session-{index:03}"))
+            .join("records.jsonl");
+        fs::create_dir_all(path.parent().expect("managed session parent"))?;
+        finalized_session(&path, &format!("managed source {index}"))?;
+    }
+    let session_dir = temp.path().join("legacy-sessions");
+    let cold = LocalSessionLifecycleService::new(
+        "workspace-cold",
+        &session_dir,
+        temp.path().join("cold-exports"),
+    )
+    .with_managed_session_log_root(temp.path().join("missing-managed-root"))?;
+    assert!(cold.catalog()?.entries.is_empty());
+
+    let lifecycle = LocalSessionLifecycleService::new(
+        "workspace-many",
+        &session_dir,
+        temp.path().join("exports"),
+    )
+    .with_managed_session_log_root(&managed_root)?;
+    let projection = SessionCatalogProjectionService::new(
+        lifecycle,
+        temp.path().join("catalog/session-catalog.sqlite"),
+    );
+    let report = projection.rebuild()?;
+    assert_eq!(report.scanned_source_count, 64);
+    assert_eq!(report.indexed_source_count, 64);
+    assert_eq!(projection.list_workspace_entries()?.len(), 64);
+    Ok(())
+}

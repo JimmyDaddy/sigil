@@ -196,6 +196,16 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 ## 9. 会话与持久化规范
 
 - session log 采用 append-only JSONL
+- current-schema application runs on CLI/HTTP (including Task and user-input continuations) must
+  resolve the logical session key through the composed `SessionLog` managed writer, admit the
+  authority-declared namespace before opening `records.jsonl`, and finalize that namespace on
+  terminal or preparation-error cleanup; a caller-supplied path must not reintroduce a direct
+  session-log root. The session catalog must read the same managed source and may retain direct
+  discovery only for the explicitly non-current/legacy path.
+- managed SessionCatalog rebuilds must be truthful on zero-session cold start, bounded for many
+  sources, and rebuildable after SQLite WAL/corruption quarantine from the durable source rather
+  than from the projection target; logical `<session-key>.jsonl` references must not expose the
+  physical managed `records.jsonl` layout to surface contracts.
 - session JSONL、writer lease、lifecycle journal 及其 lease 必须创建为 owner-only 文件；writer 打开既有文件时必须修复宽松 mode，Doctor 必须报告最近 stream 的权限漂移
 - tool result 正文使用 session sibling immutable artifact store；JSONL 只保存 V2 descriptor、facts 和 bounded view
 - artifact ref 必须 opaque、session-scoped；fork 重新签发 ref，export 明确 completeness，delete/GC 复用 tombstone + grace lifecycle

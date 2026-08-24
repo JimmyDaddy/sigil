@@ -21,10 +21,13 @@ use thiserror::Error as ThisError;
 use super::{
     LocalSessionCatalogState, LocalSessionLifecycleLimits, LocalSessionLifecycleService,
     LocalSessionMutationError, LocalSessionReopenBinding, LocalSessionReopenError,
-    SessionCandidate, acquire_session_writer_lease, direct_jsonl_candidates, hash_file_bounded,
+    SessionCandidate, acquire_session_writer_lease, hash_file_bounded,
     map_session_writer_lease_mutation_error, modified_at_unix_ms, move_session_bundle,
     move_session_to_tombstone,
 };
+
+#[cfg(test)]
+use super::direct_jsonl_candidates;
 
 mod query;
 
@@ -480,8 +483,14 @@ impl SessionCatalogProjectionService {
             .lifecycle
             .acquire_maintenance_lease()
             .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+        let source_path = self
+            .lifecycle
+            .session_source_path(&session_ref)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+        if self.lifecycle.session_source_is_managed(&session_ref) {
+            return Err(LocalSessionMutationError::NotReady);
+        }
         let session_dir = canonical_real_directory(&self.lifecycle.session_dir)?;
-        let source_path = session_ref.resolve(&session_dir);
         let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
             _ => LocalSessionMutationError::Unavailable {
@@ -570,8 +579,13 @@ impl SessionCatalogProjectionService {
             .lifecycle
             .acquire_maintenance_lease()
             .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
-        let session_dir = canonical_real_directory(&self.lifecycle.session_dir)?;
-        let source_path = session_ref.resolve(&session_dir);
+        let source_path = self
+            .lifecycle
+            .session_source_path(&session_ref)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+        if self.lifecycle.session_source_is_managed(&session_ref) {
+            return Err(LocalSessionMutationError::NotReady);
+        }
         let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
             _ => LocalSessionMutationError::Unavailable {
@@ -945,20 +959,10 @@ impl SessionCatalogProjectionService {
         force_rebuild: bool,
         indexed_at_unix_ms: u64,
     ) -> Result<SessionCatalogScan, SessionCatalogProjectionError> {
-        let metadata = match fs::symlink_metadata(&self.lifecycle.session_dir) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(SessionCatalogScan::default());
-            }
-            Err(error) => return Err(source_error(error)),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(SessionCatalogProjectionError::Source {
-                message: "configured session directory must be a real directory".to_owned(),
-            });
-        }
-        let session_dir = fs::canonicalize(&self.lifecycle.session_dir).map_err(source_error)?;
-        let mut candidates = direct_jsonl_candidates(&session_dir).map_err(source_error)?;
+        let mut candidates = self
+            .lifecycle
+            .session_source_candidates()
+            .map_err(source_error)?;
         if let Ok(journal_path) = fs::canonicalize(&self.lifecycle.lifecycle_journal_path) {
             candidates.retain(|candidate| candidate.path != journal_path);
         }

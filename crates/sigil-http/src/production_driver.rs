@@ -60,9 +60,10 @@ use sigil_runtime::application_run::{
     application_session_frontier_view, application_session_has_unresolved_user_input,
     application_session_transcript_page, application_task_integration_review_view,
     application_user_input_request_view_by_key, application_verification_view,
-    bind_application_session_with_model_ref_and_attachment, bind_existing_application_session,
-    bind_existing_application_session_with_attachment, prepare_application_run,
-    prepare_application_task_continuation, prepare_application_user_input_decision,
+    bind_application_session_with_model_ref_and_attachment_and_managed_writer,
+    bind_existing_application_session, bind_existing_application_session_with_attachment,
+    prepare_application_run, prepare_application_task_continuation,
+    prepare_application_user_input_decision,
     record_application_preparation_cancellation_with_attachment,
     rerun_application_verification_with_attachment,
 };
@@ -451,6 +452,12 @@ fn canonical_http_session_path(session_log_path: &Path) -> Result<PathBuf> {
 }
 
 impl HttpProductionRunDriver {
+    /// Returns the lifecycle service enriched with the current managed session-log source.
+    #[must_use]
+    pub fn session_lifecycle(&self) -> Option<&LocalSessionLifecycleService> {
+        self.options.session_lifecycle.as_ref()
+    }
+
     /// Returns the authority-owned host-private native-save port when the current boot was
     /// composed with the NewCurrentSchema authority surface.
     #[must_use]
@@ -805,6 +812,27 @@ impl HttpProductionRunDriver {
             &options.launch_cwd,
         )
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let mut options = options;
+        let current_schema = services.cutover().is_some_and(|cutover| {
+            cutover.manifest().selected_epoch
+                == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+        });
+        if current_schema
+            && let Some(composition) = services.authority_composition()
+            && let Some(lifecycle) = options.session_lifecycle.take()
+        {
+            let managed_session_log_root = composition
+                .storage_writer
+                .managed_leaf_path(
+                    sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+            options.session_lifecycle = Some(
+                lifecycle
+                    .with_managed_session_log_root(managed_session_log_root)
+                    .map_err(|error| HttpRunDriverError::new(error.to_string()))?,
+            );
+        }
         Ok(Self {
             options,
             services,
@@ -1563,18 +1591,32 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map(|model_ref| sigil_kernel::ConnectionId::new(model_ref.connection_id.clone()))
             .transpose()
             .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
-        let (binding, attachment) = bind_application_session_with_model_ref_and_attachment(
-            &self.options.config_path,
-            &self.options.launch_cwd,
-            None,
-            connection_id.as_ref(),
-            model_ref.map(|model_ref| model_ref.model_id.as_str()),
-        )
-        .map_err(|error| {
-            HttpRunDriverError::new(format!(
-                "failed to bind durable session for {session_id}: {error}"
-            ))
-        })?;
+        let managed_session_log_writer = self
+            .services
+            .cutover()
+            .filter(|cutover| {
+                cutover.manifest().selected_epoch
+                    == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+            })
+            .and_then(|_| {
+                self.services
+                    .authority_composition()
+                    .map(|composition| Arc::clone(&composition.storage_writer))
+            });
+        let (binding, attachment) =
+            bind_application_session_with_model_ref_and_attachment_and_managed_writer(
+                &self.options.config_path,
+                &self.options.launch_cwd,
+                None,
+                connection_id.as_ref(),
+                model_ref.map(|model_ref| model_ref.model_id.as_str()),
+                managed_session_log_writer,
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "failed to bind durable session for {session_id}: {error}"
+                ))
+            })?;
         self.install_session_attachment(
             &binding.session_scope_id,
             &binding.session_log_path,

@@ -1859,7 +1859,57 @@ pub struct ApplicationRunExecution {
     pending_session_title: Option<ApplicationSessionTitleRequest>,
     pending_user_input_continuation: Option<user_input::ApplicationUserInputContinuationContext>,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
+    managed_session_log: Option<ManagedApplicationSessionLogLease>,
     _session_lease: Arc<ApplicationSessionLease>,
+}
+
+/// One authority-admitted session-log namespace held for the complete foreground run.
+///
+/// `JsonlSessionStore` remains a kernel-owned append-log implementation. Runtime first admits the
+/// exact managed leaf and points that store at its authority-declared `records.jsonl`; this guard
+/// makes preparation failures and terminal/error paths close the same current-schema namespace.
+struct ManagedApplicationSessionLogLease {
+    writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    lease: Option<crate::managed_storage_writer::ManagedStorageWriterLeaseV1>,
+}
+
+impl ManagedApplicationSessionLogLease {
+    fn acquire(
+        writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<Self> {
+        let lease = writer
+            .acquire_named(
+                crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                key,
+            )
+            .map_err(|error| anyhow!("managed session-log namespace admission failed: {error}"))?;
+        Ok(Self {
+            writer,
+            lease: Some(lease),
+        })
+    }
+
+    fn finalize(mut self) -> Result<()> {
+        let Some(lease) = self.lease.take() else {
+            return Ok(());
+        };
+        self.writer
+            .finalize(lease)
+            .map_err(|error| anyhow!("managed session-log namespace finalize failed: {error}"))?;
+        Ok(())
+    }
+}
+
+impl Drop for ManagedApplicationSessionLogLease {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        if let Err(error) = self.writer.finalize(lease) {
+            tracing::error!(%error, "failed to finalize managed session-log namespace during cleanup");
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2380,6 +2430,11 @@ impl ApplicationRunExecution {
                     &self.redactor,
                 )?;
                 bridge.emit(terminal_event)?;
+                if let Some(managed_session_log) = self.managed_session_log.take() {
+                    managed_session_log
+                        .finalize()
+                        .context("failed to finalize managed session-log namespace")?;
+                }
                 let post_run_maintenance = ApplicationPostRunMaintenance::from_session_title(
                     self.pending_session_title.take(),
                 );
@@ -2423,6 +2478,11 @@ impl ApplicationRunExecution {
                     Some(&summary),
                     &self.redactor,
                 )?;
+                if let Some(managed_session_log) = self.managed_session_log.take() {
+                    managed_session_log
+                        .finalize()
+                        .context("failed to finalize managed session-log namespace")?;
+                }
                 Ok(ApplicationRunOutput {
                     session_id: self.session_id,
                     run_id: self.run_id,
@@ -3550,12 +3610,14 @@ async fn prepare_application_run_internal(
         }
         _ => None,
     };
+    let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
-        prepare_application_run_blocking(
+        prepare_application_run_blocking_with_writer(
             request,
             session_leases,
             task_executor_attached,
             tool_authority,
+            managed_session_log_writer,
         )
     })
     .await
@@ -3588,6 +3650,7 @@ async fn prepare_application_run_internal(
         task_agent_registry,
         generate_session_title,
         route_transition,
+        managed_session_log,
     } = prepared;
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
@@ -3881,6 +3944,7 @@ async fn prepare_application_run_internal(
             pending_session_title,
             pending_user_input_continuation: None,
             route_transition,
+            managed_session_log,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -3965,6 +4029,35 @@ pub fn bind_application_session_with_model_ref_and_attachment(
     ),
     ApplicationRunPrepareError,
 > {
+    bind_application_session_with_model_ref_and_attachment_and_managed_writer(
+        config_path,
+        launch_cwd,
+        session_path,
+        connection_id,
+        model_name,
+        None,
+    )
+}
+
+/// Creates or reopens a durable session using the authority-declared session-log leaf when the
+/// boot composition provides a managed writer. The writer lease is held across session binding
+/// and finalized before the attachment is returned; foreground runs acquire their own lease.
+pub fn bind_application_session_with_model_ref_and_attachment_and_managed_writer(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: Option<&Path>,
+    connection_id: Option<&ConnectionId>,
+    model_name: Option<&str>,
+    managed_session_log_writer: Option<
+        Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+) -> std::result::Result<
+    (
+        ApplicationSessionBinding,
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    ),
+    ApplicationRunPrepareError,
+> {
     let root_config = load_application_root_config(config_path)?;
     let (_, selected_route) =
         application_selected_model_route(&root_config, connection_id, model_name)?;
@@ -3989,6 +4082,22 @@ pub fn bind_application_session_with_model_ref_and_attachment(
     let requested_path = session_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
+    let (requested_path, managed_session_log) = if let Some(writer) = managed_session_log_writer {
+        let key = application_session_log_key(&writer, &requested_path)
+            .map_err(ApplicationRunPrepareError::execution)?;
+        let managed_path = writer
+            .managed_named_leaf_path(
+                crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                &key,
+            )
+            .map_err(ApplicationRunPrepareError::execution)?
+            .join("records.jsonl");
+        let lease = ManagedApplicationSessionLogLease::acquire(writer, &key)
+            .map_err(ApplicationRunPrepareError::execution)?;
+        (managed_path, Some(lease))
+    } else {
+        (requested_path, None)
+    };
     let canonical_path = canonical_session_lease_path(&requested_path)
         .map_err(ApplicationRunPrepareError::execution)?;
     let attachment = Arc::new(
@@ -4019,6 +4128,11 @@ pub fn bind_application_session_with_model_ref_and_attachment(
             Some(attachment.as_ref()),
         )
         .map_err(application_route_load_prepare_error)?;
+    if let Some(managed_session_log) = managed_session_log {
+        managed_session_log
+            .finalize()
+            .map_err(ApplicationRunPrepareError::execution)?;
+    }
     Ok((
         ApplicationSessionBinding {
             session_scope_id: outcome.session.session_scope_id().to_owned(),
@@ -5251,6 +5365,51 @@ pub fn default_application_session_path(session_log_dir: &Path) -> PathBuf {
     session_log_dir.join(format!("session-{}.jsonl", uuid::Uuid::new_v4()))
 }
 
+fn application_session_log_key(
+    writer: &crate::managed_storage_writer::ManagedStorageWriterAdapterV1,
+    requested_path: &Path,
+) -> Result<String> {
+    let managed_root = writer
+        .managed_leaf_path(crate::managed_storage_writer::StorageWriterChannelV1::SessionLog)
+        .map_err(|error| anyhow!("managed session-log root is unavailable: {error}"))?;
+    let key = if requested_path.file_name().and_then(|value| value.to_str())
+        == Some("records.jsonl")
+        && requested_path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(&managed_root).ok())
+            .is_some_and(|relative| relative.components().count() == 1)
+    {
+        requested_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow!("managed session-log key is unavailable"))?
+            .to_owned()
+    } else {
+        requested_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("session-log path has no valid file stem"))?
+            .to_owned()
+    };
+    Ok(key)
+}
+
+fn current_schema_managed_session_log_writer(
+    services: &ApplicationRunServices,
+) -> Option<Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>> {
+    let cutover = services.cutover()?;
+    if cutover.manifest().selected_epoch
+        != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+    {
+        return None;
+    }
+    services
+        .authority_composition()
+        .map(|composition| Arc::clone(&composition.storage_writer))
+}
+
 /// Builds provider input with safe repository context candidates.
 #[must_use]
 pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunInput {
@@ -5299,13 +5458,33 @@ struct BlockingApplicationRunPreparation {
     task_agent_registry: Option<crate::AgentProfileRegistry>,
     generate_session_title: bool,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
+    managed_session_log: Option<ManagedApplicationSessionLogLease>,
 }
 
+#[cfg(test)]
 fn prepare_application_run_blocking(
     request: ApplicationRunRequest,
     session_leases: Arc<ApplicationSessionLeaseManager>,
     task_executor_attached: bool,
     tool_authority: Option<std::sync::Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
+) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
+    prepare_application_run_blocking_with_writer(
+        request,
+        session_leases,
+        task_executor_attached,
+        tool_authority,
+        None,
+    )
+}
+
+fn prepare_application_run_blocking_with_writer(
+    request: ApplicationRunRequest,
+    session_leases: Arc<ApplicationSessionLeaseManager>,
+    task_executor_attached: bool,
+    tool_authority: Option<std::sync::Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
+    managed_session_log_writer: Option<
+        Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
     if let Some(constraints) = request.constraints.as_ref()
         && (constraints.max_turns == 0
@@ -5328,6 +5507,23 @@ fn prepare_application_run_blocking(
         .session_path
         .clone()
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
+    let (requested_session_path, managed_session_log) =
+        if let Some(writer) = managed_session_log_writer {
+            let key = application_session_log_key(&writer, &requested_session_path)
+                .map_err(ApplicationRunPrepareError::execution)?;
+            let managed_path = writer
+                .managed_named_leaf_path(
+                    crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                    &key,
+                )
+                .map_err(ApplicationRunPrepareError::execution)?
+                .join("records.jsonl");
+            let lease = ManagedApplicationSessionLogLease::acquire(writer, &key)
+                .map_err(ApplicationRunPrepareError::execution)?;
+            (managed_path, Some(lease))
+        } else {
+            (requested_session_path, None)
+        };
     let session_store = JsonlSessionStore::new(&requested_session_path)
         .map_err(ApplicationRunPrepareError::execution)?;
     let session_path = session_store.path().to_owned();
@@ -5639,6 +5835,7 @@ fn prepare_application_run_blocking(
         task_agent_registry,
         generate_session_title,
         route_transition,
+        managed_session_log,
     })
 }
 

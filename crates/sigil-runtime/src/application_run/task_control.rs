@@ -90,6 +90,7 @@ pub struct ApplicationTaskContinuationExecution {
     conversation_start: ConversationRunStartedEntryV1,
     events: ApplicationRunEventSequence,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
+    managed_session_log: Option<ManagedApplicationSessionLogLease>,
     _session_lease: Arc<ApplicationSessionLease>,
 }
 
@@ -182,8 +183,15 @@ pub async fn prepare_application_task_continuation(
         constraints: None,
     };
     let session_leases = Arc::clone(&services.session_leases);
+    let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
-        prepare_application_run_blocking(blocking_request, session_leases, true, None)
+        prepare_application_run_blocking_with_writer(
+            blocking_request,
+            session_leases,
+            true,
+            None,
+            managed_session_log_writer,
+        )
     })
     .await
     .map_err(|error| ApplicationRunPrepareError::Internal {
@@ -208,6 +216,7 @@ pub async fn prepare_application_task_continuation(
         redactor,
         task_agent_registry,
         route_transition,
+        managed_session_log,
         ..
     } = prepared;
     if session.session_scope_id() != request.expected_session_scope_id {
@@ -329,6 +338,7 @@ pub async fn prepare_application_task_continuation(
             conversation_start: conversation_start.clone(),
             events: events.clone(),
             route_transition,
+            managed_session_log,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -493,6 +503,11 @@ impl ApplicationTaskContinuationExecution {
             &self.redactor,
         )?;
         bridge.emit(terminal_event)?;
+        if let Some(managed_session_log) = self.managed_session_log.take() {
+            managed_session_log
+                .finalize()
+                .context("failed to finalize managed session-log namespace")?;
+        }
         Ok(ApplicationTaskContinuationOutput {
             session_id: self.session_id,
             run_id: self.run_id,

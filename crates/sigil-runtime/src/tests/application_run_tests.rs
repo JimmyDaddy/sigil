@@ -6304,6 +6304,12 @@ async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()>
         prepared.run_options().tool_authority.is_some(),
         "a new-epoch binary must hand the composed tool authority to the agent run"
     );
+    assert!(
+        prepared
+            .session_log_path()
+            .starts_with(state.canonicalize()?.join("managed/session-log")),
+        "current-schema runs must use the composed managed SessionLog source"
+    );
     Ok(())
 }
 
@@ -6355,6 +6361,12 @@ async fn r71_application_prepare_keeps_legacy_tool_authority_absent() -> Result<
     assert!(
         prepared.run_options().tool_authority.is_none(),
         "the legacy epoch must keep the V2 path (file-tool adjudication defers)"
+    );
+    assert!(
+        !prepared
+            .session_log_path()
+            .starts_with(state.canonicalize()?.join("managed/session-log")),
+        "legacy runs must keep the direct compatibility session-log path"
     );
     Ok(())
 }

@@ -368,6 +368,10 @@ pub struct LocalSessionLifecycleService {
     managed_writer:
         Option<std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>>,
     managed_namespace_key: Option<String>,
+    /// Authority-declared `managed/session-log` root used as the current session source. The
+    /// logical catalog reference remains `<session-key>.jsonl`; the physical `records.jsonl`
+    /// path never becomes a caller-supplied source of truth.
+    managed_session_log_root: Option<PathBuf>,
 }
 
 /// RFC-0062 14.1: session-scoped scratch namespace cleanup bound to session deletion.
@@ -398,6 +402,7 @@ impl LocalSessionLifecycleService {
             scratch_cleanup: None,
             managed_writer: None,
             managed_namespace_key: None,
+            managed_session_log_root: None,
         }
     }
 
@@ -416,6 +421,31 @@ impl LocalSessionLifecycleService {
         self.lifecycle_journal_path = namespace.join("session-lifecycle-v1.jsonl");
         self.managed_writer = Some(writer);
         self.managed_namespace_key = Some(namespace_key);
+        Ok(self)
+    }
+
+    /// Attaches the authority-declared session-log source root used by catalog scans and reopen.
+    /// Missing roots are truthful empty sources for cold start; existing roots must be real
+    /// directories and are never followed through a symlink.
+    pub fn with_managed_session_log_root(mut self, root: impl Into<PathBuf>) -> Result<Self> {
+        let root = root.into();
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!("managed session-log root must be a real directory");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect managed session-log root {}",
+                        root.display()
+                    )
+                });
+            }
+        }
+        self.managed_session_log_root = Some(root);
         Ok(self)
     }
 
@@ -573,28 +603,7 @@ impl LocalSessionLifecycleService {
     ///
     /// Returns an error when the configured directory exists but cannot be canonicalized/read.
     pub fn catalog(&self) -> Result<LocalSessionCatalog> {
-        if !self.session_dir.exists() {
-            return Ok(LocalSessionCatalog::default());
-        }
-        if fs::symlink_metadata(&self.session_dir)
-            .with_context(|| {
-                format!(
-                    "failed to inspect session directory {}",
-                    self.session_dir.display()
-                )
-            })?
-            .file_type()
-            .is_symlink()
-        {
-            bail!("configured session directory must not be a symlink");
-        }
-        let session_dir = fs::canonicalize(&self.session_dir).with_context(|| {
-            format!(
-                "failed to canonicalize session directory {}",
-                self.session_dir.display()
-            )
-        })?;
-        let mut candidates = direct_jsonl_candidates(&session_dir)?;
+        let mut candidates = self.session_source_candidates()?;
         if let Ok(journal_path) = fs::canonicalize(&self.lifecycle_journal_path) {
             candidates.retain(|candidate| candidate.path != journal_path);
         }
@@ -669,28 +678,27 @@ impl LocalSessionLifecycleService {
         {
             return Err(LocalSessionReopenError::NotFound);
         }
-        let directory_metadata = match fs::symlink_metadata(&self.session_dir) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(LocalSessionReopenError::NotFound);
-            }
-            Err(source) => {
+        if !self.session_source_is_managed(session_ref) {
+            let directory_metadata = match fs::symlink_metadata(&self.session_dir) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(LocalSessionReopenError::NotFound);
+                }
+                Err(source) => {
+                    return Err(LocalSessionReopenError::CatalogUnavailable {
+                        source: source.into(),
+                    });
+                }
+            };
+            if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
                 return Err(LocalSessionReopenError::CatalogUnavailable {
-                    source: source.into(),
+                    source: anyhow!("configured session directory must be a real directory"),
                 });
             }
-        };
-        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
-            return Err(LocalSessionReopenError::CatalogUnavailable {
-                source: anyhow!("configured session directory must be a real directory"),
-            });
         }
-        let session_dir = fs::canonicalize(&self.session_dir).map_err(|source| {
-            LocalSessionReopenError::CatalogUnavailable {
-                source: source.into(),
-            }
-        })?;
-        let path = session_ref.resolve(&session_dir);
+        let path = self
+            .session_source_path(session_ref)
+            .map_err(|source| LocalSessionReopenError::CatalogUnavailable { source })?;
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1653,6 +1661,105 @@ impl LocalSessionLifecycleService {
         LocalSessionLifecycleJournal::new(self.lifecycle_journal_path.clone())
     }
 
+    fn session_source_candidates(&self) -> Result<Vec<SessionCandidate>> {
+        let mut candidates = BTreeMap::<SessionRef, SessionCandidate>::new();
+        match fs::symlink_metadata(&self.session_dir) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!("configured session directory must be a real directory");
+                }
+                let session_dir = fs::canonicalize(&self.session_dir).with_context(|| {
+                    format!(
+                        "failed to canonicalize session directory {}",
+                        self.session_dir.display()
+                    )
+                })?;
+                for candidate in direct_jsonl_candidates(&session_dir)? {
+                    candidates.insert(candidate.session_ref.clone(), candidate);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect session directory {}",
+                        self.session_dir.display()
+                    )
+                });
+            }
+        }
+        if let Some(root) = self.managed_session_log_root.as_deref() {
+            for candidate in managed_jsonl_candidates(root)? {
+                // The current managed source wins over a same-name legacy direct source. This
+                // prevents a stale direct file from shadowing the authority-declared session.
+                candidates.insert(candidate.session_ref.clone(), candidate);
+            }
+        }
+        Ok(candidates.into_values().collect())
+    }
+
+    fn session_source_path(&self, session_ref: &SessionRef) -> Result<PathBuf> {
+        let reference = session_ref.as_path();
+        if reference.components().count() != 1
+            || reference.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        {
+            bail!("session reference must be a direct JSONL child");
+        }
+        let key = reference
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow!("session reference has no managed key"))?;
+        if let Some(root) = self.managed_session_log_root.as_deref() {
+            match fs::symlink_metadata(root) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        bail!("managed session-log root must be a real directory");
+                    }
+                    let root = fs::canonicalize(root)
+                        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+                    let key_dir = root.join(key);
+                    match fs::symlink_metadata(&key_dir) {
+                        Ok(key_metadata) => {
+                            if key_metadata.file_type().is_symlink() || !key_metadata.is_dir() {
+                                bail!("managed session key must be a real directory");
+                            }
+                            return Ok(key_dir.join("records.jsonl"));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("failed to inspect {}", key_dir.display())
+                            });
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to inspect {}", root.display()));
+                }
+            }
+        }
+        let metadata = fs::symlink_metadata(&self.session_dir)
+            .with_context(|| format!("failed to inspect {}", self.session_dir.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("configured session directory must be a real directory");
+        }
+        let session_dir = fs::canonicalize(&self.session_dir)
+            .with_context(|| format!("failed to canonicalize {}", self.session_dir.display()))?;
+        Ok(session_ref.resolve(&session_dir))
+    }
+
+    fn session_source_is_managed(&self, session_ref: &SessionRef) -> bool {
+        let Some(root) = self.managed_session_log_root.as_deref() else {
+            return false;
+        };
+        let Some(key) = session_ref.as_path().file_stem() else {
+            return false;
+        };
+        fs::symlink_metadata(root.join(key)).is_ok()
+    }
+
     fn session_pin_projection(&self) -> Result<BTreeMap<SessionRef, (String, bool)>> {
         let mut pins = BTreeMap::new();
         for record in self.lifecycle_records()? {
@@ -1882,6 +1989,92 @@ fn direct_jsonl_candidates(session_dir: &Path) -> Result<Vec<SessionCandidate>> 
         } else {
             fs::canonicalize(&path)
                 .with_context(|| format!("failed to canonicalize {}", path.display()))?
+        };
+        candidates.push(SessionCandidate {
+            session_ref,
+            path: canonical_path,
+            bytes: metadata.len(),
+            modified_at_unix_ms: modified_at_unix_ms(&metadata),
+            symlink_or_non_file,
+        });
+    }
+    Ok(candidates)
+}
+
+fn managed_jsonl_candidates(root: &Path) -> Result<Vec<SessionCandidate>> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect managed session-log root {}",
+                    root.display()
+                )
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("managed session-log root must be a real directory");
+    }
+    let root = fs::canonicalize(root).with_context(|| {
+        format!(
+            "failed to canonicalize managed session-log root {}",
+            root.display()
+        )
+    })?;
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&root)
+        .with_context(|| format!("failed to read managed session-log root {}", root.display()))?
+    {
+        let entry = entry.context("failed to read managed session-log entry")?;
+        let key_path = entry.path();
+        let Some(key) = key_path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Ok(session_ref) = SessionRef::new_relative(format!("{key}.jsonl")) else {
+            continue;
+        };
+        let key_metadata = fs::symlink_metadata(&key_path).with_context(|| {
+            format!(
+                "failed to inspect managed session key {}",
+                key_path.display()
+            )
+        })?;
+        let record_path = key_path.join("records.jsonl");
+        if key_metadata.file_type().is_symlink() || !key_metadata.is_dir() {
+            candidates.push(SessionCandidate {
+                session_ref,
+                path: record_path,
+                bytes: key_metadata.len(),
+                modified_at_unix_ms: modified_at_unix_ms(&key_metadata),
+                symlink_or_non_file: true,
+            });
+            continue;
+        }
+        let (metadata, symlink_or_non_file) = match fs::symlink_metadata(&record_path) {
+            Ok(metadata) => {
+                let symlink_or_non_file = key_metadata.file_type().is_symlink()
+                    || !key_metadata.is_dir()
+                    || metadata.file_type().is_symlink()
+                    || !metadata.is_file();
+                (metadata, symlink_or_non_file)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (key_metadata, true),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect managed session source {}",
+                        record_path.display()
+                    )
+                });
+            }
+        };
+        let canonical_path = if symlink_or_non_file {
+            record_path
+        } else {
+            fs::canonicalize(&record_path)
+                .with_context(|| format!("failed to canonicalize {}", record_path.display()))?
         };
         candidates.push(SessionCandidate {
             session_ref,
