@@ -35,7 +35,10 @@ fn probe_request(program: String, args: Vec<String>) -> ExecutionRequest {
         cwd: std::env::current_dir().expect("current directory should resolve"),
         env: BTreeMap::new(),
         environment_policy: ProcessEnvironmentPolicy::InheritParent,
-        timeout_ms: Some(5_000),
+        // Restricted/AppContainer process creation is materially slower on hosted Windows
+        // runners than on a warm developer machine; keep the fixture bounded without treating
+        // normal hosted startup latency as a sandbox timeout.
+        timeout_ms: Some(30_000),
         timeout_secs: 0,
         cpu_time_ms: None,
         memory_limit_bytes: None,

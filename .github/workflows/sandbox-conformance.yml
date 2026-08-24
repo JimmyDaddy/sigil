@@ -95,6 +95,19 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.30.3
+          run_install: false
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Install locked frontend dependencies
+        run: pnpm --dir apps/desktop install --frozen-lockfile
       - name: Install Bubblewrap tools
         run: |
           sudo apt-get update
@@ -229,6 +242,11 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+      - name: Warm Cargo dependency store
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_NET_OFFLINE=false cargo fetch --locked
       - name: Run toolchain qualification
         shell: bash
         env:
