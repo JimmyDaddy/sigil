@@ -5556,6 +5556,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sigil-kernel",
+ "sigil-resource-authority",
  "sigil-runtime",
  "tempfile",
  "thiserror 2.0.19",

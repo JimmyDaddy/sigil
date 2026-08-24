@@ -54,6 +54,10 @@ pub struct RuntimeManagedResourceServicesV1 {
     /// Product-plane updater owner. It is deliberately independent from agent storage grants;
     /// the product-state probe passes only when this real owner is attached.
     pub product_updater: Option<Arc<sigil_updater::ProductUpdaterState>>,
+    /// Host-private borrowed native-save authority port. It is present only when the real
+    /// registration capsule route is composed.
+    pub borrowed_native_save:
+        Option<Arc<dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1>>,
     /// Whether the desktop product-state updater is attached to its real owner route.
     pub product_state_updater_seam: crate::r71_global_cutover::RuntimeProductStateSeamV1,
     /// Whether native support-save is attached to its host-private registration route.
@@ -288,10 +292,14 @@ impl RuntimeManagedResourceServicesV1 {
             projection_backed: false,
             extension_execution: None,
             product_updater: None,
+            borrowed_native_save: bundle.borrowed_native_save.clone(),
             product_state_updater_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
-            borrowed_native_save_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_native_save_seam: if bundle.borrowed_native_save.is_some() {
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
+            } else {
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+            },
             borrowed_configuration_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
             borrowed_release_output_seam:
@@ -325,10 +333,14 @@ impl RuntimeManagedResourceServicesV1 {
             projection_backed: true,
             extension_execution: None,
             product_updater: None,
+            borrowed_native_save: bundle.borrowed_native_save.clone(),
             product_state_updater_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
-            borrowed_native_save_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_native_save_seam: if bundle.borrowed_native_save.is_some() {
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
+            } else {
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+            },
             borrowed_configuration_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
             borrowed_release_output_seam:
@@ -369,6 +381,23 @@ impl RuntimeManagedResourceServicesV1 {
         product_updater: Arc<sigil_updater::ProductUpdaterState>,
     ) -> Self {
         self.with_optional_product_updater(Some(product_updater))
+    }
+
+    /// Attaches the host-private borrowed native-save registration route.
+    #[must_use]
+    pub fn with_optional_borrowed_native_save(
+        mut self,
+        borrowed_native_save: Option<
+            Arc<dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1>,
+        >,
+    ) -> Self {
+        self.borrowed_native_save_seam = if borrowed_native_save.is_some() {
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
+        } else {
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+        };
+        self.borrowed_native_save = borrowed_native_save;
+        self
     }
 
     /// Keeps isolated/shadow compositions truthful when no product-plane owner is available.

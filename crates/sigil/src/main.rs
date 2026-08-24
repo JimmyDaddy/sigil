@@ -978,6 +978,10 @@ async fn serve_command(
         launch_cwd,
         BuildInfo::current().into(),
     ));
+    let server = match driver.borrowed_native_save_service() {
+        Some(service) => server.with_borrowed_native_save_service(service),
+        None => server,
+    };
     plan.bind_addr = server.local_addr()?;
     let mut owner_channel = options
         .shutdown_on_stdin_close

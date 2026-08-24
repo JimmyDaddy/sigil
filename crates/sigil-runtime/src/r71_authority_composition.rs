@@ -165,7 +165,18 @@ fn compose_runtime_authority_inner(
         sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
     ));
     let file_access: Arc<dyn ManagedFileAccessServiceV1> = Arc::new(
-        sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new(registry),
+        sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new(
+            Arc::clone(&registry),
+        ),
+    );
+    let borrowed_native_save: Arc<
+        dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1,
+    > = Arc::new(
+        sigil_resource_authority::native_save::AuthorityBorrowedNativeSaveServiceV1::new(
+            // The file-access adapter and native-save adapter observe through one authority
+            // registry, so a registration capsule cannot bypass the existing subject table.
+            Arc::clone(&registry),
+        ),
     );
     let execution: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionServiceV1> = Arc::new(
         sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
@@ -178,10 +189,11 @@ fn compose_runtime_authority_inner(
         Arc::clone(&broker),
         execution_temp_root.to_path_buf(),
     ));
-    let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
+    let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new_with_borrowed_native_save(
         authority,
         storage.clone() as Arc<dyn ManagedStorageServiceV1>,
         file_access.clone() as Arc<dyn ManagedFileAccessServiceV1>,
+        borrowed_native_save,
     )
     .build_bundle();
     let records_projection = std::sync::Arc::new(

@@ -1,12 +1,7 @@
 use std::{
     collections::BTreeSet,
-    fs::OpenOptions,
-    io::Write,
     path::{Path, PathBuf},
 };
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use serde::Serialize;
 use sigil_desktop::{
@@ -295,16 +290,16 @@ pub(crate) async fn desktop_export_support_bundle(
                 "The selected support report destination is invalid.",
             )
         })?;
-    tokio::task::spawn_blocking(move || {
-        write_private_support_bundle(&destination, &bundle.content)
-    })
-    .await
-    .map_err(|_| {
-        DesktopCommandError::new(
-            "support_save_failed",
-            "The private support report could not be saved.",
-        )
-    })??;
+    client
+        .save_support_bundle(&destination, &bundle.content)
+        .await
+        .map(|_| ())
+        .map_err(|_| {
+            DesktopCommandError::new(
+                "support_save_failed",
+                "The private support report could not be saved.",
+            )
+        })?;
     Ok(DesktopSupportSaveSummary {
         cancelled: false,
         file_name: Some(file_name),
@@ -332,39 +327,6 @@ fn validate_support_bundle(file_name: &str, content: &str) -> Result<(), Desktop
         )
     })?;
     Ok(())
-}
-
-fn write_private_support_bundle(
-    destination: &Path,
-    content: &str,
-) -> Result<(), DesktopCommandError> {
-    if destination
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Err(DesktopCommandError::new(
-            "support_save_invalid",
-            "A private support report cannot replace a symbolic link.",
-        ));
-    }
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(destination).map_err(|_| {
-        DesktopCommandError::new(
-            "support_save_failed",
-            "The private support report could not be saved.",
-        )
-    })?;
-    file.write_all(content.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|_| {
-            DesktopCommandError::new(
-                "support_save_failed",
-                "The private support report could not be saved.",
-            )
-        })
 }
 
 fn admit_external_https_url(candidate: &str) -> Result<String, DesktopCommandError> {

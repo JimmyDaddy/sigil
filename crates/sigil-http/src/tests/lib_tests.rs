@@ -195,6 +195,87 @@ credential = { source = "none" }
 }
 
 #[tokio::test]
+async fn host_private_native_save_route_registers_and_returns_closed_receipt() {
+    use sha2::Digest;
+
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let destination = temp.path().join("sigil-support-route.json");
+    let content = r#"{"schema_version":1}"#;
+    let content_hash = sigil_kernel::resource::CanonicalHash::from_bytes(
+        sha2::Sha256::digest(content.as_bytes()).into(),
+    );
+    let registry = Arc::new(Mutex::new(
+        sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
+    ));
+    let native_save = Arc::new(
+        sigil_resource_authority::native_save::AuthorityBorrowedNativeSaveServiceV1::new(registry),
+    );
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_borrowed_native_save_service(native_save);
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let body = json!({
+        "schema_version": 1,
+        "purpose": "support_bundle",
+        "capsule_id": "desktop-native-save-route-test-1",
+        "destination": destination,
+        "content": content,
+        "content_hash": content_hash,
+    })
+    .to_string();
+    let (status, receipt) = http_raw_request(
+        address,
+        http_post(
+            "/v1/private/borrowed/native-save",
+            Some("secret-token"),
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert!(receipt["subject_ref"].as_str().is_some());
+    assert!(receipt.get("destination").is_none());
+    assert_eq!(
+        fs::read_to_string(&destination).expect("native save"),
+        content
+    );
+
+    let (status, error) = http_raw_request(
+        address,
+        http_post(
+            "/v1/private/borrowed/native-save",
+            Some("secret-token"),
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert_eq!(error["error"]["code"], "borrowed_native_save_rejected");
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
+}
+
+#[tokio::test]
 async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catalog() {
     let (provider_base_url, request_count, provider_server) =
         spawn_provider_catalog_server(200, r#"{"data":[{"id":"local-coder"}]}"#).await;
@@ -6455,7 +6536,7 @@ fn live_event_bus_binds_approval_display_to_the_allocated_public_sequence() {
 }
 
 #[test]
-fn crate_dependency_boundary_excludes_tui_and_extra_sigil_crates() {
+fn crate_dependency_boundary_excludes_tui_and_unrelated_sigil_crates() {
     let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let manifest =
         std::fs::read_to_string(&manifest_path).expect("sigil-http manifest should be readable");
@@ -6471,6 +6552,10 @@ fn crate_dependency_boundary_excludes_tui_and_extra_sigil_crates() {
         sigil_dependencies,
         vec![
             ("dependencies".to_owned(), "sigil-kernel".to_owned()),
+            (
+                "dependencies".to_owned(),
+                "sigil-resource-authority".to_owned(),
+            ),
             ("dependencies".to_owned(), "sigil-runtime".to_owned())
         ]
     );

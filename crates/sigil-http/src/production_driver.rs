@@ -451,6 +451,17 @@ fn canonical_http_session_path(session_log_path: &Path) -> Result<PathBuf> {
 }
 
 impl HttpProductionRunDriver {
+    /// Returns the authority-owned host-private native-save port when the current boot was
+    /// composed with the NewCurrentSchema authority surface.
+    #[must_use]
+    pub fn borrowed_native_save_service(
+        &self,
+    ) -> Option<Arc<dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1>> {
+        self.services
+            .authority_composition()
+            .and_then(|composition| composition.services.borrowed_native_save.clone())
+    }
+
     /// Executes one prepared plan review revision as an owned, supervised background run so
     /// `Revise` runs a real read-only plan review instead of leaving a dangling `Started` attempt.
     ///

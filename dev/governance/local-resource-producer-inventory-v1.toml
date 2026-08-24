@@ -62,20 +62,20 @@ exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0004"
-crate_name = "apps"
-module = "apps/desktop/src-tauri/src/commands.rs"
-constructor = "CreateOrOpenFile"
-line = 350
-class = "trusted-product"
-owner = "DesktopProductState"
-root_source = "PlatformProductStateAnchor"
-input_taint = "None"
+crate_name = "sigil-resource-authority"
+module = "crates/sigil-resource-authority/src/native_save.rs"
+constructor = "TemporaryFile"
+line = 262
+class = "managed-runtime-state"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "UserSelectedDestination"
 child_access = "None"
-admission_contract = "ProductStateOwnerAdmission"
-resource_contract = "ProductStateObject(DesktopAppearance)"
-lifecycle_contract = "ProductOwnerAtomicLifecycle"
-receipt_contract = "ProductStateReceipt"
-reachability_proof_digest = "scanner-line:commands.rs:350"
+admission_contract = "BorrowedMutation"
+resource_contract = "BorrowedIdentity(UserSelectedSupportExport)"
+lifecycle_contract = "BorrowedNoOwnership"
+receipt_contract = "BorrowedMutationReceipt"
+reachability_proof_digest = "scanner-line:native_save.rs:262"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3800,5 +3800,62 @@ resource_contract = "ProductStateObject(SignedUpdaterCache)"
 lifecycle_contract = "ProductOwnerAtomicLifecycle"
 receipt_contract = "ProductStateReceipt"
 reachability_proof_digest = "scanner-line:cache.rs:140"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0201"
+crate_name = "sigil-resource-authority"
+module = "crates/sigil-resource-authority/src/native_save.rs"
+constructor = "TemporaryDirectory"
+line = 303
+class = "managed-runtime-state"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "UserSelectedDestination"
+child_access = "None"
+admission_contract = "BorrowedMutation"
+resource_contract = "BorrowedIdentity(UserSelectedSupportExport)"
+lifecycle_contract = "BorrowedNoOwnership"
+receipt_contract = "BorrowedMutationReceipt"
+reachability_proof_digest = "scanner-line:native_save.rs:303"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0202"
+crate_name = "sigil-resource-authority"
+module = "crates/sigil-resource-authority/src/native_save.rs"
+constructor = "TemporaryDirectory"
+line = 325
+class = "managed-runtime-state"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "UserSelectedDestination"
+child_access = "None"
+admission_contract = "BorrowedMutation"
+resource_contract = "BorrowedIdentity(UserSelectedSupportExport)"
+lifecycle_contract = "BorrowedNoOwnership"
+receipt_contract = "BorrowedMutationReceipt"
+reachability_proof_digest = "scanner-line:native_save.rs:325"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0203"
+crate_name = "sigil-resource-authority"
+module = "crates/sigil-resource-authority/src/native_save.rs"
+constructor = "DirectWriteOrAtomicReplace"
+line = 327
+class = "managed-runtime-state"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "UserSelectedDestination"
+child_access = "None"
+admission_contract = "BorrowedMutation"
+resource_contract = "BorrowedIdentity(UserSelectedSupportExport)"
+lifecycle_contract = "BorrowedNoOwnership"
+receipt_contract = "BorrowedMutationReceipt"
+reachability_proof_digest = "scanner-line:native_save.rs:327"
 test_case_ids = []
 exception_rfc = "0071"

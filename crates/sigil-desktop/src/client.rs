@@ -1,4 +1,4 @@
-use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
+use std::{fmt, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header};
@@ -11,9 +11,9 @@ use crate::{
     dto::{
         DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION, DESKTOP_CONVERSATION_QUEUE_SCHEMA_VERSION,
         DESKTOP_HTTP_PROTOCOL_VERSION, DesktopApprovalCommandReceipt,
-        DesktopApprovalDecisionRequest, DesktopCatalogQuery, DesktopCheckpointRestoreRequest,
-        DesktopCheckpointRestoreReview, DesktopCommandEnvelope, DesktopCompactionReview,
-        DesktopConversationDisplayPage, DesktopConversationDisplayQuery,
+        DesktopApprovalDecisionRequest, DesktopBorrowedNativeSaveReceipt, DesktopCatalogQuery,
+        DesktopCheckpointRestoreRequest, DesktopCheckpointRestoreReview, DesktopCommandEnvelope,
+        DesktopCompactionReview, DesktopConversationDisplayPage, DesktopConversationDisplayQuery,
         DesktopConversationQueueCommandAction, DesktopConversationQueueCommandReceipt,
         DesktopConversationQueueCommandRequest, DesktopConversationQueueView,
         DesktopConversationRecoveryCommandAction, DesktopConversationRecoveryCommandReceipt,
@@ -79,6 +79,17 @@ const MAX_CONVERSATION_TASK_CONTROL_ITEMS: usize = 128;
 const MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS: usize = 32;
 const MAX_CONVERSATION_TASK_CONTROL_TITLE_CHARS: usize = 4 * 1024;
 const CONVERSATION_TASK_CONTROL_SCHEMA_VERSION: u16 = 1;
+const BORROWED_NATIVE_SAVE_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Serialize)]
+struct DesktopBorrowedNativeSaveRequest<'a> {
+    schema_version: u16,
+    purpose: &'static str,
+    capsule_id: String,
+    destination: &'a str,
+    content: &'a str,
+    content_hash: String,
+}
 
 /// Authenticated typed client for one desktop-owned loopback server.
 ///
@@ -121,6 +132,45 @@ impl DesktopHttpClient {
     pub async fn support_bundle(&self) -> Result<DesktopSupportBundleExport, DesktopClientError> {
         self.post_json(self.route(["support", "bundle"])?, &(), StatusCode::OK)
             .await
+    }
+
+    /// Saves a support bundle through the host-private server writer. The destination is only
+    /// accepted from native code and never appears in a renderer-facing DTO or receipt.
+    pub async fn save_support_bundle(
+        &self,
+        destination: &Path,
+        content: &str,
+    ) -> Result<DesktopBorrowedNativeSaveReceipt, DesktopClientError> {
+        if !destination.is_absolute() || content.is_empty() {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let request = DesktopBorrowedNativeSaveRequest {
+            schema_version: BORROWED_NATIVE_SAVE_SCHEMA_VERSION,
+            purpose: "support_bundle",
+            capsule_id: format!("desktop-native-save-{}", Uuid::new_v4()),
+            destination: destination
+                .to_str()
+                .ok_or(DesktopClientError::InvalidRoute)?,
+            content,
+            content_hash: sha256_hex(content.as_bytes()),
+        };
+        let receipt: DesktopBorrowedNativeSaveReceipt = self
+            .post_json(
+                self.route(["v1", "private", "borrowed", "native-save"])?,
+                &request,
+                StatusCode::CREATED,
+            )
+            .await?;
+        if receipt.schema_version != BORROWED_NATIVE_SAVE_SCHEMA_VERSION
+            || receipt.capsule_id != request.capsule_id
+            || receipt.subject_ref.is_empty()
+            || receipt.observation_generation == 0
+            || receipt.content_hash != request.content_hash
+            || receipt.byte_length != content.len() as u64
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(receipt)
     }
 
     /// Reads the secret-free provider inventory through the native owner boundary.

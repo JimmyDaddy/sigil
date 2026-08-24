@@ -16,6 +16,7 @@ pub mod identity;
 pub mod journal;
 pub mod lease;
 pub mod maintenance;
+pub mod native_save;
 pub mod provider_registry;
 pub mod quota;
 pub mod reconcile;

@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::native_save::BorrowedNativeSaveServiceV1;
 use sigil_kernel::managed_file_access::ManagedFileAccessServiceV1;
 use sigil_kernel::managed_storage::ManagedStorageServiceV1;
 use sigil_kernel::resource::AuthorityGeneration;
@@ -44,6 +45,8 @@ pub struct ResourceAuthorityServiceBundleV1 {
     pub storage: Arc<dyn ManagedStorageServiceV1>,
     pub verifiers: Vec<RaOwnedVerifierV1>,
     pub journal_coordinator: ResourceJournalCoordinatorProtocolServiceV1,
+    /// Host-private borrowed native-save authority, absent in isolated shadow compositions.
+    pub borrowed_native_save: Option<Arc<dyn BorrowedNativeSaveServiceV1>>,
 }
 
 /// The unique factory. Compositions may not construct a second instance through any other path.
@@ -51,6 +54,7 @@ pub struct ResourceAuthorityServiceFactoryV1 {
     authority_generation: AuthorityGeneration,
     storage: Arc<dyn ManagedStorageServiceV1>,
     file_access: Arc<dyn ManagedFileAccessServiceV1>,
+    borrowed_native_save: Option<Arc<dyn BorrowedNativeSaveServiceV1>>,
 }
 
 impl ResourceAuthorityServiceFactoryV1 {
@@ -63,6 +67,21 @@ impl ResourceAuthorityServiceFactoryV1 {
             authority_generation,
             storage,
             file_access,
+            borrowed_native_save: None,
+        }
+    }
+
+    pub fn new_with_borrowed_native_save(
+        authority_generation: AuthorityGeneration,
+        storage: Arc<dyn ManagedStorageServiceV1>,
+        file_access: Arc<dyn ManagedFileAccessServiceV1>,
+        borrowed_native_save: Arc<dyn BorrowedNativeSaveServiceV1>,
+    ) -> Self {
+        Self {
+            authority_generation,
+            storage,
+            file_access,
+            borrowed_native_save: Some(borrowed_native_save),
         }
     }
 
@@ -104,6 +123,7 @@ impl ResourceAuthorityServiceFactoryV1 {
             journal_coordinator: ResourceJournalCoordinatorProtocolServiceV1 {
                 journal_instance_hash: format!("journal-{}", self.authority_generation.epoch),
             },
+            borrowed_native_save: self.borrowed_native_save.clone(),
         }
     }
 }

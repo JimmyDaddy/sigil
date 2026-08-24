@@ -172,6 +172,8 @@ pub struct HttpLocalServer {
     session_catalog: Option<Arc<SessionCatalogProjectionService>>,
     server_info: Option<HttpServerInfo>,
     support_context: Option<Arc<HttpSupportContext>>,
+    borrowed_native_save_service:
+        Option<Arc<dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1>>,
 }
 
 impl HttpLocalServer {
@@ -280,6 +282,7 @@ impl HttpLocalServer {
             session_catalog,
             server_info,
             support_context: None,
+            borrowed_native_save_service: None,
         })
     }
 
@@ -287,6 +290,17 @@ impl HttpLocalServer {
     #[must_use]
     pub fn with_support_context(mut self, support_context: HttpSupportContext) -> Self {
         self.support_context = Some(Arc::new(support_context));
+        self
+    }
+
+    /// Attaches the host-private borrowed native-save authority port. This route is intentionally
+    /// not part of the public/OpenAPI command surface.
+    #[must_use]
+    pub fn with_borrowed_native_save_service(
+        mut self,
+        service: Arc<dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1>,
+    ) -> Self {
+        self.borrowed_native_save_service = Some(service);
         self
     }
 
@@ -329,6 +343,7 @@ impl HttpLocalServer {
                     let session_catalog = self.session_catalog.clone();
                     let server_info = self.server_info.clone();
                     let support_context = self.support_context.clone();
+                    let borrowed_native_save_service = self.borrowed_native_save_service.clone();
                     let connection_shutdown = connection_shutdown.subscribe();
                     connections.spawn(async move {
                         handle_http_connection(
@@ -340,6 +355,7 @@ impl HttpLocalServer {
                             session_catalog,
                             server_info,
                             support_context,
+                            borrowed_native_save_service,
                             connection_shutdown,
                         )
                         .await
@@ -385,6 +401,9 @@ async fn handle_http_connection(
     session_catalog: Option<Arc<SessionCatalogProjectionService>>,
     server_info: Option<HttpServerInfo>,
     support_context: Option<Arc<HttpSupportContext>>,
+    borrowed_native_save_service: Option<
+        Arc<dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1>,
+    >,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), HttpListenerError> {
     let request = tokio::select! {
@@ -416,6 +435,7 @@ async fn handle_http_connection(
                     session_catalog.as_deref(),
                     server_info.as_ref(),
                     support_context.as_deref(),
+                    borrowed_native_save_service.as_deref(),
                 )
             })
             .await
@@ -445,6 +465,9 @@ fn route_http_request(
     session_catalog: Option<&SessionCatalogProjectionService>,
     server_info: Option<&HttpServerInfo>,
     support_context: Option<&HttpSupportContext>,
+    borrowed_native_save_service: Option<
+        &dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1,
+    >,
 ) -> HttpResponse {
     if request.method == "GET" && request.path == "/health" {
         return json_response(200, json!({ "status": "ok" }));
@@ -453,6 +476,31 @@ fn route_http_request(
         validator.validate_authorization_header(request.header("authorization").map(String::as_str))
     {
         return http_error_response(401, "unauthorized", error.to_string());
+    }
+
+    if request.method == "POST" && request.path == "/v1/private/borrowed/native-save" {
+        let Some(service) = borrowed_native_save_service else {
+            return http_error_response(
+                503,
+                "borrowed_native_save_unavailable",
+                "host-private native save is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<
+            sigil_resource_authority::native_save::BorrowedNativeSaveRequestV1,
+        >(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_borrowed_native_save_request",
+                "invalid host-private native save registration capsule",
+            );
+        };
+        return match service.save(body) {
+            Ok(receipt) => json_response(201, json!(receipt)),
+            Err(error) => {
+                http_error_response(422, "borrowed_native_save_rejected", error.to_string())
+            }
+        };
     }
 
     if request.method == "GET" && request.path == "/sessions" {
