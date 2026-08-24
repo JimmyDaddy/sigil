@@ -163,8 +163,7 @@ impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        sigil_process::configure_process_tree(&mut command);
         command
             .spawn()
             .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
@@ -739,19 +738,38 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            sigil_process::configure_process_tree(&mut command);
             command
                 .spawn()
                 .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?
         };
+        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
+            Ok(owner) => owner,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
         let cap = request.limits.max_output_bytes;
-        let stdout_pipe = child
-            .stdout
-            .take()
-            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
-        let stderr_pipe = child
-            .stderr
-            .take()
-            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let stdout_pipe = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => {
+                let _ = process_owner.terminate();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let stderr_pipe = match child.stderr.take() {
+            Some(pipe) => pipe,
+            None => {
+                let _ = process_owner.terminate();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
         let stdin_pipe = child.stdin.take();
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
         let handle_stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
@@ -773,6 +791,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
 
         let handle = LocalPersistentProcessHandleV1 {
             child: Arc::new(Mutex::new(child)),
+            process_owner,
             stdin: Arc::new(Mutex::new(stdin_pipe)),
             stdin_open: Arc::new(AtomicBool::new(true)),
             frame_rx: Some(frame_rx),
@@ -789,6 +808,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
 /// Local persistent process handle (non-clone, non-serialize).
 struct LocalPersistentProcessHandleV1 {
     child: Arc<Mutex<Child>>,
+    process_owner: sigil_process::ProcessTreeOwnerGuard,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdin_open: Arc<AtomicBool>,
     frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
@@ -906,6 +926,7 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         &mut self,
         _reason: ProcessCancelReasonV1,
     ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        let _ = self.process_owner.terminate();
         let mut guard = self
             .child
             .lock()

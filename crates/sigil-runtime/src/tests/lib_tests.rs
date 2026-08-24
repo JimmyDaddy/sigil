@@ -2256,9 +2256,7 @@ while True:
     sigil_mcp::register_mcp_tools_with_options(
         &mut registry,
         &servers,
-        sigil_mcp::McpToolRegistrationOptions::eager()?
-            .with_capabilities(&provider_capabilities)
-            .with_working_dir(temp.path().to_path_buf()),
+        managed_mcp_registration_options(temp.path())?.with_capabilities(&provider_capabilities),
     )
     .await?;
 
@@ -2344,6 +2342,26 @@ async fn mcp_tool_contents(
     Ok(contents)
 }
 
+fn managed_mcp_registration_options(
+    workspace_root: &Path,
+) -> Result<sigil_mcp::McpToolRegistrationOptions> {
+    let route = Arc::new(
+        super::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1::new(
+            Arc::new(super::r71_shadow_planner::ShadowPlannerV1::new(
+                super::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            workspace_root.to_path_buf(),
+        ),
+    );
+    Ok(sigil_mcp::McpToolRegistrationOptions::eager()?
+        .with_working_dir(workspace_root.to_path_buf())
+        .with_process_launcher(Arc::new(super::ConfiguredMcpProcessLauncher {
+            execution: sigil_kernel::ExecutionConfig::default(),
+            managed_extension_execution: Some(route),
+        })))
+}
+
 #[tokio::test]
 async fn refresh_mcp_server_tools_replaces_poisoned_generation_before_first_new_call() -> Result<()>
 {
@@ -2402,7 +2420,12 @@ while True:
     };
     config.mcp_servers.push(server.clone());
     let mut registry = ToolRegistry::new();
-    sigil_mcp::register_mcp_tools(&mut registry, &[server]).await?;
+    sigil_mcp::register_mcp_tools_with_options(
+        &mut registry,
+        &[server],
+        managed_mcp_registration_options(temp.path())?,
+    )
+    .await?;
 
     let poisoned = registry
         .execute(
@@ -2508,7 +2531,12 @@ while True:
     };
     config.mcp_servers.push(server.clone());
     let mut registry = ToolRegistry::new();
-    sigil_mcp::register_mcp_tools(&mut registry, &[server]).await?;
+    sigil_mcp::register_mcp_tools_with_options(
+        &mut registry,
+        &[server],
+        managed_mcp_registration_options(temp.path())?,
+    )
+    .await?;
     let descendant_pid = std::fs::read_to_string(&descendant_pid_file)?
         .trim()
         .parse::<u32>()?;
@@ -2744,7 +2772,12 @@ while True:
         ..McpServerConfig::default()
     };
     let mut registry = ToolRegistry::new();
-    sigil_mcp::register_mcp_tools(&mut registry, std::slice::from_ref(&healthy)).await?;
+    sigil_mcp::register_mcp_tools_with_options(
+        &mut registry,
+        std::slice::from_ref(&healthy),
+        managed_mcp_registration_options(temp.path())?,
+    )
+    .await?;
 
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
