@@ -1436,11 +1436,16 @@ pub(super) struct ConfiguredMcpProcessLauncher {
 #[async_trait::async_trait]
 impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
-        if self.managed_extension_execution.is_some() {
-            bail!("managed MCP extension launch requires the async lifecycle");
+        #[cfg(test)]
+        {
+            let plan = self.build_plan(&request)?;
+            launch_planned_mcp_process(request, plan)
         }
-        let plan = self.build_plan(&request)?;
-        launch_planned_mcp_process(request, plan)
+        #[cfg(not(test))]
+        {
+            let _ = (&self.execution, &self.managed_extension_execution, request);
+            bail!("MCP extension launch requires the composed managed async lifecycle")
+        }
     }
 
     async fn launch_async(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
@@ -1453,7 +1458,15 @@ impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
                 .map_err(|error| anyhow!("managed MCP extension launch failed: {error}"))?;
             return McpProcessLaunch::managed(handle, mcp_process_launch_receipt(&request, &plan));
         }
-        launch_planned_mcp_process(request, plan)
+        #[cfg(test)]
+        {
+            return launch_planned_mcp_process(request, plan);
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (request, plan);
+            bail!("MCP extension launch requires the composed managed execution route")
+        }
     }
 }
 
@@ -1476,6 +1489,7 @@ impl ConfiguredMcpProcessLauncher {
     }
 }
 
+#[cfg(test)]
 pub(super) fn launch_planned_mcp_process(
     request: McpProcessLaunchRequest,
     plan: sigil_tools_builtin::LongLivedStdioProcessPlan,

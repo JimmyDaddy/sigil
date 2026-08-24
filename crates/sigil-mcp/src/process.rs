@@ -597,9 +597,27 @@ pub trait McpProcessLauncher: Send + Sync {
     }
 }
 
+/// Production fallback that refuses to launch a local process until the runtime injects the
+/// composed managed execution route. Test-only fixtures use `LocalMcpProcessLauncher` below.
+#[cfg(not(test))]
+#[derive(Debug)]
+pub(crate) struct ManagedProcessRequiredMcpProcessLauncher;
+
+#[cfg(not(test))]
+impl McpProcessLauncher for ManagedProcessRequiredMcpProcessLauncher {
+    fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        bail!(
+            "MCP server {} requires the composed managed execution launcher",
+            request.server_name
+        )
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 pub struct LocalMcpProcessLauncher;
 
+#[cfg(test)]
 impl McpProcessLauncher for LocalMcpProcessLauncher {
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
         let planned_network = ExecutionNetworkReceipt::unknown(
@@ -1008,6 +1026,7 @@ async fn kill_and_reap_child(child: &mut Child) -> McpProcessCleanupSummary {
     }
 }
 
+#[cfg(test)]
 fn configure_mcp_process_group(_command: &mut Command) {
     #[cfg(unix)]
     _command.process_group(0);

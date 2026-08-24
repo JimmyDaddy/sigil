@@ -1,4 +1,16 @@
 use super::*;
+#[cfg(not(test))]
+use crate::process::ManagedProcessRequiredMcpProcessLauncher;
+
+#[cfg(test)]
+fn default_process_launcher() -> Arc<dyn McpProcessLauncher> {
+    Arc::new(LocalMcpProcessLauncher)
+}
+
+#[cfg(not(test))]
+fn default_process_launcher() -> Arc<dyn McpProcessLauncher> {
+    Arc::new(ManagedProcessRequiredMcpProcessLauncher)
+}
 
 pub const MCP_TOOL_LIFECYCLE_NAMESPACE: &str = "sigil.mcp.server";
 
@@ -45,7 +57,7 @@ impl McpToolRegistrationOptions {
             startup,
             mutation_recorder: None,
             mutation_workspace_root: None,
-            process_launcher: Arc::new(LocalMcpProcessLauncher),
+            process_launcher: default_process_launcher(),
             network_admission: ExtensionProcessNetworkAdmission::default(),
             expected_process_subject: None,
             pre_spawn_safe_metadata: BTreeMap::new(),

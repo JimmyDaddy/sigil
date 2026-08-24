@@ -539,17 +539,18 @@ pub use process_environment::{
 pub use projection::{
     AGENT_GRAPH_PROJECTION_SCHEMA_VERSION, DISPATCH_TRACE_PROJECTION_SCHEMA_VERSION,
     DispatchTraceEntry, DispatchTraceKind, DispatchTraceProjectionSnapshot, DispatchTraceStatus,
-    DispatchTraceSummary, DispatchTraceUsageSummary, FILE_PROJECTION_STORE_SCHEMA_VERSION,
-    FileProjectionStore, ProjectionPressureEvaluation, ProjectionPressureReason,
-    ProjectionPressureSample, ProjectionPressureThresholds, ProjectionQueryContract,
-    ProjectionQueryFamily, ProjectionQueryScope, ProjectionQuerySurface, ProjectionRebuildOutput,
-    ProjectionRebuildReport, ProjectionStore, ProjectionStoreRecommendation, ProjectionStoreState,
-    SESSION_LIST_PROJECTION_SCHEMA_VERSION, SessionListProjectionEntry,
+    DispatchTraceSummary, DispatchTraceUsageSummary, ProjectionPressureEvaluation,
+    ProjectionPressureReason, ProjectionPressureSample, ProjectionPressureThresholds,
+    ProjectionQueryContract, ProjectionQueryFamily, ProjectionQueryScope, ProjectionQuerySurface,
+    ProjectionRebuildOutput, ProjectionRebuildReport, ProjectionStoreRecommendation,
+    ProjectionStoreState, SESSION_LIST_PROJECTION_SCHEMA_VERSION, SessionListProjectionEntry,
     SessionListProjectionSnapshot, SessionListReadinessSummary, SessionListTaskSummary,
     SessionListUsageSummary, agent_graph_projection_from_records,
     dispatch_trace_projection_from_records, evaluate_projection_pressure,
     session_list_projection_from_records,
 };
+#[cfg(test)]
+pub use projection::{FILE_PROJECTION_STORE_SCHEMA_VERSION, FileProjectionStore, ProjectionStore};
 pub use provider::{
     AssistantMessageKind, BackgroundTaskHandle, BackgroundTaskStatus, CacheMode,
     CacheTokenCountProvenance, CacheTokenCountV1, CacheTtl, CacheUsageCapabilities, CacheUsageV1,

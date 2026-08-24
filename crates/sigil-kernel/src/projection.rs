@@ -3,11 +3,11 @@
 //! JSONL remains the source of truth. This module stores rebuildable projection views together
 //! with their cursor so event application and cursor advancement persist as one atomic replace.
 
-#[cfg(unix)]
-use std::fs::File;
+use std::collections::BTreeMap;
+
+#[cfg(test)]
 use std::{
-    collections::BTreeMap,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -15,18 +15,23 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::{Context, bail};
+#[cfg(test)]
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentThreadStateProjection, ApprovalMode, ControlEntry, EvidenceScope, ModelMessage,
     NetworkEffect, PermissionRisk, ProjectionApplyDecision, ProjectionCursor, RunStatus,
     TaskRunStatus, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolErrorKind,
-    ToolExecutionStatus, ToolOperation, ToolSubjectScope, UsageStats, VerificationStateProjection,
-    VerificationStateProjectionSnapshot, VerificationVerdict, VisibleCompletionState,
-    projection_apply_decision_for_record,
+    ToolExecutionStatus, ToolOperation, ToolSubjectScope, UsageStats, VerificationVerdict,
+    VisibleCompletionState, projection_apply_decision_for_record,
     session::{SessionLogEntry, SessionStreamRecord},
 };
+#[cfg(test)]
+use crate::{VerificationStateProjection, VerificationStateProjectionSnapshot};
 
 #[cfg(test)]
 #[path = "tests/projection_tests.rs"]
@@ -37,12 +42,16 @@ pub const AGENT_GRAPH_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const DISPATCH_TRACE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const SESSION_LIST_PROJECTION_SCHEMA_VERSION: u16 = 1;
 
+#[cfg(test)]
 const AGENT_GRAPH_PROJECTION_NAME: &str = "agent_graph";
+#[cfg(test)]
 const DISPATCH_TRACE_PROJECTION_NAME: &str = "dispatch_trace";
+#[cfg(test)]
 const SESSION_LIST_PROJECTION_NAME: &str = "session_list";
 const SESSION_LIST_TITLE_MAX_CHARS: usize = 160;
 const DISPATCH_TRACE_DESTINATION_LIMIT: usize = 8;
 
+#[cfg(test)]
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Persisted projection state plus the cursor that proves how far it has consumed a stream.
@@ -443,6 +452,7 @@ fn evaluate_pressure_value(
 }
 
 /// Common interface for rebuildable projection stores.
+#[cfg(test)]
 pub trait ProjectionStore<T> {
     fn load_state(&self) -> Result<ProjectionStoreState<T>>;
 
@@ -465,6 +475,7 @@ pub trait ProjectionStore<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg(test)]
 struct ProjectionStoreEnvelope<T> {
     schema_version: u16,
     projection_name: String,
@@ -478,6 +489,7 @@ struct ProjectionStoreEnvelope<T> {
 /// envelope through a temporary file followed by atomic rename. That keeps the first productized
 /// projection store independent from a database while preserving the RFC-0001 transaction rule.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct FileProjectionStore<T> {
     path: PathBuf,
     projection_name: String,
@@ -485,6 +497,7 @@ pub struct FileProjectionStore<T> {
     _marker: PhantomData<T>,
 }
 
+#[cfg(test)]
 impl<T> FileProjectionStore<T>
 where
     T: Clone + Default + DeserializeOwned + Serialize,
@@ -675,6 +688,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<T> ProjectionStore<T> for FileProjectionStore<T>
 where
     T: Clone + Default + DeserializeOwned + Serialize,
@@ -706,6 +720,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl FileProjectionStore<VerificationStateProjectionSnapshot> {
     pub fn verification(path: impl AsRef<Path>) -> Self {
         Self::new(
@@ -730,6 +745,7 @@ impl FileProjectionStore<VerificationStateProjectionSnapshot> {
     }
 }
 
+#[cfg(test)]
 impl FileProjectionStore<AgentThreadStateProjection> {
     pub fn agent_graph(path: impl AsRef<Path>) -> Self {
         Self::new(
@@ -760,6 +776,7 @@ impl FileProjectionStore<AgentThreadStateProjection> {
     }
 }
 
+#[cfg(test)]
 impl FileProjectionStore<DispatchTraceProjectionSnapshot> {
     pub fn dispatch_trace(path: impl AsRef<Path>) -> Self {
         Self::new(
@@ -784,6 +801,7 @@ impl FileProjectionStore<DispatchTraceProjectionSnapshot> {
     }
 }
 
+#[cfg(test)]
 impl FileProjectionStore<SessionListProjectionSnapshot> {
     pub fn session_list(path: impl AsRef<Path>) -> Self {
         Self::new(
@@ -1376,6 +1394,7 @@ impl DispatchTraceUsageSummary {
     }
 }
 
+#[cfg(test)]
 fn apply_session_list_projection_snapshot_record(
     snapshot: &mut SessionListProjectionSnapshot,
     record: &SessionStreamRecord,
@@ -1441,6 +1460,7 @@ fn apply_agent_graph_projection_record(
     Ok(())
 }
 
+#[cfg(test)]
 fn apply_dispatch_trace_projection_snapshot_record(
     snapshot: &mut DispatchTraceProjectionSnapshot,
     record: &SessionStreamRecord,
@@ -1689,6 +1709,7 @@ fn truncate_title(value: &str) -> String {
     output
 }
 
+#[cfg(test)]
 fn apply_verification_projection_snapshot_record(
     snapshot: &mut VerificationStateProjectionSnapshot,
     record: &SessionStreamRecord,
@@ -1704,6 +1725,7 @@ fn apply_verification_projection_snapshot_record(
     Ok(())
 }
 
+#[cfg(test)]
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -1766,6 +1788,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn sync_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         File::open(parent)
@@ -1776,6 +1799,7 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg(test)]
 fn sync_parent_dir(_path: &Path) -> Result<()> {
     Ok(())
 }

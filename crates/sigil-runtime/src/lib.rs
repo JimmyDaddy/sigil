@@ -43,6 +43,7 @@ use sigil_provider_openai_responses::{
 };
 /// Session-scoped scratch lease registry shared by built-in tools and maintenance GC.
 pub use sigil_tools_builtin::ScratchNamespaceControl as RuntimeScratchNamespaceControl;
+#[cfg(test)]
 use tokio::process::Command;
 
 /// Constructs a runtime-owned agent with the root-configured policy for future durable

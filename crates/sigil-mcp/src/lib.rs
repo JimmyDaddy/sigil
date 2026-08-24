@@ -10,6 +10,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sigil_kernel::validate_extension_process_network_admission;
 use sigil_kernel::{
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EXTENSION_ENVIRONMENT_POLICY_VERSION,
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
@@ -22,13 +24,15 @@ use sigil_kernel::{
     ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner, ToolPermissionPlanDraft,
     ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
     VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
-    safe_persistence_json_value, validate_extension_process_network_admission,
+    safe_persistence_json_value,
 };
 #[cfg(test)]
 use tokio::process::ChildStdout;
+#[cfg(test)]
+use tokio::process::Command;
 use tokio::{
     io::{AsyncWrite, BufReader},
-    process::{Child, Command},
+    process::Child,
     sync::Mutex,
     task::JoinHandle,
 };
@@ -121,9 +125,11 @@ pub use permission::{
     McpPermissionBinding, McpPermissionClassification, McpPermissionTransport, McpToolAnnotations,
     classify_mcp_permission, mcp_permission_fingerprint, mcp_tool_permission_plan,
 };
+#[cfg(test)]
+pub use process::LocalMcpProcessLauncher;
 pub use process::{
-    LocalMcpProcessLauncher, McpDeclarationLaunchMetadata, McpProcessClass, McpProcessCoverage,
-    McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,
+    McpDeclarationLaunchMetadata, McpProcessClass, McpProcessCoverage, McpProcessLaunch,
+    McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,
 };
 pub use search_binding::{
     KnownMcpSearchAdapter, McpSearchAdapterKind, McpSearchIncompatibility,

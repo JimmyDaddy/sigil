@@ -1499,6 +1499,12 @@ E21.17 已把 Streamable HTTP 协议核心接入用户根 flat tagged MCP config
 
 当前 MCP 实现同时支持 stdio 与用户根配置声明的 Streamable HTTP transport。两者都覆盖 `initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`；stdio transport 还会在等待响应时处理 server 发来的反向请求：
 
+R71.7 收紧了 stdio 的生产生命周期边界：生产 MCP activation 不再拥有 raw child launch
+fallback，必须由 runtime 的 managed execution composition 提供 process route；旧的
+`McpProcessLaunch::owned` / local launcher 只保留测试兼容构造，生产缺少 managed route 时
+明确 fail closed。kernel production API 也不再暴露 path-rooted `FileProjectionStore`；可重建
+projection 由 runtime/authority 管理，文件投影类型仅编译进测试兼容面。
+
 - `roots/list` 返回入口层已解析的 workspace root，runtime 必须把 TUI / CLI 的 effective workspace root 传入 MCP 注册流程
 - `notifications/progress` 映射到 TUI live panel，不写重复 timeline，避免远端 server 用 progress 刷爆用户界面
 - `notifications/tools|resources|prompts/list_changed` 标记 server stale，并在 worker 空闲边界刷新该 server 的 provider-visible tool surface
