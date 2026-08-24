@@ -90,6 +90,10 @@ impl PathResolverEnv {
 }
 
 /// Resolves all Sigil user-local state and cache paths for one workspace.
+///
+/// Missing platform state/cache identity is a startup configuration failure. This function is
+/// intentionally infallible for the existing runtime call surface, so it terminates the current
+/// path resolution rather than inventing a cwd-relative writable root.
 #[must_use]
 pub fn resolve_sigil_paths(
     storage: &StorageConfig,
@@ -211,17 +215,13 @@ fn resolve_session_log_dir(session: &SessionConfig, workspace_state_root: &Path)
 }
 
 fn default_state_root(env: &PathResolverEnv) -> PathBuf {
-    match env.platform {
-        StoragePlatform::Macos => env
-            .home_dir
-            .as_ref()
-            .map(|home| {
-                home.join("Library")
-                    .join("Application Support")
-                    .join("sigil")
-                    .join("state")
-            })
-            .unwrap_or_else(|| PathBuf::from(".sigil-state")),
+    let root = match env.platform {
+        StoragePlatform::Macos => env.home_dir.as_ref().map(|home| {
+            home.join("Library")
+                .join("Application Support")
+                .join("sigil")
+                .join("state")
+        }),
         StoragePlatform::Linux => env
             .xdg_state_home
             .as_ref()
@@ -230,8 +230,7 @@ fn default_state_root(env: &PathResolverEnv) -> PathBuf {
                 env.home_dir
                     .as_ref()
                     .map(|home| home.join(".local").join("state").join("sigil"))
-            })
-            .unwrap_or_else(|| PathBuf::from(".sigil-state")),
+            }),
         StoragePlatform::Windows => env
             .local_app_data
             .as_ref()
@@ -243,18 +242,21 @@ fn default_state_root(env: &PathResolverEnv) -> PathBuf {
                         .join("sigil")
                         .join("state")
                 })
-            })
-            .unwrap_or_else(|| PathBuf::from(".sigil-state")),
-    }
+            }),
+    };
+    root.unwrap_or_else(|| {
+        panic!(
+            "cannot resolve Sigil state root: configure SIGIL_STATE_HOME or provide a platform user state directory"
+        )
+    })
 }
 
 fn default_cache_root(env: &PathResolverEnv) -> PathBuf {
-    match env.platform {
+    let root = match env.platform {
         StoragePlatform::Macos => env
             .home_dir
             .as_ref()
-            .map(|home| home.join("Library").join("Caches").join("sigil"))
-            .unwrap_or_else(|| PathBuf::from(".sigil-cache")),
+            .map(|home| home.join("Library").join("Caches").join("sigil")),
         StoragePlatform::Linux => env
             .xdg_cache_home
             .as_ref()
@@ -263,8 +265,7 @@ fn default_cache_root(env: &PathResolverEnv) -> PathBuf {
                 env.home_dir
                     .as_ref()
                     .map(|home| home.join(".cache").join("sigil"))
-            })
-            .unwrap_or_else(|| PathBuf::from(".sigil-cache")),
+            }),
         StoragePlatform::Windows => env
             .local_app_data
             .as_ref()
@@ -276,9 +277,13 @@ fn default_cache_root(env: &PathResolverEnv) -> PathBuf {
                         .join("sigil")
                         .join("cache")
                 })
-            })
-            .unwrap_or_else(|| PathBuf::from(".sigil-cache")),
-    }
+            }),
+    };
+    root.unwrap_or_else(|| {
+        panic!(
+            "cannot resolve Sigil cache root: configure SIGIL_CACHE_HOME or provide a platform user cache directory"
+        )
+    })
 }
 
 fn resolve_configured_path(configured: &str, base: &Path) -> PathBuf {

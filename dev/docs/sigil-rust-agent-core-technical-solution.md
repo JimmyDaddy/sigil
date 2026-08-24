@@ -1512,6 +1512,11 @@ R71.7 的工程 gate 同时把 resource/process inventory 与 Cargo graph 作为
 import 越界和 kernel path type 回流。R71.5 frozen conformance manifest 与 inventory baseline
 分开维护，baseline generator 不得重写前者。
 
+用户态 state/cache path 解析属于同一边界：`SIGIL_STATE_HOME`、`SIGIL_CACHE_HOME` 或平台
+用户目录缺失时，runtime 必须停止当前启动并报告不可解析，而不能把 `.sigil-state`、
+`.sigil-cache` 或 mutation artifact 写入当前工作目录。兼容调用方仍可保持现有 path object
+接口，但只能以 fail-closed termination 表达缺失 authority bootstrap，不能制造隐式可写 root。
+
 - `roots/list` 返回入口层已解析的 workspace root，runtime 必须把 TUI / CLI 的 effective workspace root 传入 MCP 注册流程
 - `notifications/progress` 映射到 TUI live panel，不写重复 timeline，避免远端 server 用 progress 刷爆用户界面
 - `notifications/tools|resources|prompts/list_changed` 标记 server stale，并在 worker 空闲边界刷新该 server 的 provider-visible tool surface

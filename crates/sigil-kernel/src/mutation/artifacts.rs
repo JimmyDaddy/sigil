@@ -41,11 +41,9 @@ pub struct MutationArtifactLifecycleRecorded {
 }
 
 pub(super) fn default_mutation_artifact_root(session_path: &Path) -> PathBuf {
-    let Some(parent) = session_path.parent() else {
-        return PathBuf::from(".sigil-state")
-            .join("artifacts")
-            .join("mutations");
-    };
+    let parent = session_path
+        .parent()
+        .expect("mutation session path must have an explicit parent root");
     let base = if parent.file_name().is_some_and(|name| name == "sessions") {
         let session_base = parent.parent().unwrap_or(parent);
         if session_base
@@ -63,7 +61,11 @@ pub(super) fn default_mutation_artifact_root(session_path: &Path) -> PathBuf {
 
 fn default_user_state_mutation_artifact_root() -> PathBuf {
     user_state_root()
-        .unwrap_or_else(|| PathBuf::from(".sigil-state"))
+        .unwrap_or_else(|| {
+            panic!(
+                "cannot resolve mutation artifact state root: configure SIGIL_STATE_HOME or provide a platform user state directory"
+            )
+        })
         .join("artifacts")
         .join("mutations")
 }

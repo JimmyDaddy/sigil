@@ -127,12 +127,10 @@ fn resolves_windows_defaults_from_home_when_local_app_data_is_missing() {
     );
 }
 
-/// RFC-0071 R71.0 characterization edge: with no HOME and no XDG state/cache, the current
-/// resolver silently falls back to cwd-relative ".sigil-state" / ".sigil-cache" roots. Any
-/// writer that then creates those directories pollutes the workspace (observed in session
-/// 5ff39a6d...: crate-local .sigil-state artifacts). R71.2 replaces this fallback with
-/// authority bootstrap roots; this test locks the observed behavior until that cutover.
+/// RFC-0071 R71.7: with no platform state/cache identity, path resolution must fail closed rather
+/// than invent cwd-relative writable roots.
 #[test]
+#[should_panic(expected = "cannot resolve Sigil state root")]
 fn resolver_defaults_to_relative_roots_without_home_or_xdg() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let mut resolver_env = env(StoragePlatform::Linux);
@@ -140,16 +138,12 @@ fn resolver_defaults_to_relative_roots_without_home_or_xdg() {
     resolver_env.xdg_state_home = None;
     resolver_env.xdg_cache_home = None;
 
-    let paths = resolve_sigil_paths_with_env(
+    let _paths = resolve_sigil_paths_with_env(
         &StorageConfig::default(),
         &SessionConfig::default(),
         workspace.path().join("missing-workspace"),
         &resolver_env,
     );
-
-    assert_eq!(paths.state_root, Path::new(".sigil-state"));
-    assert_eq!(paths.cache_root, Path::new(".sigil-cache"));
-    assert!(paths.workspace_id.starts_with("missing-workspace-"));
 }
 
 #[test]
