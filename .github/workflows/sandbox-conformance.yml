@@ -111,7 +111,7 @@ jobs:
       - name: Install Bubblewrap tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap libglib2.0-dev pkg-config wget
+          sudo apt-get install -y bubblewrap libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev pkg-config wget
       - name: Run full Linux qualification
         shell: bash
         env:
