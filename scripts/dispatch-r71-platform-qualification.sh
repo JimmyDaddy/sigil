@@ -54,7 +54,16 @@ if payload.get("result") != "passed" or payload.get("suite") != "full":
 print(f"local qualification evidence verified for candidate {candidate}")
 PY
 
-remote_candidate="$(git ls-remote --heads origin r71-release-candidate | awk '{print $1}')"
+remote_candidate=""
+for attempt in 1 2 3; do
+  if remote_candidate="$(git ls-remote --heads origin r71-release-candidate | awk '{print $1}')"; then
+    break
+  fi
+  remote_candidate=""
+  if [[ "$attempt" -lt 3 ]]; then
+    sleep 2
+  fi
+done
 if [[ "$remote_candidate" != "$candidate_sha" ]]; then
   echo "origin/r71-release-candidate resolves to ${remote_candidate:-<missing>}, expected $candidate_sha" >&2
   exit 1
