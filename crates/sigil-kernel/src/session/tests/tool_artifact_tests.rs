@@ -585,7 +585,7 @@ fn manifest_gc_retains_active_hold_and_tombstones_only_grace_expired_orphan() ->
         store
             .root()
             .join("trash")
-            .join(report.tombstone_id)
+            .join(&report.tombstone_id)
             .join("refs")
             .join(format!("{}.json", orphan.artifact_ref.artifact_id))
             .is_file()
@@ -595,6 +595,68 @@ fn manifest_gc_retains_active_hold_and_tombstones_only_grace_expired_orphan() ->
     let pruned = store.prune_garbage_trash(u64::MAX, TOOL_ARTIFACT_ORPHAN_GRACE_MS)?;
     assert_eq!(pruned.removed_tombstones, 1);
     assert!(pruned.removed_bytes > 0);
+    Ok(())
+}
+
+#[test]
+fn split_artifact_roots_prune_published_and_staging_trash() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("split-session.jsonl");
+    let store = ToolArtifactStore::for_session_path_with_roots(
+        &session_path,
+        temp.path().join("artifact-store"),
+        temp.path().join("artifact-staging"),
+    );
+    let orphan = store.capture_text(
+        "call-split-gc",
+        "shell",
+        "split-root orphan",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let newest_manifest_ms = store
+        .manifest_inventory()?
+        .iter()
+        .map(|entry| entry.manifest_modified_at_unix_ms)
+        .max()
+        .unwrap_or(0);
+    let report = store.garbage_collect(
+        &ToolArtifactGcRootsV1::default(),
+        newest_manifest_ms.saturating_add(TOOL_ARTIFACT_ORPHAN_GRACE_MS),
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+    assert!(
+        store
+            .root()
+            .join("trash")
+            .join(&report.tombstone_id)
+            .is_dir()
+    );
+    assert!(
+        store
+            .staging_root()
+            .join("trash")
+            .join(&report.tombstone_id)
+            .is_dir()
+    );
+    assert!(store.resolve(&orphan.artifact_ref).is_err());
+
+    let pruned = store.prune_garbage_trash(u64::MAX, TOOL_ARTIFACT_ORPHAN_GRACE_MS)?;
+    assert_eq!(pruned.removed_tombstones, 1);
+    assert!(pruned.removed_bytes > 0);
+    assert!(
+        !store
+            .root()
+            .join("trash")
+            .join(&report.tombstone_id)
+            .exists()
+    );
+    assert!(
+        !store
+            .staging_root()
+            .join("trash")
+            .join(&report.tombstone_id)
+            .exists()
+    );
     Ok(())
 }
 

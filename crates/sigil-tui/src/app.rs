@@ -969,6 +969,40 @@ impl AppState {
             .map(|path| path.join("records.jsonl"))
     }
 
+    /// Resolves the current session's artifact roots through the authority-declared leaves.
+    /// `None` means the current-schema composition could not provide a safe read route; callers
+    /// must not fall back to the legacy sibling path in that case.
+    pub(super) fn tool_artifact_store_for_current_session(
+        &self,
+    ) -> Option<sigil_kernel::ToolArtifactStore> {
+        let Some(writer) = self.managed_history_writer.as_ref() else {
+            return Some(sigil_kernel::ToolArtifactStore::for_session_path(
+                &self.session_log_path,
+            ));
+        };
+        let composition = self.authority_composition.as_ref()?;
+        let staging =
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;
+        let store = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore;
+        if !composition.declared_channels.contains(&staging)
+            || !composition.declared_channels.contains(&store)
+        {
+            return Some(sigil_kernel::ToolArtifactStore::for_session_path(
+                &self.session_log_path,
+            ));
+        }
+        let key = self.session_log_path.file_stem()?.to_str()?;
+        let store_root = writer.managed_named_leaf_path(store, key).ok()?;
+        let staging_root = writer.managed_named_leaf_path(staging, key).ok()?;
+        Some(
+            sigil_kernel::ToolArtifactStore::for_session_path_with_roots(
+                &self.session_log_path,
+                store_root,
+                staging_root,
+            ),
+        )
+    }
+
     /// The boot authority composition (None before boot attachment). Used by the production
     /// launcher; test builds route composition through the launcher builder so the accessor can
     /// be unused in that cfg.

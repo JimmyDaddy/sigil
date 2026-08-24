@@ -372,6 +372,10 @@ pub struct LocalSessionLifecycleService {
     /// logical catalog reference remains `<session-key>.jsonl`; the physical `records.jsonl`
     /// path never becomes a caller-supplied source of truth.
     managed_session_log_root: Option<PathBuf>,
+    /// Authority-declared published/staging artifact roots used when the selected session
+    /// source is current-schema managed storage.
+    managed_artifact_store_root: Option<PathBuf>,
+    managed_artifact_staging_root: Option<PathBuf>,
 }
 
 /// RFC-0062 14.1: session-scoped scratch namespace cleanup bound to session deletion.
@@ -403,6 +407,8 @@ impl LocalSessionLifecycleService {
             managed_writer: None,
             managed_namespace_key: None,
             managed_session_log_root: None,
+            managed_artifact_store_root: None,
+            managed_artifact_staging_root: None,
         }
     }
 
@@ -446,6 +452,42 @@ impl LocalSessionLifecycleService {
             }
         }
         self.managed_session_log_root = Some(root);
+        Ok(self)
+    }
+
+    /// Attaches the authority-declared ArtifactStore and ArtifactStaging roots used by current
+    /// schema lifecycle reads and exports. The roots are validated as real directories when
+    /// present and may be absent for a truthful zero-artifact cold start.
+    pub fn with_managed_artifact_roots(
+        mut self,
+        artifact_store_root: impl Into<PathBuf>,
+        artifact_staging_root: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        for (label, root) in [
+            ("managed artifact-store root", artifact_store_root.into()),
+            (
+                "managed artifact-staging root",
+                artifact_staging_root.into(),
+            ),
+        ] {
+            match fs::symlink_metadata(&root) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        bail!("{label} must be a real directory");
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to inspect {label} {}", root.display()));
+                }
+            }
+            if label == "managed artifact-store root" {
+                self.managed_artifact_store_root = Some(root);
+            } else {
+                self.managed_artifact_staging_root = Some(root);
+            }
+        }
         Ok(self)
     }
 
@@ -870,7 +912,7 @@ impl LocalSessionLifecycleService {
         let before_hash = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
         let records = JsonlSessionStore::read_event_records(&source.path)?;
         let projection = project_records(&records)?;
-        let artifact_store = ToolArtifactStore::for_session_path(&source.path);
+        let artifact_store = self.artifact_store_for_source_path(&source.path);
         let tool_artifacts = export_tool_artifacts(
             &artifact_store,
             &projection.tool_artifacts,
@@ -1593,14 +1635,21 @@ impl LocalSessionLifecycleService {
         {
             bail!("artifact GC source must be a direct session reference");
         }
-        let directory_metadata = fs::symlink_metadata(&self.session_dir)
-            .with_context(|| format!("failed to inspect {}", self.session_dir.display()))?;
-        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
-            bail!("configured session directory must be a real directory");
+        let managed_source = self.session_source_is_managed(session_ref);
+        let path = self.session_source_path(session_ref)?;
+        if !managed_source {
+            let directory_metadata = fs::symlink_metadata(&self.session_dir)
+                .with_context(|| format!("failed to inspect {}", self.session_dir.display()))?;
+            if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+                bail!("configured session directory must be a real directory");
+            }
+            let directory = fs::canonicalize(&self.session_dir).with_context(|| {
+                format!("failed to canonicalize {}", self.session_dir.display())
+            })?;
+            if path.parent() != Some(directory.as_path()) {
+                bail!("artifact GC source escaped the configured session directory");
+            }
         }
-        let directory = fs::canonicalize(&self.session_dir)
-            .with_context(|| format!("failed to canonicalize {}", self.session_dir.display()))?;
-        let path = session_ref.resolve(&directory);
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("failed to inspect {}", path.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -1608,14 +1657,58 @@ impl LocalSessionLifecycleService {
         }
         let path = fs::canonicalize(&path)
             .with_context(|| format!("failed to canonicalize {}", path.display()))?;
-        if path.parent() != Some(directory.as_path()) {
-            bail!("artifact GC source escaped the configured session directory");
+        if managed_source {
+            let root = self
+                .managed_session_log_root
+                .as_deref()
+                .context("managed session source root is unavailable")?;
+            let root = fs::canonicalize(root)
+                .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+            let relative = path
+                .parent()
+                .and_then(|parent| parent.strip_prefix(&root).ok())
+                .context("managed artifact GC source escaped the session-log root")?;
+            if relative.components().count() != 1 {
+                bail!("managed artifact GC source must be one session key below the root");
+            }
         }
-        let store = ToolArtifactStore::for_session_path(&path);
+        let store = self.artifact_store_for_source_path(&path);
         if store.session_scope_id() != expected_session_id {
             bail!("artifact GC session identity changed");
         }
         Ok(store)
+    }
+
+    fn artifact_store_for_source_path(&self, source_path: &Path) -> ToolArtifactStore {
+        let Some(session_root) = self.managed_session_log_root.as_deref() else {
+            return ToolArtifactStore::for_session_path(source_path);
+        };
+        let Some(store_root) = self.managed_artifact_store_root.as_deref() else {
+            return ToolArtifactStore::for_session_path(source_path);
+        };
+        let Some(staging_root) = self.managed_artifact_staging_root.as_deref() else {
+            return ToolArtifactStore::for_session_path(source_path);
+        };
+        let Ok(session_root) = session_root.canonicalize() else {
+            return ToolArtifactStore::for_session_path(source_path);
+        };
+        let Ok(source_path) = source_path.canonicalize() else {
+            return ToolArtifactStore::for_session_path(source_path);
+        };
+        let Some(key) = source_path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(&session_root).ok())
+            .filter(|relative| relative.components().count() == 1)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+        else {
+            return ToolArtifactStore::for_session_path(&source_path);
+        };
+        ToolArtifactStore::for_session_path_with_roots(
+            &source_path,
+            store_root.join(key),
+            staging_root.join(key),
+        )
     }
 
     fn allocate_export_path(

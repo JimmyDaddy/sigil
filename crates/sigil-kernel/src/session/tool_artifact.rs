@@ -2527,7 +2527,9 @@ const TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION: u16 = 1;
 pub struct ToolArtifactStore {
     session_scope_id: String,
     session_scope_id_hash: String,
+    session_log_path: PathBuf,
     root: PathBuf,
+    staging_root: PathBuf,
 }
 
 impl ToolArtifactStore {
@@ -2541,14 +2543,7 @@ impl ToolArtifactStore {
     /// `<session-dir>/<stem>/artifacts`, so the JSONL is `<session-dir>/<stem>.jsonl`.
     #[must_use]
     pub fn session_log_path(&self) -> std::path::PathBuf {
-        let stem_dir = self.root.parent();
-        let session_dir = stem_dir.and_then(|dir| dir.parent());
-        match (session_dir, stem_dir.and_then(|dir| dir.file_name())) {
-            (Some(session_dir), Some(stem)) => {
-                session_dir.join(format!("{}.jsonl", stem.to_string_lossy()))
-            }
-            _ => self.root.join("session.jsonl"),
-        }
+        self.session_log_path.clone()
     }
 
     #[must_use]
@@ -2568,7 +2563,6 @@ impl ToolArtifactStore {
                 .unwrap_or_else(|| session_path.to_path_buf())
         };
         let session_path = normalized_path.as_path();
-        let session_scope_id = session_id_for_path(session_path);
         let stem = session_path
             .file_stem()
             .filter(|stem| !stem.is_empty())
@@ -2578,16 +2572,47 @@ impl ToolArtifactStore {
             .unwrap_or_else(|| Path::new("."))
             .join(stem)
             .join("artifacts");
+        Self::for_session_path_with_roots(session_path, root.clone(), root)
+    }
+
+    /// Creates a session artifact store with separately authority-owned published and staging
+    /// roots. The session path remains the logical identity used for scope binding; neither
+    /// managed root is derived from env/cwd or exposed through the descriptor contract.
+    #[must_use]
+    pub fn for_session_path_with_roots(
+        session_path: &Path,
+        artifact_store_root: PathBuf,
+        artifact_staging_root: PathBuf,
+    ) -> Self {
+        let normalized_path = if session_path.exists() {
+            fs::canonicalize(session_path).unwrap_or_else(|_| session_path.to_path_buf())
+        } else {
+            session_path
+                .parent()
+                .and_then(|parent| fs::canonicalize(parent).ok())
+                .and_then(|parent| session_path.file_name().map(|name| parent.join(name)))
+                .unwrap_or_else(|| session_path.to_path_buf())
+        };
+        let session_path = normalized_path.as_path();
+        let session_scope_id = session_id_for_path(session_path);
         Self {
             session_scope_id_hash: stable_event_hash(session_scope_id.as_bytes()),
             session_scope_id,
-            root,
+            session_log_path: normalized_path,
+            root: artifact_store_root,
+            staging_root: artifact_staging_root,
         }
     }
 
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Authority-owned root used only for capture staging files.
+    #[must_use]
+    pub fn staging_root(&self) -> &Path {
+        &self.staging_root
     }
 
     #[must_use]
@@ -2956,9 +2981,11 @@ impl ToolArtifactStore {
         let trash_root = self.root.join("trash").join(&tombstone_id);
         let trash_refs = trash_root.join("refs");
         let trash_blobs = trash_root.join("blobs");
-        let trash_staging = trash_root.join("staging");
+        let staging_trash_root = self.staging_root.join("trash");
+        let trash_staging = staging_trash_root.join(&tombstone_id);
         self.ensure_root_dir()?;
         create_private_dir(&self.root.join("trash"))?;
+        create_private_dir(&staging_trash_root)?;
         create_private_dir(&self.root.join("refs"))?;
         create_private_dir(&trash_root)?;
         create_private_dir(&trash_refs)?;
@@ -3061,6 +3088,7 @@ impl ToolArtifactStore {
         }
         sync_dir(&trash_blobs)?;
         sync_dir(&trash_staging)?;
+        sync_dir(&staging_trash_root)?;
         sync_dir(&trash_root)?;
         let usage_after_gc = directory_file_bytes(&self.root.join("blobs"))?;
         self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
@@ -3072,6 +3100,12 @@ impl ToolArtifactStore {
             fs::remove_dir_all(&trash_root)
                 .with_context(|| format!("failed to remove empty {}", trash_root.display()))?;
             sync_dir(&self.root.join("trash"))?;
+            if trash_staging != trash_root {
+                fs::remove_dir_all(&trash_staging).with_context(|| {
+                    format!("failed to remove empty {}", trash_staging.display())
+                })?;
+                sync_dir(&staging_trash_root)?;
+            }
         }
         Ok(ToolArtifactGcReportV1 {
             tombstone_id,
@@ -3100,42 +3134,47 @@ impl ToolArtifactStore {
         if trash_grace_ms < TOOL_ARTIFACT_ORPHAN_GRACE_MS {
             bail!("tool artifact trash grace must be at least 24 hours");
         }
-        let trash = self.root.join("trash");
-        let entries = match fs::read_dir(&trash) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ToolArtifactTrashPruneReportV1 {
-                    removed_tombstones: 0,
-                    removed_bytes: 0,
-                });
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to read {}", trash.display()));
-            }
-        };
-        let mut removed_tombstones = 0usize;
-        let mut removed_bytes = 0u64;
-        for entry in entries {
-            let entry = entry.with_context(|| format!("failed to read {}", trash.display()))?;
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)
-                .with_context(|| format!("failed to inspect {}", path.display()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                bail!("tool artifact trash contains an unsafe entry");
-            }
-            if now_unix_ms.saturating_sub(metadata_modified_at_unix_ms(&metadata)) < trash_grace_ms
-            {
-                continue;
-            }
-            let bytes = safe_directory_file_bytes(&path)?;
-            fs::remove_dir_all(&path)
-                .with_context(|| format!("failed to prune {}", path.display()))?;
-            removed_tombstones = removed_tombstones.saturating_add(1);
-            removed_bytes = removed_bytes.saturating_add(bytes);
+        let mut trash_roots = vec![self.root.join("trash")];
+        let staging_trash = self.staging_root.join("trash");
+        if staging_trash != trash_roots[0] {
+            trash_roots.push(staging_trash);
         }
-        sync_dir(&trash)?;
+        let mut removed_tombstone_ids = BTreeSet::new();
+        let mut removed_bytes = 0u64;
+        for trash in trash_roots {
+            let entries = match fs::read_dir(&trash) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to read {}", trash.display()));
+                }
+            };
+            for entry in entries {
+                let entry = entry.with_context(|| format!("failed to read {}", trash.display()))?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path)
+                    .with_context(|| format!("failed to inspect {}", path.display()))?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!("tool artifact trash contains an unsafe entry");
+                }
+                if now_unix_ms.saturating_sub(metadata_modified_at_unix_ms(&metadata))
+                    < trash_grace_ms
+                {
+                    continue;
+                }
+                let bytes = safe_directory_file_bytes(&path)?;
+                fs::remove_dir_all(&path)
+                    .with_context(|| format!("failed to prune {}", path.display()))?;
+                if let Some(tombstone_id) = path.file_name().and_then(|name| name.to_str()) {
+                    removed_tombstone_ids.insert(tombstone_id.to_owned());
+                }
+                removed_bytes = removed_bytes.saturating_add(bytes);
+            }
+            sync_dir(&trash)?;
+        }
         Ok(ToolArtifactTrashPruneReportV1 {
-            removed_tombstones,
+            removed_tombstones: removed_tombstone_ids.len(),
             removed_bytes,
         })
     }
@@ -3307,9 +3346,15 @@ impl ToolArtifactStore {
         let session_dir = self
             .root
             .parent()
-            .context("tool artifact root has no session directory")?;
+            .context("tool artifact root has no parent")?;
         create_private_dir(session_dir)?;
-        create_private_dir(&self.root)
+        create_private_dir(&self.root)?;
+        let staging_parent = self
+            .staging_root
+            .parent()
+            .context("tool artifact staging root has no parent")?;
+        create_private_dir(staging_parent)?;
+        create_private_dir(&self.staging_root)
     }
 
     fn open_ref_lock(&self, artifact_ref: &ToolArtifactRefV1) -> Result<File> {
@@ -3346,7 +3391,7 @@ impl ToolArtifactStore {
         let blob_dir = blob_path
             .parent()
             .context("tool artifact blob path has no parent")?;
-        let staging_dir = self.root.join("staging");
+        let staging_dir = self.staging_root.join("staging");
         self.ensure_root_dir()?;
         create_private_dir(&self.root.join("blobs"))?;
         create_private_dir(blob_dir)?;
@@ -3594,7 +3639,7 @@ impl ToolArtifactStore {
         now_unix_ms: u64,
         orphan_grace_ms: u64,
     ) -> Result<Vec<(PathBuf, u64)>> {
-        let staging_root = self.root.join("staging");
+        let staging_root = self.staging_root.join("staging");
         let entries = match fs::read_dir(&staging_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -3742,7 +3787,7 @@ impl ToolArtifactCaptureSink {
             self.sensitivity,
         );
         self.store.ensure_root_dir()?;
-        let staging_dir = self.store.root.join("staging");
+        let staging_dir = self.store.staging_root.join("staging");
         create_private_dir(&staging_dir)?;
         // RFC-0062 16.2: on Windows the directory must be protected BEFORE any file is created,
         // otherwise a wide parent ACL lets other principals open the staging files while they

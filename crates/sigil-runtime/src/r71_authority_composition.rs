@@ -333,6 +333,7 @@ pub fn attach_boot_authority_to_services(
             Ch::InputHistory,
             Ch::SessionCatalog,
             Ch::ArtifactStaging,
+            Ch::ArtifactStore,
             Ch::AdapterDurableState,
             Ch::AdapterEgressDisclosure,
             Ch::AdapterIdempotencyLedger,

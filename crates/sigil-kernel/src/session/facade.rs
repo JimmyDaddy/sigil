@@ -13,6 +13,7 @@ pub struct Session {
     pub(super) resolved_model_route: Option<ResolvedModelRoute>,
     pub(super) entries: Vec<SessionLogEntry>,
     pub(super) store: Option<JsonlSessionStore>,
+    pub(super) tool_artifact_store_override: Option<ToolArtifactStore>,
     pub(super) stats: SessionStats,
     pub(super) runtime_attachments: SessionRuntimeAttachments,
     durable_session_entry_count: Option<u64>,
@@ -35,6 +36,7 @@ pub struct StableCompactionSnapshot {
     model_name: String,
     resolved_model_route: Option<ResolvedModelRoute>,
     entries: Vec<SessionLogEntry>,
+    tool_artifact_store_override: Option<ToolArtifactStore>,
     stats: SessionStats,
     runtime_attachments: SessionRuntimeAttachments,
     durable_session_entry_count: u64,
@@ -105,6 +107,7 @@ impl StableCompactionSnapshot {
             resolved_model_route: self.resolved_model_route.clone(),
             entries: self.entries.clone(),
             store: Some(self.store.clone()),
+            tool_artifact_store_override: self.tool_artifact_store_override.clone(),
             stats: self.stats.clone(),
             runtime_attachments: self.runtime_attachments.clone(),
             durable_session_entry_count: Some(self.durable_session_entry_count),
@@ -171,6 +174,7 @@ impl Session {
             resolved_model_route: None,
             entries: Vec::new(),
             store: None,
+            tool_artifact_store_override: None,
             stats: SessionStats::default(),
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
@@ -187,6 +191,7 @@ impl Session {
             resolved_model_route: Some(route),
             entries: Vec::new(),
             store: None,
+            tool_artifact_store_override: None,
             stats: SessionStats::default(),
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
@@ -203,6 +208,20 @@ impl Session {
         self.durable_session_entry_count = (self.entries.is_empty() && store_is_empty).then_some(0);
         self.store = Some(store);
         self
+    }
+
+    /// Installs a runtime-owned artifact store whose physical roots were admitted by the
+    /// authority composition. The override is deliberately process-local and is not serialized
+    /// into the kernel session contract.
+    #[must_use]
+    pub fn with_tool_artifact_store_override(mut self, store: ToolArtifactStore) -> Self {
+        self.tool_artifact_store_override = Some(store);
+        self
+    }
+
+    /// Attaches a runtime-owned artifact store to an already loaded session.
+    pub fn attach_tool_artifact_store_override(&mut self, store: ToolArtifactStore) {
+        self.tool_artifact_store_override = Some(store);
     }
 
     /// Returns the scheduler-facing durable projection for a store-backed session.
@@ -291,6 +310,7 @@ impl Session {
             model_name: self.model_name.clone(),
             resolved_model_route: self.resolved_model_route.clone(),
             entries: self.entries.clone(),
+            tool_artifact_store_override: self.tool_artifact_store_override.clone(),
             stats: self.stats.clone(),
             runtime_attachments: self.runtime_attachments.clone(),
             durable_session_entry_count: live_entry_count,
@@ -320,6 +340,7 @@ impl Session {
             resolved_model_route: session_resolved_route_from_entries(&entries),
             entries,
             store: None,
+            tool_artifact_store_override: None,
             stats,
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
@@ -370,6 +391,7 @@ impl Session {
             resolved_model_route: session_resolved_route_from_entries(&entries),
             entries,
             store: None,
+            tool_artifact_store_override: None,
             stats,
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
@@ -430,6 +452,7 @@ impl Session {
             resolved_model_route: session_resolved_route_from_entries(&entries),
             entries,
             store: Some(store),
+            tool_artifact_store_override: None,
             stats,
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count,
@@ -601,9 +624,11 @@ impl Session {
 
     #[must_use]
     pub fn tool_artifact_store(&self) -> Option<ToolArtifactStore> {
-        self.store
-            .as_ref()
-            .map(ToolArtifactStore::for_session_store)
+        self.tool_artifact_store_override.clone().or_else(|| {
+            self.store
+                .as_ref()
+                .map(ToolArtifactStore::for_session_store)
+        })
     }
 
     /// Persists one tool result and its body-free receipts/provenance as one crash-safe bundle.
@@ -661,10 +686,12 @@ impl Session {
             .transpose()?;
         self.entries.extend(entries);
         if let Some(events) = events {
-            if let (Some(artifact_ref), Some(event), Some(store)) =
+            if let (Some(artifact_ref), Some(event), Some(_store)) =
                 (artifact_ref.as_ref(), events.first(), self.store.as_ref())
-                && let Err(error) = ToolArtifactStore::for_session_store(store)
-                    .bind_source_event(artifact_ref, &event.event_id)
+                && let Err(error) = self
+                    .tool_artifact_store()
+                    .ok_or_else(|| anyhow::anyhow!("tool artifact store is unavailable"))
+                    .and_then(|store| store.bind_source_event(artifact_ref, &event.event_id))
             {
                 // The `.event` binding is a rebuildable fork/GC cache. Retrieval authorization
                 // comes only from the active durable pressure projection, so failure here cannot

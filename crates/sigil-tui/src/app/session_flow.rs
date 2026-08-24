@@ -823,8 +823,7 @@ impl AppState {
         let restored_tools = restored_tool_occurrences(&entries);
         let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(&entries);
         let suppressed_assistant_preamble_indices = suppressed_assistant_preamble_indices(&entries);
-        let tool_artifact_store =
-            sigil_kernel::ToolArtifactStore::for_session_path(&self.session_log_path);
+        let tool_artifact_store = self.tool_artifact_store_for_current_session();
         self.tool_preview_snapshots = restored_tools.pending_previews.clone();
         for (entry_index, entry) in entries.into_iter().enumerate() {
             match entry {
@@ -849,7 +848,7 @@ impl AppState {
                         Some(&result.call_id),
                         &render_tool_result_v2_content_with_store(
                             &result,
-                            Some(&tool_artifact_store),
+                            tool_artifact_store.as_ref(),
                         ),
                         execution,
                         tool_call,

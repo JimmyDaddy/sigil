@@ -10,6 +10,7 @@ pub(super) struct CapturedSessionRuntimeAttachments {
     source_session_scope_id: Option<String>,
     user_url_capability_registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
     image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
+    tool_artifact_store: Option<sigil_kernel::ToolArtifactStore>,
 }
 
 impl CapturedSessionRuntimeAttachments {
@@ -18,6 +19,85 @@ impl CapturedSessionRuntimeAttachments {
             source_session_scope_id: session.map(|session| session.session_scope_id().to_owned()),
             user_url_capability_registrar: session.and_then(Session::user_url_capability_registrar),
             image_attachment_resolver: session.and_then(Session::image_attachment_resolver),
+            tool_artifact_store: session.and_then(Session::tool_artifact_store),
+        }
+    }
+}
+
+/// Authority-admitted ArtifactStaging + ArtifactStore roots held for one interactive session.
+/// The lease is retained by the worker across runs and finalized when the worker/session ends.
+pub(super) struct ManagedTuiArtifactStoreLease {
+    writer: Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    staging_lease: Option<sigil_runtime::managed_storage_writer::ManagedStorageWriterLeaseV1>,
+    store_lease: Option<sigil_runtime::managed_storage_writer::ManagedStorageWriterLeaseV1>,
+    artifact_store: sigil_kernel::ToolArtifactStore,
+}
+
+impl ManagedTuiArtifactStoreLease {
+    pub(super) fn acquire(
+        writer: Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        session_path: &Path,
+    ) -> Result<Self> {
+        let key = session_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("managed TUI artifact session key is unavailable"))?;
+        let staging_lease = writer
+            .acquire_named(
+                sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
+                key,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("managed artifact-staging admission failed: {error}")
+            })?;
+        let store_lease = match writer.acquire_named(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
+            key,
+        ) {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = writer.finalize(staging_lease);
+                return Err(anyhow::anyhow!(
+                    "managed artifact-store admission failed: {error}"
+                ));
+            }
+        };
+        let artifact_store = sigil_kernel::ToolArtifactStore::for_session_path_with_roots(
+            session_path,
+            store_lease.path().to_path_buf(),
+            staging_lease.path().to_path_buf(),
+        );
+        Ok(Self {
+            writer,
+            staging_lease: Some(staging_lease),
+            store_lease: Some(store_lease),
+            artifact_store,
+        })
+    }
+
+    pub(super) fn store(&self) -> sigil_kernel::ToolArtifactStore {
+        self.artifact_store.clone()
+    }
+
+    pub(super) fn writer(
+        &self,
+    ) -> Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
+        Arc::clone(&self.writer)
+    }
+}
+
+impl Drop for ManagedTuiArtifactStoreLease {
+    fn drop(&mut self) {
+        if let Some(lease) = self.store_lease.take()
+            && let Err(error) = self.writer.finalize(lease)
+        {
+            tracing::error!(%error, "failed to finalize managed TUI artifact-store namespace");
+        }
+        if let Some(lease) = self.staging_lease.take()
+            && let Err(error) = self.writer.finalize(lease)
+        {
+            tracing::error!(%error, "failed to finalize managed TUI artifact-staging namespace");
         }
     }
 }
@@ -95,6 +175,12 @@ fn attach_captured_runtime_attachments(
     }
     if let Some(resolver) = runtime_attachments.image_attachment_resolver.clone() {
         session.try_attach_image_attachment_resolver(resolver)?;
+    }
+    if let Some(store) = runtime_attachments.tool_artifact_store.clone()
+        && runtime_attachments.source_session_scope_id.as_deref()
+            == Some(session.session_scope_id())
+    {
+        session.attach_tool_artifact_store_override(store);
     }
     Ok(())
 }

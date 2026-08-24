@@ -27,6 +27,7 @@ pub use protocol::{
     WorkerRouteRecoverySessionTarget,
 };
 pub(crate) use route_recovery::worker_session_route_recovery_message;
+pub(in crate::runner) use session_flow::ManagedTuiArtifactStoreLease;
 pub use spawn::spawn_agent_worker;
 #[cfg(not(test))]
 pub(crate) use spawn::{

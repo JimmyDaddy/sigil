@@ -828,6 +828,28 @@ pub fn conversation_display_page(
     limit: usize,
     current_workspace_snapshot_id: Option<&str>,
 ) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
+    let store = ToolArtifactStore::for_session_path(session_path);
+    conversation_display_page_with_artifact_store(
+        session_path,
+        expected_scope,
+        cursor,
+        limit,
+        current_workspace_snapshot_id,
+        &store,
+    )
+}
+
+/// Projects one canonical display page using an already authority-routed artifact store.
+/// Production surfaces with managed ArtifactStore/ArtifactStaging roots must use this entrypoint
+/// so physical availability checks cannot fall back to a sibling of the managed session log.
+pub fn conversation_display_page_with_artifact_store(
+    session_path: &Path,
+    expected_scope: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    current_workspace_snapshot_id: Option<&str>,
+    artifact_store: &ToolArtifactStore,
+) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
     let records = JsonlSessionStore::read_event_records(session_path).with_context(|| {
         format!(
             "failed to read conversation session {}",
@@ -841,10 +863,7 @@ pub fn conversation_display_page(
         limit,
         current_workspace_snapshot_id,
     )?;
-    reconcile_physical_artifact_availability(
-        &mut page,
-        &ToolArtifactStore::for_session_path(session_path),
-    );
+    reconcile_physical_artifact_availability(&mut page, artifact_store);
     Ok(page)
 }
 

@@ -358,6 +358,33 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 disclosure_presenter,
                 extension_network_admission,
             );
+            let managed_artifact_store = match authority_composition.as_ref() {
+                Some(composition)
+                    if composition.declared_channels.contains(
+                        &sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
+                    ) && composition.declared_channels.contains(
+                        &sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
+                    ) => match super::ManagedTuiArtifactStoreLease::acquire(
+                        Arc::clone(&composition.storage_writer),
+                        &session_log_path,
+                    ) {
+                        Ok(lease) => Some(lease),
+                        Err(error) => {
+                            tracing::debug!(%error, "managed TUI artifact storage startup is unavailable");
+                            send_worker_startup_recovery(
+                                &message_tx,
+                                sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
+                                vec![
+                                    sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                                    sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                                ],
+                                true,
+                            );
+                            return;
+                        }
+                    },
+                _ => None,
+            };
             let agent = Arc::new(Agent::new(provider, registry));
             run_worker_loop(
                 runtime,
@@ -381,6 +408,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     Some(terminal_control),
                 )
                 .with_scratch_control(surface.scratch_control),
+                managed_artifact_store,
             );
         })
         .context("failed to spawn sigil agent worker")?;

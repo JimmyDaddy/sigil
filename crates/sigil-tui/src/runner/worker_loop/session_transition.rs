@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::ManagedTuiArtifactStoreLease;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runner) enum SessionTransitionKind {
@@ -321,6 +322,29 @@ where
             return Err(source);
         }
     };
+    let same_managed_artifact_session =
+        state.managed_artifact_store.is_some() && state.session.log_path == session_log_path;
+    let target_managed_artifact_store = if let Some(current) = state.managed_artifact_store.as_ref()
+    {
+        if same_managed_artifact_session {
+            session.attach_tool_artifact_store_override(current.store());
+            None
+        } else {
+            Some(
+                ManagedTuiArtifactStoreLease::acquire(current.writer(), &session_log_path)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to admit target session artifact storage: {error:#}"
+                        )
+                    })?,
+            )
+        }
+    } else {
+        None
+    };
+    if let Some(artifact_store) = target_managed_artifact_store.as_ref() {
+        session.attach_tool_artifact_store_override(artifact_store.store());
+    }
     let cleanup_report = runtime
         .block_on(
             sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
@@ -466,6 +490,10 @@ where
     state.session.projection_reconciliation_latched = false;
     state.session.current = Some(session);
     state.session.log_path = session_log_path.clone();
+    if let Some(artifact_store) = target_managed_artifact_store {
+        let previous = state.managed_artifact_store.replace(artifact_store);
+        drop(previous);
+    }
     if let Some(target_attachment) = target_attachment {
         state.session.attachment_lease = target_attachment;
     }

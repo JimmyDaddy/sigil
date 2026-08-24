@@ -820,7 +820,13 @@ where
                         &paths.scratch_root,
                         manifest_hash,
                         planner,
-                        &[Ch::SessionLog, Ch::InputHistory, Ch::SessionCatalog],
+                        &[
+                            Ch::SessionLog,
+                            Ch::InputHistory,
+                            Ch::SessionCatalog,
+                            Ch::ArtifactStaging,
+                            Ch::ArtifactStore,
+                        ],
                     )
                     .map_err(anyhow::Error::new)?,
                 );

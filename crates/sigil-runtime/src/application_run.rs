@@ -23,8 +23,8 @@ use sigil_kernel::{
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
     Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskRunStatus,
-    TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView, WorkspaceTrust,
-    conversation_route_routing_contract_material, rerun_task_verification_check,
+    TaskVerificationRerunRequest, ToolArtifactStore, ToolRegistryScope, VerificationProductView,
+    WorkspaceTrust, conversation_route_routing_contract_material, rerun_task_verification_check,
     resolve_workspace_root, safe_persistence_text, verification_product_view,
     workspace_trust_from_entries,
 };
@@ -1860,6 +1860,7 @@ pub struct ApplicationRunExecution {
     pending_user_input_continuation: Option<user_input::ApplicationUserInputContinuationContext>,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
     managed_session_log: Option<ManagedApplicationSessionLogLease>,
+    managed_artifact_store: Option<ManagedApplicationArtifactStoreLease>,
     _session_lease: Arc<ApplicationSessionLease>,
 }
 
@@ -1908,6 +1909,89 @@ impl Drop for ManagedApplicationSessionLogLease {
         };
         if let Err(error) = self.writer.finalize(lease) {
             tracing::error!(%error, "failed to finalize managed session-log namespace during cleanup");
+        }
+    }
+}
+
+/// Authority-admitted ArtifactStaging + ArtifactStore roots held for one foreground operation.
+/// Capture writes use the staging root; immutable blobs, refs and usage state use the published
+/// artifact-store root. Both namespaces are finalized together on every terminal/drop path.
+struct ManagedApplicationArtifactStoreLease {
+    writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    staging_lease: Option<crate::managed_storage_writer::ManagedStorageWriterLeaseV1>,
+    store_lease: Option<crate::managed_storage_writer::ManagedStorageWriterLeaseV1>,
+    artifact_store: ToolArtifactStore,
+}
+
+impl ManagedApplicationArtifactStoreLease {
+    fn acquire(
+        writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        key: &str,
+        session_path: &Path,
+    ) -> Result<Self> {
+        let staging_lease = writer
+            .acquire_named(
+                crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
+                key,
+            )
+            .map_err(|error| {
+                anyhow!("managed artifact-staging namespace admission failed: {error}")
+            })?;
+        let store_lease = match writer.acquire_named(
+            crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
+            key,
+        ) {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = writer.finalize(staging_lease);
+                return Err(anyhow!(
+                    "managed artifact-store namespace admission failed: {error}"
+                ));
+            }
+        };
+        let artifact_store = ToolArtifactStore::for_session_path_with_roots(
+            session_path,
+            store_lease.path().to_path_buf(),
+            staging_lease.path().to_path_buf(),
+        );
+        Ok(Self {
+            writer,
+            staging_lease: Some(staging_lease),
+            store_lease: Some(store_lease),
+            artifact_store,
+        })
+    }
+
+    fn store(&self) -> ToolArtifactStore {
+        self.artifact_store.clone()
+    }
+
+    fn finalize(mut self) -> Result<()> {
+        if let Some(lease) = self.store_lease.take() {
+            self.writer.finalize(lease).map_err(|error| {
+                anyhow!("managed artifact-store namespace finalize failed: {error}")
+            })?;
+        }
+        if let Some(lease) = self.staging_lease.take() {
+            self.writer.finalize(lease).map_err(|error| {
+                anyhow!("managed artifact-staging namespace finalize failed: {error}")
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ManagedApplicationArtifactStoreLease {
+    fn drop(&mut self) {
+        if let Some(lease) = self.store_lease.take()
+            && let Err(error) = self.writer.finalize(lease)
+        {
+            tracing::error!(%error, "failed to finalize managed artifact-store namespace during cleanup");
+        }
+        if let Some(lease) = self.staging_lease.take()
+            && let Err(error) = self.writer.finalize(lease)
+        {
+            tracing::error!(%error, "failed to finalize managed artifact-staging namespace during cleanup");
         }
     }
 }
@@ -2435,6 +2519,11 @@ impl ApplicationRunExecution {
                         .finalize()
                         .context("failed to finalize managed session-log namespace")?;
                 }
+                if let Some(managed_artifact_store) = self.managed_artifact_store.take() {
+                    managed_artifact_store
+                        .finalize()
+                        .context("failed to finalize managed artifact namespaces")?;
+                }
                 let post_run_maintenance = ApplicationPostRunMaintenance::from_session_title(
                     self.pending_session_title.take(),
                 );
@@ -2482,6 +2571,11 @@ impl ApplicationRunExecution {
                     managed_session_log
                         .finalize()
                         .context("failed to finalize managed session-log namespace")?;
+                }
+                if let Some(managed_artifact_store) = self.managed_artifact_store.take() {
+                    managed_artifact_store
+                        .finalize()
+                        .context("failed to finalize managed artifact namespaces")?;
                 }
                 Ok(ApplicationRunOutput {
                     session_id: self.session_id,
@@ -3611,6 +3705,7 @@ async fn prepare_application_run_internal(
         _ => None,
     };
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
+    let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking_with_writer(
             request,
@@ -3618,6 +3713,7 @@ async fn prepare_application_run_internal(
             task_executor_attached,
             tool_authority,
             managed_session_log_writer,
+            managed_artifact_store_writer,
         )
     })
     .await
@@ -3651,6 +3747,7 @@ async fn prepare_application_run_internal(
         generate_session_title,
         route_transition,
         managed_session_log,
+        managed_artifact_store,
     } = prepared;
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
@@ -3945,6 +4042,7 @@ async fn prepare_application_run_internal(
             pending_user_input_continuation: None,
             route_transition,
             managed_session_log,
+            managed_artifact_store,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -5410,6 +5508,28 @@ fn current_schema_managed_session_log_writer(
         .map(|composition| Arc::clone(&composition.storage_writer))
 }
 
+fn current_schema_managed_artifact_store_writer(
+    services: &ApplicationRunServices,
+) -> Option<Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>> {
+    let cutover = services.cutover()?;
+    if cutover.manifest().selected_epoch
+        != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+    {
+        return None;
+    }
+    let composition = services.authority_composition()?;
+    if !composition
+        .declared_channels
+        .contains(&crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging)
+        || !composition
+            .declared_channels
+            .contains(&crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStore)
+    {
+        return None;
+    }
+    Some(Arc::clone(&composition.storage_writer))
+}
+
 /// Builds provider input with safe repository context candidates.
 #[must_use]
 pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunInput {
@@ -5459,6 +5579,7 @@ struct BlockingApplicationRunPreparation {
     generate_session_title: bool,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
     managed_session_log: Option<ManagedApplicationSessionLogLease>,
+    managed_artifact_store: Option<ManagedApplicationArtifactStoreLease>,
 }
 
 #[cfg(test)]
@@ -5474,6 +5595,7 @@ fn prepare_application_run_blocking(
         task_executor_attached,
         tool_authority,
         None,
+        None,
     )
 }
 
@@ -5483,6 +5605,9 @@ fn prepare_application_run_blocking_with_writer(
     task_executor_attached: bool,
     tool_authority: Option<std::sync::Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
     managed_session_log_writer: Option<
+        Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+    managed_artifact_store_writer: Option<
         Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
 ) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
@@ -5507,7 +5632,7 @@ fn prepare_application_run_blocking_with_writer(
         .session_path
         .clone()
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
-    let (requested_session_path, managed_session_log) =
+    let (requested_session_path, managed_session_log, managed_session_key) =
         if let Some(writer) = managed_session_log_writer {
             let key = application_session_log_key(&writer, &requested_session_path)
                 .map_err(ApplicationRunPrepareError::execution)?;
@@ -5520,9 +5645,9 @@ fn prepare_application_run_blocking_with_writer(
                 .join("records.jsonl");
             let lease = ManagedApplicationSessionLogLease::acquire(writer, &key)
                 .map_err(ApplicationRunPrepareError::execution)?;
-            (managed_path, Some(lease))
+            (managed_path, Some(lease), Some(key))
         } else {
-            (requested_session_path, None)
+            (requested_session_path, None, None)
         };
     let session_store = JsonlSessionStore::new(&requested_session_path)
         .map_err(ApplicationRunPrepareError::execution)?;
@@ -5558,6 +5683,17 @@ fn prepare_application_run_blocking_with_writer(
         plan,
         recovery_binding,
     } = inspected;
+    let managed_artifact_store = if let (Some(writer), Some(key)) = (
+        managed_artifact_store_writer,
+        managed_session_key.as_deref(),
+    ) {
+        let lease = ManagedApplicationArtifactStoreLease::acquire(writer, key, &session_path)
+            .map_err(ApplicationRunPrepareError::execution)?;
+        session = session.with_tool_artifact_store_override(lease.store());
+        Some(lease)
+    } else {
+        None
+    };
     let route_authority = session_lease
         .route_mutation_authority(session.session_scope_id())
         .map_err(ApplicationRunPrepareError::execution)?;
@@ -5836,6 +5972,7 @@ fn prepare_application_run_blocking_with_writer(
         generate_session_title,
         route_transition,
         managed_session_log,
+        managed_artifact_store,
     })
 }
 

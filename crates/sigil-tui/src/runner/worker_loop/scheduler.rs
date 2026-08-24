@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::ManagedTuiArtifactStoreLease;
 
 const MAX_EVENT_DRAIN: usize = 64;
 static WORKER_REACTOR_EVENT_WAKE_TOTAL: std::sync::atomic::AtomicU64 =
@@ -116,6 +117,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     message_tx: mpsc::Sender<WorkerMessage>,
     mcp_handlers: WorkerLoopMcpHandlers,
     terminal_runtime: WorkerLoopTerminalRuntime,
+    managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
@@ -152,6 +154,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
         None,
     ) {
         Ok(mut session) => {
+            if let Some(artifact_store) = managed_artifact_store.as_ref() {
+                session.attach_tool_artifact_store_override(artifact_store.store());
+            }
             if let Err(error) = session.try_attach_image_attachment_resolver(Arc::clone(
                 &default_image_attachment_resolver,
             )) {
@@ -282,6 +287,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         terminal_lifecycle_router,
         terminal_control,
         scratch_control.clone(),
+        managed_artifact_store,
     );
     // RFC-0062 14.1: one startup TTL sweep over the workspace scratch namespaces. Leases are
     // in-memory only, so a fresh worker cannot hold one; expired namespaces from crashed or

@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::ManagedTuiArtifactStoreLease;
 
 const MAX_APPROVAL_COMMAND_RECEIPTS: usize = 256;
 const MAX_ARTIFACT_GC_DEFERRED_NOTICES: usize = 32;
@@ -13,6 +14,7 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
     pub(in crate::runner) readiness: WorkerReadiness,
     pub(in crate::runner) session: SessionWorkerState,
+    pub(in crate::runner) managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
     pub(in crate::runner) run: RunWorkerState,
     pub(in crate::runner) compaction: CompactionWorkerState,
     pub(in crate::runner) artifact_gc: ArtifactGcWorkerState,
@@ -30,6 +32,7 @@ pub(in crate::runner) struct WorkerLoopState {
 }
 
 impl WorkerLoopState {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::runner) fn new(
         session_log_path: PathBuf,
         session: Option<Session>,
@@ -43,6 +46,7 @@ impl WorkerLoopState {
         terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
         terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
         scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+        managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
     ) -> Self {
         let pending_agent_result_continuations =
             pending_agent_result_continuations_from_session(session.as_ref());
@@ -73,6 +77,7 @@ impl WorkerLoopState {
             terminal_lifecycle_router,
             terminal_control,
             scratch_control,
+            managed_artifact_store,
             readiness: WorkerReadiness::new(),
             session: SessionWorkerState {
                 log_path: session_log_path,

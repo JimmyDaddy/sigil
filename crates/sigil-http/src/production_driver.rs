@@ -68,7 +68,7 @@ use sigil_runtime::application_run::{
     rerun_application_verification_with_attachment,
 };
 use sigil_runtime::conversation_display::{
-    ConversationDisplayProjectionError, conversation_display_page,
+    ConversationDisplayProjectionError, conversation_display_page_with_artifact_store,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
@@ -827,9 +827,27 @@ impl HttpProductionRunDriver {
                     sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
                 )
                 .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+            let managed_artifact_store_root = composition
+                .storage_writer
+                .managed_leaf_path(
+                    sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+            let managed_artifact_staging_root = composition
+                .storage_writer
+                .managed_leaf_path(
+                    sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
             options.session_lifecycle = Some(
                 lifecycle
                     .with_managed_session_log_root(managed_session_log_root)
+                    .and_then(|lifecycle| {
+                        lifecycle.with_managed_artifact_roots(
+                            managed_artifact_store_root,
+                            managed_artifact_staging_root,
+                        )
+                    })
                     .map_err(|error| HttpRunDriverError::new(error.to_string()))?,
             );
         }
@@ -1603,6 +1621,47 @@ fn validate_projected_tool_artifact_descriptor(
     Ok(())
 }
 
+fn authority_artifact_store_for_session(
+    services: &ApplicationRunServices,
+    session: &crate::HttpSessionSnapshot,
+) -> Option<ToolArtifactStore> {
+    let current_schema = services.cutover().is_some_and(|cutover| {
+        cutover.manifest().selected_epoch
+            == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+    });
+    let Some(composition) = services.authority_composition() else {
+        return Some(ToolArtifactStore::for_session_path(Path::new(
+            &session.session_log_path,
+        )));
+    };
+    let staging = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;
+    let store = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore;
+    if !current_schema
+        || !composition.declared_channels.contains(&staging)
+        || !composition.declared_channels.contains(&store)
+    {
+        return Some(ToolArtifactStore::for_session_path(Path::new(
+            &session.session_log_path,
+        )));
+    }
+    let key = Path::new(&session.session_log_path)
+        .file_stem()
+        .and_then(|value| value.to_str())?;
+    let store_root = composition
+        .storage_writer
+        .managed_named_leaf_path(store, key)
+        .ok()?;
+    let staging_root = composition
+        .storage_writer
+        .managed_named_leaf_path(staging, key)
+        .ok()?;
+    Some(ToolArtifactStore::for_session_path_with_roots(
+        Path::new(&session.session_log_path),
+        store_root,
+        staging_root,
+    ))
+}
+
 impl HttpRunDriver for HttpProductionRunDriver {
     fn requires_run_release_barrier(&self) -> bool {
         true
@@ -2156,12 +2215,15 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     sigil_runtime::plan_handoff_workspace_snapshot_id(&config, &workspace_root).ok()
                 })
                 .flatten();
-        let page = conversation_display_page(
+        let artifact_store = authority_artifact_store_for_session(&self.services, session)
+            .ok_or(HttpConversationDisplayDriverError::Unavailable)?;
+        let page = conversation_display_page_with_artifact_store(
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
             cursor,
             limit,
             current_workspace_snapshot_id.as_deref(),
+            &artifact_store,
         )
         .map_err(|error| match error {
             ConversationDisplayProjectionError::InvalidCursor { .. } => {
@@ -2207,7 +2269,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|_| HttpToolArtifactReadDriverError::InvalidSelector)?;
 
         let binding = self.projected_tool_artifact_binding(session, &artifact_ref)?;
-        let store = ToolArtifactStore::for_session_path(Path::new(&session.session_log_path));
+        let store = authority_artifact_store_for_session(&self.services, session)
+            .ok_or(HttpToolArtifactReadDriverError::Unavailable)?;
         let descriptor = store
             .resolve(&artifact_ref)
             .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;

@@ -56,14 +56,37 @@ pub(in crate::runner) fn local_session_lifecycle_service_for_source(
     let source_dir = source_path
         .parent()
         .and_then(|parent| fs::canonicalize(parent).ok())?;
-    (source_dir == configured_dir).then(|| {
-        LocalSessionLifecycleService::new(
-            paths.workspace_id,
-            paths.session_log_dir,
-            paths.session_exports_root,
-        )
-        .with_lifecycle_journal_path(paths.session_lifecycle_journal)
-    })
+    if source_dir == configured_dir {
+        return Some(
+            LocalSessionLifecycleService::new(
+                paths.workspace_id,
+                paths.session_log_dir,
+                paths.session_exports_root,
+            )
+            .with_lifecycle_journal_path(paths.session_lifecycle_journal),
+        );
+    }
+    let managed_session_root = paths.state_root.join("managed/session-log");
+    let managed_root = fs::canonicalize(&managed_session_root).ok()?;
+    let relative = source_dir.strip_prefix(&managed_root).ok()?;
+    (relative.components().count() == 1)
+        .then(|| {
+            LocalSessionLifecycleService::new(
+                paths.workspace_id,
+                paths.session_log_dir,
+                paths.session_exports_root,
+            )
+            .with_lifecycle_journal_path(paths.session_lifecycle_journal)
+            .with_managed_session_log_root(managed_session_root)
+            .and_then(|service| {
+                service.with_managed_artifact_roots(
+                    paths.state_root.join("managed/artifact-store"),
+                    paths.state_root.join("managed/artifact-staging"),
+                )
+            })
+            .ok()
+        })
+        .flatten()
 }
 
 pub(in crate::runner) fn inspect_local_session(

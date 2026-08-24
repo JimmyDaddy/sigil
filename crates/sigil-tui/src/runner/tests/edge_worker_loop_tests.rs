@@ -1852,6 +1852,7 @@ fn spawn_loop_with_shared_agent(
                     context_resolver,
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
+                None,
             );
         })
         .map_err(|error| anyhow::anyhow!("failed to spawn worker loop: {error}"))?;

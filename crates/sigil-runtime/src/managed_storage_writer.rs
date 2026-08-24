@@ -28,6 +28,7 @@ pub enum StorageWriterChannelV1 {
     DurableMemory,
     SessionCatalog,
     ArtifactStaging,
+    ArtifactStore,
     AdapterDurableState,
     AdapterEgressDisclosure,
     AdapterIdempotencyLedger,
@@ -73,6 +74,11 @@ impl StorageWriterChannelV1 {
                 ManagedStorageSemanticOwnerV1::ArtifactStaging,
                 ManagedStorageCapabilityFamilyV1::StreamingArtifact,
                 "artifact-staging",
+            ),
+            Self::ArtifactStore => (
+                ManagedStorageSemanticOwnerV1::ArtifactStore,
+                ManagedStorageCapabilityFamilyV1::ArtifactStore,
+                "artifact-store",
             ),
             Self::AdapterDurableState => (
                 ManagedStorageSemanticOwnerV1::AdapterDurableState(
@@ -884,5 +890,60 @@ mod tests {
             error,
             ManagedStorageWriterErrorV1::LeafEscapesAnchor
         ));
+    }
+
+    #[test]
+    fn r71_sw_artifact_staging_and_store_are_separate_authority_roots() {
+        use sigil_kernel::session::ToolArtifactSensitivity;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table
+            .register(grant_for_channel(
+                StorageWriterChannelV1::ArtifactStaging,
+                0x81,
+            ))
+            .expect("staging grant");
+        table
+            .register(grant_for_channel(
+                StorageWriterChannelV1::ArtifactStore,
+                0x82,
+            ))
+            .expect("store grant");
+        let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
+            std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
+                table,
+                AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: hash(0x83),
+                },
+            ));
+        let writer =
+            ManagedStorageWriterAdapterV1::new(service, dir.path().to_path_buf(), hash(0x84));
+        let staging = writer
+            .acquire_named(StorageWriterChannelV1::ArtifactStaging, "session-artifact")
+            .expect("staging lease");
+        let store = writer
+            .acquire_named(StorageWriterChannelV1::ArtifactStore, "session-artifact")
+            .expect("store lease");
+        let session_path = dir.path().join("session.jsonl");
+        let artifact_store = sigil_kernel::ToolArtifactStore::for_session_path_with_roots(
+            &session_path,
+            store.path().to_path_buf(),
+            staging.path().to_path_buf(),
+        );
+        let descriptor = artifact_store
+            .capture_text(
+                "call-1",
+                "shell",
+                "managed artifact",
+                ToolArtifactSensitivity::Ordinary,
+            )
+            .expect("artifact should publish");
+        assert!(descriptor.retrieval_available());
+        assert!(artifact_store.root().join("refs").exists());
+        assert!(artifact_store.staging_root().join("staging").exists());
+        assert!(!dir.path().join("session").join("artifacts").exists());
+        writer.finalize(store).expect("store finalize");
+        writer.finalize(staging).expect("staging finalize");
     }
 }

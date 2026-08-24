@@ -2226,6 +2226,48 @@ fn managed_session_log_source_is_cataloged_and_reopened() -> Result<()> {
 }
 
 #[test]
+fn managed_session_artifact_gc_uses_authority_roots_without_legacy_sibling() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_dir = temp.path().join("legacy-sessions");
+    let managed_root = temp.path().join("state/managed/session-log");
+    let artifact_store_root = temp.path().join("state/managed/artifact-store");
+    let artifact_staging_root = temp.path().join("state/managed/artifact-staging");
+    let managed_session = managed_root.join("session-gc").join("records.jsonl");
+    fs::create_dir_all(managed_session.parent().expect("managed session parent"))?;
+    finalized_session(&managed_session, "managed artifact gc")?;
+    let expected_session_id = JsonlSessionStore::read_event_records(&managed_session)?
+        .first()
+        .expect("managed session has a record")
+        .session_id()
+        .to_owned();
+    let service = LocalSessionLifecycleService::new(
+        "workspace-managed-artifacts",
+        &session_dir,
+        temp.path().join("exports"),
+    )
+    .with_managed_session_log_root(&managed_root)?
+    .with_managed_artifact_roots(&artifact_store_root, &artifact_staging_root)?;
+
+    let report = service.garbage_collect_session_artifacts(
+        &sigil_kernel::SessionRef::new_relative("session-gc.jsonl")?,
+        &expected_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(report.scanned_manifests, 0);
+    assert!(artifact_store_root.join("session-gc").is_dir());
+    assert!(artifact_staging_root.join("session-gc").is_dir());
+    assert!(
+        !managed_session
+            .parent()
+            .expect("managed session parent")
+            .join("artifacts")
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
 fn managed_session_catalog_cold_starts_and_rebuilds_many_sources() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let managed_root = temp.path().join("state/managed/session-log");

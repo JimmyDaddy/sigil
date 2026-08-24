@@ -80,6 +80,7 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
         terminal_lifecycle_router,
         None,
         None,
+        None,
     );
 
     assert_eq!(state.session.log_path, session_log_path);
@@ -493,6 +494,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         terminal_lifecycle_router,
         None,
         None,
+        None,
     );
     let queue_id = ConversationInputQueueId::new("queue_1")?;
     state
@@ -663,6 +665,7 @@ fn session_transition_joins_in_flight_maintenance_instead_of_rejecting() -> Resu
         terminal_lifecycle_router,
         None,
         None,
+        None,
     );
     let session_scope_id = state
         .session
@@ -768,6 +771,7 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
         event_tx.clone(),
         WorkerWakeCoalescer::new(event_tx, None),
         terminal_lifecycle_router,
+        None,
         None,
         None,
     );
@@ -901,6 +905,7 @@ allowed_tools = ["grep"]
         event_tx.clone(),
         WorkerWakeCoalescer::new(event_tx, None),
         terminal_lifecycle_router,
+        None,
         None,
         None,
     );

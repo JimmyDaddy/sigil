@@ -91,6 +91,7 @@ pub struct ApplicationTaskContinuationExecution {
     events: ApplicationRunEventSequence,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
     managed_session_log: Option<ManagedApplicationSessionLogLease>,
+    managed_artifact_store: Option<ManagedApplicationArtifactStoreLease>,
     _session_lease: Arc<ApplicationSessionLease>,
 }
 
@@ -184,6 +185,7 @@ pub async fn prepare_application_task_continuation(
     };
     let session_leases = Arc::clone(&services.session_leases);
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
+    let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking_with_writer(
             blocking_request,
@@ -191,6 +193,7 @@ pub async fn prepare_application_task_continuation(
             true,
             None,
             managed_session_log_writer,
+            managed_artifact_store_writer,
         )
     })
     .await
@@ -217,6 +220,7 @@ pub async fn prepare_application_task_continuation(
         task_agent_registry,
         route_transition,
         managed_session_log,
+        managed_artifact_store,
         ..
     } = prepared;
     if session.session_scope_id() != request.expected_session_scope_id {
@@ -339,6 +343,7 @@ pub async fn prepare_application_task_continuation(
             events: events.clone(),
             route_transition,
             managed_session_log,
+            managed_artifact_store,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -507,6 +512,11 @@ impl ApplicationTaskContinuationExecution {
             managed_session_log
                 .finalize()
                 .context("failed to finalize managed session-log namespace")?;
+        }
+        if let Some(managed_artifact_store) = self.managed_artifact_store.take() {
+            managed_artifact_store
+                .finalize()
+                .context("failed to finalize managed artifact namespaces")?;
         }
         Ok(ApplicationTaskContinuationOutput {
             session_id: self.session_id,

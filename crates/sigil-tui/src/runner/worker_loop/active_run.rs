@@ -94,6 +94,9 @@ pub(in crate::runner) fn cancel_active_run(
 ) {
     let url_capability_registrar = active_run.url_capability_registrar.clone();
     let image_attachment_resolver = active_run.image_attachment_resolver.clone();
+    let tool_artifact_store = current_session
+        .as_ref()
+        .and_then(Session::tool_artifact_store);
     elicitation_handler.set_audit_buffer(None);
     if !active_run.cancellation_owner.reserve_cancel() {
         let _ = message_tx.send(WorkerMessage::Notice(
@@ -202,6 +205,7 @@ pub(in crate::runner) fn cancel_active_run(
             current_session_log_path,
             url_capability_registrar.clone(),
             image_attachment_resolver.clone(),
+            tool_artifact_store.clone(),
         ) {
             *current_session = Some(session);
             detached_durable_controls.clear();
@@ -236,6 +240,7 @@ pub(in crate::runner) fn cancel_active_run(
         current_session_log_path,
         url_capability_registrar,
         image_attachment_resolver,
+        tool_artifact_store,
     ) {
         Ok(session) => {
             let mut session = session;
@@ -392,6 +397,7 @@ fn load_active_run_session(
     session_log_path: &Path,
     registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
     image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
+    tool_artifact_store: Option<sigil_kernel::ToolArtifactStore>,
 ) -> std::result::Result<Session, String> {
     let mut session = load_session(provider_name, model_name, session_log_path)
         .map_err(|error| format!("failed to reload active-run session: {error:#}"))?;
@@ -406,6 +412,14 @@ fn load_active_run_session(
     session
         .try_attach_image_attachment_resolver(image_attachment_resolver)
         .map_err(|error| format!("failed to restore active-run image cache: {error:#}"))?;
+    if tool_artifact_store
+        .as_ref()
+        .is_some_and(|store| store.session_scope_id() == session.session_scope_id())
+    {
+        session.attach_tool_artifact_store_override(
+            tool_artifact_store.expect("artifact store was checked above"),
+        );
+    }
     Ok(session)
 }
 
