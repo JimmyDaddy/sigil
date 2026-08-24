@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/check-touched-classifier.sh
+source "${ROOT}/scripts/check-touched-classifier.sh"
+
 usage() {
   cat <<'EOF'
 Usage: scripts/check-touched.sh [--tier quick|standard|full] [--scope dirty|staged|base] [--base REF] [--dry-run]
@@ -157,28 +161,13 @@ while IFS= read -r path; do
       ;;
   esac
 
-  case "${path}" in
-    crates/sigil-kernel/src/agent.rs|\
-    crates/sigil-kernel/src/event.rs|\
-    crates/sigil-kernel/src/session.rs|\
-    crates/sigil-kernel/src/mutation.rs|\
-    crates/sigil-kernel/src/verification.rs|\
-    crates/sigil-kernel/src/permission.rs|\
-    crates/sigil-kernel/src/task_orchestrator.rs|\
-    crates/sigil-kernel/src/tool.rs|\
-    crates/sigil-tui/src/runner/*|\
-    crates/sigil-tui/src/app/worker_bridge.rs|\
-    crates/sigil-mcp/src/*|\
-    crates/sigil-tools-builtin/src/*)
-      high_risk_changed=1
-      ;;
-  esac
+  if is_high_risk_path "${path}"; then
+    high_risk_changed=1
+  fi
 
-  case "${path}" in
-    apps/desktop/*|apps/desktop/**/*|crates/sigil-http/src/openapi.rs|scripts/generate-desktop-contract.sh)
-      desktop_changed=1
-      ;;
-  esac
+  if is_desktop_path "${path}"; then
+    desktop_changed=1
+  fi
 done <"${files_file}"
 
 sort -u "${packages_file}" -o "${packages_file}"
@@ -202,6 +191,7 @@ if [[ "${high_risk_changed}" == "1" && "${tier}" == "quick" ]]; then
 fi
 
 run_cmd git diff --check --
+run_cmd scripts/test-check-touched-classifier.sh
 run_cmd python3 scripts/test-check-no-prompt-phrase-routing.py
 run_cmd python3 scripts/check-no-prompt-phrase-routing.py
 

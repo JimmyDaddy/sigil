@@ -44,8 +44,7 @@ PRODUCER_PATTERNS = [
     (r"write_atomic", "DirectWriteOrAtomicReplace"),
     (r"\bpersist\(", "DirectWriteOrAtomicReplace"),
     (r"\bfs::rename\(", "DirectWriteOrAtomicReplace"),
-    (r"rusqlite::Connection::open", "DatabaseOrSidecar"),
-    (r"\.sqlite3\b", "DatabaseOrSidecar"),
+    (r"\bConnection::open(?:_with_flags)?\(", "DatabaseOrSidecar"),
     (r"worktree\s*\(", "WorktreeOrCheckout"),
     (r"\bgit\s+worktree", "WorktreeOrCheckout"),
 ]
@@ -56,20 +55,120 @@ def is_test_path(path: Path) -> bool:
     return any(part in ("tests", "test") for part in parts)
 
 
+def _mask_rust_non_code(lines: list[str]) -> list[str]:
+    """Mask strings/comments so braces and test attributes are lexical, not textual."""
+
+    masked: list[str] = []
+    block_comment = False
+    raw_hashes: int | None = None
+
+    for line in lines:
+        output: list[str] = []
+        index = 0
+        while index < len(line):
+            if block_comment:
+                end = line.find("*/", index)
+                if end < 0:
+                    index = len(line)
+                    break
+                output.extend("  ")
+                index = end + 2
+                block_comment = False
+                continue
+            if raw_hashes is not None:
+                terminator = '"' + ("#" * raw_hashes)
+                end = line.find(terminator, index)
+                if end < 0:
+                    index = len(line)
+                    break
+                output.extend(" " * (len(terminator) + (end - index)))
+                index = end + len(terminator)
+                raw_hashes = None
+                continue
+            if line.startswith("//", index):
+                output.extend(" " * (len(line) - index))
+                break
+            if line.startswith("/*", index):
+                output.extend("  ")
+                index += 2
+                block_comment = True
+                continue
+            raw_match = re.match(r"(?:b)?r(#+)?\"", line[index:])
+            if raw_match:
+                hashes = len(raw_match.group(1) or "")
+                opening_length = len(raw_match.group(0))
+                output.extend(" " * opening_length)
+                index += opening_length
+                raw_hashes = hashes
+                continue
+            if line[index] == '"' or (
+                line[index] == "'"
+                and index + 2 < len(line)
+                and (line[index + 2] == "'" or line[index + 1] == "\\")
+            ):
+                quote = line[index]
+                output.append(" ")
+                index += 1
+                while index < len(line):
+                    if line[index] == "\\":
+                        output.append("  ")
+                        index += 2
+                        continue
+                    if line[index] == quote:
+                        output.append(" ")
+                        index += 1
+                        break
+                    output.append(" ")
+                    index += 1
+                continue
+            output.append(line[index])
+            index += 1
+        masked.append("".join(output))
+    return masked
+
+
 class _Ctx:
-    """Per-file context for cfg(test) module detection."""
+    """Per-file lexical context for cfg(test) module detection."""
 
     def __init__(self, text: str):
         self.lines = text.splitlines()
+        self.code_lines = _mask_rust_non_code(self.lines)
+        self.test_lines = self._build_test_mask()
+
+    def _build_test_mask(self) -> list[bool]:
+        test_lines = [False] * len(self.code_lines)
+        test_scope_depths: list[int] = []
+        pending_test_item = False
+        brace_depth = 0
+
+        for index, line in enumerate(self.code_lines):
+            if any(brace_depth >= scope for scope in test_scope_depths):
+                test_lines[index] = True
+            if re.search(r"#\[cfg\(test\)\]", line) or re.search(
+                r"\bmod\s+tests\b", line
+            ):
+                pending_test_item = True
+                test_lines[index] = True
+            if pending_test_item:
+                test_lines[index] = True
+
+            opens = line.count("{")
+            closes = line.count("}")
+            if pending_test_item and opens:
+                test_scope_depths.append(brace_depth + 1)
+                pending_test_item = False
+            elif pending_test_item and ";" in line and not opens:
+                pending_test_item = False
+
+            brace_depth += opens - closes
+            test_scope_depths = [
+                scope for scope in test_scope_depths if brace_depth >= scope
+            ]
+
+        return test_lines
 
     def cfg_test_or_mod_tests(self, index: int) -> bool:
-        """Returns True when line index is inside a cfg(test) module or after a mod tests decl."""
-        window = self.lines[max(0, index - 12): index + 1]
-        if any(re.search(r"#\[cfg\(test\)\]", line) for line in window):
-            return True
-        if any(re.search(r"\bmod\s+tests\b", line) for line in window):
-            return True
-        return False
+        return self.test_lines[index]
 
 
 def rust_sources(root: Path) -> list[Path]:

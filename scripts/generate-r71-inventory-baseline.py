@@ -2,11 +2,10 @@
 """RFC-0071 R71.0 inventory baseline generator.
 
 Consumes the deterministic scan output of scripts/r71_inventory_scan.py and writes the
-versioned governance manifests under dev/governance/:
+versioned process/producer governance manifests under dev/governance/:
 
 - local-process-inventory-v1.toml
 - local-resource-producer-inventory-v1.toml
-- r71-conformance-inventory-v1.toml
 
 Every site gets a closed classification per RFC-0071 section 9.5. Sites that cannot be assigned
 by the bundled rule table are emitted as class="unclassified" blocks -> migration blockers.
@@ -250,43 +249,13 @@ def emit_manifest(path: Path, kind: str, sites: list[dict], rules: list) -> Coun
     return stats
 
 
-def emit_conformance(path: Path, cases: list[str]) -> None:
-    lines = [
-        "# RFC-0071 R71.0 characterization case ids.",
-        "schema_version = 1",
-        f"manifest_hash = \"r71-conformance-v1-{len(cases):03d}\"",
-        "",
-    ]
-    for index, case in enumerate(cases, start=1):
-        lines.append(f"[[cases]]")
-        lines.append(f"case_id = \"R71-C-{index:03d}\"")
-        lines.append(f"case_name = \"{case}\"")
-        lines.append(f"fixture_class = \"characterization\"")
-        lines.append(f"required = true")
-        lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
 def main() -> int:
     scan = json.loads(subprocess.check_output(
         [sys.executable, str(ROOT / "scripts" / "r71_inventory_scan.py"), str(ROOT)],
         text=True,
     ))
-    cases = [
-        "feedback_storage_fixture_is_explicitly_injected_isolated_root",
-        "feedback_storage_fixture_never_inherits_active_session_scratch",
-        "feedback_storage_fixture_no_follow_cleanup_completes",
-        "descendant_symlink_is_leaf_report_not_followed",
-        "poisoned_sibling_blocks_unrelated_session_provisioning",
-        "gc_permanently_skips_invalid_namespace_without_quarantine",
-        "same_session_double_lease_releases_early",
-        "repeated_new_call_hits_same_provision_failure_without_blocker_gate",
-        "two_terminal_tasks_release_early_while_sibling_live",
-        "missing_home_xdg_falls_back_to_cwd_sigil_state_cache",
-        "cargo_test_pipe_tail_false_green_guard",
-        "workspace_cross_session_blast_radius_is_measurement_only",
-    ]
-    emit_conformance(ROOT / "dev" / "governance" / "r71-conformance-inventory-v1.toml", cases)
+    # The conformance manifest is a frozen R71.5 artifact. Inventory regeneration must never
+    # replace it with the smaller R71.0 characterization list.
     proc_stats = emit_manifest(
         ROOT / "dev" / "governance" / "local-process-inventory-v1.toml",
         "local-process", scan["process_sites"], PROCESS_RULES)

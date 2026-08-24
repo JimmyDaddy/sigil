@@ -1505,6 +1505,13 @@ fallback，必须由 runtime 的 managed execution composition 提供 process ro
 明确 fail closed。kernel production API 也不再暴露 path-rooted `FileProjectionStore`；可重建
 projection 由 runtime/authority 管理，文件投影类型仅编译进测试兼容面。
 
+R71.7 的工程 gate 同时把 resource/process inventory 与 Cargo graph 作为一个 fail-closed
+边界：结构化扫描结果必须与 versioned manifest 双向 exact join，未登记、过期或
+`unclassified` producer/process site 都阻止 candidate；`check-r71-negative-dependencies.sh`
+还会拒绝 legacy cwd writable root、production raw-launch symbol、authority/sandbox physical
+import 越界和 kernel path type 回流。R71.5 frozen conformance manifest 与 inventory baseline
+分开维护，baseline generator 不得重写前者。
+
 - `roots/list` 返回入口层已解析的 workspace root，runtime 必须把 TUI / CLI 的 effective workspace root 传入 MCP 注册流程
 - `notifications/progress` 映射到 TUI live panel，不写重复 timeline，避免远端 server 用 progress 刷爆用户界面
 - `notifications/tools|resources|prompts/list_changed` 标记 server stale，并在 worker 空闲边界刷新该 server 的 provider-visible tool surface
