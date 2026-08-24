@@ -123,7 +123,8 @@ expected = {
 }[(platform, backend)]
 jobs = load_platform_manifest()["jobs"]
 job = next(item for item in jobs if item["job_id"] == expected)
-if job["platform"] != ("linux" if platform == "docker" else platform) or job["backend"] != backend:
+expected_host_platform = "linux" if platform in {"docker", "toolchain"} else platform
+if job["platform"] != expected_host_platform or job["backend"] != backend:
     raise SystemExit(f"platform manifest drift for {expected}")
 print(f"R71 platform manifest: {expected} required")
 PY
