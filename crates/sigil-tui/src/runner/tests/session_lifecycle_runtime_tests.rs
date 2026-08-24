@@ -1,4 +1,4 @@
-use std::{fs, path::Path, time::Duration};
+use std::{fs, path::Path, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use serde_json::json;
@@ -45,6 +45,51 @@ fn write_finalized_session(path: &Path, prompt: &str) -> Result<()> {
             "error": null
         }),
     )?;
+    Ok(())
+}
+
+#[test]
+fn managed_worker_lifecycle_service_uses_authority_namespace() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    fs::create_dir(&workspace_root)?;
+    let state_root = temp.path().join("state");
+    fs::create_dir(&state_root)?;
+    let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+    root_config.storage.state_root = StorageRoot::Path(state_root.display().to_string());
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+
+    fs::create_dir_all(paths.state_root.join("cache"))?;
+    let execution_temp_root = temp.path().join("execution-temp");
+    fs::create_dir(&execution_temp_root)?;
+    let composition = sigil_runtime::r71_authority_composition::compose_runtime_authority(
+        &paths.state_root,
+        &execution_temp_root,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
+        Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        &[sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLifecycleLog],
+    )?;
+    let writer = Arc::clone(&composition.storage_writer);
+    let session_path = paths.session_log_dir.join("session.jsonl");
+    fs::create_dir_all(&paths.session_log_dir)?;
+    write_finalized_session(&session_path, "managed lifecycle")?;
+    let service = super::super::worker_loop::local_session_lifecycle_service_for_worker(
+        &root_config,
+        &workspace_root,
+        Some(&writer),
+    )
+    .expect("managed lifecycle service should attach");
+    service.set_session_pin(&session_path, true, 1)?;
+    assert!(
+        paths
+            .state_root
+            .join("managed/session-lifecycle-log")
+            .join(&paths.workspace_id)
+            .join("session-lifecycle-v1.jsonl")
+            .is_file()
+    );
     Ok(())
 }
 

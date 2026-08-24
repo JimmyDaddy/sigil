@@ -177,9 +177,10 @@ pub(in crate::runner) use scheduler::{
 pub use scheduler::{WorkerReactorMetricsSnapshot, worker_reactor_metrics};
 pub(in crate::runner) use session_lifecycle_runtime::{
     apply_local_session_delete, apply_session_retention, export_local_session, fork_local_session,
-    inspect_local_session, local_session_lifecycle_service,
-    local_session_lifecycle_service_for_source, local_session_lifecycle_service_with_scratch,
-    preview_local_session_delete, preview_session_retention, set_local_session_pin,
+    inspect_local_session, local_session_lifecycle_service_for_source_for_worker,
+    local_session_lifecycle_service_for_worker,
+    local_session_lifecycle_service_with_scratch_for_worker, preview_local_session_delete,
+    preview_session_retention, set_local_session_pin,
 };
 pub(in crate::runner) use session_transition::{
     SessionTransitionKind, ensure_session_transition_allowed, session_transition_recovery_message,

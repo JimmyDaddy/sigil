@@ -1338,10 +1338,11 @@ where
             return WorkerAdvancementControl::SkipCommandPoll;
         }
     };
-    let Some(lifecycle) = local_session_lifecycle_service_for_source(
+    let Some(lifecycle) = local_session_lifecycle_service_for_source_for_worker(
         root_config,
         workspace_root,
         &state.session.log_path,
+        state.managed_storage_writer.as_ref(),
     ) else {
         state.session.artifact_gc_dirty = false;
         return WorkerAdvancementControl::PollCommand;

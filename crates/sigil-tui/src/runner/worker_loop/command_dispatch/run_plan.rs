@@ -144,14 +144,18 @@ where
                     let title_session_log_path = state.session.log_path.clone();
                     let title_session_id = run_session.session_scope_id().to_owned();
                     let title_prompt = prompt.clone();
-                    Some(sigil_runtime::application_run::ApplicationPostRunMaintenance::session_title(
+                    let maintenance = sigil_runtime::application_run::ApplicationPostRunMaintenance::session_title(
                         title_root_config,
                         title_workspace_root,
                         route.model_ref,
                         title_session_log_path,
                         title_session_id,
                         title_prompt,
-                    ))
+                    );
+                    Some(match state.managed_storage_writer.as_ref() {
+                        Some(writer) => maintenance.with_managed_writer(Arc::clone(writer)),
+                        None => maintenance,
+                    })
                 } else {
                     None
                 };

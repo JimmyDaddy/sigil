@@ -14,6 +14,9 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
     pub(in crate::runner) readiness: WorkerReadiness,
     pub(in crate::runner) session: SessionWorkerState,
+    pub(in crate::runner) managed_storage_writer: Option<
+        std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
     pub(in crate::runner) managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
     pub(in crate::runner) run: RunWorkerState,
     pub(in crate::runner) compaction: CompactionWorkerState,
@@ -46,6 +49,9 @@ impl WorkerLoopState {
         terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
         terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
         scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+        managed_storage_writer: Option<
+            std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        >,
         managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
     ) -> Self {
         let pending_agent_result_continuations =
@@ -77,6 +83,7 @@ impl WorkerLoopState {
             terminal_lifecycle_router,
             terminal_control,
             scratch_control,
+            managed_storage_writer,
             managed_artifact_store,
             readiness: WorkerReadiness::new(),
             session: SessionWorkerState {

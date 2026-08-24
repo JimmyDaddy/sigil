@@ -408,6 +408,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     Some(terminal_control),
                 )
                 .with_scratch_control(surface.scratch_control),
+                authority_composition
+                    .as_ref()
+                    .map(|composition| Arc::clone(&composition.storage_writer)),
                 managed_artifact_store,
             );
         })

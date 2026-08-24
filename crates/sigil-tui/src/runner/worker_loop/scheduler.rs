@@ -117,6 +117,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
     message_tx: mpsc::Sender<WorkerMessage>,
     mcp_handlers: WorkerLoopMcpHandlers,
     terminal_runtime: WorkerLoopTerminalRuntime,
+    managed_storage_writer: Option<
+        std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
     managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -287,6 +290,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         terminal_lifecycle_router,
         terminal_control,
         scratch_control.clone(),
+        managed_storage_writer,
         managed_artifact_store,
     );
     // RFC-0062 14.1: one startup TTL sweep over the workspace scratch namespaces. Leases are

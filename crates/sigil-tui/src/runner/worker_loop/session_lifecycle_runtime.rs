@@ -17,33 +17,54 @@ use sigil_runtime::{
 };
 use uuid::Uuid;
 
-pub(in crate::runner) fn local_session_lifecycle_service(
+/// Builds the worker-owned lifecycle service and, when the boot composition is present, routes
+/// its journal through the authority-declared workspace namespace. A failed managed attachment
+/// is represented as `None` so callers fail closed instead of falling back to the legacy journal.
+pub(in crate::runner) fn local_session_lifecycle_service_for_worker(
     root_config: &RootConfig,
     workspace_root: &Path,
-) -> LocalSessionLifecycleService {
+    managed_writer: Option<
+        &Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+) -> Option<LocalSessionLifecycleService> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
-    LocalSessionLifecycleService::new(
-        paths.workspace_id,
+    let service = LocalSessionLifecycleService::new(
+        paths.workspace_id.clone(),
         paths.session_log_dir,
         paths.session_exports_root,
     )
-    .with_lifecycle_journal_path(paths.session_lifecycle_journal)
+    .with_lifecycle_journal_path(paths.session_lifecycle_journal);
+    match managed_writer {
+        Some(writer) => service
+            .with_managed_writer(Arc::clone(writer), paths.workspace_id)
+            .ok(),
+        None => Some(service),
+    }
 }
 
-/// RFC-0062 14.1: lifecycle service with session-scoped scratch cleanup bound to deletion.
-pub(in crate::runner) fn local_session_lifecycle_service_with_scratch(
+/// Scratch-aware variant of [`local_session_lifecycle_service_for_worker`].
+pub(in crate::runner) fn local_session_lifecycle_service_with_scratch_for_worker(
     root_config: &RootConfig,
     workspace_root: &Path,
     scratch_control: &sigil_tools_builtin::ScratchNamespaceControl,
-) -> LocalSessionLifecycleService {
+    managed_writer: Option<
+        &Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+) -> Option<LocalSessionLifecycleService> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
-    LocalSessionLifecycleService::new(
-        paths.workspace_id,
+    let service = LocalSessionLifecycleService::new(
+        paths.workspace_id.clone(),
         paths.session_log_dir,
         paths.session_exports_root,
     )
     .with_lifecycle_journal_path(paths.session_lifecycle_journal)
-    .with_scratch_cleanup(paths.scratch_root, scratch_control.clone())
+    .with_scratch_cleanup(paths.scratch_root, scratch_control.clone());
+    match managed_writer {
+        Some(writer) => service
+            .with_managed_writer(Arc::clone(writer), paths.workspace_id)
+            .ok(),
+        None => Some(service),
+    }
 }
 
 pub(in crate::runner) fn local_session_lifecycle_service_for_source(
@@ -87,6 +108,25 @@ pub(in crate::runner) fn local_session_lifecycle_service_for_source(
             .ok()
         })
         .flatten()
+}
+
+pub(in crate::runner) fn local_session_lifecycle_service_for_source_for_worker(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    source_path: &Path,
+    managed_writer: Option<
+        &Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+) -> Option<LocalSessionLifecycleService> {
+    let service =
+        local_session_lifecycle_service_for_source(root_config, workspace_root, source_path)?;
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    match managed_writer {
+        Some(writer) => service
+            .with_managed_writer(Arc::clone(writer), paths.workspace_id)
+            .ok(),
+        None => Some(service),
+    }
 }
 
 pub(in crate::runner) fn inspect_local_session(

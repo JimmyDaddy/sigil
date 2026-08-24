@@ -395,6 +395,7 @@ where
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,
+                None,
             );
         })
         .context("failed to spawn test worker")?;

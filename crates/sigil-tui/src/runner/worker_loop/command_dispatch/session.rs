@@ -87,7 +87,17 @@ where
                     });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
+                let Some(service) = local_session_lifecycle_service_for_worker(
+                    root_config,
+                    workspace_root,
+                    state.managed_storage_writer.as_ref(),
+                ) else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
+                };
                 match inspect_local_session(&service, &source_path) {
                     Ok(entry) => {
                         let _ = message_tx
@@ -113,11 +123,22 @@ where
                         .send(WorkerMessage::LocalSessionLifecycleFailed { request_id, error });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
-                let active_session = local_session_lifecycle_service_for_source(
+                let Some(service) = local_session_lifecycle_service_for_worker(
+                    root_config,
+                    workspace_root,
+                    state.managed_storage_writer.as_ref(),
+                ) else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
+                };
+                let active_session = local_session_lifecycle_service_for_source_for_worker(
                     root_config,
                     workspace_root,
                     &source_path,
+                    state.managed_storage_writer.as_ref(),
                 )
                 .and_then(|_| {
                     state
@@ -191,7 +212,17 @@ where
                     });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
+                let Some(service) = local_session_lifecycle_service_for_worker(
+                    root_config,
+                    workspace_root,
+                    state.managed_storage_writer.as_ref(),
+                ) else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
+                };
                 match export_local_session(&service, &source_path) {
                     Ok(output) => {
                         let _ = message_tx
@@ -217,7 +248,17 @@ where
                     });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
+                let Some(service) = local_session_lifecycle_service_for_worker(
+                    root_config,
+                    workspace_root,
+                    state.managed_storage_writer.as_ref(),
+                ) else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
+                };
                 match set_local_session_pin(&service, &source_path, pinned) {
                     Ok(entry) => {
                         if std::fs::canonicalize(&source_path).ok()
@@ -248,7 +289,17 @@ where
                     });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
+                let Some(service) = local_session_lifecycle_service_for_worker(
+                    root_config,
+                    workspace_root,
+                    state.managed_storage_writer.as_ref(),
+                ) else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
+                };
                 match preview_local_session_delete(
                     &service,
                     &source_path,
@@ -284,12 +335,26 @@ where
                     // RFC-0062 14.1: session delete also reclaims the session-scoped scratch
                     // namespace; the lifecycle service does this under the shared lease
                     // registry so a live tool/terminal namespace is never deleted.
-                    Some(scratch_control) => local_session_lifecycle_service_with_scratch(
+                    Some(scratch_control) => {
+                        local_session_lifecycle_service_with_scratch_for_worker(
+                            root_config,
+                            workspace_root,
+                            scratch_control,
+                            state.managed_storage_writer.as_ref(),
+                        )
+                    }
+                    None => local_session_lifecycle_service_for_worker(
                         root_config,
                         workspace_root,
-                        scratch_control,
+                        state.managed_storage_writer.as_ref(),
                     ),
-                    None => local_session_lifecycle_service(root_config, workspace_root),
+                };
+                let Some(service) = service else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
                 };
                 let _target_attachment = match sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
                     &preview.source_path,
@@ -329,7 +394,17 @@ where
                     });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
+                let Some(service) = local_session_lifecycle_service_for_worker(
+                    root_config,
+                    workspace_root,
+                    state.managed_storage_writer.as_ref(),
+                ) else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
+                };
                 match preview_session_retention(
                     &service,
                     policy,
@@ -361,7 +436,17 @@ where
                     });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
+                let Some(service) = local_session_lifecycle_service_for_worker(
+                    root_config,
+                    workspace_root,
+                    state.managed_storage_writer.as_ref(),
+                ) else {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: "session lifecycle authority is unavailable".to_owned(),
+                    });
+                    continue;
+                };
                 let mut _target_attachments = Vec::with_capacity(preview.candidates.len());
                 let mut attachment_error = None;
                 for candidate in &preview.candidates {

@@ -210,6 +210,7 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 - tool result 正文使用 session sibling immutable artifact store；JSONL 只保存 V2 descriptor、facts 和 bounded view
 - artifact ref 必须 opaque、session-scoped；fork 重新签发 ref，export 明确 completeness，delete/GC 复用 tombstone + grace lifecycle
 - current-schema ArtifactStaging 与 ArtifactStore 必须通过同一 authority-admitted 双 namespace lease 接线：capture 临时文件只落 staging root，发布 refs/blobs/usage 只落 ArtifactStore root；TUI/HTTP display、typed retrieval、export 与 GC 必须复用同一 authority-resolved roots，禁止从 managed SessionLog 路径推导 sibling artifact writer/read path
+- current-schema TUI session actions、artifact GC 与首轮 semantic title maintenance 必须复用 boot composition 注入的 SessionLifecycleLog writer；managed writer attach 失败时必须闭合失败，不得回退 legacy lifecycle journal
 - control state 不能只存在运行内存
 - 入口层追加普通 control state 时优先复用 runtime session-control helper，避免 TUI / CLI / HTTP adapter 各自实现不同的 append/reload 行为
 - response handle、continuation state、prefix snapshot、compaction record 等 durable control state 要有显式查询/恢复路径

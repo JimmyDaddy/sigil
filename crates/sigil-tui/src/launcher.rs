@@ -822,6 +822,7 @@ where
                         planner,
                         &[
                             Ch::SessionLog,
+                            Ch::SessionLifecycleLog,
                             Ch::InputHistory,
                             Ch::SessionCatalog,
                             Ch::ArtifactStaging,
