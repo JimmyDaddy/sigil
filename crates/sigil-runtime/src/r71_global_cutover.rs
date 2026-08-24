@@ -51,6 +51,15 @@ pub enum RuntimeExecutionExtensionSeamV1 {
     ManagedExecutionBacked,
 }
 
+/// Actual desktop product/borrowed-host writer seam. A legacy value is intentionally red; the
+/// probe reads this composition fact instead of claiming that a desktop writer exists merely
+/// because its contract has been declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeProductStateSeamV1 {
+    LegacyDirectWriter,
+    AuthorityRegistrationBacked,
+}
+
 /// Actual in-process file access seam kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeFileAccessSeamV1 {
@@ -282,18 +291,33 @@ pub fn probe_mandatory_adapters(
         evidence_digest: CanonicalHash::from_bytes([0xb5; 32]),
     });
 
-    // Product state / borrowed native writers: desktop-owned seams not present in this
-    // composition; fail closed until cut over.
-    for kind in [
-        MandatoryAdapterKindV1::ProductStateUpdater,
-        MandatoryAdapterKindV1::BorrowedNativeSave,
-        MandatoryAdapterKindV1::BorrowedConfiguration,
-        MandatoryAdapterKindV1::BorrowedReleaseOutput,
+    for (kind, seam) in [
+        (
+            MandatoryAdapterKindV1::ProductStateUpdater,
+            services.product_state_updater_seam,
+        ),
+        (
+            MandatoryAdapterKindV1::BorrowedNativeSave,
+            services.borrowed_native_save_seam,
+        ),
+        (
+            MandatoryAdapterKindV1::BorrowedConfiguration,
+            services.borrowed_configuration_seam,
+        ),
+        (
+            MandatoryAdapterKindV1::BorrowedReleaseOutput,
+            services.borrowed_release_output_seam,
+        ),
     ] {
+        let passed = matches!(seam, RuntimeProductStateSeamV1::AuthorityRegistrationBacked);
         out.push(AdapterReadinessProbeV1 {
             adapter: kind,
-            passed: false,
-            evidence_digest: CanonicalHash::from_bytes([0xb6; 32]),
+            passed,
+            evidence_digest: if passed {
+                CanonicalHash::from_bytes([0xb6; 32])
+            } else {
+                CanonicalHash::from_bytes([0xb8; 32])
+            },
         });
     }
 

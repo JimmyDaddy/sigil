@@ -51,6 +51,14 @@ pub struct RuntimeManagedResourceServicesV1 {
     /// compositions, so the extension readiness probe cannot be toggled independently of the
     /// launch path.
     pub extension_execution: Option<Arc<RuntimeManagedExtensionExecutionRouteV1>>,
+    /// Whether the desktop product-state updater is attached to its real owner route.
+    pub product_state_updater_seam: crate::r71_global_cutover::RuntimeProductStateSeamV1,
+    /// Whether native support-save is attached to its host-private registration route.
+    pub borrowed_native_save_seam: crate::r71_global_cutover::RuntimeProductStateSeamV1,
+    /// Whether configuration mutation is attached to its host-private registration route.
+    pub borrowed_configuration_seam: crate::r71_global_cutover::RuntimeProductStateSeamV1,
+    /// Whether release output is attached to its host-private registration route.
+    pub borrowed_release_output_seam: crate::r71_global_cutover::RuntimeProductStateSeamV1,
 }
 
 /// Runtime-owned coordinator for one managed extension launch. It binds a resolved stdio plan to
@@ -276,6 +284,14 @@ impl RuntimeManagedResourceServicesV1 {
             file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1::ShadowPlaceholder,
             projection_backed: false,
             extension_execution: None,
+            product_state_updater_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_native_save_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_configuration_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_release_output_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
         }
     }
 
@@ -304,6 +320,14 @@ impl RuntimeManagedResourceServicesV1 {
             file_access_seam,
             projection_backed: true,
             extension_execution: None,
+            product_state_updater_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_native_save_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_configuration_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+            borrowed_release_output_seam:
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
         }
     }
 
