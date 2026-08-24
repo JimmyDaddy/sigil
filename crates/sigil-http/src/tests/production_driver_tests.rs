@@ -8,18 +8,18 @@ use std::{
 
 use async_trait::async_trait;
 use sigil_kernel::{
-    AgentRole, AssistantMessageKind, CandidateCheck, CheckCommand, CheckDiscoverySource,
-    CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope,
-    JsonlSessionStore, NetworkEffect, PlanDraftCreatedEntry, ReadinessEvaluatedEntry,
-    ReadinessEvaluation, RequiredAction, RunStatus, SessionLogEntry, SessionRef, TaskId,
-    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval,
-    ToolApprovalSessionGrantUnavailableReason, ToolApprovalSessionGrantUnavailableReasonCode,
-    ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore,
-    ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta,
-    ToolResultRecordedV3, ToolSpec, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationProductAction, VerificationVerdict, VisibleCompletionState,
-    build_workspace_snapshot, stable_workspace_id,
+    AgentRole, ApprovalMode, AssistantMessageKind, CandidateCheck, CheckCommand,
+    CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
+    EvidenceScope, JsonlSessionStore, NetworkEffect, PermissionConfirmation, PermissionDecision,
+    PlanDraftCreatedEntry, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunStatus,
+    SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskStepStatus, ToolAccess, ToolApproval, ToolApprovalSessionGrantUnavailableReason,
+    ToolApprovalSessionGrantUnavailableReasonCode, ToolArtifactDescriptorV1, ToolArtifactEncoding,
+    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolEffect,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec, ToolSubject,
+    VerificationPolicy, VerificationPolicyChangedEntry, VerificationProductAction,
+    VerificationVerdict, VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -2588,6 +2588,33 @@ fn approval_handler_preserves_bounded_session_decisions() {
             .expect("session decision should reach the kernel"),
         ToolApproval::ApproveForSession
     ));
+}
+
+#[test]
+fn r71_headless_permission_fixture_matches_kernel_blockers() {
+    let mut confirmation = PermissionDecision::new(
+        ApprovalMode::Allow,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("notes.txt", "notes.txt")],
+        false,
+    );
+    confirmation.confirmation = Some(PermissionConfirmation::TypePhrase {
+        phrase: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+    });
+    assert_eq!(
+        confirmation.headless_blocker(),
+        Some(sigil_kernel::HeadlessPermissionBlockerV1::ConfirmationRequired)
+    );
+
+    confirmation.confirmation = None;
+    assert_eq!(confirmation.headless_blocker(), None);
+    confirmation.mode = ApprovalMode::Ask;
+    assert_eq!(
+        confirmation.headless_blocker(),
+        Some(sigil_kernel::HeadlessPermissionBlockerV1::ApprovalRequired)
+    );
 }
 
 #[tokio::test]

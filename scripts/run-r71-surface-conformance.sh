@@ -53,9 +53,13 @@ run_suite surface-facade cargo test -p sigil-runtime --lib r71_facade -- --forma
 run_suite kernel-recovery-surface cargo test -p sigil-kernel --lib resource_recovery_surface -- --format terse
 run_suite kernel-cutover-surface cargo test -p sigil-kernel --lib cutover_manifest::tests::r71_surface_status -- --format terse
 run_suite runtime-doctor-surface cargo test -p sigil-runtime --lib doctor_reports_cutover -- --format terse
+run_suite kernel-headless-admission cargo test -p sigil-kernel --lib r71_headless -- --format terse
 run_suite cli-doctor-surface cargo test -p sigil --bin sigil render_doctor_report_formats_checks_and_summary -- --format terse
+run_suite cli-headless-admission cargo test -p sigil --bin sigil r71_headless_permission_fixture_matches_kernel_blockers -- --format terse
 run_suite tui-doctor-surface cargo test -p sigil-tui --lib doctor_slash_command_renders_appearance_warnings -- --format terse
+run_suite tui-headless-admission cargo test -p sigil-tui --lib r71_headless_permission_fixture_matches_kernel_blockers -- --format terse
 run_suite http-doctor-surface cargo test -p sigil-http --lib support_routes_require_auth_and_expose_only_the_redacted_projection -- --format terse
+run_suite http-headless-admission cargo test -p sigil-http --lib r71_headless_permission_fixture_matches_kernel_blockers -- --format terse
 run_suite desktop-doctor-surface cargo test -p sigil-desktop --lib support_report_decodes_only_the_path_free_contract -- --format terse
 contract_output=$(./scripts/generate-desktop-contract.sh --check 2>&1) || {
   echo "FAIL(conformance/desktop-contract): generated OpenAPI/types drift" >&2

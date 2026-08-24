@@ -146,6 +146,53 @@ pub struct ToolPermissionDecisionV3 {
     pub decision_hash: CanonicalHash,
 }
 
+/// Closed structural errors for a headless V3 decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HeadlessPermissionDecisionErrorV1 {
+    #[error("headless execution still requires approval")]
+    ApprovalRequired,
+    #[error("headless execution requires an accepted confirmation proof")]
+    MissingConfirmation,
+    #[error("headless decision carries an unexpected confirmation proof")]
+    UnexpectedConfirmation,
+    #[error("headless decision advertises a session grant without a grant reference")]
+    MissingSessionGrant,
+    #[error("headless decision carries a session grant reference without the session-grant facet")]
+    UnexpectedSessionGrant,
+}
+
+impl ToolPermissionDecisionV3 {
+    /// Validates the closed approval/grant/confirmation shape before a headless consumer uses a
+    /// current-schema decision. A session grant is an already durable authority and may satisfy
+    /// the ordinary `Ask` boundary, but it never satisfies a separate confirmation requirement.
+    pub fn validate_headless_admission(&self) -> Result<(), HeadlessPermissionDecisionErrorV1> {
+        if self.policy_decision == ApprovalMode::Ask {
+            return Err(HeadlessPermissionDecisionErrorV1::ApprovalRequired);
+        }
+        match (
+            self.policy_facets.confirmation_required,
+            self.confirmation.is_some(),
+        ) {
+            (true, false) => return Err(HeadlessPermissionDecisionErrorV1::MissingConfirmation),
+            (false, true) => {
+                return Err(HeadlessPermissionDecisionErrorV1::UnexpectedConfirmation);
+            }
+            _ => {}
+        }
+        match (
+            self.policy_facets.session_grant_available,
+            self.grant_ref.is_some(),
+        ) {
+            (true, false) => return Err(HeadlessPermissionDecisionErrorV1::MissingSessionGrant),
+            (false, true) => {
+                return Err(HeadlessPermissionDecisionErrorV1::UnexpectedSessionGrant);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 /// Closed V3 envelope shape classification (exactly four variants).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPermissionPlanEnvelopeV3 {

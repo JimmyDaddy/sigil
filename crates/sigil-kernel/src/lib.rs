@@ -450,11 +450,11 @@ pub use orchestration::{
 };
 pub use permission::{
     ApprovalMode, CommandPermissionConfig, CommandPermissionGroup, CommandPermissionMatch,
-    EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
-    NetworkPolicy, PathTrustZone, PermissionConfig, PermissionConfirmation, PermissionDecision,
-    PermissionDecisionReason, PermissionDecisionSource, PermissionEvaluationContext,
-    PermissionMode, PermissionModeOverride, PermissionPolicy, PermissionPolicyChain,
-    PermissionRisk, PermissionRule, ToolApprovalSessionGrantAvailability,
+    EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
+    HeadlessPermissionBlockerV1, InteractionMode, NetworkPolicy, PathTrustZone, PermissionConfig,
+    PermissionConfirmation, PermissionDecision, PermissionDecisionReason, PermissionDecisionSource,
+    PermissionEvaluationContext, PermissionMode, PermissionModeOverride, PermissionPolicy,
+    PermissionPolicyChain, PermissionRisk, PermissionRule, ToolApprovalSessionGrantAvailability,
     ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope,
     ToolApprovalSessionGrantUnavailableReason, ToolApprovalSessionGrantUnavailableReasonCode,
     ToolOperation, apply_risk_overlay, classify_path_trust_zone,

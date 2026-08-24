@@ -33,6 +33,29 @@ pub enum InteractionMode {
     Headless,
 }
 
+/// Stable reason why a tool cannot cross the headless execution boundary.
+///
+/// This check is intentionally separate from `ApprovalMode`: a matching session grant may
+/// lower an `Ask` decision to `Allow`, but it must never erase an outstanding confirmation
+/// requirement. All entrypoints use the same kernel-owned reason instead of inferring it from
+/// presentation text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadlessPermissionBlockerV1 {
+    ApprovalRequired,
+    ConfirmationRequired,
+}
+
+impl HeadlessPermissionBlockerV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovalRequired => "approval_required",
+            Self::ConfirmationRequired => "confirmation_required",
+        }
+    }
+}
+
 /// Stable approval modes used by permission policy evaluation.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -643,6 +666,22 @@ pub struct PermissionDecision {
 }
 
 impl PermissionDecision {
+    /// Returns the blocker that prevents this decision from executing without an interactive
+    /// route. This is evaluated after session-grant matching, so a grant may only remove the
+    /// ordinary `Ask` blocker; it cannot satisfy `confirmation`.
+    #[must_use]
+    pub fn headless_blocker(&self) -> Option<HeadlessPermissionBlockerV1> {
+        if self.mode == ApprovalMode::Deny {
+            None
+        } else if self.confirmation.is_some() {
+            Some(HeadlessPermissionBlockerV1::ConfirmationRequired)
+        } else if self.mode == ApprovalMode::Ask {
+            Some(HeadlessPermissionBlockerV1::ApprovalRequired)
+        } else {
+            None
+        }
+    }
+
     /// Constructs a decision and derives operation, path zones, risk, confirmation, and snapshot
     /// metadata from the tool/access/subject tuple.
     pub fn new(

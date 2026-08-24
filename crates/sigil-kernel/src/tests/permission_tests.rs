@@ -17,8 +17,8 @@ use crate::{
 use super::{
     ApprovalMode, CommandPermissionConfig, EffectivePermissionPolicyCap, ExternalDirectoryConfig,
     ExternalDirectoryRule, PathRiskOverlay, PathTrustZone, PermissionConfig,
-    PermissionConfirmation, PermissionEvaluationContext, PermissionMode, PermissionPolicy,
-    PermissionPolicyChain, PermissionRisk, PermissionRule, ToolOperation,
+    PermissionConfirmation, PermissionDecision, PermissionEvaluationContext, PermissionMode,
+    PermissionPolicy, PermissionPolicyChain, PermissionRisk, PermissionRule, ToolOperation,
     classify_path_trust_analysis, classify_path_trust_analysis_with_context,
     classify_path_trust_zone, classify_path_trust_zone_with_context,
     tool_approval_session_grant_availability_for_plan, tool_approval_session_grant_available,
@@ -34,6 +34,40 @@ fn spec(access: ToolAccess) -> ToolSpec {
         network_effect: None,
         preview: ToolPreviewCapability::None,
     }
+}
+
+#[test]
+fn r71_headless_admission_keeps_confirmation_after_allow_or_grant() {
+    let mut decision = PermissionDecision::new(
+        ApprovalMode::Allow,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("notes.txt", "notes.txt")],
+        false,
+    );
+    decision.confirmation = Some(PermissionConfirmation::TypePhrase {
+        phrase: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+    });
+    assert_eq!(
+        decision.headless_blocker(),
+        Some(super::HeadlessPermissionBlockerV1::ConfirmationRequired)
+    );
+
+    // A session grant is represented by the post-match Allow decision. It can clear Ask, but it
+    // cannot turn a required TypePhrase into headless authority.
+    decision.mode = ApprovalMode::Allow;
+    assert_eq!(
+        decision.headless_blocker(),
+        Some(super::HeadlessPermissionBlockerV1::ConfirmationRequired)
+    );
+    decision.confirmation = None;
+    assert_eq!(decision.headless_blocker(), None);
+    decision.mode = ApprovalMode::Ask;
+    assert_eq!(
+        decision.headless_blocker(),
+        Some(super::HeadlessPermissionBlockerV1::ApprovalRequired)
+    );
 }
 
 fn network_spec(effect: NetworkEffect) -> ToolSpec {

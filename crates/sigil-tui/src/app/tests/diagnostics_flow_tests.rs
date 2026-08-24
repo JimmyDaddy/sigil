@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use sigil_kernel::ThemeColorOverrides;
+use sigil_kernel::{
+    ApprovalMode, PermissionConfirmation, PermissionDecision, ThemeColorOverrides, ToolAccess,
+    ToolSubject,
+};
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tempfile::tempdir;
 
@@ -65,6 +68,33 @@ fn render_doctor_report_includes_summary_and_check_lines() {
     assert!(rendered.contains("  fix: set TERM in the shell before launching the TUI"));
     assert!(rendered.contains("checks:\n[ok] config:load\n  config parsed"));
     assert!(rendered.contains("[warn] terminal\n  TERM is not set"));
+}
+
+#[test]
+fn r71_headless_permission_fixture_matches_kernel_blockers() {
+    let mut confirmation = PermissionDecision::new(
+        ApprovalMode::Allow,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("notes.txt", "notes.txt")],
+        false,
+    );
+    confirmation.confirmation = Some(PermissionConfirmation::TypePhrase {
+        phrase: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+    });
+    assert_eq!(
+        confirmation.headless_blocker(),
+        Some(sigil_kernel::HeadlessPermissionBlockerV1::ConfirmationRequired)
+    );
+
+    confirmation.confirmation = None;
+    assert_eq!(confirmation.headless_blocker(), None);
+    confirmation.mode = ApprovalMode::Ask;
+    assert_eq!(
+        confirmation.headless_blocker(),
+        Some(sigil_kernel::HeadlessPermissionBlockerV1::ApprovalRequired)
+    );
 }
 
 #[test]

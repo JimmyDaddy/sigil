@@ -5385,20 +5385,31 @@ where
         prepared_tool_call = preview_capture.prepared;
         execution_subjects = decision.subjects.clone();
 
+        if options.interaction_mode == InteractionMode::Headless
+            && let Some(blocker) = decision.headless_blocker()
+        {
+            let requirement = match blocker {
+                crate::HeadlessPermissionBlockerV1::ApprovalRequired => "approval",
+                crate::HeadlessPermissionBlockerV1::ConfirmationRequired => "confirmation",
+            };
+            let reason = format!(
+                "tool {} requires {requirement} in headless mode ({})",
+                call.name,
+                blocker.as_str()
+            );
+            let mut result = ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::ApprovalRequired,
+                reason,
+            );
+            attach_tool_call_context(&mut result, &call, &decision.subjects);
+            assistant_batch_results.push((call.clone(), result));
+            return Ok(None);
+        }
+
         match decision.mode {
             ApprovalMode::Allow => {}
-            ApprovalMode::Ask if options.interaction_mode == InteractionMode::Headless => {
-                let reason = format!("tool {} requires approval in headless mode", call.name);
-                let mut result = ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::ApprovalRequired,
-                    reason,
-                );
-                attach_tool_call_context(&mut result, &call, &decision.subjects);
-                assistant_batch_results.push((call.clone(), result));
-                return Ok(None);
-            }
             ApprovalMode::Ask => {
                 let approval_identity = approval_identity
                     .as_ref()

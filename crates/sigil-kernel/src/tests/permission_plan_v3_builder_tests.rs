@@ -145,7 +145,7 @@ fn r71_v3_decision_digest_binds_plan_and_confirmation() {
         ToolPermissionPolicyFacetsV3 {
             external_directory_required: false,
             session_grant_available: false,
-            confirmation_required: false,
+            confirmation_required: true,
         },
         Some(confirmation),
         None,
@@ -157,6 +157,58 @@ fn r71_v3_decision_digest_binds_plan_and_confirmation() {
         decision.managed_file_access_plan_hash,
         Some(file_ref().plan_hash)
     );
+    assert!(decision.validate_headless_admission().is_ok());
+}
+
+#[test]
+fn r71_headless_v3_admission_rejects_missing_confirmation_and_grant_binding() {
+    let plan = build_v3_plan(
+        core(),
+        ResourceRequirementSetV1 {
+            schema_version: 1,
+            requirements: BoundedVec::new(),
+            canonical_hash: CanonicalHash::from_bytes([0x31; 32]),
+        },
+        Vec::new(),
+        Vec::new(),
+        Some(file_ref()),
+        ResourceJournalScopeV1::Application,
+        enforcement(),
+    );
+    let mut decision = build_v3_decision(
+        &plan,
+        OpaquePermissionDecisionId::new("decision-headless".to_owned()),
+        OpaqueApprovalRequestId::new("approval-headless".to_owned()),
+        CanonicalHash::from_bytes([0x42; 32]),
+        OpaqueToolCallId::new("call-headless".to_owned()),
+        CanonicalHash::from_bytes([0x11; 32]),
+        "permission-v3",
+        ApprovalMode::Allow,
+        ToolPermissionPolicyFacetsV3 {
+            external_directory_required: false,
+            session_grant_available: false,
+            confirmation_required: true,
+        },
+        None,
+        None,
+        None,
+    );
+    assert!(matches!(
+        decision.validate_headless_admission(),
+        Err(crate::permission_plan_v3::HeadlessPermissionDecisionErrorV1::MissingConfirmation)
+    ));
+
+    decision.policy_facets.confirmation_required = false;
+    decision.policy_facets.session_grant_available = true;
+    assert!(matches!(
+        decision.validate_headless_admission(),
+        Err(crate::permission_plan_v3::HeadlessPermissionDecisionErrorV1::MissingSessionGrant)
+    ));
+
+    decision.grant_ref = Some(crate::resource::OpaqueSessionGrantRef::new(
+        "grant-headless".to_owned(),
+    ));
+    assert!(decision.validate_headless_admission().is_ok());
 }
 
 #[test]

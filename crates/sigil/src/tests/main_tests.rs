@@ -11,11 +11,12 @@ use anyhow::{Result, anyhow, bail};
 use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
-    EventHandler, JsonlSessionStore, ModelMessage, ProviderChunk, PublicRunEventKind,
-    PublicTaskPhase, RootConfig, RunEvent, SessionConfig, StorageConfig, ToolAccess, ToolCall,
-    ToolCategory, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
-    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
-    WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
+    ApprovalMode, EventHandler, JsonlSessionStore, ModelMessage, PermissionConfirmation,
+    PermissionDecision, ProviderChunk, PublicRunEventKind, PublicTaskPhase, RootConfig, RunEvent,
+    SessionConfig, StorageConfig, ToolAccess, ToolCall, ToolCategory, ToolErrorKind,
+    ToolExecutionId, ToolPreview, ToolPreviewCapability, ToolProgressEvent, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceTrust, resolve_workspace_root,
+    workspace_trust_from_entries,
 };
 use sigil_runtime::SessionCatalogProjectionError;
 use sigil_runtime::application_run::{application_run_input, default_application_session_path};
@@ -1078,6 +1079,33 @@ fn render_doctor_report_formats_checks_and_summary() {
     assert!(rendered.contains("[warn] terminal - TERM is not set"));
     assert!(rendered.contains("fix: set TERM in the shell before launching the TUI"));
     assert!(rendered.contains("summary: warn"));
+}
+
+#[test]
+fn r71_headless_permission_fixture_matches_kernel_blockers() {
+    let mut confirmation = PermissionDecision::new(
+        ApprovalMode::Allow,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("notes.txt", "notes.txt")],
+        false,
+    );
+    confirmation.confirmation = Some(PermissionConfirmation::TypePhrase {
+        phrase: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+    });
+    assert_eq!(
+        confirmation.headless_blocker(),
+        Some(sigil_kernel::HeadlessPermissionBlockerV1::ConfirmationRequired)
+    );
+
+    confirmation.confirmation = None;
+    assert_eq!(confirmation.headless_blocker(), None);
+    confirmation.mode = ApprovalMode::Ask;
+    assert_eq!(
+        confirmation.headless_blocker(),
+        Some(sigil_kernel::HeadlessPermissionBlockerV1::ApprovalRequired)
+    );
 }
 
 #[test]

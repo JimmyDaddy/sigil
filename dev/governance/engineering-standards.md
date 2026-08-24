@@ -232,6 +232,8 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 - 禁止 per-consumer flag、V2/V3 dual write、legacy allocator fallback 与 active process provider 切换
 - CLI、TUI、HTTP 和 Desktop 的 doctor/support 输出必须消费同一个 kernel-owned `CutoverSurfaceStatusV1`，一致展示 `epoch`、`authority` 与稳定 blocker code；不得在 adapter 内根据 manifest、probe 或错误文本再推导一套 readiness 状态
 - execution check 若只有 `PipelineOutcomeV1::FinalStageOnly`，即使 final exit code 为 0 也不得投影为 verification passed；必须保留 `VerificationEvidenceV1::Insufficient` 或其他非 passed 结论
+- headless tool admission 必须在 session-grant 覆盖之后检查：`Ask` 仍返回 `approval_required`，任何 `PermissionConfirmation`（包括 `TypePhrase`）仍返回 `confirmation_required`；已有 durable session grant 只能消除普通 `Ask`，不能代替 confirmation
+- current-schema V3 headless decision 必须同时绑定 confirmation proof 与 session-grant ref；`confirmation_required`/`session_grant_available` 任一 facet 缺少对应 proof/ref，或反向携带未声明 proof/ref，均在执行前 fail closed
 - 该 epoch 选择的 gate 测试与 conformance runner：`cargo test -p sigil-runtime resource_global_cutover`、`cargo test -p sigil-kernel current_schema_only`、`./scripts/run-r71-global-cutover-conformance.sh`、`./scripts/run-r71-surface-conformance.sh`
 
 ## 11. 评审标准
