@@ -1,0 +1,34 @@
+# RFC-0071 R71.8: fixed platform qualification jobs.
+# Job ids are part of the release contract; a skipped or diagnostic-only job never satisfies one.
+schema_version = 1
+manifest_id = "r71-platform-qualification-v1"
+
+[[jobs]]
+job_id = "macos-seatbelt"
+platform = "macos"
+backend = "seatbelt"
+required = true
+
+[[jobs]]
+job_id = "linux-bubblewrap"
+platform = "linux"
+backend = "bubblewrap"
+required = true
+
+[[jobs]]
+job_id = "windows-restricted"
+platform = "windows"
+backend = "windows-restricted"
+required = true
+
+[[jobs]]
+job_id = "docker-declared"
+platform = "linux"
+backend = "docker"
+required = true
+
+[[jobs]]
+job_id = "toolchain-offline"
+platform = "linux"
+backend = "toolchain-offline"
+required = true

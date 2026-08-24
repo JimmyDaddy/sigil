@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Deterministic tests for the R71.8 qualification contract."""
+
+from __future__ import annotations
+
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+import r71_qualification_common as common
+
+
+class QualificationContractTests(unittest.TestCase):
+    def test_frozen_manifests_have_exact_required_sets(self) -> None:
+        conformance = common.load_conformance_manifest()
+        self.assertEqual(len(conformance["cases"]), 200)
+        platform = common.load_platform_manifest()
+        self.assertEqual(
+            {job["job_id"] for job in platform["jobs"]}, common.REQUIRED_PLATFORM_JOBS
+        )
+
+    def test_sha_validation_rejects_short_or_non_hex_values(self) -> None:
+        with self.assertRaises(ValueError):
+            common.validate_sha("abc", "candidate_sha")
+        with self.assertRaises(ValueError):
+            common.validate_sha("z" * 40, "candidate_sha")
+
+    def test_clean_candidate_and_ancestor_are_required(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="r71-qualification-meta-") as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "r71@example.invalid"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "R71 Test"], cwd=root, check=True)
+            (root / "fixture.txt").write_text("one\n", encoding="utf-8")
+            subprocess.run(["git", "add", "fixture.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=root, check=True)
+            base = common.git(root, "rev-parse", "HEAD")
+            (root / "fixture.txt").write_text("two\n", encoding="utf-8")
+            subprocess.run(["git", "add", "fixture.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "candidate"], cwd=root, check=True)
+            candidate = common.git(root, "rev-parse", "HEAD")
+            identity = common.validate_git_identity(root, candidate, base)
+            self.assertEqual(identity["candidate_sha"], candidate)
+            (root / "dirty.txt").write_text("must fail\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "clean checkout"):
+                common.validate_git_identity(root, candidate, base)
+
+    def test_fixed_workflow_job_ids_and_dispatch_contract_are_present(self) -> None:
+        workflow = (common.ROOT / ".github/workflows/sandbox-conformance.yml").read_text(
+            encoding="utf-8"
+        )
+        dispatch = (common.ROOT / "scripts/dispatch-r71-platform-qualification.sh").read_text(
+            encoding="utf-8"
+        )
+        for job_id in sorted(common.REQUIRED_PLATFORM_JOBS):
+            self.assertIn(f"  {job_id}:", workflow)
+        self.assertIn("--ref r71-release-candidate", dispatch)
+        self.assertIn("-f require_conformance=true", dispatch)
+        self.assertIn('run.get("headSha") != candidate', dispatch)
+
+
+if __name__ == "__main__":
+    unittest.main()

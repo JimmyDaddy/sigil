@@ -1,113 +1,248 @@
-name: Sandbox Conformance
+name: R71 Platform Qualification
 
 on:
   workflow_dispatch:
     inputs:
+      candidate_sha:
+        description: "Exact unpublished r71-release-candidate commit SHA"
+        required: true
+        type: string
+      base_sha:
+        description: "Exact immutable base commit SHA"
+        required: true
+        type: string
       require_conformance:
-        description: "Fail the workflow when the hosted runner cannot prove bubblewrap conformance"
-        required: false
+        description: "Required R71 qualification; false is rejected"
+        required: true
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: r71-platform-qualification-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
-  linux-bubblewrap:
-    name: Linux Bubblewrap
-    runs-on: ubuntu-latest
-
+  macos-seatbelt:
+    name: macos-seatbelt
+    runs-on: macos-latest
     steps:
-      - name: Checkout
+      - name: Checkout exact candidate
         uses: actions/checkout@v7
-
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Verify exact candidate and required mode
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          REQUIRE_CONFORMANCE: ${{ inputs.require_conformance }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUIRE_CONFORMANCE" == true ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+      - name: Run Seatbelt qualification
+        shell: bash
+        env:
+          SIGIL_R71_EVIDENCE_DIR: ${{ runner.temp }}/r71-evidence/macos-seatbelt
+        run: |
+          set -euo pipefail
+          bash scripts/run-r71-release-qualification.sh \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --base-sha "${{ inputs.base_sha }}" \
+            --platform macos --backend seatbelt --required --suite platform
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r71-macos-seatbelt
+          path: ${{ runner.temp }}/r71-evidence/macos-seatbelt
+          if-no-files-found: error
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
+  linux-bubblewrap:
+    name: linux-bubblewrap
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Verify exact candidate and required mode
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          REQUIRE_CONFORMANCE: ${{ inputs.require_conformance }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUIRE_CONFORMANCE" == true ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"
+      - name: Install Rust and Bubblewrap
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
       - name: Install Bubblewrap tools
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap wget
-
-      - name: Host namespace preflight
-        id: namespace_preflight
+      - name: Run full Linux qualification
+        shell: bash
+        env:
+          SIGIL_R71_EVIDENCE_DIR: ${{ runner.temp }}/r71-evidence/linux-bubblewrap
         run: |
           set -euo pipefail
-          {
-            echo "### Bubblewrap host preflight"
-            echo ""
-            echo '```text'
-            bwrap --version
-            sysctl kernel.unprivileged_userns_clone || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/run-r71-release-qualification.sh \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --base-sha "${{ inputs.base_sha }}" \
+            --platform linux --backend bubblewrap --required --suite full
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r71-linux-bubblewrap
+          path: ${{ runner.temp }}/r71-evidence/linux-bubblewrap
+          if-no-files-found: error
 
-          set +e
-          preflight_output="$(
-            bwrap \
-              --die-with-parent \
-              --unshare-pid \
-              --unshare-net \
-              --ro-bind / / \
-              --proc /proc \
-              --dev /dev \
-              /bin/true 2>&1
-          )"
-          preflight_status=$?
-          set -e
-
-          if [[ "$preflight_status" -eq 0 ]]; then
-            echo "supported=true" >> "$GITHUB_OUTPUT"
-            echo "Bubblewrap network namespace preflight passed." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          echo "supported=false" >> "$GITHUB_OUTPUT"
-          {
-            echo "Bubblewrap network namespace preflight is unsupported on this runner."
-            echo ""
-            echo '```text'
-            echo "$preflight_output"
-            echo '```'
-            echo "Conformance remains unproven unless this workflow is rerun on a compatible Linux host or with require_conformance enabled."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Linux Bubblewrap conformance
-        if: steps.namespace_preflight.outputs.supported == 'true'
+  windows-restricted:
+    name: windows-restricted
+    runs-on: windows-latest
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Verify exact candidate and required mode
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          REQUIRE_CONFORMANCE: ${{ inputs.require_conformance }}
         run: |
-          cargo test --locked \
-            -p sigil-tools-builtin \
-            tests::linux_bubblewrap_execution_backend_real_conformance \
-            -- --ignored --exact --nocapture
-
-      - name: Report unsupported hosted runner
-        if: steps.namespace_preflight.outputs.supported != 'true' && !inputs.require_conformance
+          set -euo pipefail
+          [[ "$REQUIRE_CONFORMANCE" == true ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+      - name: Run Windows restricted qualification
+        shell: bash
+        env:
+          SIGIL_R71_EVIDENCE_DIR: ${{ runner.temp }}/r71-evidence/windows-restricted
         run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          set -euo pipefail
+          bash scripts/run-r71-release-qualification.sh \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --base-sha "${{ inputs.base_sha }}" \
+            --platform windows --backend windows-restricted --required --suite platform
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r71-windows-restricted
+          path: ${{ runner.temp }}/r71-evidence/windows-restricted
+          if-no-files-found: error
 
-          ### Result
-
-          This hosted runner cannot run the Bubblewrap network namespace preflight.
-          The workflow is diagnostic-only by default, so this is recorded as an unsupported runner rather than a code failure.
-
-          E05.8 remains gated until the ignored Linux conformance test passes on a compatible Linux host.
-          EOF
-
-      - name: Enforce required conformance
-        if: steps.namespace_preflight.outputs.supported != 'true' && inputs.require_conformance
+  docker-declared:
+    name: docker-declared
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Verify exact candidate and required mode
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          REQUIRE_CONFORMANCE: ${{ inputs.require_conformance }}
         run: |
-          echo "Bubblewrap conformance was required, but this runner does not support the required namespace setup." >&2
-          exit 1
+          set -euo pipefail
+          [[ "$REQUIRE_CONFORMANCE" == true ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+      - name: Pull declared qualification image
+        run: docker pull alpine:3.20
+      - name: Run Docker qualification
+        shell: bash
+        env:
+          SIGIL_R71_DOCKER_CONFORMANCE_IMAGE: alpine:3.20
+          SIGIL_R71_EVIDENCE_DIR: ${{ runner.temp }}/r71-evidence/docker-declared
+        run: |
+          set -euo pipefail
+          export SIGIL_DOCKER_CONFORMANCE_IMAGE="$SIGIL_R71_DOCKER_CONFORMANCE_IMAGE"
+          bash scripts/run-r71-release-qualification.sh \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --base-sha "${{ inputs.base_sha }}" \
+            --platform docker --backend docker --required --suite platform
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r71-docker-declared
+          path: ${{ runner.temp }}/r71-evidence/docker-declared
+          if-no-files-found: error
+
+  toolchain-offline:
+    name: toolchain-offline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Verify exact candidate and required mode
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          REQUIRE_CONFORMANCE: ${{ inputs.require_conformance }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUIRE_CONFORMANCE" == true ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+      - name: Run toolchain qualification
+        shell: bash
+        env:
+          SIGIL_R71_EVIDENCE_DIR: ${{ runner.temp }}/r71-evidence/toolchain-offline
+        run: |
+          set -euo pipefail
+          bash scripts/run-r71-release-qualification.sh \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --base-sha "${{ inputs.base_sha }}" \
+            --platform toolchain --backend toolchain-offline --required --suite platform
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r71-toolchain-offline
+          path: ${{ runner.temp }}/r71-evidence/toolchain-offline
+          if-no-files-found: error
