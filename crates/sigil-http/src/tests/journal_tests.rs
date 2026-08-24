@@ -217,6 +217,25 @@ fn durable_journal_replays_after_process_reopen() {
 }
 
 #[test]
+fn replay_rebuild_quarantines_invalid_source_under_journal_owner() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("protocol-journal.json");
+    std::fs::write(&path, b"not-json").expect("invalid source should be written");
+
+    let journal = HttpDurableProtocolJournal::open_with_replay_rebuild(&path, 16)
+        .expect("invalid replay source should be rebuilt");
+    drop(journal);
+
+    assert!(!path.exists());
+    let quarantined = std::fs::read_dir(temp.path())
+        .expect("temporary directory should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .any(|name| name.starts_with("protocol-journal.json.invalid-"));
+    assert!(quarantined, "invalid replay source should be quarantined");
+}
+
+#[test]
 fn current_schema_protocol_replay_uses_managed_namespace_and_reopens_from_it() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let legacy_path = temp.path().join("legacy-protocol.json");
