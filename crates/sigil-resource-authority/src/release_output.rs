@@ -645,6 +645,17 @@ mod tests {
     }
 
     #[test]
+    fn r71_release_tree_root_reservation_allows_parent_entry_creation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service = AuthorityBorrowedReleaseOutputServiceV1::new(temp.path());
+        let root = temp.path().join("campaign");
+        service
+            .prepare_tree_root(&root)
+            .expect("tree root reservation");
+        assert!(root.is_dir());
+    }
+
+    #[test]
     fn r71_release_output_rejects_aliases_and_invalid_tree_entries_before_effect() {
         let temp = tempfile::tempdir().expect("tempdir");
         let service = AuthorityBorrowedReleaseOutputServiceV1::new(temp.path());

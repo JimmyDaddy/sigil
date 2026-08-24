@@ -56,15 +56,22 @@ pub fn canonical_identity(path: &Path) -> Result<CanonicalLocalIdentity, Identit
     let mut digest_material = Vec::new();
     digest_material.extend_from_slice(path.to_string_lossy().as_bytes());
     digest_material.extend_from_slice(&inode.to_le_bytes());
-    digest_material.extend_from_slice(&link_count.to_le_bytes());
-    digest_material.extend_from_slice(&metadata.len().to_le_bytes());
+    // A directory's link count also changes when a child directory is created. It is a
+    // containment boundary, so bind its inode/path identity rather than mutable entry counts.
+    let stable_link_count = if metadata.is_dir() { 0 } else { link_count };
+    digest_material.extend_from_slice(&stable_link_count.to_le_bytes());
+    // Directory byte length is not a stable identity: creating an admitted child changes it on
+    // common filesystems while leaving the directory inode and link identity intact. Files still
+    // bind their current size so borrowed-file content replacement remains detectable.
+    let stable_size = if metadata.is_dir() { 0 } else { metadata.len() };
+    digest_material.extend_from_slice(&stable_size.to_le_bytes());
     let digest = identity_digest(&digest_material);
     Ok(CanonicalLocalIdentity {
         digest,
         is_regular_file: metadata.is_file(),
         is_directory: metadata.is_dir(),
         is_symlink: metadata.file_type().is_symlink(),
-        link_count,
+        link_count: stable_link_count,
     })
 }
 
@@ -146,5 +153,14 @@ mod tests {
     #[test]
     fn r71_identity_digest_is_stable() {
         assert_eq!(identity_digest(b"x"), identity_digest(b"x"));
+    }
+
+    #[test]
+    fn r71_directory_identity_survives_admitted_child_creation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let before = canonical_identity(temp.path()).expect("directory identity");
+        std::fs::create_dir(temp.path().join("child")).expect("child directory");
+        let after = canonical_identity(temp.path()).expect("directory identity after child");
+        assert_eq!(before, after, "before={before:?} after={after:?}");
     }
 }

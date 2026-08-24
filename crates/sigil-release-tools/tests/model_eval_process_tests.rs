@@ -44,9 +44,16 @@ fn hidden_model_eval_process_runs_scripted_production_tool_path() -> Result<()> 
         )
         .env("SIGIL_API_KEY", "loopback-model-eval-key")
         .output()?;
-    server
+    let server_result = server
         .join()
-        .map_err(|_| anyhow::anyhow!("loopback provider thread panicked"))??;
+        .map_err(|_| anyhow::anyhow!("loopback provider thread panicked"))?;
+    if let Err(error) = server_result {
+        bail!(
+            "loopback provider fixture failed: {error:#}\nmodel-eval stdout:\n{}\nmodel-eval stderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     if !output.status.success() {
         bail!(
