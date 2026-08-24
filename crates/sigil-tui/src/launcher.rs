@@ -805,11 +805,12 @@ where
                     )
                     .map_err(anyhow::Error::new)?;
                 }
-                let manifest_hash =
+                let boot_cutover =
                     sigil_runtime::r71_global_cutover::legacy_boot_decision(&config_path)
-                        .map_err(anyhow::Error::new)?
-                        .manifest()
-                        .manifest_hash;
+                        .map_err(anyhow::Error::new)?;
+                let current_schema = boot_cutover.manifest().selected_epoch
+                    == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema;
+                let manifest_hash = boot_cutover.manifest().manifest_hash;
                 let planner =
                     std::sync::Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
                         sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
@@ -831,7 +832,12 @@ where
                     )
                     .map_err(anyhow::Error::new)?,
                 );
-                app.set_authority_composition(composition);
+                // Legacy epoch keeps its compatibility writers and must not receive a managed
+                // consumer route. The authority composition is still built and validated at
+                // boot, but only the current schema may inject its writer into App/worker state.
+                if current_schema {
+                    app.set_authority_composition(composition);
+                }
             }
             if app.workspace_is_trusted_from_history() {
                 restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
