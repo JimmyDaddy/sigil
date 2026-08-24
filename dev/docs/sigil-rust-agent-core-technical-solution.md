@@ -3,6 +3,8 @@
 > Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
 > no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
 
+> RFC-0071 implementation snapshot (2026-08-25): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. R71.6-R71.8 remain one unpublished candidate until the fixed cross-platform qualification evidence is complete.
+
 ## 1. 背景
 
 `sigil` 是一个基于 Rust 的 AI coding agent：内核复用、前端可插拔，

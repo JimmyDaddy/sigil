@@ -1,10 +1,10 @@
 # RFC-0071：Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1
 
-状态：Proposed（已完成独立架构审计，待评审冻结，尚未实施）
+状态：Implemented/Frozen（R71.0–R71.8 已实施并完成固定跨平台资格；exact candidate、ledger 与 evidence 见本地 R71 handoff）
 
 创建日期：2026-08-23
 
-修订日期：2026-08-23
+修订日期：2026-08-25
 
 依赖：
 
@@ -10316,6 +10316,8 @@ Proposed 阶段只创建本 RFC，不更新 README、`dev/docs/index.md` 或 `.r
 6. Desktop/TUI/CLI/HTTP 用户文档：temp、unconfined、typed recovery 行为；
 7. RFC-0005/0060/0062的implementation note：标明被RFC-0071 supersede/extend的具体段落；RFC-0068/0069同步标明RecoveryBlockerV1到current-schema V2的clean cutover、ManagedResource domain/scope/detail、physical frontier bridge与stable admission key，不能保留两个active blocker schema；同时修正`code-standards.md`遗留的`ToolResultRecordedV2/V2 view`表述，使其与RFC-0062/current implementation的current V3 artifact/view contract一致，避免治理文本反向要求已淘汰schema；
 8. `.repo-local-dev/rfcs/STATUS.md`：只有开始 R71 implementation ledger 后登记。
+
+R71.8 closure record：上述同步已完成。固定五 job workflow、exact candidate/base 校验、200 个 required fault cases、inventory/shipping/negative gates、四表面 contract checks 与三平台 sandbox qualification 的逐项证据由本地 execution ledger 和 handoff manifest 记录；R71.6–R71.8 仍作为同一未发布 release candidate 管理，RFC-0070 不在本闭环中提前启动。
 
 ---
 

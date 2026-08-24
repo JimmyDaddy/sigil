@@ -2,6 +2,8 @@
 
 状态：implemented / verified
 
+> RFC-0071 implementation note (2026-08-25): current-schema session/artifact output uses authority-owned managed storage and artifact staging leases. Legacy direct projection paths remain compatibility-only and are excluded from shipping ownership; R71.7 inventory/shipping gates and R71.8 platform qualification verify this boundary.
+
 ### 2026-08-17 cache-stable runtime follow-up
 
 RFC-0065 已补齐 Desktop 普通 run 的 provider-neutral cache usage、last layout mutation 与 provider-miss

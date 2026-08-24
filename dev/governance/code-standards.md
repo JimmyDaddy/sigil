@@ -118,7 +118,7 @@
 - prepared mutation 的 source/target hash、workspace revision、args、policy 与 approval 任一漂移都必须在首个写入前 fail closed；多文件补偿回滚仍须走 RFC-0002 CAS/审计，不能宣称为 crash-atomic transaction
 - `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
 - `bash` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
-- 所有工具结果必须通过 `ToolResultRecordedV2` 拆成 immutable policy-safe artifact、bounded model view 和 bounded display view；artifact body 不得进入 JSONL、control entry、run event 或 Desktop IPC
+- 所有 current-schema 工具结果必须通过 `ToolResultRecordedV3` 拆成 immutable policy-safe artifact、bounded model view 和 bounded display view；artifact body 不得进入 JSONL、control entry、run event 或 Desktop IPC。V2 只保留为明确的 legacy decoder/fixture，不得作为新 execution writer 或治理规范目标
 - 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；bounded inline adapter 只允许受限 fallback，超过 hard guard 必须显式 `Unavailable`，不得通过提高 stored-event 上限兜底
 - model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt
 - 所有 model-visible 工具输出必须有默认上限和截断 metadata；大输出不能直接灌满 timeline 或 provider context
@@ -132,7 +132,7 @@
 - scratch TTL GC 只能删除无 active tool/terminal lease 的命名空间，删除与 lease 获取必须在同一注册表锁内完成；session 删除必须同时回收该 session 的 scratch 命名空间
 - 工具失败必须结构化返回，不能 panic；pipe 读取失败、artifact/capture 存储失败与磁盘耗尽不得压缩成同一个通用 reader error，资源耗尽必须带稳定 code 和可执行恢复提示
 - 长时间 workspace check 在启动前必须做有界磁盘余量预检；capture 存储失败时继续 drain 已启动的 child process，并把 artifact 标记为 unavailable，不能把存储失败伪装成命令执行失败
-- provider-visible tool result 必须使用 V2 bounded model view；durable history 写 descriptor、facts 和 initial model view，不写裸文本或完整工具正文
+- provider-visible tool result 必须使用 V3 bounded model view；durable history 写 descriptor、facts 和 initial model view，不写裸文本或完整工具正文
 - initial model view 必须同时受 tool-specific per-result cap 与 root-run aggregate cap；aggregate cap 只按实际写入 `initial_model_view.preview` 的 UTF-8 bytes 扣减，不得按工具最大额度预扣；预算耗尽后保留 facts、opaque artifact ref 和 typed retrieval hint，不得回退为扩大 inline preview
 
 ### 3.4 `sigil-mcp`

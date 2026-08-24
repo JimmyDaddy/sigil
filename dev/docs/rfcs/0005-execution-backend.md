@@ -2,6 +2,8 @@
 
 状态：draft / E05.1-E05.9, E05.11-E05.15 implemented with real macOS/Linux/Docker conformance where applicable / E05.16 minimal doctor implemented / E05.17 controlled-auto deferred / productization remains
 
+> RFC-0071 implementation note (2026-08-25): current managed execution is admitted by Resource Authority and enforced through the `sigil-sandbox` seam. Local execution reports truthful `None` enforcement; Seatbelt, Bubblewrap, Docker and Windows restricted qualification are not inferred from cwd/env and are covered by the R71.8 fixed-job release candidate.
+
 创建日期：2026-06-28
 
 基线：

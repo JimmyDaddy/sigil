@@ -9,6 +9,8 @@
 > Plan materialization、workspace observation/CAS、execution segment 与 public-event outbox；其
 > qualification gate 取代本 RFC 先前未拆分的跨 surface / fault-campaign 收口要求。
 
+> RFC-0071 implementation note (2026-08-25): current recovery uses the RFC-0071 `RecoveryBlockerV2`/managed-resource bridge, composition epoch and physical frontier evidence. R71.5's 200-case campaign and R71.8 full qualification are the release evidence for the authority/sandbox extension of this recovery spine.
+
 依赖：
 
 - [Rust agent core technical solution](../sigil-rust-agent-core-technical-solution.md)

@@ -2,6 +2,8 @@
 
 状态：实施完成（2026-08-22；同日修订 Plan Run 为 first-class direct execution；验证证据见 R69 execution ledger）
 
+> RFC-0071 implementation note (2026-08-25): R71 current-schema cutover extends the stable admission key and blocker boundary with managed resource domain/scope/detail, physical frontier bridge and authority-owned recovery evidence. Plan/task direct execution remains downstream of that typed admission; no second blocker schema or path-derived recovery proof is introduced.
+
 创建日期：2026-08-22
 
 依赖：

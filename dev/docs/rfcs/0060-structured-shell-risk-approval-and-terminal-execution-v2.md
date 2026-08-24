@@ -2,6 +2,8 @@
 
 状态：implementation complete / local deterministic and source-built acceptance complete / external platform, provider-cost and release gates pending
 
+> RFC-0071 implementation note (2026-08-25): shell and terminal execution now consume the current-schema permission/resource binding and typed sandbox admission. Backend selection, temporary roots and enforcement receipts are no longer inferred from cwd or ambient environment; the R71.8 candidate supplies the cross-platform qualification boundary.
+
 创建日期：2026-08-01
 
 依赖：
