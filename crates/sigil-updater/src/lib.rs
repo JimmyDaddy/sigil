@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use apply::{UpdateApplyOutcome, apply_checked_update};
+pub use cache::{ProductUpdaterReceipt, ProductUpdaterState};
 pub use channel::UpdateChannel;
 pub use github::{
     CheckOptions, ReleaseSecurity, UpdateCandidate, UpdateCheckOutcome, UpdateService,

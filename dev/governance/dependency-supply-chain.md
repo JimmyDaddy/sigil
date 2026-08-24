@@ -17,6 +17,7 @@ target 不复制 Shell 风险规则，也不以测试专用 parser 代替真实�
 |---|---|---|---|---|---|
 | `self_update` | `=1.0.0-rc.6`；关闭默认 feature，仅启用 `async,github,rustls,archive-tar,compression-tar-gz,checksums` | `sigil-updater/apply` | 只负责已准入 GitHub standalone archive 的 exact tag/asset 下载、SHA-256 校验、archive 解包、候选 binary `--version` 验证与 unattended replacement；不负责选择 release、解析 GitHub 安全字段或 package-manager 更新 | MIT；jaemk/self_update | 固定 RC 精确版本，避免预发布 API 漂移；只有 `immutable=true`、精确 target asset 和 GitHub `sha256:` digest 同时成立才进入该引擎。npm/Homebrew/Cargo/source/unknown 均不得原地替换 |
 | `semver` | `1.0.27`；默认 feature | `sigil-updater/channel` | 解析当前版本与 release tag，并按 stable、beta 或当前已安装 prerelease channel 做严格隔离和版本排序 | MIT OR Apache-2.0；dtolnay/semver | `beta` 只接收 stable 与首个 prerelease identifier 为 `beta` 的版本；`current` 对 prerelease 只跟随相同 identifier，拒绝 alpha/beta/rc 串线 |
+| `ring` | `0.17.14`；默认 feature | `sigil-updater/cache` | 对完整、bounded 的 updater cache object 计算 SHA-256 receipt，绑定 owner 的 atomic publish 结果；不用于 provider payload 或 agent capability | Apache-2.0 AND ISC；Brian Smith/ring | 复用 workspace 已锁定版本；receipt 只返回 content identity，不暴露 cache path 或可重放的 writer capability |
 
 `sigil-updater` 自行使用 workspace `reqwest 0.12` 拉取 GitHub Releases，并显式请求
 `X-GitHub-Api-Version: 2026-03-10`；client 只允许 HTTPS、禁止 redirect、设置连接/总超时并将

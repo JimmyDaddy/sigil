@@ -72,6 +72,51 @@ pub fn compose_runtime_authority(
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     declared: &[StorageWriterChannelV1],
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
+    compose_runtime_authority_inner(
+        state_anchor,
+        execution_temp_root,
+        cutover_manifest_hash,
+        planner,
+        declared,
+        None,
+    )
+}
+
+/// Composes the production authority surface with the independent product updater owner.
+///
+/// The updater cache is a trusted product-plane object, not a managed agent resource. Keeping
+/// its owner explicit here lets the cutover probe verify the real writer attachment without
+/// granting the updater an agent/session capability.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_runtime_authority_with_product_updater(
+    state_anchor: &Path,
+    cache_root: &Path,
+    execution_temp_root: &Path,
+    cutover_manifest_hash: CanonicalHash,
+    planner: Arc<dyn ManagedExecutionPlannerV1>,
+    declared: &[StorageWriterChannelV1],
+) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
+    compose_runtime_authority_inner(
+        state_anchor,
+        execution_temp_root,
+        cutover_manifest_hash,
+        planner,
+        declared,
+        Some(Arc::new(
+            sigil_updater::ProductUpdaterState::from_cache_root(cache_root),
+        )),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compose_runtime_authority_inner(
+    state_anchor: &Path,
+    execution_temp_root: &Path,
+    cutover_manifest_hash: CanonicalHash,
+    planner: Arc<dyn ManagedExecutionPlannerV1>,
+    declared: &[StorageWriterChannelV1],
+    product_updater: Option<Arc<sigil_updater::ProductUpdaterState>>,
+) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
     // The real kernel capability broker is the single issuer for this composition: execution
     // bundles and storage admission capabilities are broker-issued (one-shot proofs), never
     // fabricated by consumers.
@@ -153,7 +198,8 @@ pub fn compose_runtime_authority(
             Arc::clone(&file_access),
             crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
             Arc::clone(&extension_execution),
-        );
+        )
+        .with_optional_product_updater(product_updater);
     let storage_writer = std::sync::Arc::new(ManagedStorageWriterAdapterV1::with_storage_issuer(
         storage,
         state_anchor.to_path_buf(),
@@ -251,8 +297,9 @@ pub fn attach_boot_authority_to_services(
     let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
         crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
     ));
-    let composition = compose_runtime_authority(
+    let composition = compose_runtime_authority_with_product_updater(
         &paths.state_root,
+        &paths.cache_root,
         &paths.scratch_root,
         cutover.manifest().manifest_hash,
         planner,

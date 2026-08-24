@@ -1,4 +1,9 @@
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +12,64 @@ use crate::{UpdateCheckOutcome, UpdateError};
 const CACHE_SCHEMA_VERSION: u16 = 1;
 const MAX_CACHE_BYTES: u64 = 256 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The single product-plane owner for the shared signed updater cache.
+///
+/// CLI, TUI, and Desktop callers may share this owner, but they do not receive the cache path or
+/// implement their own temporary-file/replace protocol. The owner keeps the physical location and
+/// atomic publication lifecycle private to this crate.
+#[derive(Debug, Clone)]
+pub struct ProductUpdaterState {
+    cache_file: std::path::PathBuf,
+    replace_lock: Arc<Mutex<()>>,
+}
+
+impl ProductUpdaterState {
+    /// Creates the owner for Sigil's configured cache root.
+    #[must_use]
+    pub fn from_cache_root(cache_root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            cache_file: cache_root.into().join(crate::UPDATE_CACHE_RELATIVE_PATH),
+            replace_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub(crate) async fn load(&self) -> Option<UpdateCacheEntry> {
+        load(&self.cache_file).await
+    }
+
+    pub(crate) async fn replace(
+        &self,
+        entry: &UpdateCacheEntry,
+    ) -> Result<ProductUpdaterReceipt, UpdateError> {
+        let path = self.cache_file.clone();
+        let entry = entry.clone();
+        let replace_lock = Arc::clone(&self.replace_lock);
+        tokio::task::spawn_blocking(move || {
+            let _guard = replace_lock
+                .lock()
+                .map_err(|_| UpdateError::Cache("updater owner lock poisoned".to_owned()))?;
+            replace_sync(&path, &entry)
+        })
+        .await
+        .map_err(|error| UpdateError::Cache(format!("cache writer task failed: {error}")))?
+    }
+}
+
+/// Closed receipt returned after the product updater owner publishes one complete object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductUpdaterReceipt {
+    object_hash: [u8; 32],
+}
+
+impl ProductUpdaterReceipt {
+    /// Returns the content identity of the atomically published cache object.
+    #[must_use]
+    pub fn object_hash(&self) -> [u8; 32] {
+        self.object_hash
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateCacheEntry {
     pub(crate) schema_version: u16,
@@ -43,12 +105,14 @@ pub(crate) async fn load(path: &Path) -> Option<UpdateCacheEntry> {
         .flatten()
 }
 
-pub(crate) async fn store(path: &Path, entry: &UpdateCacheEntry) -> Result<(), UpdateError> {
-    let path = path.to_path_buf();
-    let entry = entry.clone();
-    tokio::task::spawn_blocking(move || store_sync(&path, &entry))
-        .await
-        .map_err(|error| UpdateError::Cache(format!("cache writer task failed: {error}")))?
+fn object_hash(entry: &UpdateCacheEntry) -> [u8; 32] {
+    use ring::digest::{SHA256, digest};
+
+    let bytes = serde_json::to_vec(entry).expect("updater cache entry is serializable");
+    let digest = digest(&SHA256, &bytes);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(digest.as_ref());
+    hash
 }
 
 fn load_sync(path: &Path) -> Option<UpdateCacheEntry> {
@@ -85,6 +149,22 @@ fn store_sync(path: &Path, entry: &UpdateCacheEntry) -> Result<(), UpdateError> 
     set_owner_only(path)?;
     sync_parent(parent)?;
     Ok(())
+}
+
+fn replace_sync(
+    path: &Path,
+    entry: &UpdateCacheEntry,
+) -> Result<ProductUpdaterReceipt, UpdateError> {
+    let new_hash = object_hash(entry);
+    if load_sync(path).is_some_and(|current| object_hash(&current) == new_hash) {
+        return Err(UpdateError::Cache(
+            "updater cache object is already current".to_owned(),
+        ));
+    }
+    store_sync(path, entry)?;
+    Ok(ProductUpdaterReceipt {
+        object_hash: new_hash,
+    })
 }
 
 #[cfg(unix)]

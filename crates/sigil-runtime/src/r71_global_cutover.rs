@@ -57,6 +57,9 @@ pub enum RuntimeExecutionExtensionSeamV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeProductStateSeamV1 {
     LegacyDirectWriter,
+    /// A trusted product-plane owner performs the bounded atomic lifecycle itself.
+    ProductOwnerAtomicBacked,
+    /// A borrowed-host writer is attached through the authority registration route.
     AuthorityRegistrationBacked,
 }
 
@@ -309,7 +312,11 @@ pub fn probe_mandatory_adapters(
             services.borrowed_release_output_seam,
         ),
     ] {
-        let passed = matches!(seam, RuntimeProductStateSeamV1::AuthorityRegistrationBacked);
+        let passed = matches!(
+            seam,
+            RuntimeProductStateSeamV1::ProductOwnerAtomicBacked
+                | RuntimeProductStateSeamV1::AuthorityRegistrationBacked
+        );
         out.push(AdapterReadinessProbeV1 {
             adapter: kind,
             passed,
@@ -1271,22 +1278,24 @@ mod tests {
             Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
                 crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
             ));
-        let composition = crate::r71_authority_composition::compose_runtime_authority(
-            &state,
-            &exec,
-            CanonicalHash::from_bytes([0x55; 32]),
-            planner,
-            &[
-                Ch::SessionLog,
-                Ch::SessionLifecycleLog,
-                Ch::InputHistory,
-                Ch::DurableMemory,
-                Ch::SessionCatalog,
-                Ch::ArtifactStaging,
-                Ch::AdapterDurableState,
-            ],
-        )
-        .expect("compose");
+        let composition =
+            crate::r71_authority_composition::compose_runtime_authority_with_product_updater(
+                &state,
+                &state.join("cache"),
+                &exec,
+                CanonicalHash::from_bytes([0x55; 32]),
+                planner,
+                &[
+                    Ch::SessionLog,
+                    Ch::SessionLifecycleLog,
+                    Ch::InputHistory,
+                    Ch::DurableMemory,
+                    Ch::SessionCatalog,
+                    Ch::ArtifactStaging,
+                    Ch::AdapterDurableState,
+                ],
+            )
+            .expect("compose");
         let recovery = RuntimeResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-full",

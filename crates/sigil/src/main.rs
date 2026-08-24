@@ -586,9 +586,6 @@ async fn update_command(
             launch_cwd,
         ),
     };
-    let cache_file = paths
-        .cache_root
-        .join(sigil_updater::UPDATE_CACHE_RELATIVE_PATH);
     let current_exe = env::current_exe()?;
     let metadata = build.update_metadata();
     let install_source = metadata.install_source(&current_exe);
@@ -599,7 +596,7 @@ async fn update_command(
             refresh,
             output,
         } => {
-            let service = sigil_updater::UpdateService::github(cache_file)?;
+            let service = sigil_updater::UpdateService::github(&paths.cache_root)?;
             let outcome = service
                 .check(sigil_updater::CheckOptions {
                     current_version: metadata.version,
@@ -630,7 +627,7 @@ async fn update_command(
                     "this source build cannot update itself; rebuild or reinstall with Cargo"
                 );
             }
-            let service = sigil_updater::UpdateService::github(cache_file)?;
+            let service = sigil_updater::UpdateService::github(&paths.cache_root)?;
             let outcome = service
                 .check(sigil_updater::CheckOptions {
                     current_version: metadata.version,

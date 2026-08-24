@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     InstallSource, Result, UpdateChannel, UpdateError,
-    cache::{self, UpdateCacheEntry},
+    cache::{ProductUpdaterState, UpdateCacheEntry},
     managed_update_command,
 };
 
@@ -91,17 +91,20 @@ pub struct UpdateService {
     client: Client,
     owner: String,
     repository: String,
-    cache_file: PathBuf,
+    product_state: ProductUpdaterState,
     cache_ttl: Duration,
 }
 
 impl UpdateService {
-    /// Builds Sigil's production release checker.
+    /// Builds Sigil's production release checker around the shared product updater owner.
+    ///
+    /// `cache_root` is an owner input; the updater service derives the fixed cache location and
+    /// callers never receive the staging or replacement path.
     ///
     /// # Errors
     ///
     /// Returns an error when the hardened HTTP client cannot be constructed.
-    pub fn github(cache_file: impl Into<PathBuf>) -> Result<Self> {
+    pub fn github(cache_root: impl Into<PathBuf>) -> Result<Self> {
         let client = Client::builder()
             .https_only(true)
             .redirect(Policy::none())
@@ -113,7 +116,7 @@ impl UpdateService {
             client,
             owner: DEFAULT_OWNER.to_owned(),
             repository: DEFAULT_REPOSITORY.to_owned(),
-            cache_file: cache_file.into(),
+            product_state: ProductUpdaterState::from_cache_root(cache_root),
             cache_ttl: DEFAULT_CACHE_TTL,
         })
     }
@@ -133,7 +136,9 @@ impl UpdateService {
         })?;
         let cache_key = cache_key(&options);
         let now = unix_seconds();
-        let cached = cache::load(&self.cache_file)
+        let cached = self
+            .product_state
+            .load()
             .await
             .filter(|entry| entry.cache_key == cache_key);
         if !options.force_refresh
@@ -167,7 +172,7 @@ impl UpdateService {
             outcome.checked_at_unix_seconds = now;
             outcome.cached = true;
             let persisted = UpdateCacheEntry::new(cache_key, now, entry.etag, outcome.clone());
-            cache::store(&self.cache_file, &persisted).await?;
+            self.product_state.replace(&persisted).await?;
             return Ok(outcome);
         }
         if !response.status().is_success() {
@@ -191,17 +196,15 @@ impl UpdateService {
             candidate,
             managed_update_command: managed_command,
         };
-        cache::store(
-            &self.cache_file,
-            &UpdateCacheEntry::new(cache_key, now, etag, outcome.clone()),
-        )
-        .await?;
+        self.product_state
+            .replace(&UpdateCacheEntry::new(
+                cache_key,
+                now,
+                etag,
+                outcome.clone(),
+            ))
+            .await?;
         Ok(outcome)
-    }
-
-    #[must_use]
-    pub fn cache_file(&self) -> &Path {
-        &self.cache_file
     }
 }
 

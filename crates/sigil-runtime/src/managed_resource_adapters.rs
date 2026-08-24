@@ -51,6 +51,9 @@ pub struct RuntimeManagedResourceServicesV1 {
     /// compositions, so the extension readiness probe cannot be toggled independently of the
     /// launch path.
     pub extension_execution: Option<Arc<RuntimeManagedExtensionExecutionRouteV1>>,
+    /// Product-plane updater owner. It is deliberately independent from agent storage grants;
+    /// the product-state probe passes only when this real owner is attached.
+    pub product_updater: Option<Arc<sigil_updater::ProductUpdaterState>>,
     /// Whether the desktop product-state updater is attached to its real owner route.
     pub product_state_updater_seam: crate::r71_global_cutover::RuntimeProductStateSeamV1,
     /// Whether native support-save is attached to its host-private registration route.
@@ -284,6 +287,7 @@ impl RuntimeManagedResourceServicesV1 {
             file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1::ShadowPlaceholder,
             projection_backed: false,
             extension_execution: None,
+            product_updater: None,
             product_state_updater_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
             borrowed_native_save_seam:
@@ -320,6 +324,7 @@ impl RuntimeManagedResourceServicesV1 {
             file_access_seam,
             projection_backed: true,
             extension_execution: None,
+            product_updater: None,
             product_state_updater_seam:
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
             borrowed_native_save_seam:
@@ -353,6 +358,32 @@ impl RuntimeManagedResourceServicesV1 {
             crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::ManagedExecutionBacked;
         composed.extension_execution = Some(extension_execution);
         composed
+    }
+
+    /// Attaches the transport-neutral product updater owner to the composed surface.
+    ///
+    /// This is a product-plane owner attachment, not an agent Resource Authority grant.
+    #[must_use]
+    pub fn with_product_updater(
+        self,
+        product_updater: Arc<sigil_updater::ProductUpdaterState>,
+    ) -> Self {
+        self.with_optional_product_updater(Some(product_updater))
+    }
+
+    /// Keeps isolated/shadow compositions truthful when no product-plane owner is available.
+    #[must_use]
+    pub fn with_optional_product_updater(
+        mut self,
+        product_updater: Option<Arc<sigil_updater::ProductUpdaterState>>,
+    ) -> Self {
+        self.product_state_updater_seam = if product_updater.is_some() {
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::ProductOwnerAtomicBacked
+        } else {
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+        };
+        self.product_updater = product_updater;
+        self
     }
 }
 

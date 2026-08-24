@@ -95,16 +95,13 @@ impl AppState {
             }
             return explicit;
         }
-        let cache_file = self
-            .sigil_paths
-            .cache_root
-            .join(sigil_updater::UPDATE_CACHE_RELATIVE_PATH);
+        let cache_root = self.sigil_paths.cache_root.clone();
         let (sender, receiver) = sync_channel(1);
         let spawned = std::thread::Builder::new()
             .name("sigil-update-check".to_owned())
             .spawn(move || {
                 let result =
-                    run_update_check(build, install_source, cache_file, force_refresh, channel);
+                    run_update_check(build, install_source, cache_root, force_refresh, channel);
                 let _ = sender.send(UpdateTaskResult::Checked { explicit, result });
             });
         if spawned.is_err() {
@@ -140,16 +137,13 @@ impl AppState {
             );
             return true;
         }
-        let cache_file = self
-            .sigil_paths
-            .cache_root
-            .join(sigil_updater::UPDATE_CACHE_RELATIVE_PATH);
+        let cache_root = self.sigil_paths.cache_root.clone();
         let (sender, receiver) = sync_channel(1);
         let spawned = std::thread::Builder::new()
             .name("sigil-update-apply".to_owned())
             .spawn(move || {
                 let result =
-                    run_update_apply(build, install_source, cache_file, current_exe, channel);
+                    run_update_apply(build, install_source, cache_root, current_exe, channel);
                 let _ = sender.send(UpdateTaskResult::Applied(result));
             });
         if spawned.is_err() {
@@ -294,7 +288,7 @@ impl AppState {
 fn run_update_check(
     build: BuildMetadata,
     install_source: sigil_updater::InstallSource,
-    cache_file: PathBuf,
+    cache_root: PathBuf,
     force_refresh: bool,
     channel: UpdateChannel,
 ) -> Result<UpdateCheckOutcome, String> {
@@ -302,7 +296,7 @@ fn run_update_check(
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    let service = UpdateService::github(cache_file).map_err(|error| error.to_string())?;
+    let service = UpdateService::github(cache_root).map_err(|error| error.to_string())?;
     runtime
         .block_on(service.check(CheckOptions {
             current_version: build.version,
@@ -317,7 +311,7 @@ fn run_update_check(
 fn run_update_apply(
     build: BuildMetadata,
     install_source: sigil_updater::InstallSource,
-    cache_file: PathBuf,
+    cache_root: PathBuf,
     current_exe: PathBuf,
     channel: UpdateChannel,
 ) -> Result<UpdateApplyOutcome, String> {
@@ -325,7 +319,7 @@ fn run_update_apply(
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    let service = UpdateService::github(cache_file).map_err(|error| error.to_string())?;
+    let service = UpdateService::github(cache_root).map_err(|error| error.to_string())?;
     runtime.block_on(async {
         let outcome = service
             .check(CheckOptions {
