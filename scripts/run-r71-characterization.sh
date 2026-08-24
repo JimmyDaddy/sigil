@@ -114,9 +114,9 @@ run_cargo_fixture "r71-causal-edges" cargo test -p sigil-tools-builtin --lib r71
 # 2. Original feedback flow suite (only after fixture isolation passes).
 run_cargo_fixture "feedback-flow" cargo test -p sigil-tui --lib feedback_ -- --format terse
 
-# 3. Paths fallback: missing HOME/XDG must fall back to cwd .sigil-state/.sigil-cache (observed
-#    pollution causal edge) -- the current resolver behavior is asserted by the existing test.
-run_cargo_fixture "paths-fallback" cargo test -p sigil-runtime --lib paths -- --format terse
+# 3. Paths fail-closed: missing HOME/XDG must not create cwd .sigil-state/.sigil-cache (the former
+#    pollution causal edge); the current resolver behavior is asserted by the existing test.
+run_cargo_fixture "paths-fail-closed" cargo test -p sigil-runtime --lib paths -- --format terse
 
 # 4. No-follow cleanup assertion is enforced inside the Rust fixtures (TestFixtureRoot RAII);
 #    the injected fixture root is trap-cleaned below.

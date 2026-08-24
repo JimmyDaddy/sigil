@@ -131,7 +131,7 @@ fn resolves_windows_defaults_from_home_when_local_app_data_is_missing() {
 /// than invent cwd-relative writable roots.
 #[test]
 #[should_panic(expected = "cannot resolve Sigil state root")]
-fn resolver_defaults_to_relative_roots_without_home_or_xdg() {
+fn resolver_fails_closed_without_home_or_xdg() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let mut resolver_env = env(StoragePlatform::Linux);
     resolver_env.home_dir = None;
