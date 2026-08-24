@@ -510,6 +510,7 @@ export function createCatalogWorkbenchBridge(
       target: "aarch64-apple-darwin",
       profile: "debug",
       environment: { os: "macos", architecture: "aarch64", terminalFamily: "other" },
+      cutover: { schemaVersion: 1, epoch: "legacy", authority: "legacy", blockers: [] },
       summary: { overallStatus: "ok", ok: 5, warn: 0, error: 0 },
       checks: [],
       privacy: { included: ["build metadata"], excluded: ["credentials"], reviewBeforeSharing: true },

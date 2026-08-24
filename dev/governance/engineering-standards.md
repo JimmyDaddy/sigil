@@ -230,7 +230,9 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 - Release evaluation output 必须由 nonshipping `sigil-release-tools` 持有 fixed-root `BorrowedReleaseOutputServiceV1`；file 使用 one-shot create-new + fsync，tree 使用 absent-root、bounded safe-relative entries、no-follow parent chain 与 partial frontier receipt；runtime 只消费 path-agnostic owner port，shipping boot 不得暴露 release writer，route-contract/model-eval/rollout output 不得回退到 direct output-path writer
 - 发布 new epoch 后，当前 binary 只创建/读取 current-schema session；old-schema session 明确 unavailable，不得按旧 schema 解释
 - 禁止 per-consumer flag、V2/V3 dual write、legacy allocator fallback 与 active process provider 切换
-- 该 epoch 选择的 gate 测试与 conformance runner：`cargo test -p sigil-runtime resource_global_cutover`、`cargo test -p sigil-kernel current_schema_only`、`./scripts/run-r71-global-cutover-conformance.sh`
+- CLI、TUI、HTTP 和 Desktop 的 doctor/support 输出必须消费同一个 kernel-owned `CutoverSurfaceStatusV1`，一致展示 `epoch`、`authority` 与稳定 blocker code；不得在 adapter 内根据 manifest、probe 或错误文本再推导一套 readiness 状态
+- execution check 若只有 `PipelineOutcomeV1::FinalStageOnly`，即使 final exit code 为 0 也不得投影为 verification passed；必须保留 `VerificationEvidenceV1::Insufficient` 或其他非 passed 结论
+- 该 epoch 选择的 gate 测试与 conformance runner：`cargo test -p sigil-runtime resource_global_cutover`、`cargo test -p sigil-kernel current_schema_only`、`./scripts/run-r71-global-cutover-conformance.sh`、`./scripts/run-r71-surface-conformance.sh`
 
 ## 11. 评审标准
 

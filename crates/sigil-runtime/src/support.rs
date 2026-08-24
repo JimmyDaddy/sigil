@@ -10,6 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1;
 use sigil_kernel::{SecretRedactor, safe_persistence_text};
 
 use crate::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
@@ -176,6 +177,7 @@ pub struct DoctorSupportReportV1 {
     pub generated_at_unix_ms: u64,
     pub build: SupportBuildInfo,
     pub environment: SupportEnvironmentV1,
+    pub cutover: CutoverSurfaceStatusV1,
     pub summary: SupportDoctorSummaryV1,
     pub checks: Vec<SupportDoctorCheckV1>,
     pub privacy: SupportPrivacyV1,
@@ -585,6 +587,7 @@ pub fn project_doctor_support_report_v1(
         generated_at_unix_ms: context.generated_at_unix_ms,
         build: context.build.clone(),
         environment: context.environment.clone(),
+        cutover: report.cutover.clone(),
         summary: SupportDoctorSummaryV1 {
             overall_status: report.overall_status().into(),
             ok: counts[0],
@@ -668,6 +671,7 @@ enum SupportCheckKind {
     CodeIntelligence,
     Compaction,
     Configuration,
+    Cutover,
     ExecutionSandbox,
     Mcp,
     Plugins,
@@ -686,6 +690,7 @@ impl SupportCheckKind {
             Self::CodeIntelligence => "code intelligence",
             Self::Compaction => "context compaction",
             Self::Configuration => "configuration",
+            Self::Cutover => "cutover authority",
             Self::ExecutionSandbox => "execution sandbox",
             Self::Mcp => "MCP",
             Self::Plugins => "plugin",
@@ -715,6 +720,9 @@ impl SupportCheckKind {
             }
             Self::Compaction => "review local tokenizer readiness in the troubleshooting guide",
             Self::Configuration => "review the reported configuration check with sigil doctor",
+            Self::Cutover => {
+                "repair the cutover authority blocker before selecting current-schema boot"
+            }
             Self::ExecutionSandbox => "review execution sandbox settings in /config",
             Self::Mcp => "review the named MCP server in /config",
             Self::Plugins => "review plugin trust and configuration in /config",
@@ -749,6 +757,7 @@ fn support_check_kind(name: &str) -> Option<SupportCheckKind> {
         value if has_nonempty_suffix(value, "lsp:") => Some(SupportCheckKind::CodeIntelligence),
         "compaction:deepseek-v4-tokenizer" => Some(SupportCheckKind::Compaction),
         "config:path" | "config:load" => Some(SupportCheckKind::Configuration),
+        value if has_nonempty_suffix(value, "cutover:") => Some(SupportCheckKind::Cutover),
         "execution:sandbox" => Some(SupportCheckKind::ExecutionSandbox),
         "mcp" => Some(SupportCheckKind::Mcp),
         value if has_nonempty_suffix(value, "mcp:") => Some(SupportCheckKind::Mcp),

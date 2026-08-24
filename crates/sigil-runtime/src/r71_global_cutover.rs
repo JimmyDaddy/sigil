@@ -406,6 +406,13 @@ impl RuntimeGlobalCutoverV1 {
     pub fn is_current_schema_ready(&self) -> bool {
         self.manifest.selected_epoch == StartupEpochV1::NewCurrentSchema && self.gate_ok
     }
+
+    /// Lossless renderer-neutral epoch/authority/blocker projection. Product surfaces must use
+    /// this view rather than deriving readiness from individual seam facts.
+    #[must_use]
+    pub fn surface_status(&self) -> sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1 {
+        sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1::from_manifest(&self.manifest)
+    }
 }
 
 impl RuntimeGlobalCutoverV1 {

@@ -237,6 +237,7 @@ fn doctor_report_overall_status_prioritizes_errors_then_warnings() {
     assert_eq!(DoctorStatus::Error.as_str(), "error");
 
     let warning_report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![DoctorCheck {
             status: DoctorStatus::Warn,
             name: "terminal".to_owned(),
@@ -248,6 +249,7 @@ fn doctor_report_overall_status_prioritizes_errors_then_warnings() {
     assert_eq!(warning_report.overall_status(), DoctorStatus::Warn);
 
     let error_report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![
             DoctorCheck {
                 status: DoctorStatus::Warn,
@@ -1987,9 +1989,13 @@ fn doctor_reports_cutover_epoch_state_without_side_effects() -> Result<()> {
     let blocker = report
         .checks
         .iter()
-        .find(|check| check.name == "cutover:manifest")
-        .expect("cutover:manifest check");
+        .find(|check| check.name == "cutover:blocker")
+        .expect("cutover:blocker check");
     assert_eq!(blocker.status, DoctorStatus::Error);
+    assert_eq!(
+        report.cutover.authority,
+        sigil_kernel::cutover_manifest::CutoverAuthorityStateV1::Unavailable
+    );
     assert!(report.has_errors());
     Ok(())
 }

@@ -3049,6 +3049,20 @@ export interface components {
             session_stream_sequence: components["schemas"]["DecimalSequence"];
             status: components["schemas"]["ConversationDisplayStatus"];
         };
+        CutoverBlocker: {
+            adapter?: string | null;
+            /** @enum {string} */
+            code: "manifest_corrupt" | "missing_readiness_probe" | "adapter_not_ready";
+        };
+        CutoverSurfaceStatus: {
+            /** @enum {string} */
+            authority: "legacy" | "ready" | "blocked" | "unavailable";
+            blockers: components["schemas"]["CutoverBlocker"][];
+            /** @enum {string} */
+            epoch: "legacy" | "new_current_schema" | "unavailable";
+            /** Format: uint16 */
+            schema_version: number;
+        };
         DecimalSequence: string;
         DisclosureListResponse: {
             disclosures: Record<string, never>[];
@@ -4018,6 +4032,7 @@ export interface components {
         SupportDoctorReport: {
             checks: components["schemas"]["SupportCheck"][];
             commit: string;
+            cutover: components["schemas"]["CutoverSurfaceStatus"];
             environment: components["schemas"]["SupportEnvironment"];
             /** Format: uint64 */
             generated_at_unix_ms: number;

@@ -25,6 +25,7 @@ fn environment() -> SupportEnvironmentV1 {
 
 fn support_bundle() -> Result<SupportBundleV1> {
     let report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![DoctorCheck {
             status: DoctorStatus::Ok,
             name: "config:load".to_owned(),
@@ -63,6 +64,7 @@ fn support_bundle() -> Result<SupportBundleV1> {
 #[test]
 fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -> Result<()> {
     let report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![
             DoctorCheck {
                 status: DoctorStatus::Ok,
@@ -107,6 +109,12 @@ fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -
                 "os": "macos",
                 "architecture": "aarch64",
                 "terminal_family": "iterm2"
+            },
+            "cutover": {
+                "schema_version": 1,
+                "epoch": "legacy",
+                "authority": "legacy",
+                "blockers": []
             },
             "summary": {
                 "overall_status": "warn",
@@ -172,6 +180,7 @@ fn terminal_projection_uses_only_coarse_allowlisted_values() -> Result<()> {
         "PROFILE-CANARY-client-project",
     ];
     let report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![DoctorCheck {
             status: DoctorStatus::Warn,
             name: "terminal:profile".to_owned(),
@@ -223,6 +232,7 @@ fn doctor_projection_redacts_known_secrets_paths_endpoints_and_unknown_categorie
     let workspace = home.join("Client Project");
     let config = home.join(".config/sigil/sigil.toml");
     let report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![
             DoctorCheck {
                 status: DoctorStatus::Error,
@@ -302,6 +312,7 @@ fn doctor_projection_fails_closed_at_check_and_field_bounds() {
     let environment = environment();
     let redactor = SecretRedactor::empty();
     let oversized_checks = DoctorReport {
+        cutover: Default::default(),
         checks: (0..=MAX_DOCTOR_SUPPORT_CHECKS)
             .map(|index| DoctorCheck {
                 status: DoctorStatus::Ok,
@@ -326,6 +337,7 @@ fn doctor_projection_fails_closed_at_check_and_field_bounds() {
     );
 
     let oversized_field = DoctorReport {
+        cutover: Default::default(),
         checks: vec![DoctorCheck {
             status: DoctorStatus::Ok,
             name: format!("mcp:{}", "x".repeat(MAX_DOCTOR_SUPPORT_NAME_BYTES + 1)),
@@ -385,6 +397,7 @@ fn doctor_support_projection_never_serializes_human_check_text() -> Result<()> {
     let message_canary = "PRIVATE-DOCTOR-MESSAGE-CANARY";
     let remediation_canary = "PRIVATE-DOCTOR-REMEDIATION-CANARY";
     let report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![DoctorCheck {
             status: DoctorStatus::Warn,
             name: "lsp:rust-analyzer".to_owned(),

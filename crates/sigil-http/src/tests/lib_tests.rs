@@ -145,6 +145,9 @@ credential = { source = "none" }
     .await;
     assert_eq!(status, 200);
     assert_eq!(doctor["version"], "0.0.1-test");
+    assert_eq!(doctor["cutover"]["epoch"], "legacy");
+    assert_eq!(doctor["cutover"]["authority"], "legacy");
+    assert_eq!(doctor["cutover"]["blockers"], json!([]));
     assert!(doctor["checks"].is_array());
     assert!(
         !doctor

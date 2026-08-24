@@ -1053,6 +1053,7 @@ fn update_text_output_does_not_offer_in_place_apply_to_source_builds() {
 #[test]
 fn render_doctor_report_formats_checks_and_summary() {
     let report = DoctorReport {
+        cutover: Default::default(),
         checks: vec![
             DoctorCheck {
                 status: DoctorStatus::Ok,
@@ -1072,6 +1073,7 @@ fn render_doctor_report_formats_checks_and_summary() {
     let rendered = render_doctor_report(&report);
 
     assert!(rendered.contains("Sigil doctor"));
+    assert!(rendered.contains("cutover: epoch=legacy authority=legacy blockers=0"));
     assert!(rendered.contains("[ok] config:load - config parsed"));
     assert!(rendered.contains("[warn] terminal - TERM is not set"));
     assert!(rendered.contains("fix: set TERM in the shell before launching the TUI"));

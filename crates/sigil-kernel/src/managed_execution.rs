@@ -381,12 +381,61 @@ pub struct BorrowedResourceAccessReceiptV1 {
     pub receipt_hash: CanonicalHash,
 }
 
+/// Whether the execution contract observed enough of a pipeline to support repository
+/// verification. A final-stage exit code is intentionally not equivalent to full evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineOutcomeV1 {
+    NotPipeline,
+    AllStagesObserved {
+        stage_statuses_digest: CanonicalHash,
+    },
+    FinalStageOnly {
+        final_exit_code: i32,
+    },
+}
+
+/// Why a check receipt cannot be promoted to verification evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationEvidenceReasonV1 {
+    UpstreamStatusUnobserved,
+    ShellProfileDoesNotSupportPipefail,
+}
+
+/// Evidence sufficiency is kernel-owned; product surfaces only project this result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationEvidenceV1 {
+    Sufficient,
+    Insufficient {
+        reason: VerificationEvidenceReasonV1,
+    },
+}
+
 /// Execution check receipt (verification pipeline outcome reference).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionCheckReceiptV1 {
     pub check_spec_hash: CanonicalHash,
-    pub passed: bool,
+    pub pipeline_outcome: PipelineOutcomeV1,
+    pub verification_evidence: VerificationEvidenceV1,
     pub evidence_binding_hash: CanonicalHash,
+    pub shell_profile_hash: CanonicalHash,
+}
+
+impl ExecutionCheckReceiptV1 {
+    /// Final-stage-only execution can be a truthful process result, but never a passed
+    /// repository verification result.
+    #[must_use]
+    pub fn verification_passed(&self) -> bool {
+        !matches!(
+            self.pipeline_outcome,
+            PipelineOutcomeV1::FinalStageOnly { .. }
+        ) && matches!(
+            self.verification_evidence,
+            VerificationEvidenceV1::Sufficient
+        )
+    }
 }
 
 /// Combined managed execution receipt.
@@ -474,4 +523,56 @@ pub enum ManagedProcessControlErrorV1 {
     InvalidState { action: &'static str },
     #[error("process handle is stale after supervisor restart")]
     StaleHandle,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receipt(
+        pipeline_outcome: PipelineOutcomeV1,
+        verification_evidence: VerificationEvidenceV1,
+    ) -> ExecutionCheckReceiptV1 {
+        ExecutionCheckReceiptV1 {
+            check_spec_hash: CanonicalHash::from_bytes([1; 32]),
+            pipeline_outcome,
+            verification_evidence,
+            evidence_binding_hash: CanonicalHash::from_bytes([2; 32]),
+            shell_profile_hash: CanonicalHash::from_bytes([3; 32]),
+        }
+    }
+
+    #[test]
+    fn final_stage_only_is_never_verification_passed() {
+        let receipt = receipt(
+            PipelineOutcomeV1::FinalStageOnly { final_exit_code: 0 },
+            VerificationEvidenceV1::Sufficient,
+        );
+        assert!(!receipt.verification_passed());
+    }
+
+    #[test]
+    fn all_stages_observed_requires_sufficient_evidence() {
+        let digest = CanonicalHash::from_bytes([4; 32]);
+        assert!(
+            receipt(
+                PipelineOutcomeV1::AllStagesObserved {
+                    stage_statuses_digest: digest,
+                },
+                VerificationEvidenceV1::Sufficient,
+            )
+            .verification_passed()
+        );
+        assert!(
+            !receipt(
+                PipelineOutcomeV1::AllStagesObserved {
+                    stage_statuses_digest: digest,
+                },
+                VerificationEvidenceV1::Insufficient {
+                    reason: VerificationEvidenceReasonV1::UpstreamStatusUnobserved,
+                },
+            )
+            .verification_passed()
+        );
+    }
 }

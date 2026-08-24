@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-
 mod plan_input;
 pub(crate) use plan_input::*;
 use sigil_desktop::{
@@ -31,7 +30,8 @@ use sigil_desktop::{
     DesktopConversationRecoveryView as NativeConversationRecoveryView,
     DesktopConversationTaskControl as NativeConversationTaskControl,
     DesktopConversationTaskLane as NativeConversationTaskLane,
-    DesktopConversationTaskPlanStep as NativeConversationTaskPlanStep,
+    DesktopConversationTaskPlanStep as NativeConversationTaskPlanStep, DesktopCutoverAuthority,
+    DesktopCutoverBlockerCode, DesktopCutoverEpoch, DesktopCutoverStatus,
     DesktopIntegrationLaneCandidateKind, DesktopIntegrationPromotionStatus,
     DesktopIntegrationPromotionTargetKind, DesktopModelSelectionPolicy, DesktopPermissionMode,
     DesktopProviderConnectionInventory, DesktopProviderConnectionReadiness,
@@ -86,6 +86,7 @@ pub(crate) struct DesktopSupportDoctorSummary {
     target: String,
     profile: String,
     environment: DesktopSupportEnvironmentSummary,
+    cutover: DesktopCutoverStatusSummary,
     summary: DesktopSupportStatusSummary,
     checks: Vec<DesktopSupportCheckSummary>,
     privacy: DesktopSupportPrivacySummary,
@@ -97,6 +98,23 @@ struct DesktopSupportEnvironmentSummary {
     os: String,
     architecture: String,
     terminal_family: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopCutoverStatusSummary {
+    schema_version: u16,
+    epoch: &'static str,
+    authority: &'static str,
+    blockers: Vec<DesktopCutoverBlockerSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopCutoverBlockerSummary {
+    code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,9 +161,43 @@ impl From<DesktopSupportDoctorReport> for DesktopSupportDoctorSummary {
             target: value.target,
             profile: value.profile,
             environment: value.environment.into(),
+            cutover: value.cutover.into(),
             summary: value.summary.into(),
             checks: value.checks.into_iter().map(Into::into).collect(),
             privacy: value.privacy.into(),
+        }
+    }
+}
+
+impl From<DesktopCutoverStatus> for DesktopCutoverStatusSummary {
+    fn from(value: DesktopCutoverStatus) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            epoch: match value.epoch {
+                DesktopCutoverEpoch::Legacy => "legacy",
+                DesktopCutoverEpoch::NewCurrentSchema => "new_current_schema",
+                DesktopCutoverEpoch::Unavailable => "unavailable",
+            },
+            authority: match value.authority {
+                DesktopCutoverAuthority::Legacy => "legacy",
+                DesktopCutoverAuthority::Ready => "ready",
+                DesktopCutoverAuthority::Blocked => "blocked",
+                DesktopCutoverAuthority::Unavailable => "unavailable",
+            },
+            blockers: value
+                .blockers
+                .into_iter()
+                .map(|blocker| DesktopCutoverBlockerSummary {
+                    code: match blocker.code {
+                        DesktopCutoverBlockerCode::ManifestCorrupt => "manifest_corrupt",
+                        DesktopCutoverBlockerCode::MissingReadinessProbe => {
+                            "missing_readiness_probe"
+                        }
+                        DesktopCutoverBlockerCode::AdapterNotReady => "adapter_not_ready",
+                    },
+                    adapter: blocker.adapter,
+                })
+                .collect(),
         }
     }
 }

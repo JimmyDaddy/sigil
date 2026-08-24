@@ -82,6 +82,184 @@ pub enum CutoverErrorV1 {
     LegacySessionUnavailable,
 }
 
+/// Schema version for the renderer-neutral cutover status shared by all product surfaces.
+pub const CUTOVER_SURFACE_SCHEMA_VERSION: u16 = 1;
+
+/// Epoch displayed by a surface. `Unavailable` is deliberately distinct from `Legacy`: a
+/// legacy epoch is a truthful, usable boot mode, while unavailable means the persisted
+/// authority decision cannot be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutoverSurfaceEpochV1 {
+    Legacy,
+    NewCurrentSchema,
+    Unavailable,
+}
+
+impl CutoverSurfaceEpochV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::NewCurrentSchema => "new_current_schema",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Authority/readiness state displayed by a surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutoverAuthorityStateV1 {
+    Legacy,
+    Ready,
+    Blocked,
+    Unavailable,
+}
+
+impl CutoverAuthorityStateV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Ready => "ready",
+            Self::Blocked => "blocked",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Stable blocker reason; no host path, error text, or runtime-private handle crosses the
+/// product boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutoverBlockerCodeV1 {
+    ManifestCorrupt,
+    MissingReadinessProbe,
+    AdapterNotReady,
+}
+
+/// One bounded current-schema blocker projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CutoverBlockerV1 {
+    pub code: CutoverBlockerCodeV1,
+    pub adapter: Option<MandatoryAdapterKindV1>,
+}
+
+/// Shared epoch/authority/blocker DTO. CLI, TUI, HTTP and Desktop must project this value
+/// without recomputing a second readiness state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CutoverSurfaceStatusV1 {
+    pub schema_version: u16,
+    pub epoch: CutoverSurfaceEpochV1,
+    pub authority: CutoverAuthorityStateV1,
+    pub blockers: Vec<CutoverBlockerV1>,
+}
+
+impl Default for CutoverSurfaceStatusV1 {
+    fn default() -> Self {
+        Self {
+            schema_version: CUTOVER_SURFACE_SCHEMA_VERSION,
+            epoch: CutoverSurfaceEpochV1::Legacy,
+            authority: CutoverAuthorityStateV1::Legacy,
+            blockers: Vec::new(),
+        }
+    }
+}
+
+impl CutoverSurfaceStatusV1 {
+    #[must_use]
+    pub fn from_manifest(manifest: &CutoverManifestV1) -> Self {
+        let epoch = match manifest.selected_epoch {
+            StartupEpochV1::Legacy => CutoverSurfaceEpochV1::Legacy,
+            StartupEpochV1::NewCurrentSchema => CutoverSurfaceEpochV1::NewCurrentSchema,
+        };
+        let blockers = if manifest.selected_epoch == StartupEpochV1::NewCurrentSchema {
+            mandatory_adapter_kinds_v1()
+                .iter()
+                .filter_map(|adapter| {
+                    let probe = manifest
+                        .mandatory_readiness
+                        .iter()
+                        .find(|probe| probe.adapter == *adapter);
+                    match probe {
+                        Some(probe) if probe.passed => None,
+                        Some(_) => Some(CutoverBlockerV1 {
+                            code: CutoverBlockerCodeV1::AdapterNotReady,
+                            adapter: Some(*adapter),
+                        }),
+                        None => Some(CutoverBlockerV1 {
+                            code: CutoverBlockerCodeV1::MissingReadinessProbe,
+                            adapter: Some(*adapter),
+                        }),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let authority = match epoch {
+            CutoverSurfaceEpochV1::Legacy => CutoverAuthorityStateV1::Legacy,
+            CutoverSurfaceEpochV1::NewCurrentSchema if blockers.is_empty() => {
+                CutoverAuthorityStateV1::Ready
+            }
+            CutoverSurfaceEpochV1::NewCurrentSchema => CutoverAuthorityStateV1::Blocked,
+            CutoverSurfaceEpochV1::Unavailable => CutoverAuthorityStateV1::Unavailable,
+        };
+        Self {
+            schema_version: CUTOVER_SURFACE_SCHEMA_VERSION,
+            epoch,
+            authority,
+            blockers,
+        }
+    }
+
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self {
+            schema_version: CUTOVER_SURFACE_SCHEMA_VERSION,
+            epoch: CutoverSurfaceEpochV1::Unavailable,
+            authority: CutoverAuthorityStateV1::Unavailable,
+            blockers: vec![CutoverBlockerV1 {
+                code: CutoverBlockerCodeV1::ManifestCorrupt,
+                adapter: None,
+            }],
+        }
+    }
+
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.authority == CutoverAuthorityStateV1::Ready && self.blockers.is_empty()
+    }
+}
+
+/// Closed mandatory adapter set used both by manifest validation and by the shared surface
+/// projection. Keeping one source prevents a surface from silently omitting a blocker.
+pub const fn mandatory_adapter_kinds_v1() -> &'static [MandatoryAdapterKindV1] {
+    &[
+        MandatoryAdapterKindV1::ExecutionOneShot,
+        MandatoryAdapterKindV1::ExecutionTerminal,
+        MandatoryAdapterKindV1::ExecutionExtension,
+        MandatoryAdapterKindV1::FileAccessInProcess,
+        MandatoryAdapterKindV1::StorageSessionLog,
+        MandatoryAdapterKindV1::StorageSessionLifecycle,
+        MandatoryAdapterKindV1::StorageInputHistory,
+        MandatoryAdapterKindV1::StorageMemory,
+        MandatoryAdapterKindV1::StorageSessionCatalog,
+        MandatoryAdapterKindV1::StorageArtifact,
+        MandatoryAdapterKindV1::StorageAdapterDurableState,
+        MandatoryAdapterKindV1::ProjectionRebuildable,
+        MandatoryAdapterKindV1::ProductStateUpdater,
+        MandatoryAdapterKindV1::BorrowedNativeSave,
+        MandatoryAdapterKindV1::BorrowedConfiguration,
+        MandatoryAdapterKindV1::BorrowedReleaseOutput,
+        MandatoryAdapterKindV1::RecoverySurface,
+        MandatoryAdapterKindV1::BlockingGate,
+    ]
+}
+
 /// A session open attempt: session schema vs. binary epoch. After the new epoch is published
 /// the current binary only creates/reads current-schema sessions; old-schema sessions are
 /// explicitly unavailable (not opened with legacy interpretation).
@@ -183,27 +361,7 @@ pub fn validate_cutover_manifest(manifest: &CutoverManifestV1) -> Result<(), Cut
     }
     if manifest.selected_epoch == StartupEpochV1::NewCurrentSchema {
         // Every mandatory adapter must be present and passing; missing = fail closed.
-        let required: &[MandatoryAdapterKindV1] = &[
-            MandatoryAdapterKindV1::ExecutionOneShot,
-            MandatoryAdapterKindV1::ExecutionTerminal,
-            MandatoryAdapterKindV1::ExecutionExtension,
-            MandatoryAdapterKindV1::FileAccessInProcess,
-            MandatoryAdapterKindV1::StorageSessionLog,
-            MandatoryAdapterKindV1::StorageSessionLifecycle,
-            MandatoryAdapterKindV1::StorageInputHistory,
-            MandatoryAdapterKindV1::StorageMemory,
-            MandatoryAdapterKindV1::StorageSessionCatalog,
-            MandatoryAdapterKindV1::StorageArtifact,
-            MandatoryAdapterKindV1::StorageAdapterDurableState,
-            MandatoryAdapterKindV1::ProjectionRebuildable,
-            MandatoryAdapterKindV1::ProductStateUpdater,
-            MandatoryAdapterKindV1::BorrowedNativeSave,
-            MandatoryAdapterKindV1::BorrowedConfiguration,
-            MandatoryAdapterKindV1::BorrowedReleaseOutput,
-            MandatoryAdapterKindV1::RecoverySurface,
-            MandatoryAdapterKindV1::BlockingGate,
-        ];
-        for adapter in required {
+        for adapter in mandatory_adapter_kinds_v1() {
             let probe = manifest
                 .mandatory_readiness
                 .iter()
@@ -297,6 +455,54 @@ mod tests {
             error,
             CutoverErrorV1::AdapterNotReady(MandatoryAdapterKindV1::BlockingGate)
         ));
+    }
+
+    #[test]
+    fn r71_surface_status_keeps_legacy_distinct_from_unavailable() {
+        let mut legacy = ready_manifest();
+        legacy.selected_epoch = StartupEpochV1::Legacy;
+        legacy.mandatory_readiness.clear();
+        legacy.manifest_hash = compute_manifest_hash(&legacy);
+        let legacy_status = CutoverSurfaceStatusV1::from_manifest(&legacy);
+        assert_eq!(legacy_status.epoch, CutoverSurfaceEpochV1::Legacy);
+        assert_eq!(legacy_status.authority, CutoverAuthorityStateV1::Legacy);
+        assert!(legacy_status.blockers.is_empty());
+
+        let unavailable = CutoverSurfaceStatusV1::unavailable();
+        assert_eq!(unavailable.epoch, CutoverSurfaceEpochV1::Unavailable);
+        assert_eq!(unavailable.authority, CutoverAuthorityStateV1::Unavailable);
+        assert_eq!(
+            unavailable.blockers[0].code,
+            CutoverBlockerCodeV1::ManifestCorrupt
+        );
+    }
+
+    #[test]
+    fn r71_surface_status_projects_all_current_schema_blockers() {
+        let mut manifest = ready_manifest();
+        for probe in &mut manifest.mandatory_readiness {
+            if matches!(
+                probe.adapter,
+                MandatoryAdapterKindV1::ExecutionExtension
+                    | MandatoryAdapterKindV1::BorrowedConfiguration
+            ) {
+                probe.passed = false;
+            }
+        }
+        let status = CutoverSurfaceStatusV1::from_manifest(&manifest);
+        assert_eq!(status.epoch, CutoverSurfaceEpochV1::NewCurrentSchema);
+        assert_eq!(status.authority, CutoverAuthorityStateV1::Blocked);
+        assert_eq!(status.blockers.len(), 2);
+        assert!(status.blockers.iter().all(|blocker| {
+            blocker.code == CutoverBlockerCodeV1::AdapterNotReady && blocker.adapter.is_some()
+        }));
+    }
+
+    #[test]
+    fn r71_surface_status_projects_current_schema_ready_only_when_all_probes_pass() {
+        let status = CutoverSurfaceStatusV1::from_manifest(&ready_manifest());
+        assert_eq!(status.authority, CutoverAuthorityStateV1::Ready);
+        assert!(status.is_ready());
     }
 
     #[test]

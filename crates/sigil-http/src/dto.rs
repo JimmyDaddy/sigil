@@ -3,6 +3,7 @@ use std::{fmt, net::SocketAddr};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 
+use sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1;
 /// Policy identity bound to every V1 HTTP approval request.
 use sigil_kernel::session::TOOL_ARTIFACT_MAX_BYTES;
 use sigil_kernel::{
@@ -230,6 +231,7 @@ pub struct HttpSupportDoctorReport {
     pub target: String,
     pub profile: String,
     pub environment: HttpSupportEnvironment,
+    pub cutover: CutoverSurfaceStatusV1,
     pub summary: HttpSupportSummary,
     pub checks: Vec<HttpSupportCheck>,
     pub privacy: HttpSupportPrivacy,
@@ -244,6 +246,7 @@ impl From<DoctorSupportReportV1> for HttpSupportDoctorReport {
             target: value.build.target,
             profile: value.build.profile,
             environment: value.environment.into(),
+            cutover: value.cutover,
             summary: HttpSupportSummary {
                 overall_status: value.summary.overall_status.into(),
                 ok: value.summary.ok,

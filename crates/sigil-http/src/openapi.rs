@@ -1443,7 +1443,7 @@ pub fn http_openapi_document() -> Value {
                 "SupportDoctorReport": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["generated_at_unix_ms", "version", "commit", "target", "profile", "environment", "summary", "checks", "privacy"],
+                    "required": ["generated_at_unix_ms", "version", "commit", "target", "profile", "environment", "cutover", "summary", "checks", "privacy"],
                     "properties": {
                         "generated_at_unix_ms": { "type": "integer", "format": "uint64" },
                         "version": { "type": "string" },
@@ -1451,9 +1451,30 @@ pub fn http_openapi_document() -> Value {
                         "target": { "type": "string" },
                         "profile": { "type": "string" },
                         "environment": { "$ref": "#/components/schemas/SupportEnvironment" },
+                        "cutover": { "$ref": "#/components/schemas/CutoverSurfaceStatus" },
                         "summary": { "$ref": "#/components/schemas/SupportSummary" },
                         "checks": { "type": "array", "items": { "$ref": "#/components/schemas/SupportCheck" } },
                         "privacy": { "$ref": "#/components/schemas/SupportPrivacy" }
+                    }
+                },
+                "CutoverSurfaceStatus": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "epoch", "authority", "blockers"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "format": "uint16" },
+                        "epoch": { "type": "string", "enum": ["legacy", "new_current_schema", "unavailable"] },
+                        "authority": { "type": "string", "enum": ["legacy", "ready", "blocked", "unavailable"] },
+                        "blockers": { "type": "array", "items": { "$ref": "#/components/schemas/CutoverBlocker" } }
+                    }
+                },
+                "CutoverBlocker": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["code"],
+                    "properties": {
+                        "code": { "type": "string", "enum": ["manifest_corrupt", "missing_readiness_probe", "adapter_not_ready"] },
+                        "adapter": { "type": ["string", "null"] }
                     }
                 },
                 "SupportBundleExport": {

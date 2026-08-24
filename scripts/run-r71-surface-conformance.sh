@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# RFC-0071 R71.5: four-surface conformance runner.
-# The same canonical ResourceRecoverySurfaceContractV1 fixture must project losslessly through
-# the runtime facade and the generated wire adapters; transport-private state machines or hash
-# recomputation are prohibited. Zero-test and non-zero exit are refused.
+# RFC-0071 R71.6: four-surface conformance runner.
+# The same kernel-owned recovery and cutover fixtures must project losslessly through runtime,
+# CLI, TUI, HTTP and Desktop. Transport-private state machines or hash recomputation are
+# prohibited. Zero-test and non-zero exit are refused.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -51,6 +51,18 @@ run_suite() {
 
 run_suite surface-facade cargo test -p sigil-runtime --lib r71_facade -- --format terse
 run_suite kernel-recovery-surface cargo test -p sigil-kernel --lib resource_recovery_surface -- --format terse
+run_suite kernel-cutover-surface cargo test -p sigil-kernel --lib cutover_manifest::tests::r71_surface_status -- --format terse
+run_suite runtime-doctor-surface cargo test -p sigil-runtime --lib doctor_reports_cutover -- --format terse
+run_suite cli-doctor-surface cargo test -p sigil --bin sigil render_doctor_report_formats_checks_and_summary -- --format terse
+run_suite tui-doctor-surface cargo test -p sigil-tui --lib doctor_slash_command_renders_appearance_warnings -- --format terse
+run_suite http-doctor-surface cargo test -p sigil-http --lib support_routes_require_auth_and_expose_only_the_redacted_projection -- --format terse
+run_suite desktop-doctor-surface cargo test -p sigil-desktop --lib support_report_decodes_only_the_path_free_contract -- --format terse
+contract_output=$(./scripts/generate-desktop-contract.sh --check 2>&1) || {
+  echo "FAIL(conformance/desktop-contract): generated OpenAPI/types drift" >&2
+  echo "$contract_output" | tail -20 >&2
+  exit 1
+}
+echo "PASS(conformance/desktop-contract): generated OpenAPI/types are current"
 if [[ "$EPOCH" == "current" ]]; then
   echo "--epoch current: running the R71.6 full-composition gate (red until every adapter is wired)"
   run_suite full-composition-gate cargo test -p sigil-runtime --lib r71_full_composition_gate -- --ignored --format terse

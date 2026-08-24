@@ -775,6 +775,12 @@ fn build_cli_doctor_support_report(
 
 fn render_doctor_report(report: &DoctorReport) -> String {
     let mut output = String::from("Sigil doctor\n");
+    output.push_str(&format!(
+        "cutover: epoch={} authority={} blockers={}\n",
+        report.cutover.epoch.as_str(),
+        report.cutover.authority.as_str(),
+        report.cutover.blockers.len()
+    ));
     for check in &report.checks {
         output.push_str(&format!(
             "[{}] {} - {}\n",

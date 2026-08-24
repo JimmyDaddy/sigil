@@ -53,6 +53,48 @@ pub struct DesktopSupportPrivacy {
     pub review_before_sharing: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopCutoverEpoch {
+    Legacy,
+    NewCurrentSchema,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopCutoverAuthority {
+    Legacy,
+    Ready,
+    Blocked,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopCutoverBlockerCode {
+    ManifestCorrupt,
+    MissingReadinessProbe,
+    AdapterNotReady,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCutoverBlocker {
+    pub code: DesktopCutoverBlockerCode,
+    #[serde(default)]
+    pub adapter: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCutoverStatus {
+    pub schema_version: u16,
+    pub epoch: DesktopCutoverEpoch,
+    pub authority: DesktopCutoverAuthority,
+    pub blockers: Vec<DesktopCutoverBlocker>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopSupportDoctorReport {
@@ -62,6 +104,7 @@ pub struct DesktopSupportDoctorReport {
     pub target: String,
     pub profile: String,
     pub environment: DesktopSupportEnvironment,
+    pub cutover: DesktopCutoverStatus,
     pub summary: DesktopSupportSummary,
     pub checks: Vec<DesktopSupportCheck>,
     pub privacy: DesktopSupportPrivacy,

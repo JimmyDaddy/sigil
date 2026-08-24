@@ -1297,6 +1297,12 @@ fn support_report_decodes_only_the_path_free_contract() {
             "architecture": "aarch64",
             "terminal_family": "other"
         },
+        "cutover": {
+            "schema_version": 1,
+            "epoch": "legacy",
+            "authority": "legacy",
+            "blockers": []
+        },
         "summary": { "overall_status": "warn", "ok": 4, "warn": 1, "error": 0 },
         "checks": [{
             "status": "warn",

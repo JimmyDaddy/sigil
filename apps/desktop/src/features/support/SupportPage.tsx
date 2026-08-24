@@ -146,6 +146,27 @@ export function SupportPage({
             </ul>
           </section>
 
+          <section className="support-checks" aria-labelledby="support-cutover-title">
+            <div className="support-section-heading">
+              <div>
+                <h2 id="support-cutover-title">{t("cutoverAuthority")}</h2>
+                <p>{t("cutoverStatus", { epoch: report.cutover.epoch, authority: report.cutover.authority })}</p>
+              </div>
+              <span>{t("cutoverBlockerCount", { count: report.cutover.blockers.length })}</span>
+            </div>
+            {report.cutover.blockers.length === 0 ? (
+              <p>{t("cutoverNoBlockers")}</p>
+            ) : (
+              <ul>
+                {report.cutover.blockers.map((blocker, index) => (
+                  <li key={`${blocker.code}-${blocker.adapter ?? "none"}-${index}`}>
+                    {blocker.code}{blocker.adapter === undefined ? "" : ` · ${blocker.adapter}`}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
           <section className="support-privacy" aria-labelledby="support-privacy-title">
             <div className="support-section-heading">
               <div>

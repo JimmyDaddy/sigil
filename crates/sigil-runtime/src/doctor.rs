@@ -4,6 +4,9 @@ use std::{
     process::Command,
 };
 
+use sigil_kernel::cutover_manifest::{
+    CutoverAuthorityStateV1, CutoverBlockerCodeV1, CutoverSurfaceStatusV1,
+};
 use sigil_kernel::{
     AppearanceConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
     PluginCapability, PluginHookKind, PluginTrustDecision, PluginTrustEntry, RootConfig,
@@ -90,6 +93,7 @@ pub struct DoctorCheck {
 /// Aggregated local diagnostics for config, provider, tools, and terminal readiness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DoctorReport {
+    pub cutover: CutoverSurfaceStatusV1,
     pub checks: Vec<DoctorCheck>,
 }
 
@@ -149,39 +153,82 @@ pub struct DoctorReportOptions<'a> {
 /// RFC-0071 R71.6: cutover epoch state for the shared doctor (four surfaces read the same
 /// manifest next to the config). Read-only; a corrupted manifest is an Error so the startup
 /// blocker is visible in doctor before any run.
-pub(crate) fn check_cutover(report: &mut DoctorReport, config_path: &Path) {
-    match crate::r71_global_cutover::inspect_cutover_manifest(config_path) {
-        Ok(None) => report.push(
+pub(crate) fn check_cutover(
+    report: &mut DoctorReport,
+    config_path: &Path,
+) -> CutoverSurfaceStatusV1 {
+    let status = match crate::r71_global_cutover::inspect_cutover_manifest(config_path) {
+        Ok(None) => CutoverSurfaceStatusV1::default(),
+        Ok(Some(manifest)) => CutoverSurfaceStatusV1::from_manifest(&manifest),
+        Err(_) => CutoverSurfaceStatusV1::unavailable(),
+    };
+    let epoch = match status.epoch {
+        sigil_kernel::cutover_manifest::CutoverSurfaceEpochV1::Legacy => "legacy",
+        sigil_kernel::cutover_manifest::CutoverSurfaceEpochV1::NewCurrentSchema => {
+            "new-current-schema"
+        }
+        sigil_kernel::cutover_manifest::CutoverSurfaceEpochV1::Unavailable => "unavailable",
+    };
+    let authority = match status.authority {
+        CutoverAuthorityStateV1::Legacy => "legacy",
+        CutoverAuthorityStateV1::Ready => "ready",
+        CutoverAuthorityStateV1::Blocked => "blocked",
+        CutoverAuthorityStateV1::Unavailable => "unavailable",
+    };
+    report.push(
+        if status.authority == CutoverAuthorityStateV1::Unavailable {
+            DoctorStatus::Error
+        } else {
+            DoctorStatus::Ok
+        },
+        "cutover:epoch",
+        format!("epoch={epoch}"),
+    );
+    report.push(
+        match status.authority {
+            CutoverAuthorityStateV1::Blocked | CutoverAuthorityStateV1::Unavailable => {
+                DoctorStatus::Error
+            }
+            CutoverAuthorityStateV1::Legacy | CutoverAuthorityStateV1::Ready => DoctorStatus::Ok,
+        },
+        "cutover:authority",
+        format!("authority={authority}"),
+    );
+    if status.blockers.is_empty() {
+        report.push(
             DoctorStatus::Ok,
-            "cutover:epoch",
-            "legacy epoch not published (no cutover manifest); legacy boot is the current state",
-        ),
-        Ok(Some(manifest)) => {
-            let hash = manifest.manifest_hash.to_hex();
-            report.push(
-                DoctorStatus::Ok,
-                "cutover:epoch",
-                format!(
-                    "epoch={} instance={} manifest={}..{}",
-                    match manifest.selected_epoch {
-                        sigil_kernel::cutover_manifest::StartupEpochV1::Legacy => "legacy",
-                        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema => {
-                            "new-current-schema"
-                        }
-                    },
-                    manifest.application_instance_id,
-                    &hash[..8],
-                    &hash[hash.len() - 8..]
+            "cutover:blocker",
+            "no active cutover blockers",
+        );
+    } else {
+        for blocker in &status.blockers {
+            let adapter = blocker
+                .adapter
+                .map(|value| format!(" adapter={value:?}"))
+                .unwrap_or_default();
+            let (message, remediation) = match blocker.code {
+                CutoverBlockerCodeV1::ManifestCorrupt => (
+                    "persisted cutover manifest is unavailable or corrupt",
+                    "restore or remove the manifest before selecting the current-schema epoch",
                 ),
+                CutoverBlockerCodeV1::MissingReadinessProbe => (
+                    "current-schema readiness probe is missing",
+                    "recompose the mandatory adapter and rerun doctor",
+                ),
+                CutoverBlockerCodeV1::AdapterNotReady => (
+                    "mandatory adapter readiness probe failed",
+                    "repair the reported adapter before starting current-schema boot",
+                ),
+            };
+            report.push_with_remediation(
+                DoctorStatus::Error,
+                "cutover:blocker",
+                format!("{message}{adapter}"),
+                Some(remediation),
             );
         }
-        Err(error) => report.push_with_remediation(
-            DoctorStatus::Error,
-            "cutover:manifest",
-            error.to_string(),
-            Some("the persisted cutover manifest is tampered or corrupted; startup fails closed until it is restored or removed"),
-        ),
     }
+    status
 }
 
 /// Builds a local diagnostics report without starting providers or MCP servers.
@@ -203,7 +250,7 @@ pub fn build_doctor_report_with_options(
         "config:path",
         config_path.display().to_string(),
     );
-    check_cutover(&mut report, config_path);
+    report.cutover = check_cutover(&mut report, config_path);
 
     if !config_path.exists() {
         report.push_with_remediation(

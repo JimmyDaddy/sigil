@@ -57,6 +57,15 @@ export interface SupportDoctorReport {
     architecture: string;
     terminalFamily: string;
   };
+  cutover: {
+    schemaVersion: number;
+    epoch: "legacy" | "new_current_schema" | "unavailable";
+    authority: "legacy" | "ready" | "blocked" | "unavailable";
+    blockers: Array<{
+      code: "manifest_corrupt" | "missing_readiness_probe" | "adapter_not_ready";
+      adapter?: string;
+    }>;
+  };
   summary: {
     overallStatus: SupportStatus;
     ok: number;

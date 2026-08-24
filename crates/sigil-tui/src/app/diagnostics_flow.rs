@@ -39,6 +39,12 @@ fn render_doctor_report(report: &DoctorReport) -> String {
     let mut lines = vec![
         format!("doctor: {}", report.overall_status().as_str()),
         format!(
+            "cutover: epoch={} authority={} blockers={}",
+            report.cutover.epoch.as_str(),
+            report.cutover.authority.as_str(),
+            report.cutover.blockers.len()
+        ),
+        format!(
             "summary: {} error · {} warn · {} ok",
             counts.errors, counts.warnings, counts.ok
         ),
