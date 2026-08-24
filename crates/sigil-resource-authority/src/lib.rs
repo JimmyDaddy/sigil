@@ -4,7 +4,6 @@
 //! (spawn_protocol.rs); sigil-sandbox submits factory-attested evidence and a one-shot actor
 //! sink, and never imports authority local types in the reverse direction.
 
-pub mod allocator;
 pub mod arena;
 pub mod bootstrap;
 pub mod borrowed;
