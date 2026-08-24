@@ -50,11 +50,22 @@ for command in rustc cargo node git; do
   }
 done
 
+# Keep the already-installed Rust toolchain store warm while isolating user configuration. Hiding
+# RUSTUP_HOME would make rustup attempt a network install under the fresh HOME, which is neither a
+# warm profile nor an offline proof.
+rustup_home="${RUSTUP_HOME:-}"
+if command -v rustup >/dev/null; then
+  rustup_home="$(rustup show home 2>/dev/null || true)"
+fi
+
 fixture_home="$(mktemp -d -t sigil-r71-toolchain-XXXXXX)"
 trap 'rm -rf -- "$fixture_home"' EXIT
 mkdir -p "$fixture_home/.cargo" "$fixture_home/.npm"
 
 export HOME="$fixture_home"
+if [[ -n "$rustup_home" ]]; then
+  export RUSTUP_HOME="$rustup_home"
+fi
 export CARGO_NET_OFFLINE=true
 export CARGO_TERM_COLOR=never
 export GIT_TERMINAL_PROMPT=0
