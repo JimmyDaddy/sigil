@@ -437,7 +437,7 @@ fn r71_f_spn_032_generation_reclaim_cap_enforced() {
 }
 
 #[test]
-fn r71_f_spn_033_engine_duplicate_settlement_guard() {
+fn r71_spawn_duplicate_settlement_guard() {
     // Extra guard mirroring the closed settlement claim semantics.
     let mut e = SpawnLifecycleV1::new();
     e.advance(h(1)).expect("prepared");

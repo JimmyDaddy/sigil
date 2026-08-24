@@ -526,7 +526,7 @@ impl KernelCapabilityBrokerV1 {
         proof: SealedExecutionAdmissionProofV1,
     ) -> Result<crate::managed_storage::ValidatedStorageAdmissionCapabilityV1, CapabilityIssueErrorV1>
     {
-        let (_, _) = self
+        let (family, namespace_hash) = self
             .storage_families
             .lock()
             .expect("storage families")
@@ -537,6 +537,8 @@ impl KernelCapabilityBrokerV1 {
                 crate::resource::OpaqueKernelCapabilityHandleId::new(
                     proof.handle_id.as_str().to_owned(),
                 ),
+                family,
+                namespace_hash,
             ),
         )
     }

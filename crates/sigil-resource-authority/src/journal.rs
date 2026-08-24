@@ -5,11 +5,15 @@
 //! journal are two separate trust anchors (no self-allocation recursion).
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use sigil_kernel::resource::{CanonicalHash, ResourceJournalScopeV1};
 
 /// Journal header (frozen per shard instance).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceJournalHeaderV1 {
     pub schema_version: u32,
     pub shard_name: String,
@@ -19,7 +23,7 @@ pub struct ResourceJournalHeaderV1 {
 }
 
 /// Append precondition: exact chain position.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceJournalAppendPreconditionV1 {
     Empty {
         expected_header_hash: CanonicalHash,
@@ -33,7 +37,7 @@ pub enum ResourceJournalAppendPreconditionV1 {
 }
 
 /// One append record (hash-chained).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceJournalRecordV1 {
     pub sequence: u64,
     pub previous_record_hash: CanonicalHash,
@@ -43,7 +47,7 @@ pub struct ResourceJournalRecordV1 {
 }
 
 /// Bounded journal event set (closed variants; first sequence is 1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceJournalEventV1 {
     BootstrapBound {
         bootstrap_manifest_hash: CanonicalHash,
@@ -61,6 +65,7 @@ pub enum ResourceJournalEventV1 {
         manifest_hash: CanonicalHash,
     },
     GenerationSettled {
+        grant_hash: CanonicalHash,
         resource_id: String,
         generation: u64,
         cleanup_status: String,
@@ -85,6 +90,10 @@ pub enum JournalErrorV1 {
     FirstRecordNotBootstrapBound,
     #[error("journal range is full: emergency reserve must be consumed")]
     JournalFull,
+    #[error("durable journal filesystem operation failed: {0}")]
+    Filesystem(String),
+    #[error("durable journal payload is corrupt: {0}")]
+    Corrupt(String),
 }
 
 /// In-memory deterministic journal (testing of append protocol before durable file backing).
@@ -146,7 +155,13 @@ impl ResourceJournalMemoryV1 {
                 if *expected_journal_instance_hash != header.journal_instance_hash {
                     return Err(JournalErrorV1::InstanceMismatch);
                 }
-                if !matches!(payload, ResourceJournalEventV1::BootstrapBound { .. }) {
+                let ResourceJournalEventV1::BootstrapBound {
+                    bootstrap_manifest_hash,
+                } = payload
+                else {
+                    return Err(JournalErrorV1::FirstRecordNotBootstrapBound);
+                };
+                if *bootstrap_manifest_hash != header.bootstrap_manifest_hash {
                     return Err(JournalErrorV1::FirstRecordNotBootstrapBound);
                 }
             }
@@ -185,6 +200,232 @@ impl ResourceJournalMemoryV1 {
         self.records.insert(next_sequence, record.clone());
         Ok(record)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableJournalRecordV1 {
+    record: ResourceJournalRecordV1,
+    payload: ResourceJournalEventV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableJournalSnapshotV1 {
+    header: ResourceJournalHeaderV1,
+    records: Vec<DurableJournalRecordV1>,
+}
+
+/// Owner-only file-backed journal used by production authority composition.
+///
+/// The in-memory journal remains the protocol reference and this wrapper persists the exact
+/// event plus hash-chain record after every append. Writes use a same-directory owner-only
+/// temporary file, `sync_all`, and rename, so a process crash exposes either the previous valid
+/// snapshot or the next complete valid snapshot; a partially written snapshot is never adopted.
+pub struct ResourceJournalFileV1 {
+    path: PathBuf,
+    journal: ResourceJournalMemoryV1,
+    records: Vec<DurableJournalRecordV1>,
+}
+
+impl std::fmt::Debug for ResourceJournalFileV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResourceJournalFileV1")
+            .field("path", &"[private]")
+            .field(
+                "sequence",
+                &self.journal.tail().map(|record| record.sequence),
+            )
+            .finish()
+    }
+}
+
+impl ResourceJournalFileV1 {
+    /// Opens or creates one frozen journal instance and ensures its bootstrap-bound genesis.
+    pub fn open(
+        path: impl Into<PathBuf>,
+        header: ResourceJournalHeaderV1,
+    ) -> Result<Self, JournalErrorV1> {
+        let path = path.into();
+        let parent = path.parent().ok_or_else(|| {
+            JournalErrorV1::Filesystem("journal has no parent directory".to_owned())
+        })?;
+        fs::create_dir_all(parent).map_err(map_io)?;
+        harden_directory(parent)?;
+
+        if path.exists() {
+            let metadata = fs::symlink_metadata(&path).map_err(map_io)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(JournalErrorV1::Corrupt(
+                    "journal path is not a regular file".to_owned(),
+                ));
+            }
+            let bytes = fs::read(&path).map_err(map_io)?;
+            let snapshot: DurableJournalSnapshotV1 = serde_json::from_slice(&bytes)
+                .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+            if snapshot.header != header {
+                return Err(JournalErrorV1::InstanceMismatch);
+            }
+            let (journal, records) = replay_snapshot(&snapshot)?;
+            let mut durable = Self {
+                path,
+                journal,
+                records,
+            };
+            if durable.records.is_empty() {
+                durable.append_event(ResourceJournalEventV1::BootstrapBound {
+                    bootstrap_manifest_hash: header.bootstrap_manifest_hash,
+                })?;
+            }
+            Ok(durable)
+        } else {
+            let mut journal = ResourceJournalMemoryV1::new();
+            journal.install_header(header.clone())?;
+            let mut durable = Self {
+                path,
+                journal,
+                records: Vec::new(),
+            };
+            durable.append_event(ResourceJournalEventV1::BootstrapBound {
+                bootstrap_manifest_hash: header.bootstrap_manifest_hash,
+            })?;
+            Ok(durable)
+        }
+    }
+
+    pub fn header(&self) -> Option<&ResourceJournalHeaderV1> {
+        self.journal.header()
+    }
+
+    pub fn tail(&self) -> Option<&ResourceJournalRecordV1> {
+        self.journal.tail()
+    }
+
+    /// Returns grant identities with an admitted namespace that has no durable settlement yet.
+    /// A restarted authority must not silently reuse such a physical namespace.
+    pub fn unsettled_storage_grants(&self) -> std::collections::BTreeSet<String> {
+        let mut pending = std::collections::BTreeSet::new();
+        for durable in &self.records {
+            match &durable.payload {
+                ResourceJournalEventV1::StorageNamespaceAdmitted { grant_hash } => {
+                    let key = grant_hash.to_hex();
+                    pending.insert(key);
+                }
+                ResourceJournalEventV1::GenerationSettled { grant_hash, .. } => {
+                    pending.remove(&grant_hash.to_hex());
+                }
+                _ => {}
+            }
+        }
+        pending
+    }
+
+    /// Appends one event using the exact current tail as the precondition and persists it.
+    pub fn append_event(
+        &mut self,
+        payload: ResourceJournalEventV1,
+    ) -> Result<ResourceJournalRecordV1, JournalErrorV1> {
+        let precondition = match self.journal.tail() {
+            Some(tail) => ResourceJournalAppendPreconditionV1::Existing {
+                expected_sequence: tail.sequence,
+                expected_record_hash: tail.record_hash,
+                expected_journal_instance_hash: self
+                    .journal
+                    .header()
+                    .ok_or(JournalErrorV1::InstanceMismatch)?
+                    .journal_instance_hash,
+            },
+            None => {
+                let header = self
+                    .journal
+                    .header()
+                    .ok_or(JournalErrorV1::InstanceMismatch)?;
+                ResourceJournalAppendPreconditionV1::Empty {
+                    expected_header_hash: header.header_hash,
+                    expected_journal_instance_hash: header.journal_instance_hash,
+                }
+            }
+        };
+        let record = self.journal.append(&precondition, &payload)?;
+        self.records.push(DurableJournalRecordV1 {
+            record: record.clone(),
+            payload,
+        });
+        if let Err(error) = self.persist() {
+            self.records.pop();
+            return Err(error);
+        }
+        Ok(record)
+    }
+
+    fn persist(&self) -> Result<(), JournalErrorV1> {
+        let snapshot = DurableJournalSnapshotV1 {
+            header: self
+                .journal
+                .header()
+                .ok_or(JournalErrorV1::InstanceMismatch)?
+                .clone(),
+            records: self.records.clone(),
+        };
+        let parent = self.path.parent().ok_or_else(|| {
+            JournalErrorV1::Filesystem("journal has no parent directory".to_owned())
+        })?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(map_io)?;
+        harden_file(temporary.path())?;
+        serde_json::to_writer(&mut temporary, &snapshot)
+            .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+        temporary.as_file().sync_all().map_err(map_io)?;
+        temporary
+            .persist(&self.path)
+            .map_err(|error| map_io(error.error))?;
+        Ok(())
+    }
+}
+
+fn replay_snapshot(
+    snapshot: &DurableJournalSnapshotV1,
+) -> Result<(ResourceJournalMemoryV1, Vec<DurableJournalRecordV1>), JournalErrorV1> {
+    let mut journal = ResourceJournalMemoryV1::new();
+    journal.install_header(snapshot.header.clone())?;
+    for durable in &snapshot.records {
+        let precondition = match journal.tail() {
+            Some(tail) => ResourceJournalAppendPreconditionV1::Existing {
+                expected_sequence: tail.sequence,
+                expected_record_hash: tail.record_hash,
+                expected_journal_instance_hash: snapshot.header.journal_instance_hash,
+            },
+            None => ResourceJournalAppendPreconditionV1::Empty {
+                expected_header_hash: snapshot.header.header_hash,
+                expected_journal_instance_hash: snapshot.header.journal_instance_hash,
+            },
+        };
+        let expected = journal.append(&precondition, &durable.payload)?;
+        if expected != durable.record {
+            return Err(JournalErrorV1::HashChainBroken);
+        }
+    }
+    Ok((journal, snapshot.records.clone()))
+}
+
+fn map_io(error: std::io::Error) -> JournalErrorV1 {
+    JournalErrorV1::Filesystem(error.to_string())
+}
+
+fn harden_directory(path: &Path) -> Result<(), JournalErrorV1> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(map_io)?;
+    }
+    Ok(())
+}
+
+fn harden_file(path: &Path) -> Result<(), JournalErrorV1> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(map_io)?;
+    }
+    Ok(())
 }
 
 /// Deterministic canonical encoding used for hashes (no path separators involved).
@@ -312,5 +553,32 @@ mod tests {
             )
             .expect_err("wrong precondition must fail");
         assert!(matches!(error, JournalErrorV1::PreconditionMismatch));
+    }
+
+    #[test]
+    fn r71_durable_journal_replays_after_process_restart_and_rejects_corruption() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority.journal.json");
+        let h = header();
+        let grant_hash = journal_encode(b"grant-1");
+        {
+            let mut journal = ResourceJournalFileV1::open(&path, h.clone()).expect("create");
+            let record = journal
+                .append_event(ResourceJournalEventV1::StorageNamespaceAdmitted { grant_hash })
+                .expect("append admission");
+            assert_eq!(record.sequence, 2, "genesis is persisted before admissions");
+        }
+        let reopened = ResourceJournalFileV1::open(&path, h.clone()).expect("replay");
+        assert_eq!(reopened.tail().expect("tail").sequence, 2);
+        assert_eq!(reopened.header().expect("header"), &h);
+        assert!(
+            reopened
+                .unsettled_storage_grants()
+                .contains(&grant_hash.to_hex())
+        );
+
+        std::fs::write(&path, b"truncated").expect("corrupt journal");
+        let error = ResourceJournalFileV1::open(&path, h).expect_err("corruption fails closed");
+        assert!(matches!(error, JournalErrorV1::Corrupt(_)));
     }
 }

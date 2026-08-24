@@ -15,7 +15,7 @@ use sigil_kernel::managed_storage::{
 };
 use sigil_kernel::resource::{
     AdapterDurableStateClassV1, CanonicalHash, ManagedStorageCapabilityFamilyV1,
-    ManagedStorageSemanticOwnerV1, MemoryScopeClassV1, OpaqueSessionId, ResourceJournalScopeV1,
+    ManagedStorageSemanticOwnerV1, MemoryScopeClassV1, ResourceJournalScopeV1,
     ResourceOwnerScopeV1,
 };
 
@@ -313,14 +313,11 @@ impl ManagedStorageWriterAdapterV1 {
         }
         let capability = match &self.storage_issuer {
             Some(broker) => {
-                let mut key_ns = [0x6bu8; 32];
-                for (index, byte) in key.bytes().take(32).enumerate() {
-                    key_ns[index] = byte;
-                }
-                let proof = broker.seal_storage_namespace_proof(
-                    capability_family,
-                    CanonicalHash::from_bytes(key_ns),
-                );
+                // The grant binds the authority-declared channel root. The logical key is
+                // carried by the admitted physical sub-leaf, while each broker claim still
+                // receives a distinct one-shot handle namespace in the authority.
+                let proof = broker
+                    .seal_storage_namespace_proof(capability_family, writer_namespace_hash(leaf));
                 broker
                     .issue_storage_namespace_capability(proof)
                     .map_err(|error| {
@@ -341,9 +338,7 @@ impl ManagedStorageWriterAdapterV1 {
                     cutover_manifest_hash: self.cutover_manifest_hash,
                     application_generation: 1,
                 },
-            owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new(
-                "application".to_owned(),
-            )),
+            owner_scope: ResourceOwnerScopeV1::Application,
             journal_scope: ResourceJournalScopeV1::Application,
         };
         let handle = self
@@ -391,9 +386,7 @@ impl ManagedStorageWriterAdapterV1 {
                     cutover_manifest_hash: self.cutover_manifest_hash,
                     application_generation: 1,
                 },
-            owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new(
-                "application".to_owned(),
-            )),
+            owner_scope: ResourceOwnerScopeV1::Application,
             journal_scope: ResourceJournalScopeV1::Application,
         };
         let capability = match &self.storage_issuer {
@@ -537,6 +530,21 @@ impl ManagedStorageWriterAdapterV1 {
 /// memory writer admits exact class namespaces and the cutover probe only inspects the
 /// frozen ProjectFact cell.
 pub fn memory_grants(seed: u8) -> Vec<sigil_kernel::managed_storage::StorageAdmissionGrantV1> {
+    memory_grants_with_context(
+        seed,
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x28; 32]),
+        },
+        CanonicalHash::from_bytes([0u8; 32]),
+    )
+}
+
+pub fn memory_grants_with_context(
+    seed: u8,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    source_binding_hash: CanonicalHash,
+) -> Vec<sigil_kernel::managed_storage::StorageAdmissionGrantV1> {
     use sigil_kernel::resource::MemoryScopeClassV1;
     let project = grant_for_owner(
         StorageWriterChannelV1::DurableMemory,
@@ -544,6 +552,8 @@ pub fn memory_grants(seed: u8) -> Vec<sigil_kernel::managed_storage::StorageAdmi
             MemoryScopeClassV1::ProjectFact,
         ),
         seed,
+        authority_generation,
+        source_binding_hash,
     );
     let mut preferences = grant_for_owner(
         StorageWriterChannelV1::DurableMemory,
@@ -551,6 +561,8 @@ pub fn memory_grants(seed: u8) -> Vec<sigil_kernel::managed_storage::StorageAdmi
             MemoryScopeClassV1::UserPreference,
         ),
         seed + 1,
+        authority_generation,
+        source_binding_hash,
     );
     // Both classes are grants of the same writer channel: grant ids must stay distinct for
     // the authority tables (a duplicate id would be a capability mismatch at registration).
@@ -564,26 +576,52 @@ pub fn grant_for_channel(
     channel: StorageWriterChannelV1,
     seed: u8,
 ) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+    grant_for_channel_with_context(
+        channel,
+        seed,
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x28; 32]),
+        },
+        CanonicalHash::from_bytes([0u8; 32]),
+    )
+}
+
+pub fn grant_for_channel_with_context(
+    channel: StorageWriterChannelV1,
+    seed: u8,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    source_binding_hash: CanonicalHash,
+) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
     let (semantic_owner, _, _) = channel.mapping();
-    grant_for_owner(channel, semantic_owner, seed)
+    grant_for_owner(
+        channel,
+        semantic_owner,
+        seed,
+        authority_generation,
+        source_binding_hash,
+    )
 }
 
 fn grant_for_owner(
     channel: StorageWriterChannelV1,
     semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
     seed: u8,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    source_binding_hash: CanonicalHash,
 ) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
-    use sigil_kernel::resource::{AuthorityGeneration, OpaqueStorageGrantId, ResourceOwnerScopeV1};
+    use sigil_kernel::resource::{OpaqueStorageGrantId, ResourceOwnerScopeV1};
     let (_, capability_family, leaf) = channel.mapping();
-    let mut ns = [seed; 32];
-    ns[0] = leaf.as_bytes()[0];
+    let namespace_hash = writer_namespace_hash(leaf);
     sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
         grant_id: OpaqueStorageGrantId::new(format!("grant-writer-{leaf}")),
-        admission_hash: CanonicalHash::from_bytes([0x21; 32]),
+        admission_hash: CanonicalHash::from_bytes([0x21 ^ seed; 32]),
         semantic_owner,
         purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
         purpose_hash: CanonicalHash::from_bytes([0x22; 32]),
-        namespace_hash: CanonicalHash::from_bytes(ns),
+        source_class: sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
+        source_binding_hash,
+        namespace_hash,
         journal_scope: ResourceJournalScopeV1::Application,
         journal_scope_hash: CanonicalHash::from_bytes([0x24; 32]),
         resource_ref: sigil_kernel::resource::ResourceRefV1 {
@@ -611,13 +649,31 @@ fn grant_for_owner(
         semantic_schema: sigil_kernel::resource::OpaqueSemanticSchemaId::new(format!(
             "schema-{leaf}"
         )),
-        authority_generation: AuthorityGeneration {
-            epoch: 1,
-            instance_hash: CanonicalHash::from_bytes([0x28; 32]),
-        },
+        authority_generation,
         journal_admission_sequence: 1,
-        grant_hash: CanonicalHash::from_bytes([0x29; 32]),
+        grant_hash: hash_grant_identity(leaf, authority_generation, source_binding_hash),
     }
+}
+
+fn writer_namespace_hash(leaf: &str) -> CanonicalHash {
+    let mut namespace = [0x6au8; 32];
+    for (index, byte) in leaf.bytes().take(16).enumerate() {
+        namespace[index] = byte;
+    }
+    CanonicalHash::from_bytes(namespace)
+}
+
+fn hash_grant_identity(
+    leaf: &str,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    source_binding_hash: CanonicalHash,
+) -> CanonicalHash {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(leaf.as_bytes());
+    bytes.extend_from_slice(&authority_generation.epoch.to_be_bytes());
+    bytes.extend_from_slice(authority_generation.instance_hash.as_bytes());
+    bytes.extend_from_slice(source_binding_hash.as_bytes());
+    crate::r71_shadow_planner::canonical_digest(&bytes)
 }
 
 #[cfg(test)]
@@ -626,7 +682,7 @@ mod tests {
     use sigil_kernel::managed_storage::StorageAdmissionGrantV1;
     use sigil_kernel::resource::{
         AuthorityGeneration, ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1,
-        OpaqueStorageGrantId, ResourceJournalScopeV1, ResourceOwnerScopeV1,
+        OpaqueSessionId, OpaqueStorageGrantId, ResourceJournalScopeV1, ResourceOwnerScopeV1,
     };
     use sigil_resource_authority::storage::{
         AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
@@ -643,7 +699,10 @@ mod tests {
             semantic_owner: ManagedStorageSemanticOwnerV1::SessionLog,
             purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
             purpose_hash: hash(2),
-            namespace_hash: hash(3),
+            source_class:
+                sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
+            source_binding_hash: hash(10),
+            namespace_hash: super::writer_namespace_hash("session-log"),
             journal_scope: ResourceJournalScopeV1::Application,
             journal_scope_hash: hash(4),
             resource_ref: sigil_kernel::resource::ResourceRefV1 {
@@ -898,15 +957,25 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut table = AuthorityStorageGrantTableV1::new();
         table
-            .register(grant_for_channel(
+            .register(grant_for_channel_with_context(
                 StorageWriterChannelV1::ArtifactStaging,
                 0x81,
+                AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: hash(0x83),
+                },
+                hash(0x84),
             ))
             .expect("staging grant");
         table
-            .register(grant_for_channel(
+            .register(grant_for_channel_with_context(
                 StorageWriterChannelV1::ArtifactStore,
                 0x82,
+                AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: hash(0x83),
+                },
+                hash(0x84),
             ))
             .expect("store grant");
         let service: std::sync::Arc<dyn ManagedStorageServiceV1> =

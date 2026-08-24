@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 sigil-kernel = { path = "../sigil-kernel" }
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
@@ -14,7 +15,6 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true

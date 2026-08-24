@@ -8,6 +8,20 @@ use sigil_kernel::resource_recovery_surface::{
     ResourceRecoveryActionEnvelopeV1, ResourceRecoverySurfaceContractV1,
 };
 
+fn canonical_contract_hash(contract: &ResourceRecoverySurfaceContractV1) -> String {
+    let encoded = serde_json::to_vec(contract).expect("recovery surface contract is serializable");
+    format!("sha256:{}", sigil_kernel::sha256_hex(&encoded))
+}
+
+fn canonical_binding_hash(
+    contract: &ResourceRecoverySurfaceContractV1,
+    envelope: &ResourceRecoveryActionEnvelopeV1,
+) -> String {
+    let encoded = serde_json::to_vec(&(contract, envelope))
+        .expect("recovery surface binding is serializable");
+    format!("sha256:{}", sigil_kernel::sha256_hex(&encoded))
+}
+
 /// Facade query result: a lossless projection plus the exact action envelope round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceRecoverySurfaceProjectionV1 {
@@ -31,8 +45,9 @@ impl RuntimeResourceRecoveryFacadeV1 {
         Self
     }
 
-    /// Lossless projection: recomputes schema validation and returns the exact contract bytes
-    /// definition; surfaces never re-canonicalize.
+    /// Lossless projection: validates the kernel contract and binds the projection to its exact
+    /// canonical bytes. The hash is correlation metadata only; authorization remains owned by
+    /// the kernel action envelope.
     pub fn project(
         &self,
         contract: ResourceRecoverySurfaceContractV1,
@@ -40,7 +55,7 @@ impl RuntimeResourceRecoveryFacadeV1 {
         contract
             .validate_schema()
             .map_err(|error| facade_error::FacadeErrorV1::UnknownSchema(error.to_string()))?;
-        let projection_hash = format!("facade-v1:{:x}", contract.schema_version);
+        let projection_hash = canonical_contract_hash(&contract);
         Ok(ResourceRecoverySurfaceProjectionV1 {
             contract,
             projection_hash,
@@ -60,9 +75,10 @@ impl RuntimeResourceRecoveryFacadeV1 {
         if *expected != returned {
             return Err(facade_error::FacadeErrorV1::EnvelopeMismatch);
         }
+        let binding_hash = canonical_binding_hash(&projected.contract, &returned);
         Ok(ResourceRecoveryDispatchV1 {
             accepted_envelope: returned,
-            binding_hash: format!("binding:{:x}", projected.contract.schema_version),
+            binding_hash,
         })
     }
 }
@@ -158,5 +174,26 @@ mod tests {
             error,
             facade_error::FacadeErrorV1::EnvelopeMismatch
         ));
+    }
+
+    #[test]
+    fn r71_facade_hashes_contract_and_binding_content_not_schema_only() {
+        let facade = RuntimeResourceRecoveryFacadeV1::new();
+        let first = facade.project(sample_contract()).expect("first project");
+        let mut changed = sample_contract();
+        changed.blocker.as_mut().expect("blocker").frontier_hash =
+            CanonicalHash::from_bytes([8u8; 32]);
+        let second = facade.project(changed).expect("second project");
+
+        assert_ne!(first.projection_hash, second.projection_hash);
+        let first_envelope = first.contract.action_envelope.clone().expect("envelope");
+        let second_envelope = second.contract.action_envelope.clone().expect("envelope");
+        let first_dispatch = facade
+            .dispatch(&first, first_envelope)
+            .expect("first dispatch");
+        let second_dispatch = facade
+            .dispatch(&second, second_envelope)
+            .expect("second dispatch");
+        assert_ne!(first_dispatch.binding_hash, second_dispatch.binding_hash);
     }
 }

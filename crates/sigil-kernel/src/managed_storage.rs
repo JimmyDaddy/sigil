@@ -53,6 +53,8 @@ pub struct StorageAdmissionGrantV1 {
     pub semantic_owner: ManagedStorageSemanticOwnerV1,
     pub purpose: ManagedStorageAdmissionPurposeV1,
     pub purpose_hash: CanonicalHash,
+    pub source_class: StorageAdmissionSourceClassV1,
+    pub source_binding_hash: CanonicalHash,
     pub namespace_hash: CanonicalHash,
     pub journal_scope: ResourceJournalScopeV1,
     pub journal_scope_hash: CanonicalHash,
@@ -245,19 +247,48 @@ pub struct ManagedStorageAdmissionRequestV1 {
 #[derive(Debug)]
 pub struct ValidatedStorageAdmissionCapabilityV1 {
     pub handle_id: OpaqueKernelCapabilityHandleId,
+    binding: Option<StorageAdmissionCapabilityBindingV1>,
     #[allow(dead_code)]
     authenticator: OpaqueKernelCapabilityAuthenticatorV1,
 }
 
+/// Kernel-sealed binding carried by a broker-issued storage capability. The value is observable
+/// only through an already validated capability; callers cannot construct one or replace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageAdmissionCapabilityBindingV1 {
+    family: ManagedStorageCapabilityFamilyV1,
+    namespace_hash: CanonicalHash,
+}
+
+impl StorageAdmissionCapabilityBindingV1 {
+    #[must_use]
+    pub const fn family(self) -> ManagedStorageCapabilityFamilyV1 {
+        self.family
+    }
+
+    #[must_use]
+    pub const fn namespace_hash(self) -> CanonicalHash {
+        self.namespace_hash
+    }
+}
+
 impl ValidatedStorageAdmissionCapabilityV1 {
     /// Kernel-broker-issued admission capability (real; distinct from the probe marker).
-    pub(crate) fn broker_issued(handle_id: OpaqueKernelCapabilityHandleId) -> Self {
+    pub(crate) fn broker_issued(
+        handle_id: OpaqueKernelCapabilityHandleId,
+        family: ManagedStorageCapabilityFamilyV1,
+        namespace_hash: CanonicalHash,
+    ) -> Self {
         Self {
             authenticator: OpaqueKernelCapabilityAuthenticatorV1::new(format!(
                 "auth-{}",
                 handle_id.as_str()
             )),
             handle_id,
+            binding: Some(StorageAdmissionCapabilityBindingV1 {
+                family,
+                namespace_hash,
+            }),
         }
     }
 
@@ -269,7 +300,13 @@ impl ValidatedStorageAdmissionCapabilityV1 {
         Self {
             handle_id: OpaqueKernelCapabilityHandleId::new("startup-probe".to_owned()),
             authenticator: OpaqueKernelCapabilityAuthenticatorV1::new("startup-probe".to_owned()),
+            binding: None,
         }
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> Option<StorageAdmissionCapabilityBindingV1> {
+        self.binding
     }
 }
 
@@ -322,6 +359,8 @@ pub enum ManagedStorageErrorV1 {
     UnsafeLogicalKey,
     #[error("namespace does not permit this capability family")]
     FamilyMismatch,
+    #[error("managed storage authority journal is unavailable")]
+    JournalUnavailable,
 }
 
 /// Closed artifact id for the dual-grant publish path.

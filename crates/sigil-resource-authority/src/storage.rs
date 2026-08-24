@@ -5,6 +5,8 @@
 //! import authority concrete types nor receive an authority token.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Mutex;
 
 use sigil_kernel::managed_storage::{
     ManagedStorageAdmissionRequestV1, ManagedStorageErrorV1, ManagedStorageNamespaceHandleV1,
@@ -16,6 +18,10 @@ use sigil_kernel::resource::{
     OpaqueStorageGrantId, OpaqueStorageKeyIdV1,
 };
 
+use crate::journal::{
+    JournalErrorV1, ResourceJournalEventV1, ResourceJournalFileV1, ResourceJournalRecordV1,
+};
+
 /// Authority-private grant table: grant id -> durable admission grant + claim state.
 #[derive(Debug, Default)]
 pub struct AuthorityStorageGrantTableV1 {
@@ -25,6 +31,8 @@ pub struct AuthorityStorageGrantTableV1 {
     /// Finalized namespace registry: one-shot per namespace (interior mutability because
     /// finalize is &self on the kernel port).
     finalized_namespaces: std::sync::Mutex<BTreeMap<String, ()>>,
+    /// Exact admitted request and grant, retained until the one-shot finalize CAS.
+    admitted_namespaces: std::sync::Mutex<BTreeMap<String, StorageAdmissionRecordV1>>,
     /// Probe-claim sequence: every kernel-owned startup-probe claim gets a distinct probe
     /// namespace so probes and shadow writer claims never share a finalized namespace.
     probe_sequence: std::sync::atomic::AtomicU64,
@@ -36,6 +44,7 @@ impl AuthorityStorageGrantTableV1 {
             grants: BTreeMap::new(),
             consumed_capabilities: BTreeMap::new(),
             finalized_namespaces: std::sync::Mutex::new(BTreeMap::new()),
+            admitted_namespaces: std::sync::Mutex::new(BTreeMap::new()),
             probe_sequence: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -77,11 +86,20 @@ impl AuthorityStorageGrantTableV1 {
     }
 }
 
+#[derive(Debug, Clone)]
+struct StorageAdmissionRecordV1 {
+    grant: StorageAdmissionGrantV1,
+    request: ManagedStorageAdmissionRequestV1,
+    namespace_hash: CanonicalHash,
+    admission_sequence: u64,
+}
+
 /// Authority-owned managed storage service behind the kernel trait object.
 pub struct AuthorityManagedStorageServiceV1 {
     table: AuthorityStorageGrantTableV1,
-    #[allow(dead_code)]
     authority_generation: AuthorityGeneration,
+    journal: Option<Mutex<ResourceJournalFileV1>>,
+    blocked_grants_after_restart: BTreeMap<String, ()>,
 }
 
 impl AuthorityManagedStorageServiceV1 {
@@ -92,11 +110,61 @@ impl AuthorityManagedStorageServiceV1 {
         Self {
             table,
             authority_generation,
+            journal: None,
+            blocked_grants_after_restart: BTreeMap::new(),
         }
+    }
+
+    /// Creates the production service with an owner-only durable authority journal.
+    pub fn new_with_journal(
+        table: AuthorityStorageGrantTableV1,
+        authority_generation: AuthorityGeneration,
+        journal_path: impl AsRef<Path>,
+        bootstrap_manifest_hash: CanonicalHash,
+        journal_instance_hash: CanonicalHash,
+    ) -> Result<Self, JournalErrorV1> {
+        let header = crate::journal::ResourceJournalHeaderV1 {
+            schema_version: 1,
+            shard_name: "application-resources".to_owned(),
+            bootstrap_manifest_hash,
+            journal_instance_hash,
+            header_hash: hash_debug(&(
+                "application-resources",
+                bootstrap_manifest_hash,
+                journal_instance_hash,
+            )),
+        };
+        let journal = ResourceJournalFileV1::open(journal_path.as_ref().to_path_buf(), header)?;
+        let blocked_grants_after_restart = journal
+            .unsettled_storage_grants()
+            .into_iter()
+            .map(|key| (key, ()))
+            .collect();
+        Ok(Self {
+            table,
+            authority_generation,
+            journal: Some(Mutex::new(journal)),
+            blocked_grants_after_restart,
+        })
     }
 
     pub fn grant_table(&self) -> &AuthorityStorageGrantTableV1 {
         &self.table
+    }
+
+    fn append_journal_event(
+        &self,
+        event: ResourceJournalEventV1,
+    ) -> Result<Option<ResourceJournalRecordV1>, ManagedStorageErrorV1> {
+        let Some(journal) = &self.journal else {
+            return Ok(None);
+        };
+        journal
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .append_event(event)
+            .map(Some)
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)
     }
 }
 
@@ -115,9 +183,35 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         let Some(grant) = self.table.grants.values().find(|grant| {
             grant.capability_family == request.capability_family
                 && grant.semantic_owner == request.semantic_owner
+                && grant.purpose == request.purpose
+                && grant.journal_scope == request.journal_scope
+                && (probe || grant.owner_scope == request.owner_scope)
+                && (probe || grant.source_class == request.source.source_class())
         }) else {
             return Err(ManagedStorageErrorV1::FamilyMismatch);
         };
+        let binding = capability.binding();
+        if !probe {
+            if self
+                .blocked_grants_after_restart
+                .contains_key(&grant.grant_hash.to_hex())
+            {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            let Some(binding) = binding else {
+                return Err(ManagedStorageErrorV1::CapabilityMismatch);
+            };
+            if binding.family() != request.capability_family
+                || binding.namespace_hash() != grant.namespace_hash
+            {
+                return Err(ManagedStorageErrorV1::CapabilityMismatch);
+            }
+            if grant.source_binding_hash != source_binding_hash(&request.source)
+                || grant.authority_generation != self.authority_generation
+            {
+                return Err(ManagedStorageErrorV1::CapabilityMismatch);
+            }
+        }
         let (handle_id, namespace_hash, authenticator) = if probe {
             let mut probe_ns = [0x9fu8; 32];
             let seq = self.table.next_probe_sequence();
@@ -132,11 +226,11 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                 sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::SemanticLeaseLedger => 7,
             };
             (
-                sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
-                    "handle-probe-storage-1".to_owned(),
-                ),
+                sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(format!(
+                    "handle-probe-storage-{seq}"
+                )),
                 CanonicalHash::from_bytes(probe_ns),
-                OpaqueKernelCapabilityAuthenticatorV1::new("auth-probe-storage-1".to_owned()),
+                OpaqueKernelCapabilityAuthenticatorV1::new(format!("auth-probe-storage-{seq}")),
             )
         } else {
             // Broker-issued claims: the namespace identity is the claim binding itself (the
@@ -155,12 +249,32 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                 )),
             )
         };
-        Ok(ManagedStorageNamespaceHandleV1::new(
+        let handle = ManagedStorageNamespaceHandleV1::new(
             handle_id,
             namespace_hash,
             grant.capability_family,
             authenticator,
-        ))
+        );
+        let admission_sequence = self
+            .append_journal_event(ResourceJournalEventV1::StorageNamespaceAdmitted {
+                grant_hash: grant.grant_hash,
+            })?
+            .map(|record| record.sequence)
+            .unwrap_or(grant.journal_admission_sequence);
+        self.table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::CapabilityMismatch)?
+            .insert(
+                handle.handle_id.as_str().to_owned(),
+                StorageAdmissionRecordV1 {
+                    grant: grant.clone(),
+                    request,
+                    namespace_hash,
+                    admission_sequence,
+                },
+            );
+        Ok(handle)
     }
 
     fn finalize_namespace(
@@ -168,22 +282,80 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         handle: ManagedStorageNamespaceHandleV1,
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
-        let _ = reason;
+        let record = self
+            .table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::HandleFinalized)?
+            .remove(handle.handle_id.as_str())
+            .ok_or(ManagedStorageErrorV1::CapabilityMismatch)?;
+        if record.namespace_hash != handle.namespace_hash
+            || record.grant.capability_family != handle.capability_family
+        {
+            return Err(ManagedStorageErrorV1::CapabilityMismatch);
+        }
+        let operation_digest = hash_debug(&(record.request, &reason));
+        let settlement = self.append_journal_event(ResourceJournalEventV1::GenerationSettled {
+            grant_hash: record.grant.grant_hash,
+            resource_id: record.grant.resource_ref.resource_id.as_str().to_owned(),
+            generation: record.grant.resource_ref.generation,
+            cleanup_status: reason,
+        })?;
         self.table.record_finalized(&handle.namespace_hash)?;
-        let mut receipt = ManagedStorageStorageReceiptV1 {
-            grant_id: OpaqueStorageGrantId::new("grant-1".to_owned()),
-            grant_hash: CanonicalHash::from_bytes([1u8; 32]),
-            semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLog,
-            capability_family: handle.capability_family,
-            resource_id: sigil_kernel::resource::OpaqueResourceId::new("resource-1".to_owned()),
-            operation_digest: CanonicalHash::from_bytes([2u8; 32]),
-            committed_sequence_or_version: Some(1),
-            committed_frontier_hash: CanonicalHash::from_bytes([3u8; 32]),
-            receipt_hash: CanonicalHash::from_bytes([4u8; 32]),
+        let committed_frontier_hash = if let Some(settlement) = &settlement {
+            settlement.committed_frontier_hash
+        } else {
+            hash_debug(&(
+                record.grant.grant_hash,
+                record.namespace_hash,
+                operation_digest,
+            ))
         };
-        let _ = &mut receipt;
-        Ok(receipt)
+        let receipt_hash = hash_debug(&(
+            record.grant.grant_id.as_str(),
+            record.grant.grant_hash,
+            record.grant.resource_ref.resource_id.as_str(),
+            operation_digest,
+            committed_frontier_hash,
+            record.admission_sequence,
+            settlement.as_ref().map(|record| record.sequence),
+        ));
+        Ok(ManagedStorageStorageReceiptV1 {
+            grant_id: record.grant.grant_id,
+            grant_hash: record.grant.grant_hash,
+            semantic_owner: record.grant.semantic_owner,
+            capability_family: record.grant.capability_family,
+            resource_id: record.grant.resource_ref.resource_id,
+            operation_digest,
+            committed_sequence_or_version: Some(
+                settlement
+                    .as_ref()
+                    .map(|record| record.sequence)
+                    .unwrap_or(record.grant.journal_admission_sequence),
+            ),
+            committed_frontier_hash,
+            receipt_hash,
+        })
     }
+}
+
+fn source_binding_hash(
+    source: &sigil_kernel::managed_storage::StorageAdmissionSourceV1,
+) -> CanonicalHash {
+    match source {
+        sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+            cutover_manifest_hash,
+            ..
+        } => *cutover_manifest_hash,
+        _ => hash_debug(source),
+    }
+}
+
+fn hash_debug(value: &impl std::fmt::Debug) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{value:?}").as_bytes());
+    CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
 /// Authority-private storage capability verifier facet (RA-owned; factory returns only
@@ -252,6 +424,9 @@ mod tests {
             semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLog,
             purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
             purpose_hash: CanonicalHash::from_bytes([2u8; 32]),
+            source_class:
+                sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
+            source_binding_hash: CanonicalHash::from_bytes([9u8; 32]),
             namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
             journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
             journal_scope_hash: CanonicalHash::from_bytes([4u8; 32]),
@@ -351,7 +526,7 @@ mod tests {
                     application_generation: 1,
                 },
             owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new("s-1".to_owned())),
-            journal_scope: ResourceJournalScopeV1::Application,
+            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
         };
         service
             .admit_namespace(
@@ -400,5 +575,64 @@ mod tests {
             )
             .expect_err("unrelated");
         assert!(matches!(error, ManagedStorageErrorV1::FamilyMismatch));
+    }
+
+    #[test]
+    fn r71_storage_broker_binding_rejects_namespace_and_family_drift() {
+        use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+        use sigil_kernel::managed_storage::StorageAdmissionSourceV1;
+        use sigil_kernel::resource::{
+            ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1,
+        };
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant()).expect("register");
+        let service = AuthorityManagedStorageServiceV1::new(
+            table,
+            AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([8u8; 32]),
+            },
+        );
+        let request = ManagedStorageAdmissionRequestV1 {
+            semantic_owner: ManagedStorageSemanticOwnerV1::SessionLog,
+            capability_family: ManagedStorageCapabilityFamilyV1::AppendLog,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            source: StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
+                application_generation: 1,
+            },
+            owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
+            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
+        };
+        let broker = KernelCapabilityBrokerV1::new();
+        let exact = broker
+            .issue_storage_namespace_capability(broker.seal_storage_namespace_proof(
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                CanonicalHash::from_bytes([3u8; 32]),
+            ))
+            .expect("exact capability");
+        service
+            .admit_namespace(request.clone(), exact)
+            .expect("exact binding");
+        let wrong_namespace = broker
+            .issue_storage_namespace_capability(broker.seal_storage_namespace_proof(
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                CanonicalHash::from_bytes([4u8; 32]),
+            ))
+            .expect("wrong namespace capability");
+        let error = service
+            .admit_namespace(request.clone(), wrong_namespace)
+            .expect_err("namespace drift");
+        assert!(matches!(error, ManagedStorageErrorV1::CapabilityMismatch));
+        let wrong_family = broker
+            .issue_storage_namespace_capability(broker.seal_storage_namespace_proof(
+                ManagedStorageCapabilityFamilyV1::AtomicObject,
+                CanonicalHash::from_bytes([3u8; 32]),
+            ))
+            .expect("wrong family capability");
+        let error = service
+            .admit_namespace(request, wrong_family)
+            .expect_err("family drift");
+        assert!(matches!(error, ManagedStorageErrorV1::CapabilityMismatch));
     }
 }

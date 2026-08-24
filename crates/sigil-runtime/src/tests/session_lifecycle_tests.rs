@@ -2197,7 +2197,7 @@ fn artifact_gc_fails_closed_when_durable_disable_cannot_be_written() -> Result<(
 #[test]
 fn managed_lifecycle_journal_round_trips_under_admitted_namespace() -> Result<()> {
     use crate::managed_storage_writer::{
-        ManagedStorageWriterAdapterV1, StorageWriterChannelV1, grant_for_channel,
+        ManagedStorageWriterAdapterV1, StorageWriterChannelV1, grant_for_channel_with_context,
     };
     use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
     use sigil_kernel::managed_storage::ManagedStorageServiceV1;
@@ -2212,9 +2212,14 @@ fn managed_lifecycle_journal_round_trips_under_admitted_namespace() -> Result<()
     #[cfg(unix)]
     fs::set_permissions(&anchor, fs::Permissions::from_mode(0o700))?;
     let mut table = AuthorityStorageGrantTableV1::new();
-    table.register(grant_for_channel(
+    table.register(grant_for_channel_with_context(
         StorageWriterChannelV1::SessionLifecycleLog,
         0x76,
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x68; 32]),
+        },
+        CanonicalHash::from_bytes([0x69; 32]),
     ))?;
     let storage: Arc<dyn ManagedStorageServiceV1> =
         Arc::new(AuthorityManagedStorageServiceV1::new(

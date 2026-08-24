@@ -402,7 +402,9 @@ fn remember_tools_require_preview_and_default_to_ask() -> Result<()> {
 
 #[test]
 fn managed_writer_round_trips_both_memory_scopes_under_admitted_namespaces() -> Result<()> {
-    use crate::managed_storage_writer::{ManagedStorageWriterAdapterV1, memory_grants};
+    use crate::managed_storage_writer::{
+        ManagedStorageWriterAdapterV1, memory_grants_with_context,
+    };
     use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
     use sigil_kernel::managed_storage::ManagedStorageServiceV1;
     use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash};
@@ -420,7 +422,14 @@ fn managed_writer_round_trips_both_memory_scopes_under_admitted_namespaces() -> 
     }
 
     let mut table = AuthorityStorageGrantTableV1::new();
-    for grant in memory_grants(0x76) {
+    for grant in memory_grants_with_context(
+        0x76,
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x68; 32]),
+        },
+        CanonicalHash::from_bytes([0x69; 32]),
+    ) {
         table.register(grant)?;
     }
     let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
