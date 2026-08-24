@@ -3426,25 +3426,6 @@ exception_rfc = "0071"
 [[sites]]
 site_id = "R-0181"
 crate_name = "sigil-tools-builtin"
-module = "crates/sigil-tools-builtin/src/scratch_namespace.rs"
-constructor = "CreateDirectory"
-line = 610
-class = "managed-execution-temp"
-owner = "ResourceAuthority"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "Model"
-child_access = "ExactManagedGrant"
-admission_contract = "ManagedExecutionLease"
-resource_contract = "ManagedGeneration(ExecutionTemp)"
-lifecycle_contract = "AuthorityLeaseAndJournal"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:scratch_namespace.rs:610"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
-site_id = "R-0182"
-crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
 line = 360
@@ -3462,7 +3443,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0183"
+site_id = "R-0182"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
@@ -3481,7 +3462,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0184"
+site_id = "R-0183"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
@@ -3500,7 +3481,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0185"
+site_id = "R-0184"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
@@ -3519,7 +3500,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0186"
+site_id = "R-0185"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/manager.rs"
 constructor = "CreateDirectory"
@@ -3538,7 +3519,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0187"
+site_id = "R-0186"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app/input_history.rs"
 constructor = "CreateDirectory"
@@ -3557,7 +3538,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0188"
+site_id = "R-0187"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app/input_history.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -3576,7 +3557,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0189"
+site_id = "R-0188"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app/input_history.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -3595,7 +3576,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0190"
+site_id = "R-0189"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app.rs"
 constructor = "CreateDirectory"
@@ -3614,7 +3595,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0191"
+site_id = "R-0190"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/launcher.rs"
 constructor = "CreateDirectory"
@@ -3633,7 +3614,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0192"
+site_id = "R-0191"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/launcher.rs"
 constructor = "CreateDirectory"
@@ -3652,7 +3633,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0193"
+site_id = "R-0192"
 crate_name = "sigil-updater"
 module = "crates/sigil-updater/src/cache.rs"
 constructor = "CreateDirectory"
@@ -3671,7 +3652,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0194"
+site_id = "R-0193"
 crate_name = "sigil-updater"
 module = "crates/sigil-updater/src/cache.rs"
 constructor = "TemporaryFile"
@@ -3690,7 +3671,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0195"
+site_id = "R-0194"
 crate_name = "sigil-updater"
 module = "crates/sigil-updater/src/cache.rs"
 constructor = "DirectWriteOrAtomicReplace"

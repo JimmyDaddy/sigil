@@ -170,8 +170,16 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
         terminal_execution_config.with_default_shell(default_shell.clone());
-    let scratch_control = external_scratch_control
-        .unwrap_or_else(|| ScratchNamespaceControl::for_local_root(paths.scratch_root.clone()));
+    let scratch_control = external_scratch_control.unwrap_or_else(|| {
+        #[cfg(test)]
+        {
+            ScratchNamespaceControl::for_local_root(paths.scratch_root.clone())
+        }
+        #[cfg(not(test))]
+        {
+            ScratchNamespaceControl::unavailable()
+        }
+    });
     let terminal_managers = Arc::new(
         TerminalProcessManagers::new(terminal_execution_config)
             .with_lifecycle_route(terminal_lifecycle_route)

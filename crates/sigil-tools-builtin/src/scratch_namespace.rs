@@ -18,23 +18,34 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-#[cfg(not(unix))]
+#[cfg(test)]
+use std::{fs, path::Path};
+
+#[cfg(all(test, not(unix)))]
 use std::time::SystemTime;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+#[cfg(not(test))]
+use anyhow::anyhow;
+#[cfg(test)]
+use anyhow::{Context, bail};
 use serde_json::json;
-use sigil_kernel::{ToolErrorKind, ToolResult, secure_private_path_permissions};
+#[cfg(test)]
+use sigil_kernel::secure_private_path_permissions;
+use sigil_kernel::{ToolErrorKind, ToolResult};
 
+use crate::constants::SCRATCH_NAMESPACE_TTL_MS;
+#[cfg(test)]
+use crate::constants::WORKSPACE_TEMP_ROOT;
 use crate::constants::{
-    NO_SESSION_SCRATCH_KEY, SCRATCH_NAMESPACE_TTL_MS, SCRATCH_QUOTA_PER_SESSION_BYTES,
-    SCRATCH_QUOTA_WORKSPACE_HARD_BYTES, SCRATCH_WALK_MAX_ENTRIES, SESSION_SCRATCH_NAMESPACE_DIR,
-    WORKSPACE_TEMP_ROOT,
+    NO_SESSION_SCRATCH_KEY, SCRATCH_QUOTA_PER_SESSION_BYTES, SCRATCH_QUOTA_WORKSPACE_HARD_BYTES,
 };
+#[cfg(test)]
+use crate::constants::{SCRATCH_WALK_MAX_ENTRIES, SESSION_SCRATCH_NAMESPACE_DIR};
 
 /// Stable, filesystem-safe namespace key for one session scope. Falls back to a fixed
 /// `no-session` key for direct tool invocations without a durable session.
@@ -47,6 +58,7 @@ pub fn session_scratch_key(session_scope_id: Option<&str>) -> String {
 }
 
 /// RFC-0062 14.1: the session-scoped scratch directory for one session scope.
+#[cfg(test)]
 #[must_use]
 pub fn session_scratch_dir(scratch_root: &Path, session_scope_id: Option<&str>) -> PathBuf {
     scratch_root
@@ -112,6 +124,7 @@ pub struct ScratchQuotaExceededError {
 ///
 /// Paths are relative to the session namespace so these errors can be projected to a tool result
 /// without disclosing the host cache layout.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ScratchMeasurementError {
     #[error(
@@ -177,7 +190,52 @@ struct NoopScratchNamespaceProviderLease;
 
 impl ScratchNamespaceProviderLease for NoopScratchNamespaceProviderLease {}
 
+#[cfg(not(test))]
+#[derive(Debug)]
+struct UnavailableScratchNamespaceProvider;
+
+#[cfg(not(test))]
+impl ScratchNamespaceProvider for UnavailableScratchNamespaceProvider {
+    fn acquire(&self, _session_key: &str) -> Box<dyn ScratchNamespaceProviderLease> {
+        Box::new(NoopScratchNamespaceProviderLease)
+    }
+
+    fn session_scratch_dir(&self, _session_scope_id: Option<&str>) -> PathBuf {
+        PathBuf::new()
+    }
+
+    fn ensure_session_scratch(
+        &self,
+        _session_scope_id: Option<&str>,
+        _quota: &ScratchQuota,
+    ) -> Result<SessionScratchProvision> {
+        Err(anyhow!("SessionScratch authority provider is not attached"))
+    }
+
+    fn measure_scratch_usage(&self, _session_key: &str) -> Result<ScratchUsage> {
+        Err(anyhow!("SessionScratch authority provider is not attached"))
+    }
+
+    fn gc_scratch_namespaces(
+        &self,
+        _control: &ScratchNamespaceControl,
+        _config: &ScratchGcConfig,
+        _now_ms: u64,
+    ) -> Result<ScratchGcReport> {
+        Err(anyhow!("SessionScratch authority provider is not attached"))
+    }
+
+    fn delete_session_scratch_namespace(
+        &self,
+        _session_scope_id: Option<&str>,
+        _control: &ScratchNamespaceControl,
+    ) -> Result<ScratchDeleteOutcome> {
+        Err(anyhow!("SessionScratch authority provider is not attached"))
+    }
+}
+
 /// Walk state for the bounded deterministic scratch sweep.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 struct WalkState {
     bytes: u64,
@@ -332,11 +390,13 @@ pub struct ScratchNamespaceControl {
     pub tasks: Arc<ScratchTaskLeaseRegistry>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct LocalScratchNamespaceProvider {
     root: PathBuf,
 }
 
+#[cfg(test)]
 impl ScratchNamespaceProvider for LocalScratchNamespaceProvider {
     fn acquire(&self, _session_key: &str) -> Box<dyn ScratchNamespaceProviderLease> {
         Box::new(NoopScratchNamespaceProviderLease)
@@ -377,11 +437,13 @@ impl ScratchNamespaceProvider for LocalScratchNamespaceProvider {
 }
 
 impl ScratchNamespaceControl {
+    #[cfg(test)]
     #[must_use]
     pub fn new() -> Self {
         Self::for_local_root(PathBuf::from(WORKSPACE_TEMP_ROOT))
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn for_local_root(root: impl Into<PathBuf>) -> Self {
         Self::from_provider(Arc::new(LocalScratchNamespaceProvider {
@@ -399,6 +461,12 @@ impl ScratchNamespaceControl {
             namespaces,
             tasks: Arc::new(ScratchTaskLeaseRegistry::new()),
         }
+    }
+
+    #[cfg(not(test))]
+    #[must_use]
+    pub(crate) fn unavailable() -> Self {
+        Self::from_provider(Arc::new(UnavailableScratchNamespaceProvider))
     }
 
     #[must_use]
@@ -436,19 +504,21 @@ impl ScratchNamespaceControl {
     }
 }
 
+#[cfg(test)]
 impl Default for ScratchNamespaceControl {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn system_time_ms(time: Option<SystemTime>) -> u64 {
     time.and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn entry_modified_ms(metadata: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
@@ -464,6 +534,7 @@ fn entry_modified_ms(metadata: &fs::Metadata) -> u64 {
 /// Entry-bounded deterministic walk of one namespace. Refuses symlinks and any entry that cannot
 /// be measured, so quota/activity numbers are never silently fabricated. Directory depth is not a
 /// validity constraint; traversal work is bounded by the total entry budget instead.
+#[cfg(test)]
 fn walk_namespace(namespace_root: &Path, max_entries: usize) -> Result<WalkState> {
     let mut state = WalkState::default();
     let mut pending = vec![namespace_root.to_path_buf()];
@@ -513,6 +584,7 @@ fn walk_namespace(namespace_root: &Path, max_entries: usize) -> Result<WalkState
     Ok(state)
 }
 
+#[cfg(test)]
 fn scratch_relative_label(namespace_root: &Path, path: &Path) -> String {
     path.strip_prefix(namespace_root)
         .ok()
@@ -527,6 +599,7 @@ fn scratch_relative_label(namespace_root: &Path, path: &Path) -> String {
 ///
 /// Returns an error for symlinks, unreadable entries or walk bounds; quota numbers are never
 /// silently guessed.
+#[cfg(test)]
 pub fn measure_scratch_usage(scratch_root: &Path, session_key: &str) -> Result<ScratchUsage> {
     let sessions_root = scratch_root.join(SESSION_SCRATCH_NAMESPACE_DIR);
     let mut usage = ScratchUsage::default();
@@ -582,6 +655,7 @@ pub fn measure_scratch_usage(scratch_root: &Path, session_key: &str) -> Result<S
 /// Returns [`ScratchQuotaExceededError`] when the session or workspace quota is already reached,
 /// and a contextual error for symlink attacks or permission hardening failures. Never falls back
 /// to the system temp directory.
+#[cfg(test)]
 pub fn ensure_session_scratch(
     scratch_root: &Path,
     session_scope_id: Option<&str>,
@@ -778,6 +852,7 @@ pub struct ScratchGcReport {
 /// A namespace is deleted only when it has no active lease (checked atomically with the
 /// deletion) and its last measured activity is older than `ttl_ms`. Failures are collected as
 /// bounded diagnostics instead of aborting the sweep.
+#[cfg(test)]
 pub fn gc_scratch_namespaces(
     scratch_root: &Path,
     control: &ScratchNamespaceControl,
@@ -885,6 +960,7 @@ pub enum ScratchDeleteOutcome {
 /// # Errors
 ///
 /// Returns an error when the namespace exists but cannot be removed safely.
+#[cfg(test)]
 pub fn delete_session_scratch_namespace(
     scratch_root: &Path,
     session_scope_id: Option<&str>,

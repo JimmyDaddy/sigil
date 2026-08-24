@@ -2,10 +2,11 @@
 use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use sigil_kernel::{
     AssistantMessageKind, ContextBodyRef, ContextInclusionReason, ContextItem, ContextSensitivity,
@@ -18,6 +19,74 @@ use sigil_kernel::{
 };
 
 use super::*;
+
+#[derive(Debug)]
+struct TestScratchProvider {
+    root: PathBuf,
+}
+
+#[derive(Debug)]
+struct TestScratchLease;
+
+impl sigil_tools_builtin::ScratchNamespaceProviderLease for TestScratchLease {}
+
+impl sigil_tools_builtin::ScratchNamespaceProvider for TestScratchProvider {
+    fn acquire(
+        &self,
+        _session_key: &str,
+    ) -> Box<dyn sigil_tools_builtin::ScratchNamespaceProviderLease> {
+        Box::new(TestScratchLease)
+    }
+
+    fn session_scratch_dir(&self, session_scope_id: Option<&str>) -> PathBuf {
+        self.root
+            .join("sessions")
+            .join(sigil_tools_builtin::session_scratch_key(session_scope_id))
+    }
+
+    fn ensure_session_scratch(
+        &self,
+        _session_scope_id: Option<&str>,
+        _quota: &sigil_tools_builtin::ScratchQuota,
+    ) -> Result<sigil_tools_builtin::SessionScratchProvision> {
+        Err(anyhow!("test provider does not provision scratch"))
+    }
+
+    fn measure_scratch_usage(
+        &self,
+        _session_key: &str,
+    ) -> Result<sigil_tools_builtin::ScratchUsage> {
+        Err(anyhow!("test provider does not measure scratch"))
+    }
+
+    fn gc_scratch_namespaces(
+        &self,
+        _control: &sigil_tools_builtin::ScratchNamespaceControl,
+        _config: &sigil_tools_builtin::ScratchGcConfig,
+        _now_ms: u64,
+    ) -> Result<sigil_tools_builtin::ScratchGcReport> {
+        Err(anyhow!("test provider does not gc scratch"))
+    }
+
+    fn delete_session_scratch_namespace(
+        &self,
+        session_scope_id: Option<&str>,
+        control: &sigil_tools_builtin::ScratchNamespaceControl,
+    ) -> Result<sigil_tools_builtin::ScratchDeleteOutcome> {
+        let key = sigil_tools_builtin::session_scratch_key(session_scope_id);
+        if control.namespaces.is_leased(&key) {
+            return Ok(sigil_tools_builtin::ScratchDeleteOutcome::SkippedLeased);
+        }
+        let path = self.session_scratch_dir(session_scope_id);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => Ok(sigil_tools_builtin::ScratchDeleteOutcome::Deleted),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(sigil_tools_builtin::ScratchDeleteOutcome::NotPresent)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
 
 #[derive(Default)]
 struct ProjectionNoticeRecorder {
@@ -793,16 +862,20 @@ fn session_delete_reclaims_scratch_namespace_under_lease_registry() -> Result<()
     finalized_session(&source_a, "delete scratch a")?;
     finalized_session(&source_b, "delete scratch b")?;
     let scratch_root = temp.path().join("cache").join("tmp");
-    let control =
-        sigil_tools_builtin::ScratchNamespaceControl::for_local_root(scratch_root.clone());
+    let control = sigil_tools_builtin::ScratchNamespaceControl::from_provider(Arc::new(
+        TestScratchProvider {
+            root: scratch_root.clone(),
+        },
+    ));
     let service =
         LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"))
             .with_scratch_cleanup(control.clone());
 
     // Session A: a held lease keeps the namespace while deletion still succeeds.
     let preview_a = service.preview_delete(&source_a, &[])?;
-    let namespace_a =
-        sigil_tools_builtin::session_scratch_dir(&scratch_root, Some(&preview_a.source_session_id));
+    let namespace_a = scratch_root
+        .join("sessions")
+        .join(&preview_a.source_session_id);
     fs::create_dir_all(&namespace_a)?;
     fs::write(namespace_a.join("blob"), b"scratch-a")?;
     let lease = control
@@ -820,8 +893,9 @@ fn session_delete_reclaims_scratch_namespace_under_lease_registry() -> Result<()
 
     // Session B: without a lease the namespace is reclaimed with the session.
     let preview_b = service.preview_delete(&source_b, &[])?;
-    let namespace_b =
-        sigil_tools_builtin::session_scratch_dir(&scratch_root, Some(&preview_b.source_session_id));
+    let namespace_b = scratch_root
+        .join("sessions")
+        .join(&preview_b.source_session_id);
     fs::create_dir_all(&namespace_b)?;
     fs::write(namespace_b.join("blob"), b"scratch-b")?;
     service.apply_delete(&preview_b, &[], 5679)?;

@@ -37,9 +37,7 @@ pub use scratch_namespace::{
     ScratchDeleteOutcome, ScratchGcConfig, ScratchGcReport, ScratchNamespaceControl,
     ScratchNamespaceLease, ScratchNamespaceLeaseRegistry, ScratchNamespaceProvider,
     ScratchNamespaceProviderLease, ScratchQuota, ScratchQuotaExceededError, ScratchQuotaScope,
-    ScratchTaskLeaseRegistry, ScratchUsage, SessionScratchProvision,
-    delete_session_scratch_namespace, ensure_session_scratch, gc_scratch_namespaces,
-    measure_scratch_usage, session_scratch_dir, session_scratch_key,
+    ScratchTaskLeaseRegistry, ScratchUsage, SessionScratchProvision, session_scratch_key,
 };
 pub use terminal_process::{
     MAX_TERMINAL_INPUT_BYTES, TerminalBackendKind, TerminalInputResult, TerminalProcessManager,

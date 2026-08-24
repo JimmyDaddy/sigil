@@ -20,6 +20,7 @@ pub(crate) const DEFAULT_TERMINAL_READ_LIMIT_BYTES: usize = 16 * 1024;
 pub(crate) const HARD_TERMINAL_READ_LIMIT_BYTES: usize = 128 * 1024;
 pub(crate) const SIGIL_SCRATCH_DIR_ENV: &str = "SIGIL_SCRATCH_DIR";
 /// RFC-0062 14.1: session-scoped scratch lives in `scratch_root/sessions/<session key>`.
+#[cfg(test)]
 pub(crate) const SESSION_SCRATCH_NAMESPACE_DIR: &str = "sessions";
 /// Fallback namespace key for tool invocations without a durable session scope
 /// (diagnostics and tests). Stable so repeated calls share one bounded namespace.
@@ -35,4 +36,5 @@ pub(crate) const SCRATCH_NAMESPACE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// Directory depth is intentionally not bounded: build systems and test fixtures routinely
 /// create deeply nested trees. The entry bound limits traversal work without making an otherwise
 /// valid namespace unusable.
+#[cfg(test)]
 pub(crate) const SCRATCH_WALK_MAX_ENTRIES: usize = 100_000;

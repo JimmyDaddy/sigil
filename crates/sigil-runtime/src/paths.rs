@@ -166,17 +166,6 @@ pub fn resolve_sigil_paths_with_env(
     }
 }
 
-/// RFC-0062 14.1: the session-scoped scratch directory for one session scope.
-///
-/// `SigilPaths` only carries the workspace-wide base; the per-run authority is the session scope
-/// id, so two sessions never share a scratch namespace and a resumed session always resolves to
-/// the same directory. The derivation rule lives in `sigil-tools-builtin` so `bash`,
-/// `terminal_start`, TUI maintenance and the Desktop/application runtime share exactly one rule.
-#[must_use]
-pub fn session_scratch_dir(paths: &SigilPaths, session_scope_id: Option<&str>) -> PathBuf {
-    sigil_tools_builtin::session_scratch_dir(&paths.scratch_root, session_scope_id)
-}
-
 #[must_use]
 pub fn workspace_id_for_root(workspace_root: &Path) -> String {
     let canonical = canonical_or_absolute(workspace_root);
