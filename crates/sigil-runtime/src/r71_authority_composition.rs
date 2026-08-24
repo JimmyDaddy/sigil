@@ -20,9 +20,7 @@ use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash, ResourceJournal
 
 use crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1;
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
-use crate::managed_storage_writer::{
-    ManagedStorageWriterAdapterV1, StorageWriterChannelV1, grant_for_channel,
-};
+use crate::managed_storage_writer::{ManagedStorageWriterAdapterV1, StorageWriterChannelV1};
 
 /// Composed runtime authority surface (everything a new-epoch boot needs once).
 pub struct RuntimeAuthorityCompositionV1 {
@@ -56,6 +54,8 @@ pub enum RuntimeAuthorityCompositionErrorV1 {
     AnchorInvalid(String),
     #[error("declared writer grant failed: {0}")]
     GrantDeclared(String),
+    #[error("durable authority journal failed: {0}")]
+    JournalUnavailable(String),
 }
 
 /// Composes the R71.6 authority surface from verified anchors and declared channels.
@@ -114,9 +114,17 @@ pub fn compose_runtime_authority_with_product_updater(
             config_path,
         ),
     );
+    let release_output: Arc<
+        dyn sigil_resource_authority::release_output::BorrowedReleaseOutputServiceV1,
+    > = Arc::new(
+        sigil_resource_authority::release_output::AuthorityBorrowedReleaseOutputServiceV1::new(
+            state_anchor.join("release-output"),
+        ),
+    );
     composition.services = composition
         .services
-        .with_optional_borrowed_configuration(Some(configuration_service));
+        .with_optional_borrowed_configuration(Some(configuration_service))
+        .with_optional_borrowed_release_output(Some(release_output));
     Ok(composition)
 }
 
@@ -132,6 +140,9 @@ fn compose_runtime_authority_inner(
     // The real kernel capability broker is the single issuer for this composition: execution
     // bundles and storage admission capabilities are broker-issued (one-shot proofs), never
     // fabricated by consumers.
+    let journal_instance_hash = hash_path_binding("authority-journal-instance-v1", state_anchor);
+    let bootstrap_manifest_hash =
+        hash_path_binding("authority-bootstrap-manifest-v1", state_anchor);
     let broker =
         std::sync::Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new());
     let bootstrap = sigil_resource_authority::bootstrap::AuthorityBootstrapRoots {
@@ -141,8 +152,8 @@ fn compose_runtime_authority_inner(
         state_identity: CanonicalHash::from_bytes([0x71; 32]),
         cache_identity: CanonicalHash::from_bytes([0x72; 32]),
         execution_temp_identity: CanonicalHash::from_bytes([0x73; 32]),
-        manifest_hash: cutover_manifest_hash,
-        journal_instance_hash: CanonicalHash::from_bytes([0x74; 32]),
+        manifest_hash: bootstrap_manifest_hash,
+        journal_instance_hash,
     };
     bootstrap
         .validate_anchors()
@@ -158,21 +169,39 @@ fn compose_runtime_authority_inner(
             // Both DurableMemory scope classes are writer channels of the same family: the
             // ProjectFact grant covers the probe cell; the UserPreference grant keeps the
             // two-class DurableMemory writer from being partially closed.
-            for grant in crate::managed_storage_writer::memory_grants(0x76) {
+            for grant in crate::managed_storage_writer::memory_grants_with_context(
+                0x76,
+                authority,
+                cutover_manifest_hash,
+            ) {
                 table.register(grant).map_err(|error| {
                     RuntimeAuthorityCompositionErrorV1::GrantDeclared(error.to_string())
                 })?;
             }
             continue;
         }
-        let grant = grant_for_channel(*channel, 0x76);
+        let grant = crate::managed_storage_writer::grant_for_channel_with_context(
+            *channel,
+            0x76,
+            authority,
+            cutover_manifest_hash,
+        );
         table.register(grant).map_err(|error| {
             RuntimeAuthorityCompositionErrorV1::GrantDeclared(error.to_string())
         })?;
     }
-    let storage: Arc<dyn ManagedStorageServiceV1> = Arc::new(
-        sigil_resource_authority::storage::AuthorityManagedStorageServiceV1::new(table, authority),
-    );
+    let storage_service =
+        sigil_resource_authority::storage::AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            authority,
+            state_anchor.join("authority-resources.journal.json"),
+            bootstrap_manifest_hash,
+            journal_instance_hash,
+        )
+        .map_err(|error| {
+            RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
+        })?;
+    let storage: Arc<dyn ManagedStorageServiceV1> = Arc::new(storage_service);
     let registry = Arc::new(std::sync::Mutex::new(
         sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
     ));
@@ -243,6 +272,14 @@ fn compose_runtime_authority_inner(
     })
 }
 
+fn hash_path_binding(label: &str, state_anchor: &Path) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update(state_anchor.as_os_str().to_string_lossy().as_bytes());
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
 /// Convenience: authoritative resource journal scope for the composition (application-level).
 pub fn composition_journal_scope() -> ResourceJournalScopeV1 {
     ResourceJournalScopeV1::Application
@@ -258,15 +295,144 @@ pub enum BootAuthorityErrorV1 {
     Composition(RuntimeAuthorityCompositionErrorV1),
 }
 
-/// One-call boot attach shared by CLI headless/machine and HTTP serve: selects the legacy
-/// epoch (durable manifest, fixed-forward), prepares the authority anchors and composes the
-/// authority surface once, then attaches both to the run services (fail closed on any step).
+/// Builds and publishes the current-schema authority composition for one valid boot surface.
+///
+/// The readiness manifest is computed once against a provisional composition, then the
+/// composition is rebound to the resulting content hash so storage grants and the persisted
+/// cutover manifest carry the same source binding. The journal header itself is bound to the
+/// verified state anchor, so this two-pass publication does not create a second journal shard.
+pub fn compose_current_boot_authority(
+    config_path: &std::path::Path,
+    state_anchor: &std::path::Path,
+    cache_root: &std::path::Path,
+    execution_temp_root: &std::path::Path,
+) -> Result<
+    (
+        crate::r71_global_cutover::RuntimeGlobalCutoverV1,
+        RuntimeAuthorityCompositionV1,
+    ),
+    BootAuthorityErrorV1,
+> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
+    let instance_id = format!(
+        "sigil:{}",
+        sigil_kernel::external::sha256_hex(config_path.to_string_lossy().as_bytes())
+    );
+    let authority = sigil_kernel::resource::AuthorityGeneration {
+        epoch: 1,
+        instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+    };
+    let declared = [
+        Ch::SessionLog,
+        Ch::SessionLifecycleLog,
+        Ch::InputHistory,
+        Ch::DurableMemory,
+        Ch::SessionCatalog,
+        Ch::ArtifactStaging,
+        Ch::ArtifactStore,
+        Ch::AdapterDurableState,
+        Ch::AdapterEgressDisclosure,
+        Ch::AdapterIdempotencyLedger,
+    ];
+    let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+        crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+    ));
+    let provisional_hash = hash_path_binding("cutover-provisional-v1", config_path);
+    let provisional = compose_runtime_authority_with_product_updater(
+        state_anchor,
+        cache_root,
+        execution_temp_root,
+        config_path,
+        provisional_hash,
+        planner,
+        &declared,
+    )
+    .map_err(BootAuthorityErrorV1::Composition)?;
+    let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
+    let first = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
+        instance_id.clone(),
+        1,
+        authority,
+        &provisional.services,
+        &recovery,
+        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema,
+    );
+    first.gate().map_err(|error| {
+        BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
+            error.clone(),
+        ))
+    })?;
+
+    let composition = if first.manifest().manifest_hash == provisional_hash {
+        provisional
+    } else {
+        let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        ));
+        compose_runtime_authority_with_product_updater(
+            state_anchor,
+            cache_root,
+            execution_temp_root,
+            config_path,
+            first.manifest().manifest_hash,
+            planner,
+            &declared,
+        )
+        .map_err(BootAuthorityErrorV1::Composition)?
+    };
+    let decision = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
+        instance_id,
+        1,
+        authority,
+        &composition.services,
+        &recovery,
+        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema,
+    );
+    decision.gate().map_err(|error| {
+        BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
+            error.clone(),
+        ))
+    })?;
+    let manifest_path = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".sigil-cutover-manifest.json");
+    if manifest_path.exists() {
+        let existing =
+            crate::r71_global_cutover::RuntimeGlobalCutoverV1::load_and_validate_manifest(
+                &manifest_path,
+            )
+            .map_err(|error| {
+                BootAuthorityErrorV1::Cutover(
+                    crate::r71_global_cutover::CutoverBootErrorV1::Persistence(error),
+                )
+            })?;
+        if existing != *decision.manifest() {
+            return Err(BootAuthorityErrorV1::Cutover(
+                crate::r71_global_cutover::CutoverBootErrorV1::Guard(
+                    sigil_kernel::cutover_manifest::CutoverErrorV1::AlreadyPublished,
+                ),
+            ));
+        }
+    } else {
+        decision.save_manifest(&manifest_path).map_err(|error| {
+            BootAuthorityErrorV1::Cutover(
+                crate::r71_global_cutover::CutoverBootErrorV1::Persistence(error),
+            )
+        })?;
+    }
+    Ok((decision, composition))
+}
+
+/// One-call boot attach shared by CLI headless/machine and HTTP serve: publishes the current
+/// epoch for a valid config, prepares the authority anchors and composes the authority surface
+/// once, then attaches both to the run services (fail closed on any step). Missing or malformed
+/// config keeps the legacy epoch-only recovery path.
 pub fn attach_boot_authority_to_services(
     services: crate::application_run::ApplicationRunServices,
     config_path: &std::path::Path,
     workspace_root: &std::path::Path,
 ) -> Result<crate::application_run::ApplicationRunServices, BootAuthorityErrorV1> {
-    use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
     // Config may be absent on first run or non-regular (streamed FIFO): attach the epoch only
     // (manifest + guard) and skip authority composition, which requires a real config file.
     let config_meta = match std::fs::symlink_metadata(config_path) {
@@ -293,8 +459,6 @@ pub fn attach_boot_authority_to_services(
                 .map_err(BootAuthorityErrorV1::Cutover);
         }
     };
-    let cutover = crate::r71_global_cutover::legacy_boot_decision(config_path)
-        .map_err(BootAuthorityErrorV1::Cutover)?;
     let paths =
         crate::resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
     for anchor in [&paths.state_root, &paths.scratch_root] {
@@ -318,30 +482,23 @@ pub fn attach_boot_authority_to_services(
         )
         .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     }
-    let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-        crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-    ));
-    let composition = compose_runtime_authority_with_product_updater(
+    let (cutover, composition) = compose_current_boot_authority(
+        config_path,
         &paths.state_root,
         &paths.cache_root,
         &paths.scratch_root,
-        config_path,
-        cutover.manifest().manifest_hash,
-        planner,
-        &[
-            Ch::SessionLog,
-            Ch::InputHistory,
-            Ch::SessionCatalog,
-            Ch::ArtifactStaging,
-            Ch::ArtifactStore,
-            Ch::AdapterDurableState,
-            Ch::AdapterEgressDisclosure,
-            Ch::AdapterIdempotencyLedger,
-        ],
-    )
-    .map_err(BootAuthorityErrorV1::Composition)?;
-    let services = crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
-        .map_err(BootAuthorityErrorV1::Cutover)?;
+    )?;
+    let services = services.with_global_cutover(cutover);
+    services.require_cutover_or_fail().map_err(|error| {
+        BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(error))
+    })?;
+    services
+        .admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema)
+        .map_err(|error| {
+            BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
+                error,
+            ))
+        })?;
     Ok(services.with_authority_composition(composition))
 }
 
@@ -477,5 +634,32 @@ mod tests {
             composition.services.file_access_seam,
             RuntimeFileAccessSeamV1::AuthorityBacked
         ));
+    }
+
+    #[test]
+    fn r71_current_boot_publishes_one_green_current_manifest_and_replays_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let state = dir.path().join("state");
+        let cache = state.join("cache");
+        let exec = dir.path().join("exec");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::create_dir_all(&exec).expect("exec");
+        let (first, _composition) =
+            compose_current_boot_authority(&config, &state, &cache, &exec).expect("current boot");
+        assert!(first.is_current_schema_ready());
+        assert_eq!(first.manifest().mandatory_readiness.len(), 18);
+        assert_eq!(
+            first.manifest().selected_epoch,
+            sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+        );
+        let (second, _composition) =
+            compose_current_boot_authority(&config, &state, &cache, &exec).expect("replay");
+        assert_eq!(first.manifest(), second.manifest());
     }
 }

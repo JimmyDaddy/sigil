@@ -562,6 +562,8 @@ pub struct AppState {
     authority_composition: Option<
         std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
     >,
+    /// Published boot epoch shared with the worker's guarded session opens.
+    boot_cutover: Option<std::sync::Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>>,
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
     pub session_id: String,
@@ -955,6 +957,13 @@ impl AppState {
         self.load_input_history();
     }
 
+    pub fn set_boot_cutover(
+        &mut self,
+        cutover: std::sync::Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>,
+    ) {
+        self.boot_cutover = Some(cutover);
+    }
+
     /// Authority-declared managed session-log leaf for the CURRENT session (opaque stem as the
     /// per-session key); None when no writer is attached (tests / legacy boot).
     fn managed_session_log_path(&self) -> Option<std::path::PathBuf> {
@@ -1062,6 +1071,7 @@ impl AppState {
             sigil_paths,
             managed_history_writer: None,
             authority_composition: None,
+            boot_cutover: None,
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
@@ -1199,6 +1209,7 @@ impl AppState {
             sigil_paths,
             managed_history_writer: None,
             authority_composition: None,
+            boot_cutover: None,
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,

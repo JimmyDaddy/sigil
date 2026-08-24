@@ -413,6 +413,19 @@ impl RuntimeGlobalCutoverV1 {
     pub fn surface_status(&self) -> sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1 {
         sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1::from_manifest(&self.manifest)
     }
+
+    /// Rehydrates an already validated manifest into the immutable runtime decision used by a
+    /// worker or a later product surface. The manifest is validated again at the boundary so a
+    /// caller cannot manufacture a green current-schema decision from an unchecked DTO.
+    pub fn from_validated_manifest(manifest: CutoverManifestV1) -> Result<Self, CutoverErrorV1> {
+        validate_cutover_manifest(&manifest)?;
+        let gate_error = validate_cutover_manifest(&manifest).err();
+        Ok(Self {
+            manifest,
+            gate_ok: gate_error.is_none(),
+            gate_error,
+        })
+    }
 }
 
 impl RuntimeGlobalCutoverV1 {
@@ -566,6 +579,24 @@ pub fn legacy_boot_decision(
             .map_err(CutoverBootErrorV1::Persistence)?;
     }
     Ok(cutover)
+}
+
+/// Rehydrates the published current-schema decision for a worker after the launcher has
+/// completed the composition gate. A legacy manifest is never upgraded implicitly: fixed-forward
+/// epoch semantics require an explicit current-schema publication first.
+pub fn current_boot_decision(
+    seed: &std::path::Path,
+) -> Result<RuntimeGlobalCutoverV1, CutoverBootErrorV1> {
+    let manifest_path = seed
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".sigil-cutover-manifest.json");
+    let manifest = RuntimeGlobalCutoverV1::load_and_validate_manifest(&manifest_path)
+        .map_err(CutoverBootErrorV1::Persistence)?;
+    if manifest.selected_epoch != StartupEpochV1::NewCurrentSchema {
+        return Err(CutoverBootErrorV1::Guard(CutoverErrorV1::AlreadyPublished));
+    }
+    RuntimeGlobalCutoverV1::from_validated_manifest(manifest).map_err(CutoverBootErrorV1::Guard)
 }
 
 /// Shared boot attachment for ApplicationRunServices surfaces (CLI headless/machine, HTTP
@@ -805,6 +836,9 @@ mod tests {
             semantic_owner: owner,
             purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
             purpose_hash: CanonicalHash::from_bytes([0x32; 32]),
+            source_class:
+                sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
+            source_binding_hash: CanonicalHash::from_bytes([0x39; 32]),
             namespace_hash: {
                 let mut ns = [0x33u8; 32];
                 for (index, byte) in grant_id.bytes().take(16).enumerate() {

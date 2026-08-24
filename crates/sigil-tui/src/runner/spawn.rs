@@ -96,15 +96,25 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
 ) -> Result<SpawnedAgentWorker> {
-    // RFC-0071 R71.6: the TUI surface selects the epoch exactly once per stable instance id
-    // (same manifest next to the config as CLI/HTTP) and fails closed before opening any
-    // session store; a later new-epoch binary rejects this legacy manifest.
+    // Production launcher passes the published composition, so the worker must reopen the
+    // same current-schema decision. Test-only wrappers without a composition retain the legacy
+    // compatibility epoch and therefore cannot accidentally claim the managed route.
+    let current_schema = authority_composition.is_some();
+    let session_epoch = if current_schema {
+        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+    } else {
+        sigil_kernel::cutover_manifest::StartupEpochV1::Legacy
+    };
     let boot_cutover = std::sync::Arc::new(
-        sigil_runtime::r71_global_cutover::legacy_boot_decision(&config_path)
-            .map_err(anyhow::Error::new)?,
+        if current_schema {
+            sigil_runtime::r71_global_cutover::current_boot_decision(&config_path)
+        } else {
+            sigil_runtime::r71_global_cutover::legacy_boot_decision(&config_path)
+        }
+        .map_err(anyhow::Error::new)?,
     );
     boot_cutover
-        .admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy)
+        .admit_session_open(session_epoch)
         .map_err(anyhow::Error::new)?;
     // RFC-0071 R71.6: the worker consumes the boot composition shared via the launcher (None
     // only for test wrappers; production boot always composes in the launcher).
@@ -113,7 +123,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         let store = sigil_runtime::r71_global_cutover::guarded_session_open(
             &session_log_path,
             boot_cutover.as_ref(),
-            sigil_kernel::cutover_manifest::StartupEpochV1::Legacy,
+            session_epoch,
         )
         .map_err(anyhow::Error::new)?;
         anyhow::ensure!(
@@ -223,7 +233,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             }
             // Session-open guard applies inside the worker too: every session store open in
             // this epoch must be an admitted (legacy) open, fail closed otherwise.
-            if let Err(error) = boot_cutover.admit_session_open(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy) {
+            if let Err(error) = boot_cutover.admit_session_open(session_epoch) {
                 tracing::debug!(%error, "session epoch guard rejected the open");
                 send_worker_startup_recovery(
                     &message_tx,
@@ -239,7 +249,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             let store = match sigil_runtime::r71_global_cutover::guarded_session_open(
                 &session_log_path,
                 boot_cutover.as_ref(),
-                sigil_kernel::cutover_manifest::StartupEpochV1::Legacy,
+                session_epoch,
             ) {
                 Ok(store) => store,
                 Err(error) => {
