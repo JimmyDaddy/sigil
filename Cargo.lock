@@ -3452,6 +3452,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases 0.2.2",
+ "libc",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5608,7 +5620,7 @@ dependencies = [
  "futures",
  "hmac",
  "keyring",
- "nix 0.29.0",
+ "nix 0.31.3",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -5630,7 +5642,7 @@ name = "sigil-process"
 version = "0.0.1-beta.4"
 dependencies = [
  "anyhow",
- "nix 0.29.0",
+ "nix 0.31.3",
  "windows-sys 0.61.2",
 ]
 
@@ -5850,7 +5862,7 @@ dependencies = [
  "futures",
  "globset",
  "ignore",
- "nix 0.29.0",
+ "nix 0.31.3",
  "portable-pty",
  "regex",
  "reqwest 0.12.28",
