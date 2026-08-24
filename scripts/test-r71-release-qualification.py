@@ -26,6 +26,14 @@ class QualificationContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             common.validate_sha("z" * 40, "candidate_sha")
 
+    def test_manifest_digest_is_stable_across_checkout_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="r71-manifest-digest-") as directory:
+            path = Path(directory) / "manifest.toml"
+            path.write_bytes(b"[manifest]\ncase = 1\n")
+            lf_digest = common.sha256_canonical_text_file(path)
+            path.write_bytes(b"[manifest]\r\ncase = 1\r\n")
+            self.assertEqual(lf_digest, common.sha256_canonical_text_file(path))
+
     def test_clean_candidate_and_ancestor_are_required(self) -> None:
         with tempfile.TemporaryDirectory(prefix="r71-qualification-meta-") as directory:
             root = Path(directory)

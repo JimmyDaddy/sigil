@@ -32,6 +32,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_canonical_text_file(path: Path) -> str:
+    """Hash a text manifest with platform line endings canonicalized to LF."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def git(root: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args], cwd=root, check=False, capture_output=True, text=True
@@ -103,8 +108,8 @@ def manifest_digests() -> dict[str, str]:
     load_conformance_manifest()
     load_platform_manifest()
     return {
-        "conformance_manifest_sha256": sha256_file(CONFORMANCE_MANIFEST),
-        "platform_manifest_sha256": sha256_file(PLATFORM_MANIFEST),
+        "conformance_manifest_sha256": sha256_canonical_text_file(CONFORMANCE_MANIFEST),
+        "platform_manifest_sha256": sha256_canonical_text_file(PLATFORM_MANIFEST),
     }
 
 
