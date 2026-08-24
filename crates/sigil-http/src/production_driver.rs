@@ -462,6 +462,17 @@ impl HttpProductionRunDriver {
             .and_then(|composition| composition.services.borrowed_native_save.clone())
     }
 
+    /// Returns the authority-owned host-private borrowed configuration port for the current boot.
+    #[must_use]
+    pub fn borrowed_configuration_service(
+        &self,
+    ) -> Option<Arc<dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1>>
+    {
+        self.services
+            .authority_composition()
+            .and_then(|composition| composition.services.borrowed_configuration.clone())
+    }
+
     /// Executes one prepared plan review revision as an owned, supervised background run so
     /// `Revise` runs a real read-only plan review instead of leaving a dangling `Started` attempt.
     ///

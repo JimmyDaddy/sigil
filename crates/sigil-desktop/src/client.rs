@@ -80,6 +80,7 @@ const MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS: usize = 32;
 const MAX_CONVERSATION_TASK_CONTROL_TITLE_CHARS: usize = 4 * 1024;
 const CONVERSATION_TASK_CONTROL_SCHEMA_VERSION: u16 = 1;
 const BORROWED_NATIVE_SAVE_SCHEMA_VERSION: u16 = 1;
+const BORROWED_CONFIGURATION_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Serialize)]
 struct DesktopBorrowedNativeSaveRequest<'a> {
@@ -89,6 +90,34 @@ struct DesktopBorrowedNativeSaveRequest<'a> {
     destination: &'a str,
     content: &'a str,
     content_hash: String,
+}
+
+#[derive(Serialize)]
+struct DesktopBorrowedConfigurationRequest<T> {
+    schema_version: u16,
+    capsule_id: String,
+    request: T,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct DesktopBorrowedConfigurationReceipt {
+    schema_version: u16,
+    capsule_id: String,
+    subject_ref: String,
+    observation_generation: u64,
+    operation: String,
+    previous_identity: Option<String>,
+    committed_identity: String,
+    previous_version: Option<u64>,
+    committed_version: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct DesktopBorrowedConfigurationResponse<T> {
+    result: T,
+    receipt: DesktopBorrowedConfigurationReceipt,
 }
 
 /// Authenticated typed client for one desktop-owned loopback server.
@@ -221,6 +250,60 @@ impl DesktopHttpClient {
             StatusCode::OK,
         )
         .await
+    }
+
+    /// Stores provider setup through the host-private borrowed configuration capsule route.
+    pub async fn save_provider_setup_host_private(
+        &self,
+        request: DesktopProviderSetupSaveRequest,
+    ) -> Result<DesktopProviderSetupSaveResult, DesktopClientError> {
+        let capsule_id = format!("desktop-configuration-{}", Uuid::new_v4());
+        let response: DesktopBorrowedConfigurationResponse<DesktopProviderSetupSaveResult> = self
+            .post_json(
+                self.route([
+                    "v1",
+                    "private",
+                    "borrowed",
+                    "configuration",
+                    "provider-setup",
+                ])?,
+                &DesktopBorrowedConfigurationRequest {
+                    schema_version: BORROWED_CONFIGURATION_SCHEMA_VERSION,
+                    capsule_id: capsule_id.clone(),
+                    request,
+                },
+                StatusCode::CREATED,
+            )
+            .await?;
+        validate_configuration_receipt(&response.receipt, &capsule_id)?;
+        Ok(response.result)
+    }
+
+    /// Selects the shared default through the host-private borrowed configuration capsule route.
+    pub async fn save_provider_default_model_host_private(
+        &self,
+        request: DesktopProviderDefaultModelSaveRequest,
+    ) -> Result<DesktopProviderDefaultModelSaveResult, DesktopClientError> {
+        let capsule_id = format!("desktop-configuration-{}", Uuid::new_v4());
+        let response: DesktopBorrowedConfigurationResponse<DesktopProviderDefaultModelSaveResult> =
+            self.put_json(
+                self.route([
+                    "v1",
+                    "private",
+                    "borrowed",
+                    "configuration",
+                    "default-model",
+                ])?,
+                &DesktopBorrowedConfigurationRequest {
+                    schema_version: BORROWED_CONFIGURATION_SCHEMA_VERSION,
+                    capsule_id: capsule_id.clone(),
+                    request,
+                },
+                StatusCode::OK,
+            )
+            .await?;
+        validate_configuration_receipt(&response.receipt, &capsule_id)?;
+        Ok(response.result)
     }
 
     /// Creates a new durable session through the server-owned runtime path.
@@ -2386,6 +2469,30 @@ fn sha256_hex(bytes: &[u8]) -> String {
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     output
+}
+
+fn validate_configuration_receipt(
+    receipt: &DesktopBorrowedConfigurationReceipt,
+    capsule_id: &str,
+) -> Result<(), DesktopClientError> {
+    let _previous_identity = receipt.previous_identity.as_deref();
+    if receipt.schema_version != BORROWED_CONFIGURATION_SCHEMA_VERSION
+        || receipt.capsule_id != capsule_id
+        || receipt.subject_ref.is_empty()
+        || receipt.observation_generation == 0
+        || receipt.committed_identity.is_empty()
+        || !matches!(
+            receipt.operation.as_str(),
+            "bootstrap" | "versioned_replace"
+        )
+        || receipt.committed_version == 0
+        || receipt
+            .previous_version
+            .is_some_and(|version| version >= receipt.committed_version)
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    Ok(())
 }
 
 fn validate_conversation_queue_command(

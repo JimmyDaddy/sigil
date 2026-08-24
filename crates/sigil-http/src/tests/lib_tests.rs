@@ -276,6 +276,80 @@ async fn host_private_native_save_route_registers_and_returns_closed_receipt() {
 }
 
 #[tokio::test]
+async fn host_private_configuration_route_bootstraps_and_returns_closed_receipt() {
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let body = json!({
+        "schema_version": 1,
+        "capsule_id": "desktop-configuration-route-test-1",
+        "request": {
+            "template": "open_ai_compatible",
+            "protocol": "chat_completions",
+            "endpoint": "http://127.0.0.1:11434/v1",
+            "credential_source": "none",
+            "model_id": "local-coder",
+            "replace_invalid_config": false
+        }
+    })
+    .to_string();
+    let (status, response) = http_raw_request(
+        address,
+        http_post(
+            "/v1/private/borrowed/configuration/provider-setup",
+            Some("secret-token"),
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert!(response["receipt"]["subject_ref"].as_str().is_some());
+    assert!(response["receipt"].get("config_path").is_none());
+    assert!(config_path.is_file());
+
+    let (status, error) = http_raw_request(
+        address,
+        http_post(
+            "/v1/private/borrowed/configuration/provider-setup",
+            Some("secret-token"),
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert_eq!(error["error"]["code"], "provider_setup_invalid");
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
+}
+
+#[tokio::test]
 async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catalog() {
     let (provider_base_url, request_count, provider_server) =
         spawn_provider_catalog_server(200, r#"{"data":[{"id":"local-coder"}]}"#).await;

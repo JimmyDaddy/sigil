@@ -209,7 +209,7 @@ pub(crate) async fn desktop_save_provider_setup(
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
-        .save_provider_setup(input.into_native())
+        .save_provider_setup_host_private(input.into_native())
         .await
         .map(Into::into)
         .map_err(project_client_error)
@@ -229,7 +229,7 @@ pub(crate) async fn desktop_save_provider_default_model(
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
-        .save_provider_default_model(input.into_native())
+        .save_provider_default_model_host_private(input.into_native())
         .await
         .map(Into::into)
         .map_err(project_client_error)

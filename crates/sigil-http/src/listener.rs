@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc, time::Duration};
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sigil_runtime::{
     LocalSessionCatalogState, LocalSessionMutationError, LocalSessionReopenError,
@@ -49,6 +49,14 @@ use crate::{
     },
     support::{HttpProviderSetupFailure, HttpSupportContext},
 };
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateBorrowedConfigurationRequest<T> {
+    schema_version: u16,
+    capsule_id: sigil_kernel::resource::OpaqueRegistrationCapsuleId,
+    request: T,
+}
 
 const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
 const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -500,6 +508,86 @@ fn route_http_request(
             Err(error) => {
                 http_error_response(422, "borrowed_native_save_rejected", error.to_string())
             }
+        };
+    }
+
+    if request.method == "POST"
+        && request.path == "/v1/private/borrowed/configuration/provider-setup"
+    {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "borrowed_configuration_unavailable",
+                "host-private configuration is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<
+            PrivateBorrowedConfigurationRequest<HttpProviderSetupSaveRequest>,
+        >(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_borrowed_configuration_request",
+                "invalid host-private configuration registration capsule",
+            );
+        };
+        if body.schema_version
+            != sigil_resource_authority::configuration::BORROWED_CONFIGURATION_SCHEMA_VERSION
+        {
+            return http_error_response(
+                400,
+                "invalid_borrowed_configuration_request",
+                "unsupported host-private configuration schema",
+            );
+        }
+        return match support_context.save_provider_setup_with_capsule(body.request, body.capsule_id)
+        {
+            Ok((result, receipt)) => {
+                json_response(201, json!({ "result": result, "receipt": receipt }))
+            }
+            Err(error) => provider_setup_error_response(
+                error,
+                "provider setup could not be saved; review provider, authentication, endpoint, and model",
+            ),
+        };
+    }
+
+    if request.method == "PUT" && request.path == "/v1/private/borrowed/configuration/default-model"
+    {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "borrowed_configuration_unavailable",
+                "host-private configuration is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<
+            PrivateBorrowedConfigurationRequest<HttpProviderDefaultModelSaveRequest>,
+        >(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_borrowed_configuration_request",
+                "invalid host-private configuration registration capsule",
+            );
+        };
+        if body.schema_version
+            != sigil_resource_authority::configuration::BORROWED_CONFIGURATION_SCHEMA_VERSION
+        {
+            return http_error_response(
+                400,
+                "invalid_borrowed_configuration_request",
+                "unsupported host-private configuration schema",
+            );
+        }
+        return match support_context
+            .save_provider_default_model_with_capsule(body.request, body.capsule_id)
+        {
+            Ok((result, receipt)) => {
+                json_response(200, json!({ "result": result, "receipt": receipt }))
+            }
+            Err(error) => provider_setup_error_response(
+                error,
+                "the selected connection/model route could not be saved as the default",
+            ),
         };
     }
 

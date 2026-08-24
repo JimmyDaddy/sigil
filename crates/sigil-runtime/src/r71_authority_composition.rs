@@ -92,11 +92,12 @@ pub fn compose_runtime_authority_with_product_updater(
     state_anchor: &Path,
     cache_root: &Path,
     execution_temp_root: &Path,
+    config_path: &Path,
     cutover_manifest_hash: CanonicalHash,
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     declared: &[StorageWriterChannelV1],
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
-    compose_runtime_authority_inner(
+    let mut composition = compose_runtime_authority_inner(
         state_anchor,
         execution_temp_root,
         cutover_manifest_hash,
@@ -105,7 +106,18 @@ pub fn compose_runtime_authority_with_product_updater(
         Some(Arc::new(
             sigil_updater::ProductUpdaterState::from_cache_root(cache_root),
         )),
-    )
+    )?;
+    let configuration_service: Arc<
+        dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1,
+    > = Arc::new(
+        sigil_resource_authority::configuration::AuthorityBorrowedConfigurationServiceV1::new(
+            config_path,
+        ),
+    );
+    composition.services = composition
+        .services
+        .with_optional_borrowed_configuration(Some(configuration_service));
+    Ok(composition)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,6 +325,7 @@ pub fn attach_boot_authority_to_services(
         &paths.state_root,
         &paths.cache_root,
         &paths.scratch_root,
+        config_path,
         cutover.manifest().manifest_hash,
         planner,
         &[Ch::SessionLog, Ch::InputHistory, Ch::SessionCatalog],

@@ -10095,6 +10095,8 @@ pnpm --dir apps/desktop check
 
 **R71.7 native-save implementation amendment**：当前实现冻结 desktop support save 的真实 product path 为 `Tauri native picker -> sigil-desktop typed host-private client -> sigil-http private loopback route -> Resource Authority borrowed registration service`。`BorrowedNativeSaveRequestV1` 只在 host-private wire 中携带 bounded opaque one-shot capsule id、raw destination、purpose、content 与 content hash；authority consume capsule 后观察 destination parent、拒绝 symlink/reparse 与已存在 leaf，使用 staged `persist_noclobber` + fsync 发布，并返回不含 path 的 `BorrowedNativeSaveReceiptV1`。capsule replay 在 filesystem effect 前拒绝。该路径不进入 public OpenAPI、renderer DTO、kernel contract 或 agent/session grant；isolated/shadow composition 没有该 service 时 probe 必须保持 RED。
 
+**R71.7 borrowed-configuration implementation amendment**：provider setup 与 default-model 的 Desktop production writer 现在冻结为 `Tauri command -> sigil-desktop typed host-private client -> sigil-http private loopback route -> AuthorityBorrowedConfigurationServiceV1`。私有 capsule 只携带 bounded typed request 与 one-shot opaque id；authority 固定 server-owned config root，在 update lock 内重验 expected-current bytes，执行首次 bootstrap 或 versioned atomic replace，并返回包含 previous/committed identity 与 observation version、但不含 raw path/token 的 closed receipt。公开 settings DTO/OpenAPI 仍只返回 secret-free result；旧 `RootConfig::save_if_unchanged`/direct replace 不再是 Desktop production writer，isolated/shadow composition 没有该 service 时 probe 必须保持 RED。
+
 **Schema/失败**：只保留current route；已有V3 session fixed-forward，不能降级解释。删除后若gate失败则不发布，而不是恢复部分legacy adapter。
 
 **验收命令**：

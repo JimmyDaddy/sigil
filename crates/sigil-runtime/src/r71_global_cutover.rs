@@ -1265,6 +1265,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = dir.path().join("state");
         let exec = dir.path().join("exec");
+        let config_path = dir.path().join("sigil.toml");
         std::fs::create_dir_all(&state).expect("state dir");
         std::fs::create_dir_all(state.join("cache")).expect("cache dir");
         std::fs::create_dir_all(&exec).expect("exec dir");
@@ -1283,6 +1284,7 @@ mod tests {
                 &state,
                 &state.join("cache"),
                 &exec,
+                &config_path,
                 CanonicalHash::from_bytes([0x55; 32]),
                 planner,
                 &[

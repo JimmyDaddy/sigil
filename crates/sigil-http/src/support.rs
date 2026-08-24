@@ -1,12 +1,15 @@
 use std::{
     collections::BTreeMap,
-    env, fmt,
+    env, fmt, fs,
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
-use anyhow::{Context, Result, bail};
-use sigil_kernel::{ConnectionId, ModelRef, RootConfig, resolve_workspace_root};
+use anyhow::{Context, Result, anyhow, bail};
+use sigil_kernel::{
+    ConnectionId, ModelRef, RootConfig, resolve_workspace_root,
+    resource::{CanonicalHash, OpaqueRegistrationCapsuleId},
+};
 use sigil_runtime::{
     current_unix_time_ms,
     doctor::build_doctor_report,
@@ -15,11 +18,11 @@ use sigil_runtime::{
         ConnectionCredentialUpdate, ConnectionInventory, ConnectionReadiness, ConnectionSaveDraft,
         CredentialRefConfig, CredentialSourceView, ModelAvailability, ModelCatalogRequest,
         ModelCatalogResult, ModelRecommendation, PreparedCredential, ProcessCredentialEnvironment,
-        ProviderConnectionConfig, ProviderFamily, ProviderModelCatalogService, ProviderProtocol,
-        RootConfigPublisher, connection_inventory_native, connection_semantic_fingerprint,
-        default_setup_root_config, load_provider_connections, materialize_root_config,
-        provider_connection_template, resolve_model_route, runtime_provider_name,
-        save_connection_config, save_connection_config_replacing_invalid,
+        ProviderConfigPublisher, ProviderConnectionConfig, ProviderFamily,
+        ProviderModelCatalogService, ProviderProtocol, connection_inventory_native,
+        connection_semantic_fingerprint, default_setup_root_config, load_provider_connections,
+        materialize_root_config, provider_connection_template, resolve_model_route,
+        runtime_provider_name, save_connection_config, save_connection_config_replacing_invalid,
     },
     provider_context_window_tokens, resolve_sigil_paths, secret_redactor_for_root_config,
     support::{
@@ -46,6 +49,8 @@ pub struct HttpSupportContext {
     launch_cwd: PathBuf,
     build: SupportBuildInfo,
     catalog_service: Arc<OnceLock<ProviderModelCatalogService>>,
+    borrowed_configuration_service:
+        Option<Arc<dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -65,6 +70,10 @@ impl fmt::Debug for HttpSupportContext {
                 "catalog_service_initialized",
                 &self.catalog_service.get().is_some(),
             )
+            .field(
+                "borrowed_configuration_service",
+                &self.borrowed_configuration_service.is_some(),
+            )
             .finish()
     }
 }
@@ -76,12 +85,28 @@ impl HttpSupportContext {
         launch_cwd: impl Into<PathBuf>,
         build: SupportBuildInfo,
     ) -> Self {
+        let config_path = config_path.into();
         Self {
-            config_path: config_path.into(),
+            borrowed_configuration_service: Some(Arc::new(
+                sigil_resource_authority::configuration::AuthorityBorrowedConfigurationServiceV1::new(
+                    &config_path,
+                ),
+            )),
+            config_path,
             launch_cwd: launch_cwd.into(),
             build,
             catalog_service: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Attaches the authority-owned host-private configuration registration port.
+    #[must_use]
+    pub fn with_borrowed_configuration_service(
+        mut self,
+        service: Arc<dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1>,
+    ) -> Self {
+        self.borrowed_configuration_service = Some(service);
+        self
     }
 
     /// Builds one redacted, bounded support projection for the authenticated desktop client.
@@ -182,6 +207,21 @@ impl HttpSupportContext {
         &self,
         request: HttpProviderSetupSaveRequest,
     ) -> std::result::Result<HttpProviderSetupSaveResult, HttpProviderSetupFailure> {
+        self.save_provider_setup_with_capsule(request, configuration_capsule("http-provider-setup"))
+            .map(|(result, _receipt)| result)
+    }
+
+    pub(crate) fn save_provider_setup_with_capsule(
+        &self,
+        request: HttpProviderSetupSaveRequest,
+        capsule_id: OpaqueRegistrationCapsuleId,
+    ) -> std::result::Result<
+        (
+            HttpProviderSetupSaveResult,
+            sigil_resource_authority::configuration::BorrowedConfigurationReceiptV1,
+        ),
+        HttpProviderSetupFailure,
+    > {
         let draft = self
             .prepare_provider_setup(
                 request.template,
@@ -219,13 +259,22 @@ impl HttpSupportContext {
             default_model: draft.default_model.clone(),
             credential_updates,
         };
+        let service = self
+            .borrowed_configuration_service
+            .clone()
+            .ok_or(HttpProviderSetupFailure::Invalid)?;
+        let expected_current_hash = fs::read(&self.config_path)
+            .ok()
+            .map(|bytes| configuration_digest(&bytes));
+        let publisher =
+            BorrowedConfigurationPublisher::new(service, capsule_id, expected_current_hash);
         let outcome = if draft.replace_invalid_config {
             runtime.block_on(save_connection_config_replacing_invalid(
                 &save_current,
                 &self.config_path,
                 save_draft,
                 &credential_store,
-                &RootConfigPublisher,
+                &publisher,
             ))
         } else {
             runtime.block_on(save_connection_config(
@@ -233,7 +282,7 @@ impl HttpSupportContext {
                 &self.config_path,
                 save_draft,
                 &credential_store,
-                &RootConfigPublisher,
+                &publisher,
             ))
         }
         .map_err(|_| HttpProviderSetupFailure::Invalid)?;
@@ -241,11 +290,17 @@ impl HttpSupportContext {
             || outcome.publish_outcome != ConfigPublishOutcome::Published;
         let inventory =
             project_provider_connections(connection_inventory_native(&outcome.root_config));
-        Ok(HttpProviderSetupSaveResult {
-            default_model: project_model_ref(draft.default_model),
-            inventory,
-            save_warning,
-        })
+        let receipt = publisher
+            .take_receipt()
+            .ok_or(HttpProviderSetupFailure::Invalid)?;
+        Ok((
+            HttpProviderSetupSaveResult {
+                default_model: project_model_ref(draft.default_model),
+                inventory,
+                save_warning,
+            },
+            receipt,
+        ))
     }
 
     /// Atomically changes the shared default route and its optional exact context-window limit.
@@ -256,6 +311,24 @@ impl HttpSupportContext {
         &self,
         request: HttpProviderDefaultModelSaveRequest,
     ) -> std::result::Result<HttpProviderDefaultModelSaveResult, HttpProviderSetupFailure> {
+        self.save_provider_default_model_with_capsule(
+            request,
+            configuration_capsule("http-provider-default"),
+        )
+        .map(|(result, _receipt)| result)
+    }
+
+    pub(crate) fn save_provider_default_model_with_capsule(
+        &self,
+        request: HttpProviderDefaultModelSaveRequest,
+        capsule_id: OpaqueRegistrationCapsuleId,
+    ) -> std::result::Result<
+        (
+            HttpProviderDefaultModelSaveResult,
+            sigil_resource_authority::configuration::BorrowedConfigurationReceiptV1,
+        ),
+        HttpProviderSetupFailure,
+    > {
         let current =
             RootConfig::load(&self.config_path).map_err(|_| HttpProviderSetupFailure::Invalid)?;
         let loaded = load_provider_connections(&current);
@@ -303,14 +376,34 @@ impl HttpSupportContext {
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         let next = materialize_root_config(&current, &connections, &model_ref)
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        next.save_if_unchanged(&self.config_path, &current)
+        let service = self
+            .borrowed_configuration_service
+            .clone()
+            .ok_or(HttpProviderSetupFailure::Invalid)?;
+        let expected_current_hash = fs::read(&self.config_path)
+            .map(|bytes| configuration_digest(&bytes))
+            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let receipt = service
+            .publish(
+                sigil_resource_authority::configuration::BorrowedConfigurationRequestV1 {
+                    schema_version:
+                        sigil_resource_authority::configuration::BORROWED_CONFIGURATION_SCHEMA_VERSION,
+                    capsule_id,
+                    operation: sigil_resource_authority::configuration::BorrowedConfigurationOperationV1::VersionedReplace,
+                    expected_current_hash: Some(expected_current_hash),
+                    config: next.clone(),
+                },
+            )
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         inventory = connection_inventory_native(&next);
-        Ok(HttpProviderDefaultModelSaveResult {
-            default_model: project_model_ref(model_ref),
-            inventory: project_provider_connections(inventory),
-            save_warning: false,
-        })
+        Ok((
+            HttpProviderDefaultModelSaveResult {
+                default_model: project_model_ref(model_ref),
+                inventory: project_provider_connections(inventory),
+                save_warning: false,
+            },
+            receipt,
+        ))
     }
 
     fn prepare_provider_setup(
@@ -531,6 +624,82 @@ struct PreparedProviderSetup {
     connection: ProviderConnectionConfig,
     prepared_credential: Option<PreparedCredential>,
     replace_invalid_config: bool,
+}
+
+/// Provider-connection persistence adapter that consumes one host-private configuration capsule
+/// while retaining the transaction lock acquired by the existing credential/config workflow.
+struct BorrowedConfigurationPublisher {
+    service: Arc<dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1>,
+    capsule_id: OpaqueRegistrationCapsuleId,
+    expected_current_hash: Option<CanonicalHash>,
+    receipt: Mutex<Option<sigil_resource_authority::configuration::BorrowedConfigurationReceiptV1>>,
+}
+
+impl BorrowedConfigurationPublisher {
+    fn new(
+        service: Arc<dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1>,
+        capsule_id: OpaqueRegistrationCapsuleId,
+        expected_current_hash: Option<CanonicalHash>,
+    ) -> Self {
+        Self {
+            service,
+            capsule_id,
+            expected_current_hash,
+            receipt: Mutex::new(None),
+        }
+    }
+
+    fn take_receipt(
+        &self,
+    ) -> Option<sigil_resource_authority::configuration::BorrowedConfigurationReceiptV1> {
+        self.receipt
+            .lock()
+            .ok()
+            .and_then(|mut receipt| receipt.take())
+    }
+}
+
+impl ProviderConfigPublisher for BorrowedConfigurationPublisher {
+    fn publish(
+        &self,
+        path: &std::path::Path,
+        config: &RootConfig,
+        lock: &sigil_kernel::ConfigUpdateLockGuard,
+    ) -> Result<ConfigPublishOutcome, anyhow::Error> {
+        let operation = if fs::symlink_metadata(path).is_ok() {
+            sigil_resource_authority::configuration::BorrowedConfigurationOperationV1::VersionedReplace
+        } else {
+            sigil_resource_authority::configuration::BorrowedConfigurationOperationV1::Bootstrap
+        };
+        let receipt = self
+            .service
+            .publish_with_lock(
+                sigil_resource_authority::configuration::BorrowedConfigurationRequestV1 {
+                    schema_version:
+                        sigil_resource_authority::configuration::BORROWED_CONFIGURATION_SCHEMA_VERSION,
+                    capsule_id: self.capsule_id.clone(),
+                    operation,
+                    expected_current_hash: self.expected_current_hash,
+                    config: config.clone(),
+                },
+                lock,
+            )
+            .map_err(|error| anyhow!(error.to_string()))?;
+        self.receipt
+            .lock()
+            .map_err(|_| anyhow!("configuration receipt table poisoned"))?
+            .replace(receipt);
+        Ok(ConfigPublishOutcome::Published)
+    }
+}
+
+fn configuration_capsule(prefix: &str) -> OpaqueRegistrationCapsuleId {
+    OpaqueRegistrationCapsuleId::new(format!("{prefix}-{}", uuid::Uuid::new_v4()))
+}
+
+fn configuration_digest(bytes: &[u8]) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    CanonicalHash::from_bytes(Sha256::digest(bytes).into())
 }
 
 fn setup_template_identity(

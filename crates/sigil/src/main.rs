@@ -962,6 +962,12 @@ async fn serve_command(
             "warning: historical session catalog is unavailable; catalog requests will return 503: warmup_task_failed"
         ),
     }
+    let support_context =
+        HttpSupportContext::new(config_path, launch_cwd, BuildInfo::current().into());
+    let support_context = match driver.borrowed_configuration_service() {
+        Some(service) => support_context.with_borrowed_configuration_service(service),
+        None => support_context,
+    };
     let server = HttpLocalServer::bind_production(
         config,
         token,
@@ -973,11 +979,7 @@ async fn serve_command(
         options.shutdown_on_stdin_close,
     )
     .await?
-    .with_support_context(HttpSupportContext::new(
-        config_path,
-        launch_cwd,
-        BuildInfo::current().into(),
-    ));
+    .with_support_context(support_context);
     let server = match driver.borrowed_native_save_service() {
         Some(service) => server.with_borrowed_native_save_service(service),
         None => server,

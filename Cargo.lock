@@ -5563,6 +5563,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 
@@ -5770,6 +5771,7 @@ dependencies = [
  "sigil-kernel",
  "tempfile",
  "thiserror 2.0.19",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

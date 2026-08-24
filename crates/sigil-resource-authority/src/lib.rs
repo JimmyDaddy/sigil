@@ -8,6 +8,7 @@ pub mod allocator;
 pub mod arena;
 pub mod bootstrap;
 pub mod borrowed;
+pub mod configuration;
 pub mod consumer_ports;
 pub mod factory;
 pub mod file_access;
