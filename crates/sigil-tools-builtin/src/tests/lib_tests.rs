@@ -46,9 +46,11 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 fn bash_tool(test_root: &Path) -> BashTool {
     BashTool {
-        scratch_root: test_root.join("scratch-cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
         scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+            test_root.join("scratch-cache").join("tmp"),
+        ),
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
@@ -59,9 +61,11 @@ fn bash_tool(test_root: &Path) -> BashTool {
 
 fn posix_bash_tool(test_root: &Path) -> Result<BashTool> {
     Ok(BashTool {
-        scratch_root: test_root.join("scratch-cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
         scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+            test_root.join("scratch-cache").join("tmp"),
+        ),
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
@@ -2844,7 +2848,9 @@ fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()>
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
     let mut tool = posix_bash_tool(&workspace)?;
-    tool.scratch_root = temp.path().join("cache").join("tmp");
+    tool.scratch_control = crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+        temp.path().join("cache").join("tmp"),
+    );
     let context = ToolContext::new(&workspace, 30);
     let workspace_plan =
         tool.permission_plan(&context, &json!({ "command": "cat \"$PWD/Cargo.toml\"" }))?;
@@ -3041,7 +3047,7 @@ fn shell_symbolic_path_binding_rejects_symlink_escape() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let tool = bash_tool(workspace.path());
-    let session_scratch = crate::scratch_namespace::session_scratch_dir(&tool.scratch_root, None);
+    let session_scratch = tool.scratch_control.session_scratch_dir(None);
     fs::create_dir_all(&session_scratch)?;
     symlink(outside.path(), session_scratch.join("escape"))?;
     let context = ToolContext::new(workspace.path(), 30);
@@ -3479,7 +3485,9 @@ fn bash_session_scope_ignores_output_filters_but_binds_validation_arguments() ->
     let workspace = tempfile::tempdir()?;
     let first_tool = posix_bash_tool(workspace.path())?;
     let mut second_tool = posix_bash_tool(workspace.path())?;
-    second_tool.scratch_root = workspace.path().join("different-scratch");
+    second_tool.scratch_control = crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+        workspace.path().join("different-scratch"),
+    );
     let context = ToolContext::new(workspace.path(), 30);
 
     let first =
@@ -3774,9 +3782,11 @@ fn temporary_file_guidance_is_model_visible() {
     for spec in [
         WriteFileTool.spec(),
         BashTool {
-            scratch_root: scratch_root.clone(),
             scratch_label: "cache/tmp".to_owned(),
             scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+            scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+                scratch_root.clone(),
+            ),
             scratch_namespaces: Arc::new(
                 crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
             ),
@@ -3788,7 +3798,6 @@ fn temporary_file_guidance_is_model_visible() {
             managers: Default::default(),
             artifact_root: PathBuf::from("state/artifacts/tasks"),
             artifact_label_root: PathBuf::from("state/artifacts/tasks"),
-            scratch_root,
             scratch_label: "cache/tmp".to_owned(),
             scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
             scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
@@ -5226,9 +5235,11 @@ fn registration_shares_external_scratch_control_across_surfaces() -> Result<()> 
 fn scratch_tool_descriptions_match_session_scoped_lifecycle() {
     let scratch_root = PathBuf::from("/tmp/sigil-scratch-test");
     let bash = BashTool {
-        scratch_root: scratch_root.clone(),
         scratch_label: "cache/tmp".to_owned(),
         scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+            scratch_root.clone(),
+        ),
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
@@ -5240,7 +5251,6 @@ fn scratch_tool_descriptions_match_session_scoped_lifecycle() {
         managers: Default::default(),
         artifact_root: PathBuf::from("state/artifacts/tasks"),
         artifact_label_root: PathBuf::from("state/artifacts/tasks"),
-        scratch_root,
         scratch_label: "cache/tmp".to_owned(),
         scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
         scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
@@ -5865,9 +5875,11 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
     let tool = BashTool {
-        scratch_root: temp.path().join("cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
         scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+            temp.path().join("cache").join("tmp"),
+        ),
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
@@ -5908,9 +5920,11 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
     let ctx = ToolContext::new(workspace, 5);
 
     let bash_error = BashTool {
-        scratch_root: scratch_file.clone(),
         scratch_label: "scratch-file".to_owned(),
         scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+            scratch_file.clone(),
+        ),
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
@@ -5929,10 +5943,9 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
         managers: Arc::new(TerminalProcessManagers::default()),
         artifact_root: PathBuf::from("state/artifacts/tasks"),
         artifact_label_root: PathBuf::from("state/artifacts/tasks"),
-        scratch_root: scratch_file,
         scratch_label: "scratch-file".to_owned(),
         scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
-        scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
+        scratch: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(scratch_file),
     }
     .execute(
         ctx,

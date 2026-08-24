@@ -917,9 +917,8 @@ async fn serve_command(
     let lifecycle = build_session_lifecycle_service(&paths);
     // RFC-0062 14.1: one process-scoped scratch lease registry shared by session-delete
     // cleanup, TTL GC and every run tool surface, so leases are observed consistently.
-    let scratch_control = sigil_runtime::RuntimeScratchNamespaceControl::new();
-    let lifecycle =
-        lifecycle.with_scratch_cleanup(paths.scratch_root.clone(), scratch_control.clone());
+    let scratch_control = sigil_runtime::authority_scratch_control(paths.scratch_root.clone());
+    let lifecycle = lifecycle.with_scratch_cleanup(scratch_control.clone());
     let driver = std::sync::Arc::new(HttpProductionRunDriver::new(
         HttpProductionRunDriverOptions::new(config_path, launch_cwd)
             .with_session_lifecycle(lifecycle.clone())

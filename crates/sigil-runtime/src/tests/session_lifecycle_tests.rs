@@ -793,10 +793,11 @@ fn session_delete_reclaims_scratch_namespace_under_lease_registry() -> Result<()
     finalized_session(&source_a, "delete scratch a")?;
     finalized_session(&source_b, "delete scratch b")?;
     let scratch_root = temp.path().join("cache").join("tmp");
-    let control = sigil_tools_builtin::ScratchNamespaceControl::new();
+    let control =
+        sigil_tools_builtin::ScratchNamespaceControl::for_local_root(scratch_root.clone());
     let service =
         LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"))
-            .with_scratch_cleanup(scratch_root.clone(), control.clone());
+            .with_scratch_cleanup(control.clone());
 
     // Session A: a held lease keeps the namespace while deletion still succeeds.
     let preview_a = service.preview_delete(&source_a, &[])?;

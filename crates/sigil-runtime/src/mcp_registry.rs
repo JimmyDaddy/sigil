@@ -1145,6 +1145,8 @@ fn register_local_tools(
         scratch_label: "cache/tmp".to_owned(),
         scratch_quota: sigil_tools_builtin::ScratchQuota::default(),
     };
+    let scratch_control = external_scratch_control
+        .unwrap_or_else(|| crate::authority_scratch_control(paths.scratch_root.clone()));
     let handles = match terminal_lifecycle_route {
         Some(RuntimeTerminalLifecycleRoute::Factory(factory)) => {
             sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
@@ -1153,7 +1155,7 @@ fn register_local_tools(
                 execution_backend,
                 &root_config.execution,
                 factory,
-                external_scratch_control.clone(),
+                Some(scratch_control.clone()),
             )
         }
         route => {
@@ -1168,7 +1170,7 @@ fn register_local_tools(
                 execution_backend,
                 &root_config.execution,
                 sink,
-                external_scratch_control,
+                Some(scratch_control.clone()),
             )
         }
     };

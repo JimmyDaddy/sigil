@@ -35,8 +35,9 @@ pub use registry::{
 };
 pub use scratch_namespace::{
     ScratchDeleteOutcome, ScratchGcConfig, ScratchGcReport, ScratchNamespaceControl,
-    ScratchNamespaceLease, ScratchNamespaceLeaseRegistry, ScratchQuota, ScratchQuotaExceededError,
-    ScratchQuotaScope, ScratchTaskLeaseRegistry, ScratchUsage, SessionScratchProvision,
+    ScratchNamespaceLease, ScratchNamespaceLeaseRegistry, ScratchNamespaceProvider,
+    ScratchNamespaceProviderLease, ScratchQuota, ScratchQuotaExceededError, ScratchQuotaScope,
+    ScratchTaskLeaseRegistry, ScratchUsage, SessionScratchProvision,
     delete_session_scratch_namespace, ensure_session_scratch, gc_scratch_namespaces,
     measure_scratch_usage, session_scratch_dir, session_scratch_key,
 };

@@ -22,6 +22,7 @@ pub mod quota;
 pub mod reconcile;
 pub mod release_output;
 pub mod semantic_matrix;
+pub mod session_scratch;
 pub mod spawn_protocol;
 pub mod storage;
 

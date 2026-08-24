@@ -3525,14 +3525,9 @@ async fn assemble_application_tool_surface(
     // assembly. Leases are in-memory only, so this fresh process cannot hold one; the sweep
     // reclaims namespaces abandoned by crashed or deleted sessions and never races a live tool.
     {
-        let scratch_root =
-            resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root)
-                .scratch_root;
         let scratch_control = surface.scratch_control.clone();
         tokio::task::spawn_blocking(move || {
-            match sigil_tools_builtin::gc_scratch_namespaces(
-                &scratch_root,
-                &scratch_control,
+            match scratch_control.gc_scratch_namespaces(
                 &sigil_tools_builtin::ScratchGcConfig::default(),
                 current_unix_time_ms(),
             ) {
@@ -6468,13 +6463,14 @@ where
             scratch_quota: sigil_tools_builtin::ScratchQuota::default(),
         };
         let execution_backend = crate::build_configured_execution_backend(root_config)?;
+        let scratch_control = crate::authority_scratch_control(paths.scratch_root.clone());
         sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
             &mut base_registry,
             builtin_paths,
             execution_backend,
             &root_config.execution,
             None,
-            None,
+            Some(scratch_control),
         );
         crate::register_agent_tools(&mut base_registry, root_config)?;
         let tool_registry =

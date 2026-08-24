@@ -298,11 +298,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
     // deleted sessions are reclaimed here, and the sweep never races a live tool or terminal
     // because none exist yet in this process.
     if let Some(scratch_control) = scratch_control {
-        let scratch_root = attachment_paths.scratch_root.clone();
         runtime.spawn_blocking(move || {
-            match sigil_tools_builtin::gc_scratch_namespaces(
-                &scratch_root,
-                &scratch_control,
+            match scratch_control.gc_scratch_namespaces(
                 &sigil_tools_builtin::ScratchGcConfig::default(),
                 current_unix_time_ms(),
             ) {

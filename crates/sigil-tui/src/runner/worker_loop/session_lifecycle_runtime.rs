@@ -58,7 +58,7 @@ pub(in crate::runner) fn local_session_lifecycle_service_with_scratch_for_worker
         paths.session_exports_root,
     )
     .with_lifecycle_journal_path(paths.session_lifecycle_journal)
-    .with_scratch_cleanup(paths.scratch_root, scratch_control.clone());
+    .with_scratch_cleanup(scratch_control.clone());
     match managed_writer {
         Some(writer) => service
             .with_managed_writer(Arc::clone(writer), paths.workspace_id)

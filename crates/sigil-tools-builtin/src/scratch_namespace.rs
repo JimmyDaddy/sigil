@@ -33,6 +33,7 @@ use sigil_kernel::{ToolErrorKind, ToolResult, secure_private_path_permissions};
 use crate::constants::{
     NO_SESSION_SCRATCH_KEY, SCRATCH_NAMESPACE_TTL_MS, SCRATCH_QUOTA_PER_SESSION_BYTES,
     SCRATCH_QUOTA_WORKSPACE_HARD_BYTES, SCRATCH_WALK_MAX_ENTRIES, SESSION_SCRATCH_NAMESPACE_DIR,
+    WORKSPACE_TEMP_ROOT,
 };
 
 /// Stable, filesystem-safe namespace key for one session scope. Falls back to a fixed
@@ -142,6 +143,40 @@ pub struct SessionScratchProvision {
     pub usage: ScratchUsage,
 }
 
+/// Physical SessionScratch owner seam. Production runtime composition supplies the authority
+/// implementation; the local implementation is retained only for compatibility fixtures and
+/// isolated tests. Consumers use this seam instead of deriving roots or performing filesystem
+/// lifecycle operations themselves.
+pub trait ScratchNamespaceProvider: Send + Sync + std::fmt::Debug {
+    fn acquire(&self, session_key: &str) -> Box<dyn ScratchNamespaceProviderLease>;
+    fn session_scratch_dir(&self, session_scope_id: Option<&str>) -> PathBuf;
+    fn ensure_session_scratch(
+        &self,
+        session_scope_id: Option<&str>,
+        quota: &ScratchQuota,
+    ) -> Result<SessionScratchProvision>;
+    fn measure_scratch_usage(&self, session_key: &str) -> Result<ScratchUsage>;
+    fn gc_scratch_namespaces(
+        &self,
+        control: &ScratchNamespaceControl,
+        config: &ScratchGcConfig,
+        now_ms: u64,
+    ) -> Result<ScratchGcReport>;
+    fn delete_session_scratch_namespace(
+        &self,
+        session_scope_id: Option<&str>,
+        control: &ScratchNamespaceControl,
+    ) -> Result<ScratchDeleteOutcome>;
+}
+
+/// Provider-owned lease held for the lifetime of one tool or terminal task.
+pub trait ScratchNamespaceProviderLease: Send + Sync + std::fmt::Debug {}
+
+#[derive(Debug)]
+struct NoopScratchNamespaceProviderLease;
+
+impl ScratchNamespaceProviderLease for NoopScratchNamespaceProviderLease {}
+
 /// Walk state for the bounded deterministic scratch sweep.
 #[derive(Debug, Clone, Copy, Default)]
 struct WalkState {
@@ -154,9 +189,10 @@ struct WalkState {
 ///
 /// Deletion is executed under the same lock as lease acquisition, so GC can never delete a
 /// namespace between a tool's lease acquisition and its registration.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ScratchNamespaceLeaseRegistry {
     inner: Mutex<BTreeSet<String>>,
+    provider: Option<Arc<dyn ScratchNamespaceProvider>>,
 }
 
 /// RAII lease guard; releases the namespace lease on drop.
@@ -164,6 +200,7 @@ pub struct ScratchNamespaceLeaseRegistry {
 pub struct ScratchNamespaceLease {
     registry: Arc<ScratchNamespaceLeaseRegistry>,
     key: String,
+    _provider_lease: Option<Box<dyn ScratchNamespaceProviderLease>>,
 }
 
 impl Drop for ScratchNamespaceLease {
@@ -177,7 +214,18 @@ impl Drop for ScratchNamespaceLease {
 impl ScratchNamespaceLeaseRegistry {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Mutex::new(BTreeSet::new()),
+            provider: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_provider(provider: Arc<dyn ScratchNamespaceProvider>) -> Self {
+        Self {
+            inner: Mutex::new(BTreeSet::new()),
+            provider: Some(provider),
+        }
     }
 
     /// Acquires an exclusive-in-process lease for one session namespace.
@@ -186,9 +234,14 @@ impl ScratchNamespaceLeaseRegistry {
         if let Ok(mut inner) = self.inner.lock() {
             inner.insert(session_key.to_owned());
         }
+        let provider_lease = self
+            .provider
+            .as_ref()
+            .map(|provider| provider.acquire(session_key));
         ScratchNamespaceLease {
             registry: Arc::clone(self),
             key: session_key.to_owned(),
+            _provider_lease: provider_lease,
         }
     }
 
@@ -219,6 +272,12 @@ impl ScratchNamespaceLeaseRegistry {
         }
         delete()?;
         Ok(true)
+    }
+}
+
+impl Default for ScratchNamespaceLeaseRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -266,16 +325,120 @@ impl ScratchTaskLeaseRegistry {
 
 /// Shared scratch authority for one process: namespace leases used by GC and task leases held
 /// by live terminal tasks.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScratchNamespaceControl {
+    provider: Arc<dyn ScratchNamespaceProvider>,
     pub namespaces: Arc<ScratchNamespaceLeaseRegistry>,
     pub tasks: Arc<ScratchTaskLeaseRegistry>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalScratchNamespaceProvider {
+    root: PathBuf,
+}
+
+impl ScratchNamespaceProvider for LocalScratchNamespaceProvider {
+    fn acquire(&self, _session_key: &str) -> Box<dyn ScratchNamespaceProviderLease> {
+        Box::new(NoopScratchNamespaceProviderLease)
+    }
+
+    fn session_scratch_dir(&self, session_scope_id: Option<&str>) -> PathBuf {
+        session_scratch_dir(&self.root, session_scope_id)
+    }
+
+    fn ensure_session_scratch(
+        &self,
+        session_scope_id: Option<&str>,
+        quota: &ScratchQuota,
+    ) -> Result<SessionScratchProvision> {
+        ensure_session_scratch(&self.root, session_scope_id, quota)
+    }
+
+    fn measure_scratch_usage(&self, session_key: &str) -> Result<ScratchUsage> {
+        measure_scratch_usage(&self.root, session_key)
+    }
+
+    fn gc_scratch_namespaces(
+        &self,
+        control: &ScratchNamespaceControl,
+        config: &ScratchGcConfig,
+        now_ms: u64,
+    ) -> Result<ScratchGcReport> {
+        gc_scratch_namespaces(&self.root, control, config, now_ms)
+    }
+
+    fn delete_session_scratch_namespace(
+        &self,
+        session_scope_id: Option<&str>,
+        control: &ScratchNamespaceControl,
+    ) -> Result<ScratchDeleteOutcome> {
+        delete_session_scratch_namespace(&self.root, session_scope_id, control)
+    }
 }
 
 impl ScratchNamespaceControl {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::for_local_root(PathBuf::from(WORKSPACE_TEMP_ROOT))
+    }
+
+    #[must_use]
+    pub fn for_local_root(root: impl Into<PathBuf>) -> Self {
+        Self::from_provider(Arc::new(LocalScratchNamespaceProvider {
+            root: root.into(),
+        }))
+    }
+
+    #[must_use]
+    pub fn from_provider(provider: Arc<dyn ScratchNamespaceProvider>) -> Self {
+        let namespaces = Arc::new(ScratchNamespaceLeaseRegistry::with_provider(Arc::clone(
+            &provider,
+        )));
+        Self {
+            provider,
+            namespaces,
+            tasks: Arc::new(ScratchTaskLeaseRegistry::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn session_scratch_dir(&self, session_scope_id: Option<&str>) -> PathBuf {
+        self.provider.session_scratch_dir(session_scope_id)
+    }
+
+    pub fn ensure_session_scratch(
+        &self,
+        session_scope_id: Option<&str>,
+        quota: &ScratchQuota,
+    ) -> Result<SessionScratchProvision> {
+        self.provider
+            .ensure_session_scratch(session_scope_id, quota)
+    }
+
+    pub fn measure_scratch_usage(&self, session_key: &str) -> Result<ScratchUsage> {
+        self.provider.measure_scratch_usage(session_key)
+    }
+
+    pub fn gc_scratch_namespaces(
+        &self,
+        config: &ScratchGcConfig,
+        now_ms: u64,
+    ) -> Result<ScratchGcReport> {
+        self.provider.gc_scratch_namespaces(self, config, now_ms)
+    }
+
+    pub fn delete_session_scratch_namespace(
+        &self,
+        session_scope_id: Option<&str>,
+    ) -> Result<ScratchDeleteOutcome> {
+        self.provider
+            .delete_session_scratch_namespace(session_scope_id, self)
+    }
+}
+
+impl Default for ScratchNamespaceControl {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -35,8 +35,8 @@ use crate::{
         resolve_existing_prefix, resolve_tool_path_from_base,
     },
     scratch_namespace::{
-        ScratchNamespaceLeaseRegistry, ScratchQuota, ensure_session_scratch,
-        scratch_provision_error_result, session_scratch_dir, session_scratch_key,
+        ScratchNamespaceControl, ScratchNamespaceLeaseRegistry, ScratchQuota,
+        scratch_provision_error_result, session_scratch_key,
     },
     shell_runtime::{ResolvedShell, ShellDialect},
     support::{
@@ -106,9 +106,9 @@ struct TrustedExecutableIdentity {
 }
 
 pub(crate) struct BashTool {
-    pub(crate) scratch_root: PathBuf,
     pub(crate) scratch_label: String,
     pub(crate) scratch_quota: ScratchQuota,
+    pub(crate) scratch_control: ScratchNamespaceControl,
     pub(crate) scratch_namespaces: Arc<ScratchNamespaceLeaseRegistry>,
     pub(crate) backend: Arc<dyn ExecutionBackend>,
     pub(crate) shell: ResolvedShell,
@@ -116,7 +116,8 @@ pub(crate) struct BashTool {
 
 impl BashTool {
     fn session_scratch_dir(&self, ctx: &ToolContext) -> PathBuf {
-        session_scratch_dir(&self.scratch_root, ctx.session_scope_id())
+        self.scratch_control
+            .session_scratch_dir(ctx.session_scope_id())
     }
 
     fn analyze_command(&self, ctx: &ToolContext, command: &str) -> Result<ShellCommandAnalysis> {
@@ -243,7 +244,9 @@ impl Tool for BashTool {
             .and_then(Value::as_u64)
             .unwrap_or(ctx.timeout_secs);
         let session_scope_id = ctx.session_scope_id().map(str::to_owned);
-        let session_scratch = session_scratch_dir(&self.scratch_root, session_scope_id.as_deref());
+        let session_scratch = self
+            .scratch_control
+            .session_scratch_dir(session_scope_id.as_deref());
         let (request, fallback_analysis) = if let Some(plan) = ctx.prepared_permission_plan() {
             anyhow::ensure!(
                 plan.tool_name == "bash",
@@ -352,15 +355,11 @@ impl Tool for BashTool {
         // RFC-0062 14.1: provision the session-scoped scratch namespace (owner-only, quota
         // checked) before any child can write into it. Quota failures are recoverable tool
         // errors, never a silent fallback to the system temp directory.
-        let provision_root = self.scratch_root.clone();
+        let scratch_control = self.scratch_control.clone();
         let provision_scope = session_scope_id.clone();
         let provision_quota = self.scratch_quota;
         let provision = tokio::task::spawn_blocking(move || {
-            ensure_session_scratch(
-                &provision_root,
-                provision_scope.as_deref(),
-                &provision_quota,
-            )
+            scratch_control.ensure_session_scratch(provision_scope.as_deref(), &provision_quota)
         })
         .await
         .context("scratch provisioning task panicked")?;
@@ -418,9 +417,6 @@ impl Tool for BashTool {
             capture_setup_failed = true;
         }
         let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
-        tokio::fs::create_dir_all(&session_scratch)
-            .await
-            .with_context(|| format!("failed to create {}", self.scratch_label))?;
         let execution_hash = sigil_kernel::stable_event_hash(call_id.as_bytes());
         let execution_digest = execution_hash
             .strip_prefix("sha256:")

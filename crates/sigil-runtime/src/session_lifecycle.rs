@@ -381,7 +381,6 @@ pub struct LocalSessionLifecycleService {
 /// RFC-0062 14.1: session-scoped scratch namespace cleanup bound to session deletion.
 #[derive(Debug, Clone)]
 struct ScratchCleanupBinding {
-    scratch_root: PathBuf,
     control: sigil_tools_builtin::ScratchNamespaceControl,
 }
 
@@ -504,13 +503,9 @@ impl LocalSessionLifecycleService {
     #[must_use]
     pub fn with_scratch_cleanup(
         mut self,
-        scratch_root: impl Into<PathBuf>,
         control: sigil_tools_builtin::ScratchNamespaceControl,
     ) -> Self {
-        self.scratch_cleanup = Some(ScratchCleanupBinding {
-            scratch_root: scratch_root.into(),
-            control,
-        });
+        self.scratch_cleanup = Some(ScratchCleanupBinding { control });
         self
     }
 
@@ -1479,11 +1474,10 @@ impl LocalSessionLifecycleService {
         // under the lease registry so a live tool/terminal namespace is never reclaimed;
         // failures are bounded diagnostics and TTL GC remains the fallback.
         if let Some(binding) = &self.scratch_cleanup {
-            match sigil_tools_builtin::delete_session_scratch_namespace(
-                &binding.scratch_root,
-                Some(&preview.source_session_id),
-                &binding.control,
-            ) {
+            match binding
+                .control
+                .delete_session_scratch_namespace(Some(&preview.source_session_id))
+            {
                 Ok(outcome) => {
                     tracing::debug!(?outcome, "deleted session scratch namespace");
                 }

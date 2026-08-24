@@ -27,8 +27,7 @@ use crate::{
         tool_path_subject,
     },
     scratch_namespace::{
-        ScratchNamespaceControl, ScratchQuota, ensure_session_scratch,
-        scratch_provision_error_result, session_scratch_dir, session_scratch_key,
+        ScratchNamespaceControl, ScratchQuota, scratch_provision_error_result, session_scratch_key,
     },
     shell::{
         CommandFamily, ShellCommandAnalysis, ShellPathPolicyBinding,
@@ -54,7 +53,6 @@ pub(crate) struct TerminalStartTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
     pub(crate) artifact_root: PathBuf,
     pub(crate) artifact_label_root: PathBuf,
-    pub(crate) scratch_root: PathBuf,
     pub(crate) scratch_label: String,
     pub(crate) scratch_quota: ScratchQuota,
     pub(crate) scratch: ScratchNamespaceControl,
@@ -423,7 +421,7 @@ impl TerminalProcessManagers {
 
 impl TerminalStartTool {
     fn session_scratch_dir(&self, ctx: &ToolContext) -> PathBuf {
-        session_scratch_dir(&self.scratch_root, ctx.session_scope_id())
+        self.scratch.session_scratch_dir(ctx.session_scope_id())
     }
 
     fn analyze_command(
@@ -616,15 +614,11 @@ impl Tool for TerminalStartTool {
         // RFC-0062 14.1: provision the session-scoped scratch namespace (owner-only, quota
         // checked) before any forward effect or child spawn. Quota failures are recoverable
         // tool errors, never a silent fallback to the system temp directory.
-        let provision_root = self.scratch_root.clone();
+        let scratch_control = self.scratch.clone();
         let provision_scope = ctx.session_scope_id().map(str::to_owned);
         let provision_quota = self.scratch_quota;
         let provision = tokio::task::spawn_blocking(move || {
-            ensure_session_scratch(
-                &provision_root,
-                provision_scope.as_deref(),
-                &provision_quota,
-            )
+            scratch_control.ensure_session_scratch(provision_scope.as_deref(), &provision_quota)
         })
         .await
         .context("scratch provisioning task panicked")?;
@@ -646,10 +640,7 @@ impl Tool for TerminalStartTool {
             &self.artifact_root,
             &self.artifact_label_root,
         )?;
-        let session_scratch = session_scratch_dir(&self.scratch_root, ctx.session_scope_id());
-        tokio::fs::create_dir_all(&session_scratch)
-            .await
-            .with_context(|| format!("failed to create {}", self.scratch_label))?;
+        let session_scratch = self.scratch.session_scratch_dir(ctx.session_scope_id());
         let mut env = BTreeMap::new();
         env.insert(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),

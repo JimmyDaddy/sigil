@@ -170,7 +170,8 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
         terminal_execution_config.with_default_shell(default_shell.clone());
-    let scratch_control = external_scratch_control.unwrap_or_default();
+    let scratch_control = external_scratch_control
+        .unwrap_or_else(|| ScratchNamespaceControl::for_local_root(paths.scratch_root.clone()));
     let terminal_managers = Arc::new(
         TerminalProcessManagers::new(terminal_execution_config)
             .with_lifecycle_route(terminal_lifecycle_route)
@@ -197,9 +198,9 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     registry.register(Arc::new(GrepTool));
     registry.register(Arc::new(VcsInspectTool));
     registry.register(Arc::new(BashTool {
-        scratch_root: paths.scratch_root.clone(),
         scratch_label: paths.scratch_label.clone(),
         scratch_quota: paths.scratch_quota,
+        scratch_control: scratch_control.clone(),
         scratch_namespaces: Arc::clone(&scratch_control.namespaces),
         backend: Arc::clone(&execution_backend),
         shell: default_shell,
@@ -208,7 +209,6 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         managers: Arc::clone(&terminal_managers),
         artifact_root: terminal_tasks_root.clone(),
         artifact_label_root: terminal_tasks_label_root.clone(),
-        scratch_root: paths.scratch_root,
         scratch_label: paths.scratch_label,
         scratch_quota: paths.scratch_quota,
         scratch: scratch_control.clone(),

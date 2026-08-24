@@ -1522,6 +1522,9 @@ import/rebuild 边界隔离；CLI/serve 不得直接执行 rename。current-sche
 接口，但只能以 fail-closed termination 表达缺失 authority bootstrap，不能制造隐式可写 root。
 同一规则覆盖 plan-review 等非主 run 的 tool assembly：shipping runtime 必须用已解析的
 `SigilPaths` 注入 artifact/task/scratch roots，不能重新调用相对路径 compatibility helper。
+SessionScratch 的目录分配、quota、no-follow walker、lease、GC 与 delete 由
+`sigil-resource-authority::SessionScratchAuthorityV1` 统一持有；tools-builtin 只通过
+`ScratchNamespaceProvider` 消费 authority 注入的 exact namespace，local provider 仅用于测试/隔离兼容构造。
 
 - `roots/list` 返回入口层已解析的 workspace root，runtime 必须把 TUI / CLI 的 effective workspace root 传入 MCP 注册流程
 - `notifications/progress` 映射到 TUI live panel，不写重复 timeline，避免远端 server 用 progress 刷爆用户界面

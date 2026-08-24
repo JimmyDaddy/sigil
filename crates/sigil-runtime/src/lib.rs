@@ -3,6 +3,7 @@ use std::{env, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+pub use session_scratch::authority_scratch_control;
 use sha2::{Digest, Sha256};
 pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 use sigil_kernel::{
@@ -149,6 +150,7 @@ pub mod resource_recovery_surface;
 pub mod runtime_records_projection;
 pub mod session_control;
 pub mod session_lifecycle;
+mod session_scratch;
 mod session_title;
 pub mod skills;
 #[allow(dead_code)] // E21.15 runtime-private route is intentionally dormant before E21.17.
