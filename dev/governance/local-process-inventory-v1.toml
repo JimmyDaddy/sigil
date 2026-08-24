@@ -483,7 +483,7 @@ site_id = "P-0026"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/docker.rs"
 constructor = "CommandNew"
-line = 447
+line = 450
 class = "managed-execution"
 owner = "ResourceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -493,7 +493,7 @@ admission_contract = "ManagedExecutionLease"
 resource_contract = "ManagedGeneration(ExecutionTemp)"
 lifecycle_contract = "AuthorityLeaseAndJournal"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:docker.rs:447"
+reachability_proof_digest = "scanner-line:docker.rs:450"
 test_case_ids = []
 exception_rfc = "0071"
 
