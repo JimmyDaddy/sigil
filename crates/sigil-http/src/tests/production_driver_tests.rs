@@ -127,11 +127,14 @@ struct FailingTaskPreparation {
 }
 
 fn write_production_test_config(path: &std::path::Path, workspace_root: &str) {
+    let storage = isolated_storage_toml(path);
     let config = format!(
         r#"config_version = 2
 
 [workspace]
 root = "{workspace_root}"
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -149,10 +152,14 @@ credential = {{ source = "none" }}
 }
 
 fn write_reasoning_test_config(path: &std::path::Path) {
-    let config = r#"config_version = 2
+    let storage = isolated_storage_toml(path);
+    let config = format!(
+        r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "deepseek-test"
@@ -163,9 +170,21 @@ label = "DeepSeek test"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#;
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+    );
     std::fs::write(path, config).expect("reasoning test config should write");
+}
+
+fn isolated_storage_toml(config_path: &std::path::Path) -> String {
+    let root = config_path
+        .parent()
+        .expect("production test config should have a parent");
+    format!(
+        "[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"",
+        root.join("state").display(),
+        root.join("cache").display()
+    )
 }
 
 fn production_test_model_route(
@@ -371,12 +390,17 @@ async fn production_selection_recovery_requires_exact_route_and_catalog_bindings
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
         .expect("original route should bind");
+    let replacement_config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&replacement_config_path);
     std::fs::write(
-        temp.path().join("sigil.toml"),
-        r#"config_version = 2
+        &replacement_config_path,
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "replacement"
@@ -387,8 +411,9 @@ label = "Replacement"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:2"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )
     .expect("replacement config should write");
     let context = driver
@@ -475,12 +500,16 @@ credential = { source = "none" }
 async fn production_supervisor_routes_typed_task_continuation_to_shared_preparer() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -491,11 +520,12 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:1"
-credential = { source = "none" }
+credential = {{ source = "none" }}
 
 [task]
 enabled = true
-"#,
+"#
+        ),
     )
     .expect("Task continuation config should write");
     let protocol_journal = Arc::new(
@@ -603,18 +633,20 @@ fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpS
 }
 
 fn append_durable_tool_artifact(
+    driver: &HttpProductionRunDriver,
     session: &HttpSessionSnapshot,
     result: ToolResult,
 ) -> ToolArtifactDescriptorV1 {
     let session_store = JsonlSessionStore::new(std::path::Path::new(&session.session_log_path))
         .expect("session store should reopen");
-    let artifact_store = ToolArtifactStore::for_session_store(&session_store);
-    let (recorded, _display) = ToolResultRecordedV3::capture(
-        &result,
-        Some(&artifact_store),
-        ToolArtifactSensitivity::Ordinary,
-    )
-    .expect("tool result should capture");
+    let (recorded, _display) = with_authority_artifact_store(driver, session, |artifact_store| {
+        ToolResultRecordedV3::capture(
+            &result,
+            Some(artifact_store),
+            ToolArtifactSensitivity::Ordinary,
+        )
+        .expect("tool result should capture")
+    });
     let descriptor = recorded
         .artifact
         .descriptor()
@@ -626,14 +658,26 @@ fn append_durable_tool_artifact(
     descriptor
 }
 
+fn with_authority_artifact_store<T>(
+    driver: &HttpProductionRunDriver,
+    session: &HttpSessionSnapshot,
+    operation: impl FnOnce(&ToolArtifactStore) -> T,
+) -> T {
+    let lease = authority_artifact_store_for_session(&driver.services, session)
+        .expect("current-schema artifact authority should admit the test session");
+    let store = lease.store();
+    let output = operation(&store);
+    drop(lease);
+    output
+}
+
 #[tokio::test]
 async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "artifact-read");
     let session = production_queue_session_named(&temp, "artifact-owner");
-    let store =
-        ToolArtifactStore::for_session_path(std::path::Path::new(&session.session_log_path));
     let descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-artifact",
@@ -643,7 +687,9 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         ),
     );
     assert!(
-        store.source_event_id(&descriptor.artifact_ref).is_err(),
+        with_authority_artifact_store(&driver, &session, |store| store
+            .source_event_id(&descriptor.artifact_ref))
+        .is_err(),
         "retrieval authority must not require a post-append sidecar"
     );
     let request = crate::HttpToolArtifactReadRequest {
@@ -693,19 +739,22 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         Err(crate::HttpToolArtifactReadDriverError::Unavailable)
     );
 
-    let binary_descriptor = store
-        .capture_policy_safe_bytes(
-            "call-binary",
-            "read_binary",
-            &[0xff, 0x00],
-            2,
-            "application/octet-stream",
-            ToolArtifactEncoding::Binary,
-            ToolArtifactSensitivity::Ordinary,
-            0,
-        )
-        .expect("binary artifact should publish");
+    let binary_descriptor = with_authority_artifact_store(&driver, &session, |store| {
+        store
+            .capture_policy_safe_bytes(
+                "call-binary",
+                "read_binary",
+                &[0xff, 0x00],
+                2,
+                "application/octet-stream",
+                ToolArtifactEncoding::Binary,
+                ToolArtifactSensitivity::Ordinary,
+                0,
+            )
+            .expect("binary artifact should publish")
+    });
     let binary_descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-binary",
@@ -731,6 +780,7 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
 
     let long_line = "x".repeat(sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES as usize + 128);
     let long_line_descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-long-line",
@@ -761,9 +811,9 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         .content_sha256
         .strip_prefix("sha256:")
         .expect("descriptor hash prefix");
-    let blob_path = store
-        .root()
-        .join("blobs")
+    let blob_path = temp
+        .path()
+        .join("state/managed/artifact-store/artifact-owner/blobs")
         .join(&digest[..2])
         .join(format!("{digest}.blob"));
     std::fs::write(&blob_path, b"tampered")
@@ -791,20 +841,21 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "artifact-binding");
     let session = production_queue_session_named(&temp, "artifact-binding-owner");
-    let store =
-        ToolArtifactStore::for_session_path(std::path::Path::new(&session.session_log_path));
 
-    let orphan = store
-        .capture_text(
-            "call-orphan",
-            "shell",
-            "not durably bound",
-            ToolArtifactSensitivity::Ordinary,
-        )
-        .expect("orphan artifact should publish");
-    store
-        .bind_source_event(&orphan.artifact_ref, "forged-source-event")
-        .expect("orphan sidecar should be forgeable for the regression fixture");
+    let orphan = with_authority_artifact_store(&driver, &session, |store| {
+        let orphan = store
+            .capture_text(
+                "call-orphan",
+                "shell",
+                "not durably bound",
+                ToolArtifactSensitivity::Ordinary,
+            )
+            .expect("orphan artifact should publish");
+        store
+            .bind_source_event(&orphan.artifact_ref, "forged-source-event")
+            .expect("orphan sidecar should be forgeable for the regression fixture");
+        orphan
+    });
     assert_eq!(
         driver.tool_artifact_page(
             &session,
@@ -821,6 +872,7 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
     );
 
     let descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-bound",
@@ -829,17 +881,26 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
             ToolResultMeta::default(),
         ),
     );
-    let manifest_path = store
-        .root()
-        .join("refs")
-        .join(format!("{}.json", descriptor.artifact_ref.artifact_id));
     let mut forged_descriptor = descriptor.clone();
     forged_descriptor.tool_name = "forged-tool".to_owned();
+    let manifest_path = temp
+        .path()
+        .join("state/managed/artifact-store/artifact-binding-owner/refs")
+        .join(format!("{}.json", descriptor.artifact_ref.artifact_id));
     std::fs::write(
         manifest_path,
         serde_json::to_vec(&forged_descriptor).expect("forged descriptor should encode"),
     )
     .expect("test should replace the descriptor manifest");
+    with_authority_artifact_store(&driver, &session, |store| {
+        assert_eq!(
+            store
+                .resolve(&descriptor.artifact_ref)
+                .expect("forged but well-formed physical descriptor should resolve")
+                .tool_name,
+            "forged-tool"
+        );
+    });
     let projected_binding = driver
         .retained_session_projection_store(&session)
         .expect("projection store should remain available")
@@ -849,13 +910,6 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
         .artifact_source_binding(&descriptor.artifact_ref)
         .expect("durable binding should remain authoritative");
     assert_eq!(projected_binding.tool_name, "shell");
-    assert_eq!(
-        store
-            .resolve(&descriptor.artifact_ref)
-            .expect("forged but well-formed physical descriptor should resolve")
-            .tool_name,
-        "forged-tool"
-    );
     assert_eq!(
         driver.tool_artifact_page(
             &session,
@@ -3818,12 +3872,16 @@ async fn production_revision_duplicate_registration_never_blocks_the_session() {
     std::fs::create_dir(&sessions).expect("session directory should create");
 
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "workspace"
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -3838,8 +3896,9 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:9"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )
     .expect("revision config should write");
 
@@ -4017,12 +4076,16 @@ async fn production_revision_bind_failure_rolls_back_only_the_run_registration()
     std::fs::create_dir(&sessions).expect("session directory should create");
 
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -4037,8 +4100,9 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:9"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )
     .expect("revision config should write");
     let root_config = sigil_kernel::RootConfig::load(&config_path).expect("config should load");

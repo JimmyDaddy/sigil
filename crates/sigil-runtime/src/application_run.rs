@@ -5271,19 +5271,13 @@ pub async fn rerun_application_verification_with_attachment(
     let (mut session, _session_lease, workspace_root, request) = preparation;
     let verification_execution_port: Arc<
         dyn sigil_kernel::verification::VerificationExecutionPortV1,
-    > = {
-        let route = Arc::clone(
-            &services
-                .authority_composition()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "current-schema verification rerun requires the managed verification route"
-                    )
-                })?
-                .command_execution,
-        );
-        route
-    };
+    > = services
+        .authority_composition()
+        .ok_or_else(|| {
+            anyhow!("current-schema verification rerun requires the managed verification route")
+        })?
+        .command_execution
+        .clone();
     let mut handler = NoopEventHandler;
     rerun_task_verification_check(
         &mut session,
@@ -6448,17 +6442,9 @@ where
             None => {
                 #[cfg(test)]
                 {
-                    let execution_backend =
-                        crate::build_configured_execution_backend(root_config)?;
-                    let scratch_control =
-                        crate::authority_scratch_control(paths.scratch_root.clone());
-                    sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+                    sigil_tools_builtin::register_builtin_tools_with_unavailable_managed_execution(
                         &mut base_registry,
                         builtin_paths.clone(),
-                        execution_backend,
-                        &root_config.execution,
-                        None,
-                        Some(scratch_control),
                     );
                     None
                 }

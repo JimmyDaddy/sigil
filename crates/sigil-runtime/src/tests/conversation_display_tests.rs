@@ -38,7 +38,10 @@ use crate::conversation_display::{
 fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let session = Session::new("provider", "model").with_store(store.clone());
+    let artifact_store = ToolArtifactStore::for_session_store(&store);
+    let session = Session::new("provider", "model")
+        .with_store(store.clone())
+        .with_tool_artifact_store_override(artifact_store);
     Ok((temp, store, session))
 }
 

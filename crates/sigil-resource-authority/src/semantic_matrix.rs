@@ -64,7 +64,7 @@ pub fn frozen_matrix() -> &'static [MatrixCellV1] {
         MatrixCellV1 {
             owner: "ApplicationControlLog",
             family: AppendLog,
-            source: ApplicationControlReady,
+            source: ApplicationCutoverRoot,
             purpose: DurablePayload,
             kind: ResourceKindV1::RuntimeState,
         },

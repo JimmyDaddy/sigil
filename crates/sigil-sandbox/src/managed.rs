@@ -1099,6 +1099,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             attempt_id: prepared.attempt_id.clone(),
             prepared,
             finalizing: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicBool::new(false)),
         };
         Ok(Box::new(handle))
     }
@@ -1160,6 +1161,7 @@ struct LocalPersistentProcessHandleV1 {
     attempt_id: PhysicalAttemptId,
     prepared: PreparedLocalRunV1,
     finalizing: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
 }
 
 struct LocalPersistentOutputStreamV1 {
@@ -1269,6 +1271,7 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         &mut self,
         _reason: ProcessCancelReasonV1,
     ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        self.cancelled.store(true, Ordering::SeqCst);
         let _ = self.process_owner.terminate();
         let mut guard = self
             .child
@@ -1291,6 +1294,10 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
                 .lock()
                 .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
             match guard.wait() {
+                Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
+                    let _ = status;
+                    ProcessTerminationV1::Cancelled
+                }
                 Ok(status) => classify_status(status),
                 Err(_) => ProcessTerminationV1::OutcomeUncertain {
                     evidence_digest: zero_hash(),
@@ -1977,6 +1984,28 @@ mod tests {
         let mut handle =
             futures::executor::block_on(svc.start_persistent(bundle("terminal"), request))
                 .expect("pty spawn");
+        futures::executor::block_on(handle.cancel(ProcessCancelReasonV1::UserCancelled))
+            .expect("cancel");
+        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("receipt");
+        assert!(matches!(
+            receipt.process.termination,
+            ProcessTerminationV1::Cancelled
+        ));
+        assert_eq!(
+            receipt.resources.cleanup_status,
+            ResourceCleanupStatusV1::Released
+        );
+    }
+
+    #[test]
+    fn r71_managed_persistent_non_pty_cancel_has_cancelled_terminal_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svc = service(false, dir.path());
+        let mut handle = futures::executor::block_on(svc.start_persistent(
+            bundle("terminal"),
+            exec_request(&["/bin/sh", "-c", "sleep 30"], false),
+        ))
+        .expect("spawn");
         futures::executor::block_on(handle.cancel(ProcessCancelReasonV1::UserCancelled))
             .expect("cancel");
         let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("receipt");

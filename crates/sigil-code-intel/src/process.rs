@@ -6,6 +6,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub type LanguageServerReaderV1 = Box<dyn AsyncRead + Send + Unpin>;
+pub type LanguageServerWriterV1 = Box<dyn AsyncWrite + Send + Unpin>;
+pub type LanguageServerShutdownV1 = Arc<dyn Fn() + Send + Sync>;
+
 /// Resolved language-server launch material supplied by the runtime authority route.
 #[derive(Debug, Clone)]
 pub struct LanguageServerLaunchRequestV1 {
@@ -23,9 +27,9 @@ pub struct LanguageServerLaunchRequestV1 {
 
 /// Managed language-server stdio transport returned by a runtime launch port.
 pub struct LanguageServerProcessIoV1 {
-    reader: Box<dyn AsyncRead + Send + Unpin>,
-    writer: Box<dyn AsyncWrite + Send + Unpin>,
-    shutdown: Arc<dyn Fn() + Send + Sync>,
+    reader: LanguageServerReaderV1,
+    writer: LanguageServerWriterV1,
+    shutdown: LanguageServerShutdownV1,
 }
 
 impl LanguageServerProcessIoV1 {
@@ -47,9 +51,9 @@ impl LanguageServerProcessIoV1 {
     pub fn into_parts(
         self,
     ) -> (
-        Box<dyn AsyncRead + Send + Unpin>,
-        Box<dyn AsyncWrite + Send + Unpin>,
-        Arc<dyn Fn() + Send + Sync>,
+        LanguageServerReaderV1,
+        LanguageServerWriterV1,
+        LanguageServerShutdownV1,
     ) {
         (self.reader, self.writer, self.shutdown)
     }

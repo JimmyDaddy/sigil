@@ -9,6 +9,10 @@ use std::os::unix::fs::symlink;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use sigil_kernel::managed_execution::{
+    ExecutionPurposeV1, ManagedExecutionPlanDraftV1, ManagedExecutionPlanErrorV1,
+    ManagedExecutionPlanRequestV1, ManagedExecutionPlannerV1,
+};
 use sigil_kernel::{
     ApprovalMode, ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
     ExecutionCoverageLabel, ExecutionFuture, ExecutionNetworkReceipt, ExecutionReceipt,
@@ -27,6 +31,36 @@ use super::{
 };
 use crate::skills::discover_plugin_skill_descriptors;
 use crate::{McpConfigOrigin, McpExecutionBase, resolve_user_root_mcp_declarations};
+
+#[derive(Debug)]
+struct RecordingManagedPlanner {
+    inner: crate::r71_shadow_planner::ShadowPlannerV1,
+    purposes: Mutex<Vec<ExecutionPurposeV1>>,
+}
+
+impl Default for RecordingManagedPlanner {
+    fn default() -> Self {
+        Self {
+            inner: crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ),
+            purposes: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ManagedExecutionPlannerV1 for RecordingManagedPlanner {
+    fn plan_execution(
+        &self,
+        request: ManagedExecutionPlanRequestV1,
+    ) -> std::result::Result<ManagedExecutionPlanDraftV1, ManagedExecutionPlanErrorV1> {
+        self.purposes
+            .lock()
+            .expect("planner purposes should lock")
+            .push(request.purpose);
+        self.inner.plan_execution(request)
+    }
+}
 
 #[test]
 fn missing_plugin_directory_returns_empty_report() {
@@ -2210,6 +2244,248 @@ fn workspace_mutation_detected(
         .find(|(id, _)| id == event_id)
         .map(|(_, payload)| payload)
         .ok_or_else(|| anyhow::anyhow!("workspace mutation event {event_id} not found"))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn production_plugin_hook_route_uses_extension_purpose_admission() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "managed-hook",
+        r#"id = "managed-hook"
+name = "Managed Hook"
+version = "0.1.0"
+
+[[hooks]]
+id = "context-pack"
+event = "context"
+kind = "context"
+command = "/bin/sh"
+args = ["-c", "printf managed-extension-hook"]
+declared_effect = "read_only"
+approval = "allow"
+timeout_ms = 5000
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial plugin discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("plugin trust should build");
+    let registration = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed")
+        .registrations
+        .hooks
+        .into_iter()
+        .next()
+        .expect("trusted hook should register");
+
+    let planner = Arc::new(RecordingManagedPlanner::default());
+    let state = workspace.path().join("state");
+    let execution_temp = workspace.path().join("execution-temp");
+    fs::create_dir_all(&state).expect("state root should create");
+    fs::create_dir_all(state.join("cache")).expect("cache root should create");
+    fs::create_dir_all(&execution_temp).expect("execution temp should create");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))
+            .expect("state root should harden");
+        fs::set_permissions(&execution_temp, fs::Permissions::from_mode(0o700))
+            .expect("execution temp should harden");
+    }
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x5a; 32]),
+        planner.clone() as Arc<dyn ManagedExecutionPlannerV1>,
+        &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
+    )
+    .expect("managed authority composition should build");
+    let runner = composition.plugin_hook_runner();
+    let wrong_purpose_registration = registration.clone();
+
+    let outcome = runner
+        .execute(PluginHookExecutionRequest::new(
+            registration,
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect("managed plugin hook should execute");
+
+    assert_eq!(outcome.receipt.exit_code, Some(0));
+    assert_eq!(outcome.receipt.stdout, b"managed-extension-hook");
+    {
+        let purposes = planner
+            .purposes
+            .lock()
+            .expect("planner purposes should lock");
+        assert_eq!(purposes.len(), 2, "route and sandbox must both replan");
+        assert!(
+            purposes
+                .iter()
+                .all(|purpose| *purpose == ExecutionPurposeV1::ExtensionProcess),
+            "plugin hook must never be rebound to one-shot execution"
+        );
+    }
+    let control_records = fs::read_to_string(
+        state
+            .join("managed/application-control-log")
+            .read_dir()
+            .expect("control namespace should exist")
+            .next()
+            .expect("control namespace entry should exist")
+            .expect("control namespace entry should read")
+            .path()
+            .join("records.jsonl"),
+    )
+    .expect("control records should be durable");
+    assert!(control_records.contains("extension_plan_decided"));
+    assert!(control_records.contains("extension_start_authorized"));
+    assert!(control_records.contains("extension_process_settled"));
+    assert!(control_records.contains("plugin-trust:managed-hook:42"));
+
+    let marker = workspace.path().join("wrong-purpose-spawned");
+    let wrong_request = super::ManagedPluginHookExecutionRequestV1 {
+        plugin_id: wrong_purpose_registration.plugin_id.clone(),
+        hook_id: wrong_purpose_registration.hook.stable_id(),
+        manifest_hash: wrong_purpose_registration.manifest_hash.clone(),
+        capability_digest: wrong_purpose_registration.capability_digest.clone(),
+        config_generation: wrong_purpose_registration.trust_reviewed_at_ms,
+        durable_scope:
+            sigil_kernel::extension_admission::DurableAdmissionScopeV1::ApplicationControl {
+                control_log_id: "wrong-purpose-control".to_owned(),
+                workspace_id: Some("wrong-purpose-workspace".to_owned()),
+            },
+        config_grant_ref: sigil_kernel::resource::OpaqueExtensionGrantRef::new(
+            "plugin-trust:managed-hook:42".to_owned(),
+        ),
+        config_grant_hash: super::plugin_hook_config_grant_hash(
+            &wrong_purpose_registration.plugin_id,
+            wrong_purpose_registration.trust_reviewed_at_ms,
+            &wrong_purpose_registration.manifest_hash,
+            &wrong_purpose_registration.capability_digest,
+        ),
+        purpose: ExecutionPurposeV1::OneShot,
+        program: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!("touch {}", marker.display())],
+        cwd: wrong_purpose_registration
+            .plugin_root
+            .canonicalize()
+            .expect("plugin root should resolve"),
+        environment: std::collections::BTreeMap::from([
+            (
+                "SIGIL_WORKSPACE_ROOT".to_owned(),
+                workspace.path().to_string_lossy().into_owned(),
+            ),
+            ("SIGIL_PLUGIN_ID".to_owned(), "managed-hook".to_owned()),
+            (
+                "SIGIL_PLUGIN_HOOK_ID".to_owned(),
+                wrong_purpose_registration.hook.stable_id(),
+            ),
+        ]),
+        timeout_ms: 5_000,
+        output_limit_bytes: 1024,
+        cancellation: None,
+    };
+    let error = super::ManagedPluginHookExecutionPortV1::execute_plugin_hook(
+        composition.plugin_hook_execution.as_ref(),
+        wrong_request,
+    )
+    .await
+    .expect_err("one-shot purpose must be rejected");
+    assert!(error.to_string().contains("purpose substitution"));
+    assert!(
+        !marker.exists(),
+        "wrong-purpose request must remain zero-spawn"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn production_plugin_hook_cancellation_is_settled_in_application_control_log() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "cancel-hook",
+        r#"id = "cancel-hook"
+name = "Cancel Hook"
+version = "0.1.0"
+
+[[hooks]]
+id = "wait"
+event = "context"
+kind = "context"
+command = "/bin/sh"
+args = ["-c", "sleep 10"]
+declared_effect = "read_only"
+approval = "allow"
+timeout_ms = 15000
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial plugin discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 77)
+            .expect("plugin trust should build");
+    let registration = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed")
+        .registrations
+        .hooks
+        .into_iter()
+        .next()
+        .expect("trusted hook should register");
+    let state = workspace.path().join("state");
+    let execution_temp = workspace.path().join("execution-temp");
+    fs::create_dir_all(state.join("cache")).expect("state root should create");
+    fs::create_dir_all(&execution_temp).expect("execution temp should create");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))
+            .expect("state root should harden");
+        fs::set_permissions(&execution_temp, fs::Permissions::from_mode(0o700))
+            .expect("execution temp should harden");
+    }
+    let planner = Arc::new(RecordingManagedPlanner::default());
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x5b; 32]),
+        planner as Arc<dyn ManagedExecutionPlannerV1>,
+        &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
+    )
+    .expect("managed authority composition should build");
+    let runner = composition.plugin_hook_runner();
+    let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
+    let request = PluginHookExecutionRequest::new(registration, workspace.path().to_path_buf())
+        .with_cancellation(cancellation_owner.handle());
+    let mut execution = Box::pin(runner.execute(request));
+    tokio::select! {
+        result = &mut execution => panic!("hook exited before cancellation: {result:?}"),
+        () = tokio::time::sleep(std::time::Duration::from_millis(150)) => {}
+    }
+    assert!(cancellation_owner.request_cancel());
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), execution)
+        .await
+        .expect("cancelled hook should settle")
+        .expect("cancelled hook should return a terminal receipt");
+    assert!(matches!(
+        outcome.receipt.output.termination,
+        sigil_kernel::ExecutionTerminationCause::Cancelled
+    ));
+    let control_root = state.join("managed/application-control-log");
+    let record_path = control_root
+        .read_dir()
+        .expect("control namespace should exist")
+        .next()
+        .expect("control namespace entry should exist")
+        .expect("control namespace entry should read")
+        .path()
+        .join("records.jsonl");
+    let records = fs::read_to_string(record_path).expect("control records should read");
+    assert!(records.contains("extension_process_settled"));
+    assert!(records.contains("\"cancel_requested\":true"));
 }
 
 fn workspace_mutation_events(

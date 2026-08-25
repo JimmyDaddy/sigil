@@ -24,6 +24,7 @@ use sigil_kernel::resource::{
 /// Closed semantic writer channel (row-aligned with the R71.6 mandatory adapter kinds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StorageWriterChannelV1 {
+    ApplicationControlLog,
     SessionLog,
     SessionLifecycleLog,
     InputHistory,
@@ -46,6 +47,11 @@ impl StorageWriterChannelV1 {
         &'static str,
     ) {
         match self {
+            Self::ApplicationControlLog => (
+                ManagedStorageSemanticOwnerV1::ApplicationControlLog,
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                "application-control-log",
+            ),
             Self::SessionLog => (
                 ManagedStorageSemanticOwnerV1::SessionLog,
                 ManagedStorageCapabilityFamilyV1::AppendLog,
@@ -605,15 +611,7 @@ impl ManagedStorageWriterAdapterV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
         };
-        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-            return Err(ManagedStorageWriterErrorV1::Io(
-                "managed record object ends with a partial JSONL line".to_owned(),
-            ));
-        }
-        let record_count = bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .count() as u64;
+        let record_count = managed_physical_record_count(lease.channel, &bytes)?;
         Ok((bytes.len() as u64, record_count, content_hash(&bytes)))
     }
 
@@ -723,6 +721,41 @@ impl ManagedStorageWriterAdapterV1 {
             })
             .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
     }
+}
+
+fn managed_physical_record_count(
+    channel: StorageWriterChannelV1,
+    bytes: &[u8],
+) -> Result<u64, ManagedStorageWriterErrorV1> {
+    if matches!(
+        channel,
+        StorageWriterChannelV1::AdapterDurableState
+            | StorageWriterChannelV1::AdapterEgressDisclosure
+            | StorageWriterChannelV1::AdapterIdempotencyLedger
+    ) {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+            ManagedStorageWriterErrorV1::Io(
+                "managed adapter snapshot is not a complete JSON object".to_owned(),
+            )
+        })?;
+        return value.is_object().then_some(1).ok_or_else(|| {
+            ManagedStorageWriterErrorV1::Io(
+                "managed adapter snapshot must be a JSON object".to_owned(),
+            )
+        });
+    }
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed record object ends with a partial JSONL line".to_owned(),
+        ));
+    }
+    Ok(bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .count() as u64)
 }
 
 fn content_hash(bytes: &[u8]) -> CanonicalHash {
@@ -1096,6 +1129,31 @@ mod tests {
 
     fn hash(seed: u8) -> CanonicalHash {
         CanonicalHash::from_bytes([seed; 32])
+    }
+
+    #[test]
+    fn r71_sw_physical_frontier_distinguishes_snapshots_from_jsonl() {
+        assert_eq!(
+            managed_physical_record_count(
+                StorageWriterChannelV1::AdapterDurableState,
+                br#"{"schema_version":1,"events":[]}"#,
+            )
+            .expect("complete adapter snapshot"),
+            1
+        );
+        assert!(
+            managed_physical_record_count(
+                StorageWriterChannelV1::AdapterIdempotencyLedger,
+                br#"["not-an-object"]"#,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            managed_physical_record_count(StorageWriterChannelV1::SessionLog, b"{}\n{}\n")
+                .expect("complete JSONL"),
+            2
+        );
+        assert!(managed_physical_record_count(StorageWriterChannelV1::SessionLog, b"{}").is_err());
     }
 
     fn session_log_grant() -> StorageAdmissionGrantV1 {

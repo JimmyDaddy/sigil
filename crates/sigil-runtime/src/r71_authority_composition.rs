@@ -21,6 +21,7 @@ use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash, ResourceJournal
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
 use crate::managed_resource_adapters::{
     RuntimeManagedCommandExecutionRouteV1, RuntimeManagedExtensionExecutionRouteV1,
+    RuntimeManagedPluginHookExecutionRouteV1,
 };
 use crate::managed_storage_writer::{ManagedStorageWriterAdapterV1, StorageWriterChannelV1};
 
@@ -37,8 +38,20 @@ pub struct RuntimeAuthorityCompositionV1 {
     pub tool_authority: sigil_kernel::tool_authority::KernelToolAuthorityV1,
     /// Managed Extension route used by eager/lazy MCP stdio activation.
     pub extension_execution: std::sync::Arc<RuntimeManagedExtensionExecutionRouteV1>,
+    /// Extension-purpose route used exclusively by trusted plugin hook execution.
+    pub plugin_hook_execution: std::sync::Arc<RuntimeManagedPluginHookExecutionRouteV1>,
     /// Managed one-shot command route used by the built-in Bash surface.
     pub command_execution: std::sync::Arc<RuntimeManagedCommandExecutionRouteV1>,
+}
+
+impl RuntimeAuthorityCompositionV1 {
+    /// Creates a hook runner already bound to this composition's Extension-purpose authority.
+    #[must_use]
+    pub fn plugin_hook_runner(&self) -> crate::plugins::PluginHookExecutionRunner {
+        let route: Arc<dyn crate::plugins::ManagedPluginHookExecutionPortV1> =
+            self.plugin_hook_execution.clone();
+        crate::plugins::PluginHookExecutionRunner::new(route)
+    }
 }
 
 impl std::fmt::Debug for RuntimeAuthorityCompositionV1 {
@@ -60,6 +73,8 @@ pub enum RuntimeAuthorityCompositionErrorV1 {
     GrantDeclared(String),
     #[error("durable authority journal failed: {0}")]
     JournalUnavailable(String),
+    #[error("execution configuration failed: {0}")]
+    ExecutionConfigurationInvalid(String),
 }
 
 /// Composes the R71.6 authority surface from verified anchors and declared channels.
@@ -83,6 +98,7 @@ pub fn compose_runtime_authority(
         planner,
         declared,
         None,
+        sigil_kernel::ExecutionConfig::default(),
     )
 }
 
@@ -101,6 +117,11 @@ pub fn compose_runtime_authority_with_product_updater(
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     declared: &[StorageWriterChannelV1],
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
+    let execution_config = sigil_kernel::RootConfig::load(config_path)
+        .map_err(|error| {
+            RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(error.to_string())
+        })?
+        .execution;
     let mut composition = compose_runtime_authority_inner(
         state_anchor,
         execution_temp_root,
@@ -110,6 +131,7 @@ pub fn compose_runtime_authority_with_product_updater(
         Some(Arc::new(
             sigil_updater::ProductUpdaterState::from_cache_root(cache_root),
         )),
+        execution_config,
     )?;
     let configuration_service: Arc<
         dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1,
@@ -140,6 +162,7 @@ fn compose_runtime_authority_inner(
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     declared: &[StorageWriterChannelV1],
     product_updater: Option<Arc<sigil_updater::ProductUpdaterState>>,
+    execution_config: sigil_kernel::ExecutionConfig,
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
     // The real kernel capability broker is the single issuer for this composition: execution
     // bundles and storage admission capabilities are broker-issued (one-shot proofs), never
@@ -239,11 +262,14 @@ fn compose_runtime_authority_inner(
             execution_temp_root.to_path_buf(),
         ),
     );
-    let extension_execution = std::sync::Arc::new(RuntimeManagedExtensionExecutionRouteV1::new(
-        Arc::clone(&planner),
-        Arc::clone(&broker),
-        execution_temp_root.to_path_buf(),
-    ));
+    let extension_execution = std::sync::Arc::new(
+        RuntimeManagedExtensionExecutionRouteV1::new(
+            Arc::clone(&planner),
+            Arc::clone(&broker),
+            execution_temp_root.to_path_buf(),
+        )
+        .with_authority_generation(authority),
+    );
     let command_execution = std::sync::Arc::new(RuntimeManagedCommandExecutionRouteV1::new(
         Arc::clone(&planner),
         Arc::clone(&broker),
@@ -300,6 +326,16 @@ fn compose_runtime_authority_inner(
         )
         .with_artifact_retire_authority(artifact_retire_authority),
     );
+    let plugin_hook_execution = std::sync::Arc::new(
+        RuntimeManagedPluginHookExecutionRouteV1::new(
+            Arc::clone(&extension_execution),
+            execution_config,
+            Arc::clone(&storage_writer),
+        )
+        .map_err(|error| {
+            RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(error.to_string())
+        })?,
+    );
     Ok(RuntimeAuthorityCompositionV1 {
         services,
         storage_writer,
@@ -310,6 +346,7 @@ fn compose_runtime_authority_inner(
             Arc::clone(&broker),
         ),
         extension_execution,
+        plugin_hook_execution,
         command_execution,
     })
 }
@@ -366,6 +403,7 @@ pub fn compose_current_boot_authority(
         instance_hash: CanonicalHash::from_bytes([0x75; 32]),
     };
     let declared = [
+        Ch::ApplicationControlLog,
         Ch::SessionLog,
         Ch::SessionLifecycleLog,
         Ch::InputHistory,

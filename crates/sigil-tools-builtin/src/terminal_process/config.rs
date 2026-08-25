@@ -12,6 +12,7 @@ pub(super) const DEFAULT_CANCEL_GRACE_MS: u64 = 500;
 const DEFAULT_TERMINAL_PTY_ROWS: u16 = 24;
 const DEFAULT_TERMINAL_PTY_COLS: u16 = 80;
 pub const MAX_TERMINAL_INPUT_BYTES: usize = 8 * 1024;
+#[cfg(any(test, feature = "test-support"))]
 pub(super) const TERMINAL_PTY_INPUT_QUEUE_BOUND: usize = 8;
 pub(super) const PTY_CANCEL_POLL_INTERVAL_MS: u64 = 20;
 
@@ -134,6 +135,7 @@ impl TerminalExecutionConfig {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn resolve_pty_execution(
         &self,
         resolved_cwd: &Path,

@@ -613,7 +613,11 @@ impl Session {
     /// Crate-local helper for tests that need a current durable tool-result record.
     #[cfg(test)]
     pub(crate) fn append_test_tool_result(&mut self, result: ToolResult) -> Result<()> {
-        let artifact_store = self.tool_artifact_store();
+        let artifact_store = self.tool_artifact_store().or_else(|| {
+            self.store
+                .as_ref()
+                .map(ToolArtifactStore::for_session_store)
+        });
         let (recorded, _) = ToolResultRecordedV3::capture(
             &result,
             artifact_store.as_ref(),

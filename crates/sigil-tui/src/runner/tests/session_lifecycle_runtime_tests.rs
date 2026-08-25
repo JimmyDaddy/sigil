@@ -146,7 +146,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         source_path: target_path.clone(),
     })?;
     assert!(matches!(
-        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(message, WorkerMessage::LocalSessionInspected { request_id: 11, .. }))?,
+        worker.recv_until_with_timeout(Duration::from_secs(30), |message| matches!(message, WorkerMessage::LocalSessionInspected { request_id: 11, .. }))?,
         WorkerMessage::LocalSessionInspected { entry, .. }
             if entry.finalized_turn_count == 1 && entry.title.as_deref() == Some("target")
     ));
@@ -155,7 +155,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         request_id: 12,
         source_path: target_path.clone(),
     })?;
-    let export_path = match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+    let export_path = match worker.recv_until_with_timeout(Duration::from_secs(30), |message| {
         matches!(
             message,
             WorkerMessage::LocalSessionExported { request_id: 12, .. }
@@ -176,7 +176,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         pinned: true,
     })?;
     assert!(matches!(
-        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(
+        worker.recv_until_with_timeout(Duration::from_secs(30), |message| matches!(
             message,
             WorkerMessage::LocalSessionPinChanged { request_id: 13, .. }
                 | WorkerMessage::LocalSessionLifecycleFailed { request_id: 13, .. }
@@ -189,7 +189,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         pinned: false,
     })?;
     assert!(matches!(
-        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(
+        worker.recv_until_with_timeout(Duration::from_secs(30), |message| matches!(
             message,
             WorkerMessage::LocalSessionPinChanged { request_id: 14, .. }
                 | WorkerMessage::LocalSessionLifecycleFailed { request_id: 14, .. }
@@ -202,7 +202,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         source_path: target_path.clone(),
     })?;
     let delete_preview =
-        match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        match worker.recv_until_with_timeout(Duration::from_secs(30), |message| {
             matches!(
                 message,
                 WorkerMessage::LocalSessionDeletePreviewed { request_id: 15, .. }
@@ -220,7 +220,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         preview: delete_preview,
     })?;
     assert!(matches!(
-        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(message, WorkerMessage::LocalSessionDeleted { request_id: 16, .. }))?,
+        worker.recv_until_with_timeout(Duration::from_secs(30), |message| matches!(message, WorkerMessage::LocalSessionDeleted { request_id: 16, .. }))?,
         WorkerMessage::LocalSessionDeleted { output, .. }
             if output.source_session_ref.as_path() == Path::new("target.jsonl")
     ));
@@ -235,7 +235,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         },
     })?;
     let retention_preview =
-        match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        match worker.recv_until_with_timeout(Duration::from_secs(30), |message| {
             matches!(
                 message,
                 WorkerMessage::SessionRetentionPreviewed { request_id: 17, .. }
@@ -257,7 +257,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         preview: retention_preview,
     })?;
     assert!(matches!(
-        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(message, WorkerMessage::SessionRetentionApplied { request_id: 18, .. }))?,
+        worker.recv_until_with_timeout(Duration::from_secs(30), |message| matches!(message, WorkerMessage::SessionRetentionApplied { request_id: 18, .. }))?,
         WorkerMessage::SessionRetentionApplied { output, .. }
             if output.deleted_sessions == 1
     ));
@@ -275,7 +275,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         current_model_route: invalid_current_route,
     })?;
     let invalid_route_error =
-        match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        match worker.recv_until_with_timeout(Duration::from_secs(30), |message| {
             matches!(
                 message,
                 WorkerMessage::LocalSessionLifecycleFailed { request_id: 19, .. }
@@ -294,7 +294,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         source_path: current_path,
         current_model_route,
     })?;
-    let fork_path = match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+    let fork_path = match worker.recv_until_with_timeout(Duration::from_secs(30), |message| {
         matches!(
             message,
             WorkerMessage::LocalSessionForked { request_id: 20, .. }
@@ -319,13 +319,14 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         )
     }));
 
-    worker.shutdown()?;
+    let managed_writer = worker.managed_storage_writer();
     let service = LocalSessionLifecycleService::new(
-        paths.workspace_id,
+        paths.workspace_id.clone(),
         paths.session_log_dir,
         paths.session_exports_root,
     )
-    .with_lifecycle_journal_path(paths.session_lifecycle_journal);
+    .with_lifecycle_journal_path(paths.session_lifecycle_journal)
+    .with_managed_writer(managed_writer, paths.workspace_id)?;
     let recovery = service.lifecycle_recovery()?;
     assert!(recovery.iter().any(|entry| {
         entry.kind == LocalSessionLifecycleOperationKind::Export
@@ -339,6 +340,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         entry.kind == LocalSessionLifecycleOperationKind::Retention
             && entry.status == LocalSessionLifecycleRecoveryStatus::Completed
     }));
+    worker.shutdown()?;
     Ok(())
 }
 

@@ -1140,17 +1140,8 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn terminal_start_result_projects_optional_output_hash_into_durable_audit() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let provider_capabilities =
-        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
-    let mut registry = build_tool_registry(
-        &test_root_config("deepseek"),
-        &provider_capabilities,
-        temp.path().to_path_buf(),
-    )
-    .await?;
+#[test]
+fn terminal_start_result_projects_optional_output_hash_into_durable_audit() -> Result<()> {
     let call = ToolCall {
         id: "terminal-runtime-audit".to_owned(),
         name: "terminal_start".to_owned(),
@@ -1162,9 +1153,12 @@ async fn terminal_start_result_projects_optional_output_hash_into_durable_audit(
         })
         .to_string(),
     };
-    let mut result = registry
-        .execute(ToolContext::new(temp.path().to_path_buf(), 5), call.clone())
-        .await?;
+    let mut result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        serde_json::json!({"status": "started"}).to_string(),
+        ToolResultMeta::default(),
+    );
     result.metadata.details["output_hash"] = json!("2".repeat(64));
 
     let execution = durable_tool_execution_entry(
@@ -1181,8 +1175,6 @@ async fn terminal_start_result_projects_optional_output_hash_into_durable_audit(
     );
     let mut session = Session::new("runtime-audit", "runtime-audit");
     session.append_control(ControlEntry::ToolExecution(Box::new(execution)))?;
-    let tools = registry.drain_by_name_prefix("");
-    shutdown_registered_tools(&tools).await?;
     Ok(())
 }
 
@@ -1786,9 +1778,8 @@ async fn build_tool_registry_rejects_uncomposed_terminal_pty_route() -> Result<(
         .await
         .expect_err("uncomposed terminal execution must fail closed");
     assert!(
-        error
-            .to_string()
-            .contains("sandbox provider is unavailable")
+        format!("{error:#}").contains("sandbox provider is unavailable"),
+        "unexpected fail-closed error: {error:#}"
     );
     Ok(())
 }

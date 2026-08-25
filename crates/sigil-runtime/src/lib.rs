@@ -272,11 +272,12 @@ pub use plan_review_coordinator::{
     plan_handoff_workspace_snapshot_id, plan_run_rejection_message,
 };
 pub use plugins::{
-    PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
-    PluginHookExecutionAdmissionError, PluginHookExecutionAdmissionErrorCode,
-    PluginHookExecutionOutcome, PluginHookExecutionRequest, PluginHookExecutionRunner,
-    PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
-    discover_workspace_plugins, merge_mcp_server_declarations, merge_plugin_skill_descriptors,
+    ManagedPluginHookExecutionPortV1, ManagedPluginHookExecutionRequestV1, PluginDiscoveryReport,
+    PluginDiscoveryWarning, PluginDiscoveryWarningKind, PluginHookExecutionAdmissionError,
+    PluginHookExecutionAdmissionErrorCode, PluginHookExecutionOutcome, PluginHookExecutionRequest,
+    PluginHookExecutionRunner, PluginHookRegistration, PluginMcpServerRegistration,
+    PluginRegistrations, discover_workspace_plugins, merge_mcp_server_declarations,
+    merge_plugin_skill_descriptors,
 };
 pub use portable_compaction::{
     DeepSeekV4FlashPortableTargetPressure, PortableCompactionEconomicsV2Input,

@@ -353,6 +353,7 @@ impl CaptureTaskState {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn spawn_pty_runtime(
     plan: &TerminalTaskStartPlan,
     size: TerminalPtySize,
@@ -442,6 +443,7 @@ pub(super) fn spawn_pty_runtime(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
     enum WorkerEvent {
         ProcessExited(TerminalTaskStatus),
@@ -641,6 +643,7 @@ async fn join_capture_tasks(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
     enum PtyWorkerEvent {
         CaptureFailed(TerminalCaptureFailure),
@@ -1457,19 +1460,29 @@ pub(super) async fn wait_for_terminal_summary(
 
 #[cfg(unix)]
 pub(super) async fn send_terminate_signal(process_id: u32) -> Result<()> {
-    if send_process_group_signal(process_id, "TERM").await.is_ok() {
-        return Ok(());
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let _ = process_id;
+        bail!("legacy direct terminal cleanup is unavailable in normal builds");
     }
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        if send_process_group_signal(process_id, "TERM").await.is_ok() {
+            return Ok(());
+        }
 
-    let mut command = Command::new("kill");
-    command.arg("-TERM").arg(process_id.to_string());
-    let status =
-        run_terminal_cleanup_command(command, format!("kill -TERM terminal process {process_id}"))
-            .await?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("kill returned non-zero status for terminal process {process_id}");
+        let mut command = Command::new("kill");
+        command.arg("-TERM").arg(process_id.to_string());
+        let status = run_terminal_cleanup_command(
+            command,
+            format!("kill -TERM terminal process {process_id}"),
+        )
+        .await?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("kill returned non-zero status for terminal process {process_id}");
+        }
     }
 }
 

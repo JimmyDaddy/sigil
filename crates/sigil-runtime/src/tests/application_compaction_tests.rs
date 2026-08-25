@@ -1,8 +1,8 @@
 use anyhow::Result;
 use sigil_kernel::{
     ConnectionId, ControlEntry, JsonlSessionStore, ModelMessage, ModelRef, Session,
-    SessionLogEntry, ToolArtifactEncoding, ToolArtifactSensitivity, ToolCall, ToolResult,
-    ToolResultMeta, ToolResultRecordedV3,
+    SessionLogEntry, ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore, ToolCall,
+    ToolResult, ToolResultMeta, ToolResultRecordedV3,
 };
 
 use super::*;
@@ -176,7 +176,10 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let store = JsonlSessionStore::new(&session_path)?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let artifact_store = ToolArtifactStore::for_session_store(&store);
+    let mut session = Session::new("deepseek", "deepseek-v4-flash")
+        .with_store(store)
+        .with_tool_artifact_store_override(artifact_store);
     let root = RootConfig::load(&config_path)?;
     let (_, route) = crate::provider_connections::resolve_default_model_route(&root)?;
     session.append_control(ControlEntry::SessionIdentity {

@@ -109,6 +109,7 @@ impl QuotaJournalV1 {
     fn open(
         path: impl Into<PathBuf>,
         workspace_cap: u64,
+        authorized_previous_cap: Option<u64>,
     ) -> Result<(Self, QuotaBookV1), QuotaErrorV1> {
         let path = path.into();
         let parent = path
@@ -132,22 +133,26 @@ impl QuotaJournalV1 {
                     "unsupported quota journal schema".to_owned(),
                 ));
             }
-            if snapshot.workspace_cap != workspace_cap {
+            let authorized_migration = authorized_previous_cap.is_some_and(|previous| {
+                snapshot.workspace_cap == previous && workspace_cap > previous
+            });
+            if snapshot.workspace_cap != workspace_cap && !authorized_migration {
                 return Err(QuotaErrorV1::Journal(
                     "quota journal workspace cap mismatch".to_owned(),
                 ));
             }
             let mut book = QuotaBookV1::new(workspace_cap);
             verify_and_replay_records(&mut book, &snapshot.records)?;
-            Ok((
-                Self {
-                    path,
-                    workspace_cap,
-                    records: snapshot.records,
-                    poisoned: false,
-                },
-                book,
-            ))
+            let journal = Self {
+                path,
+                workspace_cap,
+                records: snapshot.records,
+                poisoned: false,
+            };
+            if authorized_migration {
+                journal.persist()?;
+            }
+            Ok((journal, book))
         } else {
             let journal = Self {
                 path,
@@ -347,7 +352,20 @@ impl QuotaBookV1 {
 
     /// Opens a quota book backed by an owner-only, hash-chained durable journal.
     pub fn open(path: impl Into<PathBuf>, workspace_cap: u64) -> Result<Self, QuotaErrorV1> {
-        let (journal, mut book) = QuotaJournalV1::open(path, workspace_cap)?;
+        let (journal, mut book) = QuotaJournalV1::open(path, workspace_cap, None)?;
+        book.journal = Some(journal);
+        Ok(book)
+    }
+
+    /// Opens a durable book while authorizing one exact monotonic policy-cap migration.
+    /// Any other cap drift remains fail-closed, including a tampered or decreased cap.
+    pub fn open_with_previous_cap(
+        path: impl Into<PathBuf>,
+        workspace_cap: u64,
+        authorized_previous_cap: u64,
+    ) -> Result<Self, QuotaErrorV1> {
+        let (journal, mut book) =
+            QuotaJournalV1::open(path, workspace_cap, Some(authorized_previous_cap))?;
         book.journal = Some(journal);
         Ok(book)
     }
@@ -768,6 +786,52 @@ mod tests {
         std::fs::write(&path, bytes).expect("tamper journal");
         let error = QuotaBookV1::open(&path, 200).expect_err("tampered journal must fail closed");
         assert!(matches!(error, QuotaErrorV1::Journal(_)));
+    }
+
+    #[test]
+    fn r71_quota_durable_book_authorizes_exact_monotonic_cap_migration() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("quota.json");
+        let prof = profile(100, 10);
+        {
+            let mut book = QuotaBookV1::open(&path, 200).expect("open old durable book");
+            book.reserve_owned("session-a", &prof, 40, 4)
+                .expect("reserve before migration");
+        }
+
+        let migrated = QuotaBookV1::open_with_previous_cap(&path, 300, 200)
+            .expect("authorize exact monotonic migration");
+        assert_eq!(migrated.workspace_used_bytes(), 40);
+        assert_eq!(
+            migrated
+                .reservation_for_owner("session-a")
+                .expect("active reservation survives migration")
+                .reserved_bytes,
+            40
+        );
+        drop(migrated);
+
+        let reopened = QuotaBookV1::open(&path, 300).expect("migration persists current cap");
+        assert_eq!(reopened.workspace_used_bytes(), 40);
+    }
+
+    #[test]
+    fn r71_quota_durable_book_rejects_unapproved_or_decreasing_cap_migration() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("quota.json");
+        drop(QuotaBookV1::open(&path, 200).expect("open durable book"));
+
+        let wrong_previous = QuotaBookV1::open_with_previous_cap(&path, 300, 199)
+            .expect_err("wrong previous cap must fail closed");
+        assert!(matches!(wrong_previous, QuotaErrorV1::Journal(_)));
+
+        let decreasing = QuotaBookV1::open_with_previous_cap(&path, 100, 200)
+            .expect_err("decreasing cap must fail closed");
+        assert!(matches!(decreasing, QuotaErrorV1::Journal(_)));
+
+        let strict_drift = QuotaBookV1::open(&path, 300)
+            .expect_err("strict open must reject undeclared cap drift");
+        assert!(matches!(strict_drift, QuotaErrorV1::Journal(_)));
     }
 
     #[test]

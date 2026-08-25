@@ -399,23 +399,29 @@ impl ResourceJournalFileV1 {
     /// Returns grant identities with an admitted namespace that has no durable settlement yet.
     /// A restarted authority must not silently reuse such a physical namespace.
     pub fn unsettled_storage_grants(&self) -> std::collections::BTreeSet<String> {
-        let mut pending = std::collections::BTreeSet::new();
-        for durable in &self.records {
-            match &durable.payload {
-                ResourceJournalEventV1::StorageNamespaceAdmitted { grant_hash, .. } => {
-                    let key = grant_hash.to_hex();
-                    pending.insert(key);
-                }
-                ResourceJournalEventV1::GenerationSettled { grant_hash, .. } => {
-                    pending.remove(&grant_hash.to_hex());
-                }
-                ResourceJournalEventV1::RecoveryOperationSettled { grant_hash, .. } => {
-                    pending.remove(&grant_hash.to_hex());
-                }
-                _ => {}
-            }
-        }
-        pending
+        let (admissions, settled_namespaces) = self.storage_admission_state();
+        admissions
+            .into_iter()
+            .filter(|admission| !settled_namespaces.contains(&admission.namespace_hash.to_hex()))
+            .map(|admission| admission.grant_hash.to_hex())
+            .collect()
+    }
+
+    /// Returns exact namespace identities whose admission lacks a durable settlement.
+    /// Grant identity alone is insufficient because one durable grant can own many sequential
+    /// (and, for session-scoped writers, concurrent) namespaces.
+    pub fn unsettled_storage_namespaces(&self) -> std::collections::BTreeMap<String, String> {
+        let (admissions, settled_namespaces) = self.storage_admission_state();
+        admissions
+            .into_iter()
+            .filter(|admission| !settled_namespaces.contains(&admission.namespace_hash.to_hex()))
+            .map(|admission| {
+                (
+                    admission.namespace_hash.to_hex(),
+                    admission.grant_hash.to_hex(),
+                )
+            })
+            .collect()
     }
 
     /// Replays every storage admission and its settlement frontier for authority startup.
@@ -425,8 +431,30 @@ impl ResourceJournalFileV1 {
         Vec<ResourceJournalStorageAdmissionV1>,
         std::collections::BTreeSet<String>,
     ) {
+        let mut observations_by_record = BTreeMap::new();
+        let mut namespaces_by_frontier = BTreeMap::new();
+        for durable in &self.records {
+            if let ResourceJournalEventV1::DomainStoragePhysicalFrontierObserved {
+                grant_hash,
+                namespace_hash,
+                frontier_hash,
+                ..
+            } = &durable.payload
+            {
+                observations_by_record.insert(
+                    durable.record.record_hash.to_hex(),
+                    (*grant_hash, *namespace_hash, *frontier_hash),
+                );
+                namespaces_by_frontier.insert(
+                    (grant_hash.to_hex(), frontier_hash.to_hex()),
+                    *namespace_hash,
+                );
+            }
+        }
+
         let mut admissions = Vec::new();
         let mut settled = std::collections::BTreeSet::new();
+        let mut pending_by_grant: BTreeMap<String, Vec<CanonicalHash>> = BTreeMap::new();
         for durable in &self.records {
             match &durable.payload {
                 ResourceJournalEventV1::StorageNamespaceAdmitted {
@@ -435,24 +463,120 @@ impl ResourceJournalFileV1 {
                     namespace_hash,
                     grant,
                     request,
-                } => admissions.push(ResourceJournalStorageAdmissionV1 {
-                    admission_sequence: durable.record.sequence,
-                    grant_hash: *grant_hash,
-                    handle_id: handle_id.clone(),
-                    namespace_hash: *namespace_hash,
-                    grant: (**grant).clone(),
-                    request: (**request).clone(),
-                }),
-                ResourceJournalEventV1::GenerationSettled { grant_hash, .. } => {
-                    settled.insert(grant_hash.to_hex());
+                } => {
+                    admissions.push(ResourceJournalStorageAdmissionV1 {
+                        admission_sequence: durable.record.sequence,
+                        grant_hash: *grant_hash,
+                        handle_id: handle_id.clone(),
+                        namespace_hash: *namespace_hash,
+                        grant: (**grant).clone(),
+                        request: (**request).clone(),
+                    });
+                    pending_by_grant
+                        .entry(grant_hash.to_hex())
+                        .or_default()
+                        .push(*namespace_hash);
                 }
-                ResourceJournalEventV1::RecoveryOperationSettled { grant_hash, .. } => {
-                    settled.insert(grant_hash.to_hex());
+                ResourceJournalEventV1::GenerationSettled {
+                    grant_hash,
+                    physical_frontier_hash,
+                    physical_observation_record_hash,
+                    ..
+                } => {
+                    let namespace = physical_observation_record_hash
+                        .and_then(|record_hash| {
+                            observations_by_record
+                                .get(&record_hash.to_hex())
+                                .filter(|(current, _, frontier)| {
+                                    current == grant_hash
+                                        && physical_frontier_hash
+                                            .is_none_or(|expected| expected == *frontier)
+                                })
+                                .map(|(_, namespace, _)| *namespace)
+                        })
+                        .or_else(|| {
+                            physical_frontier_hash.and_then(|frontier| {
+                                namespaces_by_frontier
+                                    .get(&(grant_hash.to_hex(), frontier.to_hex()))
+                                    .copied()
+                            })
+                        })
+                        // Legacy/probe settlements carry no physical binding. They are safe to
+                        // associate only with the most recent still-pending admission.
+                        .or_else(|| {
+                            pending_by_grant
+                                .get(&grant_hash.to_hex())
+                                .and_then(|pending| pending.last().copied())
+                        });
+                    if let Some(namespace) = namespace {
+                        settled.insert(namespace.to_hex());
+                        remove_pending_namespace(&mut pending_by_grant, *grant_hash, namespace);
+                    }
+                }
+                ResourceJournalEventV1::RecoveryOperationSettled {
+                    grant_hash,
+                    settled_frontier_hash,
+                    ..
+                } => {
+                    if let Some(namespace) = namespaces_by_frontier
+                        .get(&(grant_hash.to_hex(), settled_frontier_hash.to_hex()))
+                        .copied()
+                    {
+                        settled.insert(namespace.to_hex());
+                        remove_pending_namespace(&mut pending_by_grant, *grant_hash, namespace);
+                    }
                 }
                 _ => {}
             }
         }
         (admissions, settled)
+    }
+
+    /// Returns a terminal record only when it belongs to this exact admission instance.
+    pub fn settled_storage_record_for_admission(
+        &self,
+        grant_hash: CanonicalHash,
+        namespace_hash: CanonicalHash,
+        admission_sequence: u64,
+    ) -> Option<ResourceJournalRecordV1> {
+        let observations = self.storage_physical_frontier_records(grant_hash, namespace_hash);
+        let observation_hashes = observations
+            .iter()
+            .map(|(record, ..)| record.record_hash)
+            .collect::<std::collections::BTreeSet<_>>();
+        let frontier_hashes = observations
+            .iter()
+            .map(|(_, _, _, _, frontier_hash)| *frontier_hash)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        self.records.iter().rev().find_map(|durable| {
+            if durable.record.sequence <= admission_sequence {
+                return None;
+            }
+            match &durable.payload {
+                ResourceJournalEventV1::GenerationSettled {
+                    grant_hash: current,
+                    physical_frontier_hash,
+                    physical_observation_record_hash,
+                    ..
+                } if *current == grant_hash
+                    && physical_observation_record_hash
+                        .is_some_and(|hash| observation_hashes.contains(&hash))
+                    && physical_frontier_hash
+                        .is_none_or(|hash| frontier_hashes.contains(&hash)) =>
+                {
+                    Some(durable.record.clone())
+                }
+                ResourceJournalEventV1::RecoveryOperationSettled {
+                    grant_hash: current,
+                    settled_frontier_hash,
+                    ..
+                } if *current == grant_hash && frontier_hashes.contains(settled_frontier_hash) => {
+                    Some(durable.record.clone())
+                }
+                _ => None,
+            }
+        })
     }
 
     pub fn settled_storage_record(
@@ -589,6 +713,66 @@ impl ResourceJournalFileV1 {
             .collect()
     }
 
+    /// Returns the recovery chain for one exact namespace admission. Recovery event variants
+    /// after the first record are linked by hashes but historically carry only `grant_hash`, so
+    /// the namespace boundary is reconstructed from each `DomainStorageFailureObserved` opener.
+    pub fn storage_recovery_records_for_admission(
+        &self,
+        grant_hash: CanonicalHash,
+        namespace_hash: CanonicalHash,
+    ) -> Vec<(ResourceJournalRecordV1, ResourceJournalEventV1)> {
+        let mut in_target_chain = false;
+        let mut records = Vec::new();
+        for durable in &self.records {
+            match &durable.payload {
+                ResourceJournalEventV1::DomainStorageFailureObserved {
+                    grant_hash: current,
+                    namespace_hash: current_namespace,
+                    ..
+                } if *current == grant_hash => {
+                    in_target_chain = *current_namespace == namespace_hash;
+                    if in_target_chain {
+                        records.push((durable.record.clone(), durable.payload.clone()));
+                    }
+                }
+                ResourceJournalEventV1::DomainStorageResolutionStartedShadow {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::RecoveryOperationPrepared {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::DomainStorageResolutionPrepared {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::RecoveryOperationSettled {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::DomainStorageResolutionSettled {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::DomainBlockerProjected {
+                    grant_hash: current,
+                    ..
+                } if *current == grant_hash && in_target_chain => {
+                    records.push((durable.record.clone(), durable.payload.clone()));
+                    if matches!(
+                        &durable.payload,
+                        ResourceJournalEventV1::DomainBlockerProjected { .. }
+                    ) {
+                        in_target_chain = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        records
+    }
+
     /// Appends one event using the exact current tail as the precondition and persists it.
     pub fn append_event(
         &mut self,
@@ -663,6 +847,23 @@ impl ResourceJournalFileV1 {
             ))
         })?;
         Ok(())
+    }
+}
+
+fn remove_pending_namespace(
+    pending_by_grant: &mut BTreeMap<String, Vec<CanonicalHash>>,
+    grant_hash: CanonicalHash,
+    namespace_hash: CanonicalHash,
+) {
+    let grant_key = grant_hash.to_hex();
+    let remove_grant = if let Some(pending) = pending_by_grant.get_mut(&grant_key) {
+        pending.retain(|current| *current != namespace_hash);
+        pending.is_empty()
+    } else {
+        false
+    };
+    if remove_grant {
+        pending_by_grant.remove(&grant_key);
     }
 }
 

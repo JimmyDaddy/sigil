@@ -11,7 +11,7 @@ mod unix {
         BuiltinToolPaths, ScratchDeleteOutcome, ScratchGcConfig, ScratchGcReport,
         ScratchNamespaceControl, ScratchNamespaceProvider, ScratchNamespaceProviderLease,
         ScratchQuota, ScratchUsage, SessionScratchProvision, TerminalExecutionConfig,
-        UnavailableManagedCommandExecutionPortV1,
+        TerminalProcessManager, TerminalStartRequest, UnavailableManagedCommandExecutionPortV1,
         register_builtin_tools_with_managed_execution_and_terminal_config,
     };
 
@@ -131,5 +131,40 @@ mod unix {
     #[tokio::test]
     async fn shipping_default_registration_rejects_pty_without_spawning() -> Result<()> {
         assert_fail_closed(true).await
+    }
+
+    async fn assert_public_manager_constructor_fails_closed(pty: bool) -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let manager = TerminalProcessManager::new(workspace.path())?;
+        let request = TerminalStartRequest {
+            task_id: None,
+            command: "touch spawned-by-public-manager".to_owned(),
+            cwd: None,
+            shell: None,
+            env: Default::default(),
+        };
+        let error = if pty {
+            manager.start_pty(request, None).await
+        } else {
+            manager.start(request).await
+        }
+        .expect_err("normal-build public manager constructor must require managed authority");
+        assert!(error.to_string().contains("managed terminal launch failed"));
+        assert!(matches!(
+            error.downcast_ref::<sigil_kernel::managed_execution::ManagedExecutionErrorV1>(),
+            Some(sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable)
+        ));
+        assert!(!workspace.path().join("spawned-by-public-manager").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn normal_build_public_manager_rejects_non_pty_without_spawning() -> Result<()> {
+        assert_public_manager_constructor_fails_closed(false).await
+    }
+
+    #[tokio::test]
+    async fn normal_build_public_manager_rejects_pty_without_spawning() -> Result<()> {
+        assert_public_manager_constructor_fails_closed(true).await
     }
 }

@@ -1110,7 +1110,7 @@ pub struct ToolResultRecordedV2 {
 impl ToolResultRecordedV3 {
     /// Builds a bounded terminal fallback V3 record when the regular projection fails
     /// (RFC-0062 10.5); only a dead session writer may escalate to the control plane.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn terminal_fallback(
         result: &ToolResult,
         sensitivity: ToolArtifactSensitivity,
@@ -2563,6 +2563,19 @@ pub trait ToolArtifactStoreBackendV1: std::fmt::Debug + Send + Sync {
         let _ = artifact_ref;
         self.read_blob(content_sha256)
     }
+    fn availability(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+        content_sha256: &str,
+    ) -> ToolArtifactAvailability {
+        match self.read_artifact(artifact_ref, content_sha256) {
+            Ok(bytes) if stable_event_hash(&bytes) == content_sha256 => {
+                ToolArtifactAvailability::Available
+            }
+            Ok(_) => ToolArtifactAvailability::HashMismatch,
+            Err(_) => ToolArtifactAvailability::Missing,
+        }
+    }
     fn resolve(&self, artifact_ref: &ToolArtifactRefV1) -> Result<ToolArtifactDescriptorV1>;
     fn read_page(
         &self,
@@ -3660,14 +3673,7 @@ impl ToolArtifactStore {
             return ToolArtifactAvailability::PolicyRevoked;
         }
         if let Some(backend) = &self.backend {
-            return match backend.read_artifact(&descriptor.artifact_ref, &descriptor.content_sha256)
-            {
-                Ok(bytes) if stable_event_hash(&bytes) == descriptor.content_sha256 => {
-                    ToolArtifactAvailability::Available
-                }
-                Ok(_) => ToolArtifactAvailability::HashMismatch,
-                Err(_) => ToolArtifactAvailability::Missing,
-            };
+            return backend.availability(&descriptor.artifact_ref, &descriptor.content_sha256);
         }
         #[cfg(not(any(test, feature = "test-support")))]
         return ToolArtifactAvailability::Missing;

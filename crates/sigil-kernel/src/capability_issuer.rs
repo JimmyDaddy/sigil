@@ -337,6 +337,19 @@ impl KernelCapabilityBrokerV1 {
         proof
     }
 
+    /// Seals an Extension-purpose proof only from a materialized current-schema admission.
+    /// Generic one-shot/terminal/code-intel proofs cannot enter this constructor.
+    pub fn seal_extension_execution_proof(
+        &self,
+        admission: &crate::extension_admission::ExtensionProcessAdmissionV1,
+    ) -> SealedExecutionAdmissionProofV1 {
+        self.seal_execution_proof(
+            ProofKindV1::ExecutionExtension,
+            "extension-process-admission",
+            admission.physical_attempt_id.as_str().as_bytes().to_vec(),
+        )
+    }
+
     /// Seals a storage namespace admission proof carrying the authority-declared family the
     /// handle will bind.
     pub fn seal_storage_namespace_proof(

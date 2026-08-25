@@ -1,12 +1,12 @@
 # RFC-0071：Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1
 
-状态：gated（2026-08-25 implementation-completeness review；R71.0–R71.8 的历史 candidate/qualification evidence 保留，但当前 release decision 受新增 implementation findings 约束）
+状态：qualification candidate（2026-08-26；implementation-completeness findings 已闭合，等待最终 clean exact-SHA local full 与 five-platform qualification）
 
-> 当前审查覆盖与逐项回应见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。截至最新 review slice，builtin normal-build Terminal registration 已强制使用 managed terminal port，未组合 authority 时 PTY/非 PTY 均以 typed `ProviderUnavailable` fail closed；plugin hook normal-build 已改为 managed command port；negative gate 已增加 registration ownership invariant；authority journal replay 已修复 settled 历史 admission 在 source-bound grant 轮换时的 false corruption，但 pending admission 仍严格要求 exact binding 并进入 recovery。历史 R71.0–R71.8 qualification evidence 与所有复核轮次仍保留，但 artifact/quota recovery qualification、最终 clean exact-SHA full/five-platform evidence 仍未闭合，因此当前状态继续为 `gated / partial / not frozen`，不得标记 `Implemented/Frozen`。
+> 当前审查覆盖与逐项回应见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十二轮已关闭 Terminal public-manager ownership、plugin Extension-purpose admission/control、artifact retire frontier/GC/prune、durable owner quota/replay、storage physical-frontier/recovery、task/parent/TUI verification 及 test-feature 污染等剩余 implementation findings；全 workspace、strict clippy、inventory 与 negative dependency gates 已通过。历史 R71.0–R71.8 qualification evidence 与所有复核轮次继续保留，但不得替代本次候选的 exact-SHA 证据；只有最终 clean/pushed SHA 的 local full 与五平台 workflow 全绿后，状态才可改为 `Implemented/Frozen`。
 
 创建日期：2026-08-23
 
-修订日期：2026-08-25
+修订日期：2026-08-26
 
 依赖：
 

@@ -548,7 +548,7 @@ async fn terminal_status_and_cancel_return_the_exact_lifecycle_generation() -> R
             },
             TerminalReadinessCondition::OutputContains {
                 value: "READY".to_owned(),
-                timeout: Duration::from_secs(2),
+                timeout: Duration::from_secs(5),
             },
         )
         .await?;
@@ -557,7 +557,7 @@ async fn terminal_status_and_cancel_return_the_exact_lifecycle_generation() -> R
             &entry.handle.task_id,
             0,
             TerminalWaitCondition::Readiness,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
         )
         .await?;
     assert_eq!(

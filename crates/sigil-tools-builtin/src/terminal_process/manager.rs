@@ -17,9 +17,26 @@ pub struct TerminalProcessManager {
     preview_limit_bytes: usize,
     artifact_limits: TerminalArtifactLimits,
     cancel_grace: Duration,
-    managed_execution: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
+    execution_owner: TerminalExecutionOwnerV1,
     /// RFC-0062 14.1: shared task-scoped scratch leases; released when a task terminalizes.
     scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
+}
+
+#[derive(Clone)]
+enum TerminalExecutionOwnerV1 {
+    Managed(Arc<dyn crate::ManagedTerminalExecutionPortV1>),
+    #[cfg(any(test, feature = "test-support"))]
+    LegacyDirect,
+}
+
+#[cfg(test)]
+fn default_terminal_execution_owner() -> TerminalExecutionOwnerV1 {
+    TerminalExecutionOwnerV1::LegacyDirect
+}
+
+#[cfg(not(test))]
+fn default_terminal_execution_owner() -> TerminalExecutionOwnerV1 {
+    TerminalExecutionOwnerV1::Managed(Arc::new(crate::UnavailableManagedCommandExecutionPortV1))
 }
 
 impl TerminalProcessManager {
@@ -81,20 +98,26 @@ impl TerminalProcessManager {
             preview_limit_bytes: DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES,
             artifact_limits: TerminalArtifactLimits::default(),
             cancel_grace: Duration::from_millis(DEFAULT_CANCEL_GRACE_MS),
-            managed_execution: None,
+            execution_owner: default_terminal_execution_owner(),
             scratch_leases: None,
         })
     }
 
     /// Binds the production terminal lifecycle to the runtime-owned managed execution port.
     ///
-    /// The legacy constructor remains available for isolated unit fixtures; production boot
-    /// injects this port so terminal startup cannot silently select an `ExecutionBackend`.
+    /// Normal-build public constructors always hold a managed owner, including when Cargo unifies
+    /// test-support features for a workspace test build.
     pub fn with_managed_execution(
         mut self,
         managed_execution: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
     ) -> Self {
-        self.managed_execution = Some(managed_execution);
+        self.execution_owner = TerminalExecutionOwnerV1::Managed(managed_execution);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_legacy_execution_for_test_support(mut self) -> Self {
+        self.execution_owner = TerminalExecutionOwnerV1::LegacyDirect;
         self
     }
 
@@ -158,17 +181,32 @@ impl TerminalProcessManager {
         let plan = self
             .prepare_start(request, TerminalStartMode::LocalProcess)
             .await?;
-        if let Some(managed_execution) = &self.managed_execution {
-            return self
-                .start_managed_with_readiness_and_sink(
+        match &self.execution_owner {
+            TerminalExecutionOwnerV1::Managed(managed_execution) => {
+                self.start_managed_with_readiness_and_sink(
                     managed_execution,
                     plan,
                     readiness,
                     lifecycle_sink,
                     None,
                 )
-                .await;
+                .await
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            TerminalExecutionOwnerV1::LegacyDirect => {
+                self.start_legacy_with_readiness_and_sink(plan, readiness, lifecycle_sink)
+                    .await
+            }
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    async fn start_legacy_with_readiness_and_sink(
+        &self,
+        plan: TerminalTaskStartPlan,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<TerminalTaskEntry> {
         // The lifecycle owner and its watch channel exist before the child can emit or exit.
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
@@ -305,28 +343,42 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     ) -> Result<TerminalTaskEntry> {
-        let managed_execution = self.managed_execution.clone();
-        let plan = self
-            .prepare_start(
-                request,
-                if managed_execution.is_some() {
-                    TerminalStartMode::ManagedPty
-                } else {
-                    TerminalStartMode::Pty
-                },
-            )
-            .await?;
-        if let Some(managed_execution) = managed_execution {
-            return self
-                .start_managed_with_readiness_and_sink(
-                    &managed_execution,
+        match &self.execution_owner {
+            TerminalExecutionOwnerV1::Managed(managed_execution) => {
+                let plan = self
+                    .prepare_start(request, TerminalStartMode::ManagedPty)
+                    .await?;
+                self.start_managed_with_readiness_and_sink(
+                    managed_execution,
                     plan,
                     readiness,
                     lifecycle_sink,
                     Some(pty_size.unwrap_or_default()),
                 )
-                .await;
+                .await
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            TerminalExecutionOwnerV1::LegacyDirect => {
+                let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
+                self.start_legacy_pty_with_readiness_and_sink(
+                    plan,
+                    pty_size,
+                    readiness,
+                    lifecycle_sink,
+                )
+                .await
+            }
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    async fn start_legacy_pty_with_readiness_and_sink(
+        &self,
+        plan: TerminalTaskStartPlan,
+        pty_size: Option<TerminalPtySize>,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<TerminalTaskEntry> {
         // Construct the observer before the PTY child can emit or exit.
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
@@ -797,7 +849,7 @@ impl TerminalProcessManager {
             });
         }
         let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
-            bail!("managed terminal process does not expose interactive input without a PTY");
+            bail!("terminal task backend does not support input: process");
         };
 
         let input_tx = io_control
@@ -1124,6 +1176,7 @@ impl TerminalProcessManager {
         let env = request.env;
         let execution = match mode {
             TerminalStartMode::LocalProcess => local_process_execution(),
+            #[cfg(any(test, feature = "test-support"))]
             TerminalStartMode::Pty => self
                 .terminal_execution
                 .resolve_pty_execution(&resolved_cwd.absolute, &shell, &command, &env)?
@@ -1249,6 +1302,7 @@ pub(super) fn should_publish_lifecycle_event(
 #[derive(Debug, Clone, Copy)]
 enum TerminalStartMode {
     LocalProcess,
+    #[cfg(any(test, feature = "test-support"))]
     Pty,
     ManagedPty,
 }

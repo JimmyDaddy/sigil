@@ -50,7 +50,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
-sigil-tools-builtin = { path = "../sigil-tools-builtin", features = ["test-support"] }
+sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 tokio.workspace = true
 
 [lints]

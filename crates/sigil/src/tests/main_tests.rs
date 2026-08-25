@@ -1500,18 +1500,18 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     let root_config = RootConfig::load(&config_path)?;
     let paths =
         sigil_runtime::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
-    let session_dir = paths.session_log_dir;
+    let session_dir = paths.state_root.join("managed/session-log");
     let entries = fs::read_dir(&session_dir)?
         .collect::<std::io::Result<Vec<_>>>()?
         .into_iter()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter(|entry| entry.path().is_dir())
         .collect::<Vec<_>>();
     assert_eq!(
         entries.len(),
         1,
         "run_command should create one session log"
     );
-    let session_path = entries[0].path();
+    let session_path = entries[0].path().join("records.jsonl");
     assert_eq!(
         session_path.extension().and_then(|ext| ext.to_str()),
         Some("jsonl")

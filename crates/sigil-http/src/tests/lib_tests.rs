@@ -6633,7 +6633,10 @@ fn crate_dependency_boundary_excludes_tui_and_unrelated_sigil_crates() {
                 "dependencies".to_owned(),
                 "sigil-resource-authority".to_owned(),
             ),
-            ("dependencies".to_owned(), "sigil-runtime".to_owned())
+            ("dependencies".to_owned(), "sigil-runtime".to_owned()),
+            // Test-only kernel fixtures enable the explicit `test-support` feature; this edge
+            // does not add a second shipping dependency or weaken the crate boundary.
+            ("dev-dependencies".to_owned(), "sigil-kernel".to_owned())
         ]
     );
 }

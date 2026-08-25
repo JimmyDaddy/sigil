@@ -122,7 +122,10 @@ impl TerminalTaskControlHandle {
 
     #[cfg(test)]
     pub(crate) fn managed_execution_is_bound(&self) -> bool {
-        self.managers.managed_execution.is_some()
+        matches!(
+            self.managers.execution_owner,
+            TerminalManagerExecutionOwnerV1::Managed(_)
+        )
     }
 
     /// Cancels one task through the exact process manager that admitted it.
@@ -168,14 +171,26 @@ impl TerminalTaskControlHandle {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct TerminalProcessManagers {
     terminal_execution_config: TerminalExecutionConfig,
-    managed_execution: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
+    execution_owner: TerminalManagerExecutionOwnerV1,
     lifecycle_route: Option<TerminalLifecycleRoute>,
     scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
     managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
     terminal_read_guards: StdMutex<TerminalReadGuardState>,
+}
+
+pub(crate) enum TerminalManagerExecutionOwnerV1 {
+    Managed(Arc<dyn crate::ManagedTerminalExecutionPortV1>),
+    #[cfg(any(test, feature = "test-support"))]
+    LegacyDirect,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for TerminalProcessManagers {
+    fn default() -> Self {
+        Self::new_legacy(TerminalExecutionConfig::default())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -285,10 +300,13 @@ pub enum TerminalLifecycleRoute {
 }
 
 impl TerminalProcessManagers {
-    pub(crate) fn new(terminal_execution_config: TerminalExecutionConfig) -> Self {
+    pub(crate) fn new_managed(
+        terminal_execution_config: TerminalExecutionConfig,
+        managed_execution: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+    ) -> Self {
         Self {
             terminal_execution_config,
-            managed_execution: None,
+            execution_owner: TerminalManagerExecutionOwnerV1::Managed(managed_execution),
             lifecycle_route: None,
             scratch_leases: None,
             terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
@@ -296,12 +314,16 @@ impl TerminalProcessManagers {
         }
     }
 
-    pub(crate) fn with_managed_execution(
-        mut self,
-        managed_execution: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
-    ) -> Self {
-        self.managed_execution = managed_execution;
-        self
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_legacy(terminal_execution_config: TerminalExecutionConfig) -> Self {
+        Self {
+            terminal_execution_config,
+            execution_owner: TerminalManagerExecutionOwnerV1::LegacyDirect,
+            lifecycle_route: None,
+            scratch_leases: None,
+            terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
+            managers: StdMutex::new(BTreeMap::new()),
+        }
     }
 
     pub(crate) fn with_lifecycle_route(
@@ -382,16 +404,22 @@ impl TerminalProcessManagers {
             return Ok(Arc::clone(manager));
         }
 
-        let mut manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
+        let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
             &workspace_root,
             artifact_root,
             artifact_label_root.to_path_buf(),
             self.terminal_execution_config.clone(),
         )?
         .with_scratch_task_leases(self.scratch_leases.clone());
-        if let Some(managed_execution) = &self.managed_execution {
-            manager = manager.with_managed_execution(Arc::clone(managed_execution));
-        }
+        let manager = match &self.execution_owner {
+            TerminalManagerExecutionOwnerV1::Managed(managed_execution) => {
+                manager.with_managed_execution(Arc::clone(managed_execution))
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            TerminalManagerExecutionOwnerV1::LegacyDirect => {
+                manager.with_legacy_execution_for_test_support()
+            }
+        };
         let manager = Arc::new(manager);
         managers.insert(key, Arc::clone(&manager));
         Ok(manager)

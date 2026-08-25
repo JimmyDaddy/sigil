@@ -20,6 +20,26 @@ use sigil_kernel::{
 
 use super::*;
 
+#[test]
+fn managed_lifecycle_namespace_key_preserves_safe_ids_and_bounds_long_ids() {
+    assert_eq!(
+        managed_lifecycle_namespace_key("workspace-safe"),
+        "workspace-safe"
+    );
+    let long = format!("workspace-{}", "x".repeat(96));
+    let first = managed_lifecycle_namespace_key(&long);
+    let second = managed_lifecycle_namespace_key(&long);
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 63);
+    assert!(first.starts_with("ws-"));
+    assert!(
+        first
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    );
+    assert_ne!(first, managed_lifecycle_namespace_key(&(long + "-other")));
+}
+
 #[derive(Debug)]
 struct TestScratchProvider {
     root: PathBuf,

@@ -11,9 +11,11 @@ use sigil_kernel::{
 use sigil_runtime::LocalSessionLifecycleService;
 
 use super::super::{
+    ManagedTuiArtifactStoreLease,
     worker_event::{WorkerEvent, WorkerEventPayloadSender},
     worker_loop::ArtifactGcTaskManager,
 };
+use super::common::test_authority_composition;
 
 #[test]
 fn gc_task_runs_behind_one_typed_completion_event() -> Result<()> {
@@ -30,7 +32,13 @@ fn gc_task_runs_behind_one_typed_completion_event() -> Result<()> {
         kind: "artifact_gc_fixture".to_owned(),
         data: serde_json::Value::Null,
     }))?;
-    let artifact_store = ToolArtifactStore::for_session_store(&session_store);
+    let (composition, _authority_root) = test_authority_composition(temp.path())?;
+    let artifact_lease = ManagedTuiArtifactStoreLease::acquire(
+        Arc::clone(&composition.storage_writer),
+        &session_path,
+        &sigil_kernel::stable_event_uuid("sigil-session-path", &session_path.to_string_lossy()),
+    )?;
+    let artifact_store: ToolArtifactStore = artifact_lease.store();
     let descriptor = artifact_store.capture_text(
         "call-1",
         "shell",
@@ -41,9 +49,13 @@ fn gc_task_runs_behind_one_typed_completion_event() -> Result<()> {
         active_result_refs: [descriptor.artifact_ref].into_iter().collect(),
         ..ToolArtifactGcRootsV1::default()
     };
+    let session_scope_id = artifact_store.session_scope_id().to_owned();
+    drop(artifact_store);
+    drop(artifact_lease);
     let lifecycle =
         LocalSessionLifecycleService::new("workspace", &sessions, temp.path().join("exports"))
-            .with_lifecycle_journal_path(temp.path().join("lifecycle.jsonl"));
+            .with_lifecycle_journal_path(temp.path().join("lifecycle.jsonl"))
+            .with_managed_writer(Arc::clone(&composition.storage_writer), "workspace")?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -58,7 +70,7 @@ fn gc_task_runs_behind_one_typed_completion_event() -> Result<()> {
     tasks.start(
         &runtime,
         7,
-        artifact_store.session_scope_id().to_owned(),
+        session_scope_id,
         attachment,
         None,
         WorkerEventPayloadSender::artifact_gc(event_tx),

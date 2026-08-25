@@ -366,6 +366,33 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         read_blob_at(&store, content_sha256)
     }
 
+    fn availability(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+        content_sha256: &str,
+    ) -> sigil_kernel::session::ToolArtifactAvailability {
+        use sigil_kernel::session::ToolArtifactAvailability;
+
+        let outcome = (|| -> Result<Vec<u8>> {
+            artifact_ref.validate()?;
+            let (_operation, _staging, store) = self.with_mutation_lock()?;
+            let lock_path = store
+                .join("locks")
+                .join(format!("{}.lock", artifact_ref.artifact_id));
+            let lock = open_private_lock(&lock_path)?;
+            lock.lock_shared()
+                .context("failed to acquire managed artifact availability lease")?;
+            read_blob_bytes_at(&store, content_sha256)
+        })();
+        match outcome {
+            Ok(bytes) if hash_bytes(&bytes) == content_sha256 => {
+                ToolArtifactAvailability::Available
+            }
+            Ok(_) => ToolArtifactAvailability::HashMismatch,
+            Err(_) => ToolArtifactAvailability::Missing,
+        }
+    }
+
     fn resolve(&self, artifact_ref: &ToolArtifactRefV1) -> Result<ToolArtifactDescriptorV1> {
         artifact_ref.validate()?;
         let (_operation, _staging, store) = self.with_mutation_lock()?;
@@ -859,6 +886,14 @@ fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 fn read_blob_at(store_root: &Path, content_sha256: &str) -> Result<Vec<u8>> {
+    let bytes = read_blob_bytes_at(store_root, content_sha256)?;
+    if hash_bytes(&bytes) != content_sha256 {
+        bail!("managed artifact blob hash mismatch");
+    }
+    Ok(bytes)
+}
+
+fn read_blob_bytes_at(store_root: &Path, content_sha256: &str) -> Result<Vec<u8>> {
     let path = blob_path(store_root, content_sha256)?;
     let metadata = fs::symlink_metadata(&path)?;
     if !metadata.is_file()
@@ -867,11 +902,7 @@ fn read_blob_at(store_root: &Path, content_sha256: &str) -> Result<Vec<u8>> {
     {
         bail!("managed artifact blob is not a bounded regular file");
     }
-    let bytes = read_no_follow(&path)?;
-    if hash_bytes(&bytes) != content_sha256 {
-        bail!("managed artifact blob hash mismatch");
-    }
-    Ok(bytes)
+    read_no_follow(&path)
 }
 
 fn canonical_sha256(bytes: &[u8]) -> sigil_kernel::resource::CanonicalHash {

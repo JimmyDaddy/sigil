@@ -837,9 +837,9 @@ pub fn conversation_display_page(
             limit,
             current_workspace_snapshot_id,
         );
-        return Err(ConversationDisplayProjectionError::from(anyhow!(
+        Err(ConversationDisplayProjectionError::from(anyhow!(
             "conversation display requires an authority-managed artifact route"
-        )));
+        )))
     }
     #[cfg(test)]
     {

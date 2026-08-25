@@ -80,6 +80,10 @@ PLUGIN_LEGACY_PATTERNS = (
         re.compile(r"\bExecutionBackend\b"),
         "production plugin hook retains the legacy ExecutionBackend seam",
     ),
+    (
+        re.compile(r"\bManagedCommandExecutionPortV1\b"),
+        "production plugin hook retains the generic one-shot command seam",
+    ),
 )
 
 
@@ -231,6 +235,96 @@ def check_registration_invariants(root: Path) -> list[str]:
     if not full_signature or "Option" in full_signature.group(1):
         findings.append(
             "shipping builtin registration still exposes an optional managed terminal port"
+        )
+
+    manager_path = root / "crates/sigil-tools-builtin/src/terminal_process/manager.rs"
+    manager_source = manager_path.read_text(encoding="utf-8")
+    public_constructor = re.search(
+        r"pub fn new_with_artifact_root_and_terminal_execution[\s\S]*?"
+        r"\n\s*/// Binds the production terminal lifecycle",
+        manager_source,
+    )
+    if public_constructor is None:
+        findings.append("public TerminalProcessManager constructor invariant is missing")
+    elif "LegacyDirect" in public_constructor.group(0):
+        findings.append(
+            "public TerminalProcessManager constructor selects legacy direct execution"
+        )
+    manager_context = r71_inventory_scan._Ctx(manager_source)
+    for index, code in enumerate(manager_context.code_lines):
+        if manager_context.cfg_test_or_mod_tests(index):
+            continue
+        if re.search(r"\bmanaged_execution\s*:\s*Option\s*<", code):
+            findings.append(
+                "normal-build TerminalProcessManager still stores an optional managed owner"
+            )
+        if re.search(r"\bCommand::new\s*\(|\bspawn_pty_runtime\s*\(", code):
+            findings.append(
+                f"normal-build TerminalProcessManager retains a direct spawn route at line {index + 1}"
+            )
+
+    plugins_path = root / "crates/sigil-runtime/src/plugins.rs"
+    plugins_source = plugins_path.read_text(encoding="utf-8")
+    if "pub trait ManagedPluginHookExecutionPortV1" not in plugins_source:
+        findings.append("purpose-specific managed plugin hook port is missing")
+    if not re.search(
+        r"pub fn new\(executor:\s*Arc<dyn ManagedPluginHookExecutionPortV1>\)",
+        plugins_source,
+    ):
+        findings.append(
+            "production plugin hook runner is not bound to its purpose-specific managed port"
+        )
+    for required in (
+        "config_grant_ref:",
+        "config_grant_hash:",
+        "durable_scope:",
+        "purpose: sigil_kernel::managed_execution::ExecutionPurposeV1::ExtensionProcess",
+    ):
+        if required not in plugins_source:
+            findings.append(
+                f"managed plugin hook request is missing current-schema admission binding: {required}"
+            )
+
+    composition_source = (
+        root / "crates/sigil-runtime/src/r71_authority_composition.rs"
+    ).read_text(encoding="utf-8")
+    if "pub plugin_hook_execution:" not in composition_source or "plugin_hook_runner" not in composition_source:
+        findings.append(
+            "production authority composition does not expose the managed plugin hook route"
+        )
+    if "Ch::ApplicationControlLog" not in composition_source:
+        findings.append(
+            "production authority composition does not declare ApplicationControlLog before plugin activation"
+        )
+
+    adapters_source = (
+        root / "crates/sigil-runtime/src/managed_resource_adapters.rs"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "materialize_plugin_extension_admission",
+        "authorize_extension(&decision, &plan)",
+        "StorageWriterChannelV1::ApplicationControlLog",
+        "seal_extension_execution_proof",
+        "ProcessCancelReasonV1::UserCancelled",
+        '"extension_process_settled"',
+    ):
+        if required not in adapters_source:
+            findings.append(
+                f"managed plugin Extension admission/control invariant is missing: {required}"
+            )
+
+    runtime_manifest = (root / "crates/sigil-runtime/Cargo.toml").read_text(encoding="utf-8")
+    if not re.search(r"^test-support\s*=\s*\[\s*\]$", runtime_manifest, re.MULTILINE):
+        findings.append(
+            "sigil-runtime test-support must not activate legacy dependency features"
+        )
+    if re.search(
+        r'^sigil-tools-builtin\s*=\s*\{[^\n]*features\s*=\s*\[[^\]]*"test-support"',
+        runtime_manifest,
+        re.MULTILINE,
+    ):
+        findings.append(
+            "sigil-runtime dependency activates sigil-tools-builtin/test-support"
         )
     return findings
 

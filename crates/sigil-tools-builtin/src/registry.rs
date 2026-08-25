@@ -18,9 +18,9 @@ use crate::{
     shell_runtime::ResolvedShell,
     terminal_process::{self, TerminalExecutionConfig},
     terminal_tools::{
-        TerminalCancelTool, TerminalInputTool, TerminalLifecycleRoute, TerminalProcessManagers,
-        TerminalReadTool, TerminalResizeTool, TerminalStartTool, TerminalTaskControlHandle,
-        TerminalWaitTool,
+        TerminalCancelTool, TerminalInputTool, TerminalLifecycleRoute,
+        TerminalManagerExecutionOwnerV1, TerminalProcessManagers, TerminalReadTool,
+        TerminalResizeTool, TerminalStartTool, TerminalTaskControlHandle, TerminalWaitTool,
     },
     tool_artifact_tool::ReadToolArtifactTool,
     vcs_inspect::VcsInspectTool,
@@ -275,7 +275,7 @@ pub fn register_builtin_tools_with_managed_execution_and_terminal_config_and_man
         terminal_execution_config,
         terminal_lifecycle_route,
         external_scratch_control,
-        Some(managed_terminal),
+        TerminalManagerExecutionOwnerV1::Managed(managed_terminal),
     )
 }
 
@@ -295,7 +295,7 @@ fn register_builtin_tools_with_legacy_terminal(
         terminal_execution_config,
         terminal_lifecycle_route,
         external_scratch_control,
-        None,
+        TerminalManagerExecutionOwnerV1::LegacyDirect,
     )
 }
 
@@ -306,7 +306,7 @@ fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
     terminal_execution_config: TerminalExecutionConfig,
     terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
     external_scratch_control: Option<ScratchNamespaceControl>,
-    managed_terminal: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
+    terminal_owner: TerminalManagerExecutionOwnerV1,
 ) -> BuiltinToolHandles {
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
@@ -321,9 +321,17 @@ fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
             ScratchNamespaceControl::unavailable()
         }
     });
+    let terminal_managers = match terminal_owner {
+        TerminalManagerExecutionOwnerV1::Managed(managed_terminal) => {
+            TerminalProcessManagers::new_managed(terminal_execution_config, managed_terminal)
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        TerminalManagerExecutionOwnerV1::LegacyDirect => {
+            TerminalProcessManagers::new_legacy(terminal_execution_config)
+        }
+    };
     let terminal_managers = Arc::new(
-        TerminalProcessManagers::new(terminal_execution_config)
-            .with_managed_execution(managed_terminal)
+        terminal_managers
             .with_lifecycle_route(terminal_lifecycle_route)
             .with_scratch_task_leases(Some(Arc::clone(&scratch_control.tasks))),
     );

@@ -1634,9 +1634,7 @@ fn authority_artifact_store_for_session(
         cutover.manifest().selected_epoch
             == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
     });
-    let Some(composition) = services.authority_composition() else {
-        return None;
-    };
+    let composition = services.authority_composition()?;
     let staging = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;
     let store = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore;
     if !current_schema

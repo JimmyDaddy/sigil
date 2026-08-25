@@ -252,19 +252,15 @@ pub async fn prepare_application_task_continuation(
         })?;
     let verification_execution_port: Arc<
         dyn sigil_kernel::verification::VerificationExecutionPortV1,
-    > = {
-        let route = Arc::clone(
-            &services
-                .authority_composition()
-                .ok_or_else(|| ApplicationRunPrepareError::Internal {
-                    source: anyhow!(
-                        "current-schema Task continuation requires the managed verification route"
-                    ),
-                })?
-                .command_execution,
-        );
-        route
-    };
+    > = services
+        .authority_composition()
+        .ok_or_else(|| ApplicationRunPrepareError::Internal {
+            source: anyhow!(
+                "current-schema Task continuation requires the managed verification route"
+            ),
+        })?
+        .command_execution
+        .clone();
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;

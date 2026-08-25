@@ -422,7 +422,7 @@ impl LocalSessionLifecycleService {
         namespace_key: impl Into<String>,
     ) -> Result<Self> {
         use crate::managed_storage_writer::StorageWriterChannelV1;
-        let namespace_key = namespace_key.into();
+        let namespace_key = managed_lifecycle_namespace_key(&namespace_key.into());
         let namespace = writer
             .managed_named_leaf_path(StorageWriterChannelV1::SessionLifecycleLog, &namespace_key)?;
         self.lifecycle_journal_path = namespace.join("session-lifecycle-v1.jsonl");
@@ -2012,6 +2012,19 @@ impl LocalSessionLifecycleService {
             Ok(_) | Err(_) => LocalSessionLifecycleRecoveryStatus::Uncertain,
         }
     }
+}
+
+fn managed_lifecycle_namespace_key(workspace_id: &str) -> String {
+    if !workspace_id.is_empty()
+        && workspace_id.len() <= 64
+        && workspace_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return workspace_id.to_owned();
+    }
+    let digest = sigil_kernel::external::sha256_hex(workspace_id.as_bytes());
+    format!("ws-{}", &digest[..60])
 }
 
 fn conversation_fork_path(

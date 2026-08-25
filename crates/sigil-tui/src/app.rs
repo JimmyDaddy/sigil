@@ -984,9 +984,7 @@ impl AppState {
     pub(super) fn tool_artifact_store_for_current_session(
         &self,
     ) -> Option<sigil_kernel::ToolArtifactStore> {
-        let Some(writer) = self.managed_history_writer.as_ref() else {
-            return None;
-        };
+        let writer = self.managed_history_writer.as_ref()?;
         let composition = self.authority_composition.as_ref()?;
         let staging =
             sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;

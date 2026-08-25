@@ -287,6 +287,10 @@ fn create_conversation_fork(
             |route| Session::new_with_route(&provider_name, route),
         )
         .with_store(destination_store);
+    #[cfg(any(test, feature = "test-support"))]
+    destination.attach_tool_artifact_store_override(ToolArtifactStore::for_session_path(
+        &destination_path,
+    ));
     destination.append_control(ControlEntry::SessionIdentity {
         provider_name: provider_name.clone(),
         model_name: model_name.clone(),

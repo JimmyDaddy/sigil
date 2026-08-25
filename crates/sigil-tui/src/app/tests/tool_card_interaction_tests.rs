@@ -439,6 +439,12 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
         Some(&artifact_store),
         sigil_kernel::ToolArtifactSensitivity::Ordinary,
     )?;
+    let artifact_ref = recorded
+        .artifact
+        .descriptor()
+        .expect("published artifact")
+        .artifact_ref
+        .clone();
     let mut session =
         sigil_kernel::Session::new("deepseek", "deepseek-v4-flash").with_store(durable_store);
     session.append(SessionLogEntry::ToolResultV3(recorded))?;
@@ -463,6 +469,15 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
         entries,
         "restored missing artifact",
     );
+    assert!(full_plain_timeline(&missing_app).contains("Ctrl-O full output"));
+    missing_app.handle_worker_message(WorkerMessage::ToolArtifactPageReadFailed {
+        request_id: 11,
+        artifact_ref,
+        failure: ToolArtifactDisplayReadFailure::Unavailable(
+            sigil_kernel::ToolArtifactAvailability::Missing,
+        ),
+        entries: Vec::new(),
+    })?;
     assert!(full_plain_timeline(&missing_app).contains("Full output unavailable (missing)"));
     Ok(())
 }

@@ -258,15 +258,13 @@ pub async fn accept_application_task_integration_review_with_attachment(
     let session_leases = Arc::clone(&services.session_leases);
     let verification_execution_port: Arc<
         dyn sigil_kernel::verification::VerificationExecutionPortV1,
-    > = {
-        let route = Arc::clone(
-            &services
-                .authority_composition()
-                .ok_or_else(|| anyhow!("current-schema integration acceptance requires the managed verification route"))?
-                .command_execution,
-        );
-        route
-    };
+    > = services
+        .authority_composition()
+        .ok_or_else(|| {
+            anyhow!("current-schema integration acceptance requires the managed verification route")
+        })?
+        .command_execution
+        .clone();
     let request = request.clone();
     let preparation = tokio::task::spawn_blocking(move || {
         let root_config = RootConfig::load(&config_path)?;

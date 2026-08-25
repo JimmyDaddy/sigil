@@ -856,10 +856,16 @@ fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
 #[test]
 fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let root_config = test_config_for_workspace(temp.path());
+    let mut root_config = test_config_for_workspace(temp.path());
+    root_config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("state").display().to_string());
+    root_config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("cache").display().to_string());
+    let config_path = temp.path().join("sigil.toml");
+    root_config.save(&config_path)?;
     let (app, worker) = build_initial_app(
         temp.path().to_path_buf(),
-        temp.path().join("sigil.toml"),
+        config_path,
         Ok(root_config),
         |_root_config, _app| Ok(fake_worker_runtime().0),
     )?;

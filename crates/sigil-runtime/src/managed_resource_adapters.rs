@@ -7,7 +7,7 @@
 //! R71.6 composition also owns the plan-bound managed extension route; shadow composition keeps
 //! that route absent and therefore remains fail-closed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -92,6 +92,7 @@ pub struct RuntimeManagedExtensionExecutionRouteV1 {
     planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1>,
     broker: Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
     execution_temp_root: PathBuf,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
 }
 
 impl std::fmt::Debug for RuntimeManagedExtensionExecutionRouteV1 {
@@ -113,7 +114,20 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
             planner,
             broker,
             execution_temp_root,
+            authority_generation: sigil_kernel::resource::AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+            },
         }
+    }
+
+    #[must_use]
+    pub fn with_authority_generation(
+        mut self,
+        authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    ) -> Self {
+        self.authority_generation = authority_generation;
+        self
     }
 
     /// Starts one resolved long-lived extension process through the Extension broker bundle and
@@ -127,32 +141,62 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
         Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>,
         sigil_kernel::managed_execution::ManagedExecutionErrorV1,
     > {
+        let prepared =
+            self.prepare_persistent_with_options(server_name, plan, BTreeMap::new(), None, None)?;
+        self.launch_prepared(prepared, None).await
+    }
+
+    fn prepare_persistent_with_options(
+        &self,
+        subject: &str,
+        plan: sigil_tools_builtin::LongLivedStdioProcessPlan,
+        additional_environment: BTreeMap<String, String>,
+        max_runtime_ms: Option<u64>,
+        max_output_bytes: Option<u64>,
+    ) -> Result<
+        PreparedManagedExtensionLaunchV1,
+        sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+    > {
         let argv = std::iter::once(plan.program.as_os_str().to_os_string())
             .chain(plan.args.iter().cloned())
             .collect::<Vec<_>>();
-        let environment = plan
+        let mut environment = plan
             .environment
             .variables()
             .map(|(key, value)| (OsString::from(key), OsString::from(value.expose_secret())))
             .collect::<Vec<_>>();
+        let mut environment_names = environment
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>();
+        for (name, value) in additional_environment {
+            let name = OsString::from(name);
+            if !environment_names.insert(name.clone()) {
+                return Err(
+                    sigil_kernel::managed_execution::ManagedExecutionErrorV1::AdmissionMismatch,
+                );
+            }
+            environment.push((name, OsString::from(value)));
+        }
         let structured_command_digest =
             extension_command_digest(&plan.program, &plan.args, &plan.cwd);
         let cwd_subject_ref = OpaquePermissionSubjectRef::new(format!(
             "extension-cwd:{}",
             extension_path_digest(&plan.cwd).to_hex()
         ));
+        let max_output_bytes = max_output_bytes.unwrap_or(8 * 1024 * 1024);
         let capture = ExecutionCapturePolicy {
             stdout_capture: CaptureModeV1::BoundedRing {
-                max_bytes: 8 * 1024 * 1024,
+                max_bytes: max_output_bytes,
             },
             stderr_capture: CaptureModeV1::BoundedRing {
-                max_bytes: 8 * 1024 * 1024,
+                max_bytes: max_output_bytes,
             },
             pty: false,
         };
         let limits = ExecutionResourceLimits {
-            max_output_bytes: 8 * 1024 * 1024,
-            max_runtime_ms: 24 * 60 * 60 * 1000,
+            max_output_bytes,
+            max_runtime_ms: max_runtime_ms.unwrap_or(24 * 60 * 60 * 1000),
             max_children: 64,
             max_fds: 1024,
             pty_required: false,
@@ -170,10 +214,8 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
         let draft = self.planner.plan_execution(plan_request).map_err(|_| {
             sigil_kernel::managed_execution::ManagedExecutionErrorV1::ExecutionPlanDrift
         })?;
-        let attempt_id = PhysicalAttemptId::new(format!(
-            "mcp-extension:{server_name}:{}",
-            uuid::Uuid::new_v4()
-        ));
+        let attempt_id =
+            PhysicalAttemptId::new(format!("extension:{subject}:{}", uuid::Uuid::new_v4()));
         let request = ManagedExecutionRequestV1 {
             argv,
             cwd_subject_ref,
@@ -186,22 +228,54 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
             pty_size: None,
             environment: environment.clone(),
         };
-        let proof = self.broker.seal_execution_proof(
-            sigil_kernel::capability_issuer::ProofKindV1::ExecutionExtension,
-            "extension-process",
-            attempt_id.as_str().as_bytes().to_vec(),
-        );
+        let enforcement = extension_enforcement(&plan, draft.environment_profile.profile_hash);
+        Ok(PreparedManagedExtensionLaunchV1 {
+            plan,
+            environment,
+            draft,
+            request,
+            attempt_id,
+            enforcement,
+        })
+    }
+
+    async fn launch_prepared(
+        &self,
+        prepared: PreparedManagedExtensionLaunchV1,
+        extension_admission: Option<
+            &sigil_kernel::extension_admission::ExtensionProcessAdmissionV1,
+        >,
+    ) -> Result<
+        Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>,
+        sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+    > {
+        let proof = if let Some(admission) = extension_admission {
+            if admission.physical_attempt_id != prepared.attempt_id
+                || admission.execution_plan_draft_hash != prepared.draft.draft_hash
+                || admission.resource_plan_hash != prepared.draft.resource_plan_hash
+            {
+                return Err(
+                    sigil_kernel::managed_execution::ManagedExecutionErrorV1::AdmissionMismatch,
+                );
+            }
+            self.broker.seal_extension_execution_proof(admission)
+        } else {
+            self.broker.seal_execution_proof(
+                sigil_kernel::capability_issuer::ProofKindV1::ExecutionExtension,
+                "extension-process",
+                prepared.attempt_id.as_str().as_bytes().to_vec(),
+            )
+        };
         let bundle = self.broker.issue_execution(proof).map_err(|_| {
             sigil_kernel::managed_execution::ManagedExecutionErrorV1::AdmissionMismatch
         })?;
-        let enforcement = extension_enforcement(&plan, draft.environment_profile.profile_hash);
         let launcher = Arc::new(
             sigil_sandbox::managed::CommandManagedExtensionLaunchServiceV1::new(
-                plan.program,
-                plan.args,
-                plan.cwd,
-                environment,
-                enforcement,
+                prepared.plan.program,
+                prepared.plan.args,
+                prepared.plan.cwd,
+                prepared.environment,
+                prepared.enforcement,
             ),
         );
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
@@ -209,7 +283,433 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
             self.execution_temp_root.clone(),
         )
         .with_extension_launcher(launcher);
-        service.start_persistent(bundle, request).await
+        service.start_persistent(bundle, prepared.request).await
+    }
+}
+
+struct PreparedManagedExtensionLaunchV1 {
+    plan: sigil_tools_builtin::LongLivedStdioProcessPlan,
+    environment: Vec<(OsString, OsString)>,
+    draft: sigil_kernel::managed_execution::ManagedExecutionPlanDraftV1,
+    request: ManagedExecutionRequestV1,
+    attempt_id: PhysicalAttemptId,
+    enforcement: ManagedExtensionLaunchEnforcementV1,
+}
+
+/// Production plugin-hook route bound to Extension-purpose admission and one execution policy.
+/// It cannot be substituted with the generic built-in one-shot command route.
+#[derive(Clone)]
+pub struct RuntimeManagedPluginHookExecutionRouteV1 {
+    extension_execution: Arc<RuntimeManagedExtensionExecutionRouteV1>,
+    execution_config: sigil_kernel::ExecutionConfig,
+    backend: ExecutionBackendKind,
+    backend_capabilities: ExecutionBackendCapabilities,
+    sandbox_profile: sigil_kernel::ExecutionSandboxProfile,
+    network: ExecutionNetworkReceipt,
+    control_log: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+}
+
+impl std::fmt::Debug for RuntimeManagedPluginHookExecutionRouteV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeManagedPluginHookExecutionRouteV1")
+            .field("backend", &self.backend)
+            .field("sandbox_profile", &self.sandbox_profile)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeManagedPluginHookExecutionRouteV1 {
+    /// Freezes the configured execution facts used for both pre-admission checks and launch.
+    pub fn new(
+        extension_execution: Arc<RuntimeManagedExtensionExecutionRouteV1>,
+        execution_config: sigil_kernel::ExecutionConfig,
+        control_log: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    ) -> Result<Self> {
+        let backend = sigil_tools_builtin::build_execution_backend(&execution_config)?;
+        Ok(Self {
+            extension_execution,
+            backend: backend.kind(),
+            backend_capabilities: backend.capabilities(),
+            sandbox_profile: execution_config.profile(),
+            network: backend.planned_network_receipt(),
+            execution_config,
+            control_log,
+        })
+    }
+
+    fn validate_environment(
+        request: &crate::plugins::ManagedPluginHookExecutionRequestV1,
+    ) -> Result<()> {
+        let expected = BTreeSet::from([
+            "SIGIL_PLUGIN_HOOK_ID",
+            "SIGIL_PLUGIN_ID",
+            "SIGIL_WORKSPACE_ROOT",
+        ]);
+        let actual = request
+            .environment
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            actual == expected,
+            "managed plugin hook environment contains undeclared host metadata"
+        );
+        anyhow::ensure!(
+            request.environment.get("SIGIL_PLUGIN_ID") == Some(&request.plugin_id),
+            "managed plugin hook identity drifted before execution"
+        );
+        anyhow::ensure!(
+            request.environment.get("SIGIL_PLUGIN_HOOK_ID") == Some(&request.hook_id),
+            "managed plugin hook id drifted before execution"
+        );
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        request: crate::plugins::ManagedPluginHookExecutionRequestV1,
+    ) -> Result<ExecutionReceipt> {
+        Self::validate_environment(&request)?;
+        anyhow::ensure!(
+            request.purpose == ExecutionPurposeV1::ExtensionProcess,
+            "plugin hook purpose substitution was rejected before spawn"
+        );
+        let expected_grant_hash = crate::plugins::plugin_hook_config_grant_hash(
+            &request.plugin_id,
+            request.config_generation,
+            &request.manifest_hash,
+            &request.capability_digest,
+        );
+        anyhow::ensure!(
+            request.config_generation > 0 && request.config_grant_hash == expected_grant_hash,
+            "plugin hook durable config grant drifted before spawn"
+        );
+        let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
+        let plan = sigil_tools_builtin::long_lived_stdio_process_plan(
+            &self.execution_config,
+            &request.program,
+            &request.args,
+            &request.cwd,
+            &environment,
+        )?;
+        let backend = plan.backend;
+        let backend_capabilities = plan.backend_capabilities;
+        let network = plan.network.clone();
+        let output_limit_bytes = u64::try_from(request.output_limit_bytes)
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let identity = crate::r71_shadow_planner::canonical_digest(
+            format!(
+                "{}\0{}\0{}\0{}",
+                request.plugin_id,
+                request.hook_id,
+                request.manifest_hash,
+                request.capability_digest
+            )
+            .as_bytes(),
+        );
+        let prepared = self
+            .extension_execution
+            .prepare_persistent_with_options(
+                &format!("plugin-hook:{}", identity.to_hex()),
+                plan,
+                request.environment.clone(),
+                Some(request.timeout_ms.max(1)),
+                Some(output_limit_bytes),
+            )
+            .map_err(|error| anyhow!("managed plugin hook planning failed: {error}"))?;
+        let admission = materialize_plugin_extension_admission(
+            &request,
+            &prepared,
+            self.extension_execution.authority_generation,
+        )?;
+        let control_lease = self
+            .control_log
+            .acquire_named(
+                crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog,
+                &identity.to_hex(),
+            )
+            .map_err(|error| anyhow!("plugin application control log unavailable: {error}"))?;
+        append_plugin_control_record(
+            &self.control_log,
+            &control_lease,
+            serde_json::json!({
+                "schema_version": 1,
+                "event": "extension_plan_decided",
+                "plugin_id": request.plugin_id,
+                "hook_id": request.hook_id,
+                "extension_plan_hash": admission.extension_plan_hash,
+                "decision_hash": admission.decision_hash,
+                "config_grant_ref": request.config_grant_ref.as_str(),
+                "config_grant_hash": request.config_grant_hash,
+                "durable_scope": request.durable_scope,
+            }),
+        )?;
+        append_plugin_control_record(
+            &self.control_log,
+            &control_lease,
+            serde_json::json!({
+                "schema_version": 1,
+                "event": "extension_start_authorized",
+                "admission_id": admission.admission_id.as_str(),
+                "physical_attempt_id": admission.physical_attempt_id.as_str(),
+                "admission_hash": admission.admission_hash,
+                "execution_plan_draft_hash": admission.execution_plan_draft_hash,
+                "resource_plan_hash": admission.resource_plan_hash,
+            }),
+        )?;
+        let mut process = match self
+            .extension_execution
+            .launch_prepared(prepared, Some(&admission))
+            .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                append_plugin_control_record(
+                    &self.control_log,
+                    &control_lease,
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "event": "extension_start_rejected",
+                        "admission_hash": admission.admission_hash,
+                        "reason": format!("{error}"),
+                    }),
+                )?;
+                self.control_log.finalize(control_lease).map_err(|log_error| {
+                    anyhow!("plugin control-log settlement failed after launch rejection: {log_error}")
+                })?;
+                return Err(anyhow!("managed plugin hook launch failed: {error}"));
+            }
+        };
+        let mut output_stream = process
+            .take_output_stream()
+            .map_err(|error| anyhow!("managed plugin hook output unavailable: {error}"))?;
+        let mut cancellation_observed = false;
+        loop {
+            let frame = if let Some(cancellation) = request
+                .cancellation
+                .as_ref()
+                .filter(|_| !cancellation_observed)
+            {
+                tokio::select! {
+                    frame = output_stream.next_frame() => frame,
+                    () = cancellation.cancelled() => {
+                        process
+                            .cancel(ProcessCancelReasonV1::UserCancelled)
+                            .await
+                            .map_err(|error| anyhow!("managed plugin hook cancellation failed: {error}"))?;
+                        cancellation_observed = true;
+                        continue;
+                    }
+                }
+            } else {
+                output_stream.next_frame().await
+            }
+            .map_err(|error| anyhow!("managed plugin hook output failed: {error}"))?;
+            if frame.is_none() {
+                break;
+            }
+        }
+        let managed_receipt = process
+            .wait_and_finalize()
+            .await
+            .map_err(|error| anyhow!("managed plugin hook settlement failed: {error}"))?;
+        append_plugin_control_record(
+            &self.control_log,
+            &control_lease,
+            serde_json::json!({
+                "schema_version": 1,
+                "event": "extension_process_settled",
+                "admission_hash": admission.admission_hash,
+                "physical_attempt_id": managed_receipt.physical_attempt_id.as_str(),
+                "termination": managed_receipt.process.termination,
+                "cancel_requested": cancellation_observed,
+            }),
+        )?;
+        self.control_log.finalize(control_lease).map_err(|error| {
+            anyhow!("plugin application control log settlement failed: {error}")
+        })?;
+        Ok(persistent_execution_receipt(
+            &managed_receipt.process,
+            backend,
+            backend_capabilities,
+            network,
+            output_limit_bytes,
+        ))
+    }
+}
+
+fn materialize_plugin_extension_admission(
+    request: &crate::plugins::ManagedPluginHookExecutionRequestV1,
+    prepared: &PreparedManagedExtensionLaunchV1,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
+) -> Result<sigil_kernel::extension_admission::ExtensionProcessAdmissionV1> {
+    use sigil_kernel::extension_admission::{
+        ExtensionApprovalDecisionV1, ExtensionProcessAdmissionV1, ExtensionProcessDecisionV1,
+        ExtensionProcessPlanV1, ExtensionRestartPolicyV1, authorize_extension,
+    };
+    use sigil_kernel::resource::{ExtensionKindV1, OpaqueDomainEventId, OpaqueExtensionId};
+
+    let config_policy_digest = request.config_grant_hash;
+    let permission_upper_bound_hash =
+        crate::r71_shadow_planner::canonical_digest(request.capability_digest.as_bytes());
+    let requested_enforcement_hash = canonical_debug_digest(&prepared.enforcement.requested);
+    let extension_plan_hash = crate::r71_shadow_planner::canonical_digest(
+        format!(
+            "plugin-extension-plan-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            request.plugin_id,
+            request.hook_id,
+            request.config_generation,
+            prepared.draft.draft_hash.to_hex(),
+            prepared.draft.resource_plan_hash.to_hex(),
+            request.config_grant_hash.to_hex(),
+            requested_enforcement_hash.to_hex(),
+        )
+        .as_bytes(),
+    );
+    let plan = ExtensionProcessPlanV1 {
+        extension_kind: ExtensionKindV1::Plugin,
+        extension_id: OpaqueExtensionId::new(format!(
+            "plugin:{}:{}",
+            request.plugin_id, request.hook_id
+        )),
+        config_generation: request.config_generation,
+        attempt_journal_scope: prepared.draft.attempt_journal_scope.clone(),
+        attempt_journal_scope_hash: prepared.draft.attempt_journal_scope_hash,
+        executable_and_args_digest: prepared.draft.argv_digest,
+        config_policy_digest,
+        permission_upper_bound_hash,
+        execution_plan_draft_hash: prepared.draft.draft_hash,
+        resource_plan_hash: prepared.draft.resource_plan_hash,
+        requirement_set_hash: prepared.draft.resource_requirements.canonical_hash,
+        requested_enforcement_hash,
+        resolver_proof_digest: prepared.draft.resolver_proof_digest,
+        sandbox_preview_hash: prepared.draft.sandbox_preview_hash,
+        capture_policy_hash: prepared.draft.capture_policy_hash,
+        resource_limits_hash: prepared.draft.resource_limits_hash,
+        restart_policy: ExtensionRestartPolicyV1::Never,
+        extension_plan_hash,
+    };
+    let decision_hash = crate::r71_shadow_planner::canonical_digest(
+        format!(
+            "plugin-extension-decision-v1\0{}\0{}\0{}",
+            extension_plan_hash.to_hex(),
+            request.config_grant_ref.as_str(),
+            request.config_grant_hash.to_hex(),
+        )
+        .as_bytes(),
+    );
+    let decision = ExtensionProcessDecisionV1 {
+        decision_id: format!("plugin-decision:{}", prepared.attempt_id.as_str()),
+        durable_scope: request.durable_scope.clone(),
+        domain_event_id: OpaqueDomainEventId::new(format!(
+            "plugin-plan:{}",
+            prepared.attempt_id.as_str()
+        )),
+        extension_plan_hash,
+        attempt_journal_scope_hash: prepared.draft.attempt_journal_scope_hash,
+        policy_version: "plugin-config-grant-v1".to_owned(),
+        authorization: ExtensionApprovalDecisionV1::AllowByDurableConfigGrant {
+            grant_ref: request.config_grant_ref.clone(),
+            grant_hash: request.config_grant_hash,
+        },
+        decision_hash,
+    };
+    authorize_extension(&decision, &plan)
+        .map_err(|error| anyhow!("plugin extension authorization failed: {error}"))?;
+    let durable_scope_hash = canonical_debug_digest(&request.durable_scope);
+    let extension_start_event_digest = crate::r71_shadow_planner::canonical_digest(
+        format!(
+            "plugin-extension-start-v1\0{}\0{}\0{}",
+            extension_plan_hash.to_hex(),
+            decision_hash.to_hex(),
+            prepared.attempt_id.as_str(),
+        )
+        .as_bytes(),
+    );
+    let admission_hash = crate::r71_shadow_planner::canonical_digest(
+        format!(
+            "plugin-extension-admission-v1\0{}\0{}\0{}\0{}",
+            extension_plan_hash.to_hex(),
+            decision_hash.to_hex(),
+            durable_scope_hash.to_hex(),
+            extension_start_event_digest.to_hex(),
+        )
+        .as_bytes(),
+    );
+    Ok(ExtensionProcessAdmissionV1 {
+        admission_id: OpaqueAdmissionId::new(format!(
+            "plugin-admission:{}",
+            prepared.attempt_id.as_str()
+        )),
+        physical_attempt_id: prepared.attempt_id.clone(),
+        extension_kind: plan.extension_kind,
+        extension_id: plan.extension_id,
+        config_generation: plan.config_generation,
+        authority_generation,
+        attempt_journal_scope: plan.attempt_journal_scope,
+        attempt_journal_scope_hash: plan.attempt_journal_scope_hash,
+        executable_and_args_digest: plan.executable_and_args_digest,
+        config_policy_digest: plan.config_policy_digest,
+        permission_upper_bound_hash: plan.permission_upper_bound_hash,
+        execution_plan_draft_hash: plan.execution_plan_draft_hash,
+        resource_plan_hash: plan.resource_plan_hash,
+        extension_plan_hash: plan.extension_plan_hash,
+        decision_hash,
+        durable_scope_hash,
+        extension_start_event_digest,
+        resource_requirements: prepared.draft.resource_requirements.clone(),
+        requirement_set_hash: plan.requirement_set_hash,
+        requested_enforcement: prepared.enforcement.requested.clone(),
+        requested_enforcement_hash: plan.requested_enforcement_hash,
+        resolver_proof_digest: plan.resolver_proof_digest,
+        sandbox_preview_hash: plan.sandbox_preview_hash,
+        capture_policy_hash: plan.capture_policy_hash,
+        resource_limits_hash: plan.resource_limits_hash,
+        restart_policy: plan.restart_policy,
+        admission_hash,
+    })
+}
+
+fn canonical_debug_digest(value: &impl std::fmt::Debug) -> CanonicalHash {
+    crate::r71_shadow_planner::canonical_digest(format!("{value:?}").as_bytes())
+}
+
+fn append_plugin_control_record(
+    writer: &crate::managed_storage_writer::ManagedStorageWriterAdapterV1,
+    lease: &crate::managed_storage_writer::ManagedStorageWriterLeaseV1,
+    record: serde_json::Value,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(&record)?;
+    writer
+        .write_record(lease, &bytes)
+        .map_err(|error| anyhow!("plugin application control append failed: {error}"))
+}
+
+#[async_trait::async_trait]
+impl crate::plugins::ManagedPluginHookExecutionPortV1 for RuntimeManagedPluginHookExecutionRouteV1 {
+    fn kind(&self) -> ExecutionBackendKind {
+        self.backend
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        self.backend_capabilities
+    }
+
+    fn sandbox_profile(&self) -> sigil_kernel::ExecutionSandboxProfile {
+        self.sandbox_profile
+    }
+
+    fn planned_network_receipt(&self) -> ExecutionNetworkReceipt {
+        self.network.clone()
+    }
+
+    async fn execute_plugin_hook(
+        &self,
+        request: crate::plugins::ManagedPluginHookExecutionRequestV1,
+    ) -> Result<ExecutionReceipt> {
+        self.execute(request).await
     }
 }
 
@@ -766,6 +1266,46 @@ fn stream_capture(
             .filter(|byte| **byte == b'\n')
             .count() as u64,
         truncated: summary.truncated,
+    }
+}
+
+fn persistent_execution_receipt(
+    process: &sigil_kernel::managed_execution::ProcessExecutionReceiptV1,
+    backend: ExecutionBackendKind,
+    capabilities: ExecutionBackendCapabilities,
+    network: ExecutionNetworkReceipt,
+    output_limit_bytes: u64,
+) -> ExecutionReceipt {
+    let output = ExecutionOutputReceipt {
+        schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+        stdout: stream_capture(&process.stdout_summary, output_limit_bytes),
+        stderr: stream_capture(&process.stderr_summary, output_limit_bytes),
+        combined_total_bytes: process
+            .stdout_summary
+            .observed_bytes
+            .saturating_add(process.stderr_summary.observed_bytes),
+        combined_hard_limit_bytes: output_limit_bytes.saturating_mul(2),
+        termination: map_termination(&process.termination),
+    };
+    let exit_code = match process.termination {
+        sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code } => Some(code),
+        _ => None,
+    };
+    ExecutionReceipt {
+        backend,
+        capabilities,
+        network,
+        resources: ExecutionResourceReceipt::default(),
+        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
+        exit_code,
+        stdout: process.stdout_summary.retained_payload.clone(),
+        stderr: process.stderr_summary.retained_payload.clone(),
+        timed_out: matches!(
+            process.termination,
+            sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut
+        ),
+        output,
+        capture: None,
     }
 }
 
