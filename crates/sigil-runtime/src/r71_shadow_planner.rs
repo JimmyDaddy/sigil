@@ -56,6 +56,7 @@ fn purpose_class(purpose: ExecutionPurposeV1) -> &'static str {
         ExecutionPurposeV1::OneShot => "one-shot",
         ExecutionPurposeV1::Terminal => "terminal",
         ExecutionPurposeV1::ExtensionProcess => "extension",
+        ExecutionPurposeV1::CodeIntelProcess => "code-intel",
     }
 }
 
@@ -81,12 +82,16 @@ impl ShadowPlannerV1 {
             ExecutionPurposeV1::OneShot | ExecutionPurposeV1::Terminal => {
                 ResourceKindV1::ExecutionTemp
             }
-            ExecutionPurposeV1::ExtensionProcess => ResourceKindV1::RuntimeState,
+            ExecutionPurposeV1::ExtensionProcess | ExecutionPurposeV1::CodeIntelProcess => {
+                ResourceKindV1::RuntimeState
+            }
         };
         let lifetime = match purpose {
             ExecutionPurposeV1::OneShot => ResourceLeaseLifetimeV1::ToolCall,
             ExecutionPurposeV1::Terminal => ResourceLeaseLifetimeV1::TerminalTask,
-            ExecutionPurposeV1::ExtensionProcess => ResourceLeaseLifetimeV1::ExtensionProcess,
+            ExecutionPurposeV1::ExtensionProcess | ExecutionPurposeV1::CodeIntelProcess => {
+                ResourceLeaseLifetimeV1::ExtensionProcess
+            }
         };
         let quota = ResourceQuotaProfileV1 {
             class: ResourceQuotaClassV1::AttemptEphemeral,
@@ -178,7 +183,9 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
             self.config.schema_version
         ));
         let environment_profile_class = match request.purpose {
-            ExecutionPurposeV1::ExtensionProcess => EnvironmentProfileClassV1::ExtensionProcess,
+            ExecutionPurposeV1::ExtensionProcess | ExecutionPurposeV1::CodeIntelProcess => {
+                EnvironmentProfileClassV1::ExtensionProcess
+            }
             _ if self.config.local_execution_explicit_unconfined => {
                 EnvironmentProfileClassV1::ExplicitUnconfined
             }

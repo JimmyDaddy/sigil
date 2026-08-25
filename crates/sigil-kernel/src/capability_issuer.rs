@@ -28,6 +28,7 @@ pub enum ProofKindV1 {
     ExecutionOneShot,
     ExecutionTerminal,
     ExecutionExtension,
+    ExecutionCodeIntel,
     FileAccessTool,
     FileAccessSessionExport,
     StorageNamespace,
@@ -389,6 +390,13 @@ impl KernelCapabilityBrokerV1 {
                 consumer_token.as_str().to_owned(),
                 resource_capability.as_str().to_owned(),
             ),
+            IssuedExecutionAdmissionBundleV1::CodeIntel {
+                consumer_token,
+                resource_capability,
+            } => (
+                consumer_token.as_str().to_owned(),
+                resource_capability.as_str().to_owned(),
+            ),
         };
         format!("{token}:{cap}")
     }
@@ -421,6 +429,14 @@ impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
                 )),
             },
             ProofKindV1::ExecutionExtension => IssuedExecutionAdmissionBundleV1::Extension {
+                consumer_token: crate::resource::OpaqueResourceId::new(format!(
+                    "token:{purpose}:{seq}"
+                )),
+                resource_capability: crate::resource::OpaqueResourceId::new(format!(
+                    "cap:{purpose}:{seq}"
+                )),
+            },
+            ProofKindV1::ExecutionCodeIntel => IssuedExecutionAdmissionBundleV1::CodeIntel {
                 consumer_token: crate::resource::OpaqueResourceId::new(format!(
                     "token:{purpose}:{seq}"
                 )),

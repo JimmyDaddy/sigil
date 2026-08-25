@@ -15,8 +15,9 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use sigil_kernel::capability_issuer::{KernelCapabilityIssuerV1, VerifiedExecutionBundleViewV1};
 use sigil_kernel::managed_execution::{
-    CaptureModeV1, ExecutionCapturePolicy, ExecutionPurposeV1, ExecutionResourceLimits,
-    ManagedExecutionPlanRequestV1, ManagedExecutionRequestV1, ManagedExecutionServiceV1,
+    BoundedProcessInputV1, CaptureModeV1, ExecutionCapturePolicy, ExecutionPurposeV1,
+    ExecutionResourceLimits, ManagedExecutionPlanRequestV1, ManagedExecutionRequestV1,
+    ManagedExecutionServiceV1, ManagedProcessOutputChannelV1, ProcessCancelReasonV1,
 };
 use sigil_kernel::managed_file_access::ManagedFileAccessServiceV1;
 use sigil_kernel::managed_projection::ManagedProjectionServiceV1;
@@ -34,6 +35,7 @@ use sigil_kernel::{
 };
 use sigil_resource_authority::factory::ResourceAuthorityServiceBundleV1;
 use sigil_sandbox::managed::ManagedExtensionLaunchEnforcementV1;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Runtime composition snapshot: the only authority-derived surface runtime composes.
 #[derive(Clone)]
@@ -404,6 +406,167 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         service.start_persistent(bundle, managed_request).await
     }
 
+    async fn start_managed_code_intel(
+        &self,
+        request: sigil_code_intel::LanguageServerLaunchRequestV1,
+    ) -> Result<sigil_code_intel::LanguageServerProcessIoV1> {
+        let argv = std::iter::once(OsString::from(&request.program))
+            .chain(request.args.iter().map(OsString::from))
+            .collect::<Vec<_>>();
+        let environment = request
+            .environment
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect::<Vec<_>>();
+        let cwd_subject_ref = OpaquePermissionSubjectRef::new(format!(
+            "managed-code-intel-cwd:{}",
+            crate::r71_shadow_planner::canonical_digest(request.cwd.to_string_lossy().as_bytes())
+                .to_hex()
+        ));
+        let capture = ExecutionCapturePolicy {
+            stdout_capture: CaptureModeV1::ArtifactStreaming,
+            stderr_capture: CaptureModeV1::BoundedRing {
+                max_bytes: 2 * 1024 * 1024,
+            },
+            pty: false,
+        };
+        let limits = ExecutionResourceLimits {
+            max_output_bytes: 8 * 1024 * 1024,
+            max_runtime_ms: 24 * 60 * 60 * 1000,
+            max_children: 32,
+            max_fds: 512,
+            pty_required: false,
+        };
+        let structured_command_digest = code_intel_command_digest(&request);
+        let plan_request = ManagedExecutionPlanRequestV1 {
+            argv: argv.clone(),
+            cwd_subject_ref: cwd_subject_ref.clone(),
+            purpose: ExecutionPurposeV1::CodeIntelProcess,
+            structured_command_digest,
+            owner_scope: ResourceOwnerScopeV1::Application,
+            capture: capture.clone(),
+            limits: limits.clone(),
+            environment: environment.clone(),
+        };
+        let draft = self
+            .planner
+            .plan_execution(plan_request)
+            .map_err(|error| anyhow!("managed code-intel planning failed: {error}"))?;
+        let attempt_id = PhysicalAttemptId::new(format!(
+            "code-intel:{}:{}",
+            request.server_name,
+            uuid::Uuid::new_v4()
+        ));
+        let managed_request = ManagedExecutionRequestV1 {
+            argv,
+            cwd_subject_ref,
+            structured_command_digest,
+            admission_ref: OpaqueAdmissionId::new(attempt_id.as_str().to_owned()),
+            execution_plan_draft_hash: draft.draft_hash,
+            environment_profile: draft.environment_profile.clone(),
+            capture,
+            limits,
+            pty_size: None,
+            environment: environment.clone(),
+        };
+        let proof = self.broker.seal_execution_proof(
+            sigil_kernel::capability_issuer::ProofKindV1::ExecutionCodeIntel,
+            "code-intel",
+            attempt_id.as_str().as_bytes().to_vec(),
+        );
+        let bundle = self
+            .broker
+            .issue_execution(proof)
+            .map_err(|error| anyhow!("managed code-intel admission failed: {error}"))?;
+        let enforcement = terminal_enforcement(draft.environment_profile.profile_hash);
+        let launcher = Arc::new(
+            sigil_sandbox::managed::CommandManagedExtensionLaunchServiceV1::new(
+                request.program,
+                request.args.iter().map(OsString::from).collect(),
+                request.cwd,
+                environment,
+                enforcement,
+            ),
+        );
+        let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
+            Arc::clone(&self.planner),
+            self.execution_temp_root.clone(),
+        )
+        .with_code_intel_launcher(launcher);
+        let mut process = service
+            .start_persistent(bundle, managed_request)
+            .await
+            .map_err(|error| anyhow!("managed code-intel launch failed: {error}"))?;
+        let mut output = process
+            .take_output_stream()
+            .map_err(|error| anyhow!("managed code-intel output unavailable: {error}"))?;
+        let (client_side, bridge_side) = tokio::io::duplex(128 * 1024);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut bridge_reader, mut bridge_writer) = tokio::io::split(bridge_side);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        tokio::spawn(async move {
+            let mut stdin_closed = false;
+            let mut input = vec![0_u8; 64 * 1024];
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        let _ = process.cancel(ProcessCancelReasonV1::ParentShutdown).await;
+                        let _ = process.wait_and_finalize().await;
+                        break;
+                    }
+                    frame = output.next_frame() => {
+                        match frame {
+                            Ok(Some(frame)) => {
+                                if matches!(frame.channel, ManagedProcessOutputChannelV1::Stdout | ManagedProcessOutputChannelV1::Pty)
+                                    && !frame.payload.is_empty()
+                                    && bridge_writer.write_all(&frame.payload).await.is_err()
+                                {
+                                    let _ = process.cancel(ProcessCancelReasonV1::ParentShutdown).await;
+                                    let _ = process.wait_and_finalize().await;
+                                    break;
+                                }
+                            }
+                            Ok(None) | Err(_) => {
+                                let _ = process.wait_and_finalize().await;
+                                break;
+                            }
+                        }
+                    }
+                    read = bridge_reader.read(&mut input), if !stdin_closed => {
+                        match read {
+                            Ok(0) => {
+                                stdin_closed = true;
+                                let _ = process.close_stdin().await;
+                            }
+                            Ok(count) => {
+                                if process.write_stdin(BoundedProcessInputV1 {
+                                    payload: input[..count].to_vec(),
+                                }).await.is_err() {
+                                    let _ = process.cancel(ProcessCancelReasonV1::ParentShutdown).await;
+                                    let _ = process.wait_and_finalize().await;
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                let _ = process.cancel(ProcessCancelReasonV1::ParentShutdown).await;
+                                let _ = process.wait_and_finalize().await;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let shutdown = move || {
+            let _ = shutdown_tx.send(());
+        };
+        Ok(sigil_code_intel::LanguageServerProcessIoV1::new(
+            client_reader,
+            client_writer,
+            shutdown,
+        ))
+    }
+
     async fn execute_managed(
         &self,
         mut request: ExecutionRequest,
@@ -573,6 +736,16 @@ impl sigil_tools_builtin::ManagedTerminalExecutionPortV1 for RuntimeManagedComma
     }
 }
 
+#[async_trait::async_trait]
+impl sigil_code_intel::LanguageServerLaunchPortV1 for RuntimeManagedCommandExecutionRouteV1 {
+    async fn launch(
+        &self,
+        request: sigil_code_intel::LanguageServerLaunchRequestV1,
+    ) -> Result<sigil_code_intel::LanguageServerProcessIoV1> {
+        self.start_managed_code_intel(request).await
+    }
+}
+
 fn stream_capture(
     summary: &sigil_kernel::managed_execution::BoundedOutputSummaryV1,
     limit_bytes: u64,
@@ -675,6 +848,28 @@ fn extension_command_digest(program: &Path, args: &[OsString], cwd: &Path) -> Ca
         bytes.push(0);
     }
     bytes.extend_from_slice(cwd.to_string_lossy().as_bytes());
+    crate::r71_shadow_planner::canonical_digest(&bytes)
+}
+
+fn code_intel_command_digest(
+    request: &sigil_code_intel::LanguageServerLaunchRequestV1,
+) -> CanonicalHash {
+    let mut bytes = b"managed-code-intel-command-v1\0".to_vec();
+    bytes.extend_from_slice(request.server_name.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(request.program.to_string_lossy().as_bytes());
+    bytes.push(0);
+    for arg in &request.args {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
+    bytes.extend_from_slice(request.cwd.to_string_lossy().as_bytes());
+    for (key, value) in &request.environment {
+        bytes.push(0);
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.push(b'=');
+        bytes.extend_from_slice(value.as_bytes());
+    }
     crate::r71_shadow_planner::canonical_digest(&bytes)
 }
 
@@ -1057,6 +1252,39 @@ mod tests {
         assert_eq!(receipt.stdout, b"managed-route");
         assert_eq!(receipt.exit_code, Some(0));
         assert_eq!(receipt.backend, sigil_kernel::ExecutionBackendKind::Local);
+    }
+
+    #[tokio::test]
+    async fn r71_managed_code_intel_route_bridges_stdout_and_finalizes_process() {
+        use sigil_code_intel::LanguageServerLaunchPortV1;
+        use tokio::io::AsyncReadExt;
+
+        let root = tempfile::tempdir().expect("workspace");
+        let execution_temp = tempfile::tempdir().expect("execution temp");
+        let route = RuntimeManagedCommandExecutionRouteV1::new(
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            execution_temp.path().to_path_buf(),
+        );
+        let io = route
+            .launch(sigil_code_intel::LanguageServerLaunchRequestV1 {
+                server_name: "fake-lsp".to_owned(),
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".to_owned(), "printf managed-code-intel".to_owned()],
+                cwd: root.path().to_path_buf(),
+                environment: Vec::new(),
+            })
+            .await
+            .expect("managed code-intel route");
+        let (mut reader, _writer, _shutdown) = io.into_parts();
+        let mut output = Vec::new();
+        reader
+            .read_to_end(&mut output)
+            .await
+            .expect("managed code-intel output");
+        assert_eq!(output, b"managed-code-intel");
     }
 
     #[tokio::test]

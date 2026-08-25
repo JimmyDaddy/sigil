@@ -49,13 +49,31 @@ pub fn register_code_intelligence_tools_with_workspace_trust(
     workspace_root: PathBuf,
     workspace_trust: WorkspaceTrust,
 ) -> Option<CodeIntelligenceService> {
+    register_code_intelligence_tools_with_workspace_trust_and_process_launcher(
+        registry,
+        config,
+        workspace_root,
+        workspace_trust,
+        None,
+    )
+}
+
+/// Registers code-intelligence tools with a runtime-owned managed process launcher.
+pub fn register_code_intelligence_tools_with_workspace_trust_and_process_launcher(
+    registry: &mut ToolRegistry,
+    config: &CodeIntelligenceConfig,
+    workspace_root: PathBuf,
+    workspace_trust: WorkspaceTrust,
+    process_launcher: Option<Arc<dyn crate::LanguageServerLaunchPortV1>>,
+) -> Option<CodeIntelligenceService> {
     if !config.enabled || config.server_startup == CodeIntelStartup::Off {
         return None;
     }
-    let service = CodeIntelligenceService::new_with_workspace_trust(
+    let service = CodeIntelligenceService::new_with_workspace_trust_and_process_launcher(
         workspace_root,
         config.clone(),
         workspace_trust,
+        process_launcher,
     );
     let service = Arc::new(service);
     registry.register(Arc::new(CodeSymbolsTool {

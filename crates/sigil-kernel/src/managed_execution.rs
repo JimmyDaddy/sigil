@@ -23,6 +23,7 @@ pub enum ExecutionPurposeV1 {
     OneShot,
     Terminal,
     ExtensionProcess,
+    CodeIntelProcess,
 }
 
 /// Capture policy for stdout/stderr/PTY.

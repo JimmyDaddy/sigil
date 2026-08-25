@@ -15,6 +15,7 @@ mod error;
 mod language;
 mod lsp;
 mod prepared_mutation;
+mod process;
 mod repo_language;
 mod service;
 mod tools;
@@ -25,9 +26,13 @@ pub use context::{
     RepoMapEdgeKind, RepoMapLite, RepoMapLiteOptions, RepoReferenceRef, RepoSourceFileRef,
     RepoSymbolKind, RepoSymbolRef, build_repo_map_lite,
 };
+pub use process::{
+    LanguageServerLaunchPortV1, LanguageServerLaunchRequestV1, LanguageServerProcessIoV1,
+};
 pub use service::{CodeDiagnostic, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol};
 pub use tools::{
     register_code_intelligence_tools, register_code_intelligence_tools_with_workspace_trust,
+    register_code_intelligence_tools_with_workspace_trust_and_process_launcher,
 };
 pub use workspace::{
     EffectiveServerPlan, PlannedServerStatus, config_enabled, effective_server_plan,

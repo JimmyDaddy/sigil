@@ -13,11 +13,16 @@ use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig, WorkspaceTrust,
 };
 use tokio::{
-    io::AsyncReadExt,
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    io::{AsyncRead, AsyncWrite},
     sync::Mutex,
 };
 
+#[cfg(test)]
+use tokio::io::AsyncReadExt;
+#[cfg(test)]
+use tokio::process::{Child, ChildStderr, Command};
+
+use crate::process::LanguageServerLaunchPortV1;
 use crate::{
     cache::TimedCache,
     edit::{CodeWorkspaceEdit, workspace_edit_from_lsp},
@@ -48,8 +53,10 @@ use parsers::{
     select_code_action,
 };
 use preview::preview_line;
+#[cfg(test)]
+use server::drain_stderr;
 use server::{
-    LanguageServerHandle, LspRequestOutput, ProcessLanguageServer, ServerPlanState, drain_stderr,
+    LanguageServerHandle, LspRequestOutput, ProcessLanguageServer, ServerPlanState,
     initial_server_plan, language_server_mut, server_plan_state_from_effective,
 };
 use status::{response, response_with_filtered, response_with_statuses, server_status};

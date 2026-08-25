@@ -73,6 +73,7 @@ pub struct SandboxManagedExecutionServiceV1 {
     one_shot_launcher: Option<Arc<dyn ManagedOneShotLaunchServiceV1>>,
     terminal_launcher: Option<Arc<dyn ManagedTerminalLaunchServiceV1>>,
     extension_launcher: Option<Arc<dyn ManagedExtensionLaunchServiceV1>>,
+    code_intel_launcher: Option<Arc<dyn ManagedCodeIntelLaunchServiceV1>>,
 }
 
 /// Host-private one-shot launch seam. The service owns admission, planning, output bounds and
@@ -285,6 +286,18 @@ pub trait ManagedExtensionLaunchServiceV1: Send + Sync {
     ) -> Result<Child, ManagedExecutionErrorV1>;
 }
 
+/// Host-private code-intelligence launch seam. It is separate from extension launch so an MCP
+/// admission cannot be reused to start a language server.
+pub trait ManagedCodeIntelLaunchServiceV1: Send + Sync {
+    fn enforcement(&self) -> ManagedExtensionLaunchEnforcementV1;
+
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
 /// Real command-backed extension launcher used by the runtime route. The command and cwd are
 /// host-private launch material originating from a sealed `LongLivedStdioProcessPlan`; no caller
 /// can replace them through the managed request after the plan has been bound.
@@ -357,6 +370,20 @@ impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 
     }
 }
 
+impl ManagedCodeIntelLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 {
+    fn enforcement(&self) -> ManagedExtensionLaunchEnforcementV1 {
+        self.enforcement.clone()
+    }
+
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        ManagedExtensionLaunchServiceV1::launch(self, request, environment)
+    }
+}
+
 impl ManagedTerminalLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 {
     fn launch(
         &self,
@@ -373,6 +400,7 @@ enum SigilPurpose {
     OneShot,
     Terminal,
     Extension,
+    CodeIntel,
 }
 
 /// Fully bound local execution context; every check happens before any platform call.
@@ -402,6 +430,7 @@ impl SandboxManagedExecutionServiceV1 {
             one_shot_launcher: None,
             terminal_launcher: None,
             extension_launcher: None,
+            code_intel_launcher: None,
         }
     }
 
@@ -432,6 +461,15 @@ impl SandboxManagedExecutionServiceV1 {
         self
     }
 
+    #[must_use]
+    pub fn with_code_intel_launcher(
+        mut self,
+        launcher: Arc<dyn ManagedCodeIntelLaunchServiceV1>,
+    ) -> Self {
+        self.code_intel_launcher = Some(launcher);
+        self
+    }
+
     fn prepare(
         &self,
         bundle: &IssuedExecutionAdmissionBundleV1,
@@ -441,12 +479,16 @@ impl SandboxManagedExecutionServiceV1 {
             IssuedExecutionAdmissionBundleV1::OneShot { .. } => SigilPurpose::OneShot,
             IssuedExecutionAdmissionBundleV1::Terminal { .. } => SigilPurpose::Terminal,
             IssuedExecutionAdmissionBundleV1::Extension { .. } => SigilPurpose::Extension,
+            IssuedExecutionAdmissionBundleV1::CodeIntel { .. } => SigilPurpose::CodeIntel,
         };
         let execution_purpose = match purpose {
             SigilPurpose::OneShot => sigil_kernel::managed_execution::ExecutionPurposeV1::OneShot,
             SigilPurpose::Terminal => sigil_kernel::managed_execution::ExecutionPurposeV1::Terminal,
             SigilPurpose::Extension => {
                 sigil_kernel::managed_execution::ExecutionPurposeV1::ExtensionProcess
+            }
+            SigilPurpose::CodeIntel => {
+                sigil_kernel::managed_execution::ExecutionPurposeV1::CodeIntelProcess
             }
         };
         let plan_request = ManagedExecutionPlanRequestV1 {
@@ -494,6 +536,23 @@ impl SandboxManagedExecutionServiceV1 {
         ) = match purpose {
             SigilPurpose::Extension => {
                 let Some(launcher) = &self.extension_launcher else {
+                    return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+                };
+                let enforcement = launcher.enforcement();
+                if enforcement.requested.profile_hash != draft.environment_profile.profile_hash {
+                    return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
+                }
+                (
+                    enforcement.requested,
+                    enforcement.backend,
+                    enforcement.completeness,
+                    enforcement.effective_capability_set_hash,
+                    enforcement.proof_set_hash,
+                    enforcement.effective_access,
+                )
+            }
+            SigilPurpose::CodeIntel => {
+                let Some(launcher) = &self.code_intel_launcher else {
                     return Err(ManagedExecutionErrorV1::ProviderUnavailable);
                 };
                 let enforcement = launcher.enforcement();
@@ -929,12 +988,16 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         request: ManagedExecutionRequestV1,
     ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
         let is_extension = matches!(bundle, IssuedExecutionAdmissionBundleV1::Extension { .. });
-        if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. }) && !is_extension {
+        let is_code_intel = matches!(bundle, IssuedExecutionAdmissionBundleV1::CodeIntel { .. });
+        if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. })
+            && !is_extension
+            && !is_code_intel
+        {
             return Err(ManagedExecutionErrorV1::AdmissionMismatch);
         }
         let prepared = self.prepare(&bundle, &request)?;
         if request.limits.pty_required || request.capture.pty {
-            if is_extension {
+            if is_extension || is_code_intel {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
             let Some(size) = request.pty_size else {
@@ -948,6 +1011,11 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         }
         let mut child = if is_extension {
             let Some(launcher) = &self.extension_launcher else {
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            };
+            launcher.launch(&request, &prepared.env)?
+        } else if is_code_intel {
+            let Some(launcher) = &self.code_intel_launcher else {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             };
             launcher.launch(&request, &prepared.env)?

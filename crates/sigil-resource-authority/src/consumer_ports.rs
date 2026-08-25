@@ -66,7 +66,8 @@ pub fn validate_execution_purpose_seam(
         OneShotShell => matches!(purpose, OneShot),
         PersistentTerminal => matches!(purpose, Terminal),
         McpStdio | PluginHook => matches!(purpose, ExtensionProcess),
-        VerificationJob | CodeIntel | GitInspection | AgentSupervisor => true,
+        CodeIntel => matches!(purpose, CodeIntelProcess),
+        VerificationJob | GitInspection | AgentSupervisor => true,
         _ => false,
     };
     if !allowed {

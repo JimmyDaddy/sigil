@@ -1017,4 +1017,8 @@ pub enum IssuedExecutionAdmissionBundleV1 {
         consumer_token: OpaqueResourceId,
         resource_capability: OpaqueResourceId,
     },
+    CodeIntel {
+        consumer_token: OpaqueResourceId,
+        resource_capability: OpaqueResourceId,
+    },
 }

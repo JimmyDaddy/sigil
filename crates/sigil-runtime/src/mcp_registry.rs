@@ -1221,6 +1221,10 @@ fn register_local_tools(
         managed_command_execution.as_ref().map(|route| {
             Arc::clone(route) as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>
         });
+    let managed_code_intel: Option<Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>> =
+        managed_command_execution.as_ref().map(|route| {
+            Arc::clone(route) as Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>
+        });
     let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
         managed_command_execution
             .map(|route| route as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>)
@@ -1273,11 +1277,12 @@ fn register_local_tools(
             )
         }
     };
-    let code_intelligence = sigil_code_intel::register_code_intelligence_tools_with_workspace_trust(
+    let code_intelligence = sigil_code_intel::register_code_intelligence_tools_with_workspace_trust_and_process_launcher(
         registry,
         &root_config.code_intelligence,
         workspace_root.clone(),
         workspace_trust,
+        managed_code_intel,
     );
     let user_config_dir = default_user_config_dir().ok();
     let _ = skills::register_skill_tools(
