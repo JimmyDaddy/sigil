@@ -1,11 +1,13 @@
 //! RFC-0071 section 9.4 / R71.4: runtime composition of authority-owned adapters (isolated).
 //!
 //! This module composes the ResourceAuthorityServiceFactoryV1 bundle into consumer-facing
-//! semantic adapters: runtime holds only pathless trait objects and coordinates token/event/
-//! mutation receipts. It never implements authority services, never holds a private
-//! token/primitive/connection lease, and never names authority concrete types. The production
-//! R71.6 composition also owns the plan-bound managed extension route; shadow composition keeps
-//! that route absent and therefore remains fail-closed.
+//! semantic adapters: the exported resource-service view holds only pathless trait objects and
+//! coordinates token/event/mutation receipts. Runtime never implements authority services or
+//! holds a private token/primitive/connection lease. Its host-private execution coordinators do
+//! own the concrete authority allocator that provisions and retires per-attempt temp generations;
+//! that concrete type does not escape through a consumer-facing API. The production R71.6
+//! composition also owns the plan-bound managed extension route; shadow composition keeps that
+//! route absent and therefore remains fail-closed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
