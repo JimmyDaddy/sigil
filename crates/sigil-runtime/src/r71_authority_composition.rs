@@ -202,6 +202,11 @@ fn compose_runtime_authority_inner(
             RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
         })?;
     storage_service
+        .reconcile_unsettled_storage_grants_with_physical_bridge()
+        .map_err(|error| {
+            RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
+        })?;
+    storage_service
         .require_startup_reconciliation()
         .map_err(|error| {
             RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())

@@ -5,8 +5,11 @@
 //! import authority concrete types nor receive an authority token.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use serde::Deserialize;
 
 use sigil_kernel::managed_storage::{
     ManagedStorageAdmissionRequestV1, ManagedStorageErrorV1, ManagedStorageNamespaceHandleV1,
@@ -106,10 +109,26 @@ impl AuthorityStorageGrantTableV1 {
 
 #[derive(Debug, Clone)]
 struct StorageAdmissionRecordV1 {
+    handle_id: String,
     grant: StorageAdmissionGrantV1,
     request: ManagedStorageAdmissionRequestV1,
     namespace_hash: CanonicalHash,
     admission_sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PhysicalStorageAdmissionMarkerV1 {
+    schema_version: u32,
+    handle_id: String,
+    namespace_hash: CanonicalHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhysicalStorageFrontierV1 {
+    byte_length: u64,
+    record_count: u64,
+    content_hash: CanonicalHash,
+    frontier_hash: CanonicalHash,
 }
 
 /// Authority-owned managed storage service behind the kernel trait object.
@@ -117,6 +136,9 @@ pub struct AuthorityManagedStorageServiceV1 {
     table: AuthorityStorageGrantTableV1,
     authority_generation: AuthorityGeneration,
     journal: Option<Mutex<ResourceJournalFileV1>>,
+    /// The journal parent is the authority-owned state anchor. It is used only by the
+    /// authority's physical recovery verifier; no path crosses the kernel storage port.
+    journal_root: Option<PathBuf>,
     blocked_grants_after_restart: Mutex<BTreeMap<String, ()>>,
 }
 
@@ -129,6 +151,7 @@ impl AuthorityManagedStorageServiceV1 {
             table,
             authority_generation,
             journal: None,
+            journal_root: None,
             blocked_grants_after_restart: Mutex::new(BTreeMap::new()),
         }
     }
@@ -160,10 +183,12 @@ impl AuthorityManagedStorageServiceV1 {
             .collect();
         let (admissions, settled_grants) = journal.storage_admission_state();
         rehydrate_storage_state(&table, authority_generation, admissions, &settled_grants)?;
+        let journal_root = journal_path.as_ref().parent().map(Path::to_path_buf);
         Ok(Self {
             table,
             authority_generation,
             journal: Some(Mutex::new(journal)),
+            journal_root,
             blocked_grants_after_restart: Mutex::new(blocked_grants_after_restart),
         })
     }
@@ -182,6 +207,465 @@ impl AuthorityManagedStorageServiceV1 {
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
         if blocked.keys().next().is_some() {
             return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        Ok(())
+    }
+
+    /// Records the physical frontier observed by a managed writer immediately before the
+    /// authority settlement. The writer supplies only bounded facts; the authority owns the
+    /// journal record and computes the final frontier binding.
+    pub fn record_physical_frontier(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+        byte_length: u64,
+        record_count: u64,
+        content_hash: CanonicalHash,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        let admitted = self
+            .table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let record = admitted
+            .get(handle.handle_id.as_str())
+            .cloned()
+            .ok_or(ManagedStorageErrorV1::CapabilityMismatch)?;
+        if record.namespace_hash != handle.namespace_hash
+            || record.grant.capability_family != handle.capability_family
+        {
+            return Err(ManagedStorageErrorV1::CapabilityMismatch);
+        }
+        if byte_length > record.grant.quota_profile.max_bytes {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        let frontier_hash = hash_debug(&(
+            record.grant.grant_hash,
+            record.namespace_hash,
+            byte_length,
+            record_count,
+            content_hash,
+        ));
+        drop(admitted);
+        self.append_journal_event(
+            ResourceJournalEventV1::DomainStoragePhysicalFrontierObserved {
+                grant_hash: record.grant.grant_hash,
+                namespace_hash: record.namespace_hash,
+                byte_length,
+                record_count,
+                content_hash,
+                frontier_hash,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Reconciles pending writer admissions through the production physical frontier bridge.
+    ///
+    /// The bridge is intentionally authority-owned: it resolves the journal parent, locates
+    /// the writer's owner-only admission marker, verifies the real `records.jsonl` object and
+    /// appends the complete RFC-0071 section 22.4 seven-record chain. Missing markers,
+    /// ambiguous physical identities, partial lines and oversized content remain fail closed.
+    pub fn reconcile_unsettled_storage_grants_with_physical_bridge(
+        &self,
+    ) -> Result<Vec<ManagedStorageStorageReceiptV1>, ManagedStorageErrorV1> {
+        let records = self
+            .table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .iter()
+            .filter(|record| {
+                self.blocked_grants_after_restart
+                    .lock()
+                    .map(|blocked| blocked.contains_key(&record.1.grant.grant_hash.to_hex()))
+                    .unwrap_or(true)
+            })
+            .map(|(handle_id, record)| (handle_id.clone(), record.clone()))
+            .collect::<Vec<_>>();
+
+        let mut receipts = Vec::with_capacity(records.len());
+        for (handle_id, record) in records {
+            let frontier = self.observe_physical_frontier(&record)?;
+            self.append_storage_recovery_chain(&record, frontier)?;
+            let handle = ManagedStorageNamespaceHandleV1::new(
+                OpaqueKernelCapabilityHandleId::new(handle_id),
+                record.namespace_hash,
+                record.grant.capability_family,
+                OpaqueKernelCapabilityAuthenticatorV1::new(format!(
+                    "recovery-{}",
+                    record.grant.grant_id.as_str()
+                )),
+            );
+            receipts.push(self.finalize_namespace(
+                handle,
+                "domain-storage-recovery-retained-frontier".to_owned(),
+            )?);
+        }
+        Ok(receipts)
+    }
+
+    fn observe_physical_frontier(
+        &self,
+        record: &StorageAdmissionRecordV1,
+    ) -> Result<PhysicalStorageFrontierV1, ManagedStorageErrorV1> {
+        let root = self
+            .journal_root
+            .as_ref()
+            .ok_or(ManagedStorageErrorV1::JournalUnavailable)?
+            .canonicalize()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let Some(leaf) = storage_owner_leaf(record.grant.semantic_owner) else {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        };
+        let leaf_root = root.join("managed").join(leaf);
+        let leaf_metadata = fs::symlink_metadata(&leaf_root)
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        if leaf_metadata.file_type().is_symlink() || !leaf_metadata.is_dir() {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+
+        let mut candidates = vec![leaf_root.clone()];
+        for entry in
+            fs::read_dir(&leaf_root).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+        {
+            let entry = entry.map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+            if metadata.file_type().is_symlink() {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            if metadata.is_dir() {
+                candidates.push(entry.path());
+            }
+        }
+
+        let mut matched = None;
+        for candidate in candidates {
+            let marker_path = candidate.join("authority-admission.json");
+            let marker_metadata = match fs::symlink_metadata(&marker_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(ManagedStorageErrorV1::JournalUnavailable),
+            };
+            if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            let marker: PhysicalStorageAdmissionMarkerV1 = serde_json::from_slice(
+                &fs::read(&marker_path).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?,
+            )
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+            if marker.schema_version != 1 {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            if marker.namespace_hash == record.namespace_hash
+                && marker.handle_id == record.handle_id
+                && matched.replace(candidate).is_some()
+            {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+        }
+        let directory = matched.ok_or(ManagedStorageErrorV1::JournalUnavailable)?;
+        let record_path = directory.join("records.jsonl");
+        let bytes = match fs::symlink_metadata(&record_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(ManagedStorageErrorV1::JournalUnavailable);
+                }
+                if metadata.len() > record.grant.quota_profile.max_bytes {
+                    return Err(ManagedStorageErrorV1::JournalUnavailable);
+                }
+                fs::read(&record_path).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(ManagedStorageErrorV1::JournalUnavailable),
+        };
+        if bytes.len() as u64 > record.grant.quota_profile.max_bytes
+            || (!bytes.is_empty() && !bytes.ends_with(b"\n"))
+        {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        let record_count = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count() as u64;
+        let content_hash = hash_bytes(&bytes);
+        Ok(PhysicalStorageFrontierV1 {
+            byte_length: bytes.len() as u64,
+            record_count,
+            content_hash,
+            frontier_hash: hash_debug(&(
+                record.grant.grant_hash,
+                record.namespace_hash,
+                bytes.len() as u64,
+                record_count,
+                content_hash,
+            )),
+        })
+    }
+
+    fn append_storage_recovery_chain(
+        &self,
+        record: &StorageAdmissionRecordV1,
+        frontier: PhysicalStorageFrontierV1,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        use crate::journal::MAX_DOMAIN_STORAGE_RECOVERY_ENVELOPE_BYTES as MAX;
+
+        let grant_hash = record.grant.grant_hash;
+        let raised_envelope = serde_json::to_vec(&serde_json::json!({
+            "schema": "managed-storage-raised-v2",
+            "grant_hash": grant_hash,
+            "namespace_hash": record.namespace_hash,
+            "request": &record.request,
+            "physical_frontier_hash": frontier.frontier_hash,
+        }))
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let action_token_hash = hash_debug(&("retain-verified-physical-frontier-v1", grant_hash));
+        let started_envelope = serde_json::to_vec(&serde_json::json!({
+            "schema": "managed-storage-resolution-started-v2",
+            "grant_hash": grant_hash,
+            "action_token_hash": action_token_hash,
+        }))
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let operation_id = format!("storage-recovery-{}", grant_hash.to_hex());
+        let authorized_operation = serde_json::to_vec(&serde_json::json!({
+            "schema": "managed-storage-recovery-operation-prepared-v1",
+            "operation_id": operation_id,
+            "operation": "retain-verified-physical-frontier",
+            "frontier_hash": frontier.frontier_hash,
+        }))
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let repair_receipt = serde_json::to_vec(&serde_json::json!({
+            "schema": "managed-storage-repair-receipt-v1",
+            "operation_id": operation_id,
+            "action": "retained",
+            "byte_length": frontier.byte_length,
+            "record_count": frontier.record_count,
+            "content_hash": frontier.content_hash,
+        }))
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let terminal_or_successor_event = serde_json::to_vec(&serde_json::json!({
+            "schema": "managed-storage-resolved-v2",
+            "grant_hash": grant_hash,
+            "frontier_hash": frontier.frontier_hash,
+        }))
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let projected_event = serde_json::to_vec(&serde_json::json!({
+            "schema": "managed-storage-blocker-projected-v1",
+            "grant_hash": grant_hash,
+            "projection": "resolved",
+            "frontier_hash": frontier.frontier_hash,
+        }))
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        if [
+            &raised_envelope,
+            &started_envelope,
+            &authorized_operation,
+            &repair_receipt,
+            &terminal_or_successor_event,
+            &projected_event,
+        ]
+        .into_iter()
+        .any(|envelope| envelope.len() > MAX)
+        {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+
+        let prefix = self
+            .journal
+            .as_ref()
+            .ok_or(ManagedStorageErrorV1::JournalUnavailable)?
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .storage_recovery_records(grant_hash);
+        if prefix.len() > 7 {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        let mut hashes = [None; 7];
+        for (index, (journal_record, event)) in prefix.iter().enumerate() {
+            let valid = match (index, event) {
+                (
+                    0,
+                    ResourceJournalEventV1::DomainStorageFailureObserved {
+                        grant_hash: current,
+                        namespace_hash,
+                        raised_envelope: envelope,
+                        physical_frontier_hash,
+                        request_hash,
+                    },
+                ) => {
+                    *current == grant_hash
+                        && *namespace_hash == record.namespace_hash
+                        && envelope == &raised_envelope
+                        && *physical_frontier_hash == frontier.frontier_hash
+                        && *request_hash == hash_debug(&record.request)
+                }
+                (
+                    1,
+                    ResourceJournalEventV1::DomainStorageResolutionStartedShadow {
+                        grant_hash: current,
+                        observed_record_hash,
+                        action_token_hash: current_action,
+                        started_envelope: envelope,
+                        request_hash,
+                    },
+                ) => {
+                    *current == grant_hash
+                        && hashes[0] == Some(*observed_record_hash)
+                        && *current_action == action_token_hash
+                        && envelope == &started_envelope
+                        && *request_hash == hash_debug(&record.request)
+                }
+                (
+                    2,
+                    ResourceJournalEventV1::RecoveryOperationPrepared {
+                        grant_hash: current,
+                        recovery_operation_id: current_operation,
+                        authorized_operation: operation,
+                        target_frontier_hash,
+                    },
+                ) => {
+                    *current == grant_hash
+                        && current_operation == &operation_id
+                        && operation == &authorized_operation
+                        && *target_frontier_hash == frontier.frontier_hash
+                }
+                (
+                    3,
+                    ResourceJournalEventV1::DomainStorageResolutionPrepared {
+                        grant_hash: current,
+                        started_shadow_record_hash,
+                        recovery_prepared_record_hash,
+                        bridge_frontier_hash,
+                    },
+                ) => {
+                    *current == grant_hash
+                        && hashes[1] == Some(*started_shadow_record_hash)
+                        && hashes[2] == Some(*recovery_prepared_record_hash)
+                        && *bridge_frontier_hash == frontier.frontier_hash
+                }
+                (
+                    4,
+                    ResourceJournalEventV1::RecoveryOperationSettled {
+                        grant_hash: current,
+                        recovery_operation_id: current_operation,
+                        repair_receipt: receipt,
+                        settled_frontier_hash,
+                    },
+                ) => {
+                    *current == grant_hash
+                        && current_operation == &operation_id
+                        && receipt == &repair_receipt
+                        && *settled_frontier_hash == frontier.frontier_hash
+                }
+                (
+                    5,
+                    ResourceJournalEventV1::DomainStorageResolutionSettled {
+                        grant_hash: current,
+                        resolution_prepared_record_hash,
+                        recovery_settled_record_hash,
+                        receipt_event,
+                        terminal_or_successor_event: terminal,
+                    },
+                ) => {
+                    *current == grant_hash
+                        && hashes[3] == Some(*resolution_prepared_record_hash)
+                        && hashes[4] == Some(*recovery_settled_record_hash)
+                        && receipt_event == &repair_receipt
+                        && terminal == &terminal_or_successor_event
+                }
+                (
+                    6,
+                    ResourceJournalEventV1::DomainBlockerProjected {
+                        grant_hash: current,
+                        resolution_settled_record_hash,
+                        projected_event_ids_hash,
+                        final_frontier_hash,
+                        projected_event: projection,
+                    },
+                ) => {
+                    *current == grant_hash
+                        && hashes[5] == Some(*resolution_settled_record_hash)
+                        && *projected_event_ids_hash
+                            == hash_debug(&(
+                                grant_hash,
+                                hashes[5],
+                                terminal_or_successor_event.clone(),
+                            ))
+                        && *final_frontier_hash == frontier.frontier_hash
+                        && projection == &projected_event
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            hashes[index] = Some(journal_record.record_hash);
+        }
+
+        for index in prefix.len()..7 {
+            let event = match index {
+                0 => ResourceJournalEventV1::DomainStorageFailureObserved {
+                    grant_hash,
+                    namespace_hash: record.namespace_hash,
+                    raised_envelope: raised_envelope.clone(),
+                    physical_frontier_hash: frontier.frontier_hash,
+                    request_hash: hash_debug(&record.request),
+                },
+                1 => ResourceJournalEventV1::DomainStorageResolutionStartedShadow {
+                    grant_hash,
+                    observed_record_hash: hashes[0]
+                        .ok_or(ManagedStorageErrorV1::JournalUnavailable)?,
+                    action_token_hash,
+                    started_envelope: started_envelope.clone(),
+                    request_hash: hash_debug(&record.request),
+                },
+                2 => ResourceJournalEventV1::RecoveryOperationPrepared {
+                    grant_hash,
+                    recovery_operation_id: operation_id.clone(),
+                    authorized_operation: authorized_operation.clone(),
+                    target_frontier_hash: frontier.frontier_hash,
+                },
+                3 => ResourceJournalEventV1::DomainStorageResolutionPrepared {
+                    grant_hash,
+                    started_shadow_record_hash: hashes[1]
+                        .ok_or(ManagedStorageErrorV1::JournalUnavailable)?,
+                    recovery_prepared_record_hash: hashes[2]
+                        .ok_or(ManagedStorageErrorV1::JournalUnavailable)?,
+                    bridge_frontier_hash: frontier.frontier_hash,
+                },
+                4 => ResourceJournalEventV1::RecoveryOperationSettled {
+                    grant_hash,
+                    recovery_operation_id: operation_id.clone(),
+                    repair_receipt: repair_receipt.clone(),
+                    settled_frontier_hash: frontier.frontier_hash,
+                },
+                5 => ResourceJournalEventV1::DomainStorageResolutionSettled {
+                    grant_hash,
+                    resolution_prepared_record_hash: hashes[3]
+                        .ok_or(ManagedStorageErrorV1::JournalUnavailable)?,
+                    recovery_settled_record_hash: hashes[4]
+                        .ok_or(ManagedStorageErrorV1::JournalUnavailable)?,
+                    receipt_event: repair_receipt.clone(),
+                    terminal_or_successor_event: terminal_or_successor_event.clone(),
+                },
+                6 => ResourceJournalEventV1::DomainBlockerProjected {
+                    grant_hash,
+                    resolution_settled_record_hash: hashes[5]
+                        .ok_or(ManagedStorageErrorV1::JournalUnavailable)?,
+                    projected_event_ids_hash: hash_debug(&(
+                        grant_hash,
+                        hashes[5],
+                        terminal_or_successor_event.clone(),
+                    )),
+                    final_frontier_hash: frontier.frontier_hash,
+                    projected_event: projected_event.clone(),
+                },
+                _ => unreachable!(),
+            };
+            let appended = self
+                .append_journal_event(event)?
+                .ok_or(ManagedStorageErrorV1::JournalUnavailable)?;
+            hashes[index] = Some(appended.record_hash);
         }
         Ok(())
     }
@@ -259,6 +743,22 @@ impl AuthorityManagedStorageServiceV1 {
 }
 
 impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
+    fn record_physical_frontier(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+        byte_length: u64,
+        record_count: u64,
+        content_hash: CanonicalHash,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        AuthorityManagedStorageServiceV1::record_physical_frontier(
+            self,
+            handle,
+            byte_length,
+            record_count,
+            content_hash,
+        )
+    }
+
     fn admit_namespace(
         &self,
         request: ManagedStorageAdmissionRequestV1,
@@ -368,6 +868,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         admitted.insert(
             handle.handle_id.as_str().to_owned(),
             StorageAdmissionRecordV1 {
+                handle_id: handle.handle_id.as_str().to_owned(),
                 grant: grant.clone(),
                 request,
                 namespace_hash,
@@ -488,6 +989,7 @@ fn rehydrate_storage_state(
                 .insert(
                     admission.handle_id.clone(),
                     StorageAdmissionRecordV1 {
+                        handle_id: admission.handle_id.clone(),
                         grant: admission.grant,
                         request: admission.request,
                         namespace_hash: admission.namespace_hash,
@@ -522,6 +1024,38 @@ fn hash_debug(value: &impl std::fmt::Debug) -> CanonicalHash {
     let mut hasher = Sha256::new();
     hasher.update(format!("{value:?}").as_bytes());
     CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn hash_bytes(value: &[u8]) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(value);
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn storage_owner_leaf(
+    owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
+) -> Option<&'static str> {
+    use sigil_kernel::resource::{AdapterDurableStateClassV1, ManagedStorageSemanticOwnerV1};
+    match owner {
+        ManagedStorageSemanticOwnerV1::SessionLog => Some("session-log"),
+        ManagedStorageSemanticOwnerV1::SessionLifecycleLog => Some("session-lifecycle-log"),
+        ManagedStorageSemanticOwnerV1::InteractiveInputHistory => Some("input-history"),
+        ManagedStorageSemanticOwnerV1::DurableMemory(_) => Some("durable-memory"),
+        ManagedStorageSemanticOwnerV1::SessionCatalog => Some("session-catalog"),
+        ManagedStorageSemanticOwnerV1::ArtifactStaging => Some("artifact-staging"),
+        ManagedStorageSemanticOwnerV1::ArtifactStore => Some("artifact-store"),
+        ManagedStorageSemanticOwnerV1::AdapterDurableState(class) => match class {
+            AdapterDurableStateClassV1::ProtocolReplay => Some("adapter-protocol-replay"),
+            AdapterDurableStateClassV1::EgressDisclosure => Some("adapter-egress-disclosure"),
+            AdapterDurableStateClassV1::IdempotencyLedger => Some("adapter-idempotency-ledger"),
+        },
+        ManagedStorageSemanticOwnerV1::WorkspaceMutationState
+        | ManagedStorageSemanticOwnerV1::ApplicationControlLog
+        | ManagedStorageSemanticOwnerV1::PlanStore
+        | ManagedStorageSemanticOwnerV1::ProviderConnectionState
+        | ManagedStorageSemanticOwnerV1::RuntimeCache(_) => None,
+    }
 }
 
 /// Authority-private storage capability verifier facet (RA-owned; factory returns only
@@ -757,6 +1291,107 @@ mod tests {
                 .expect("reopen reconcile")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn r71_storage_physical_bridge_replays_complete_seven_record_chain() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority-resources.journal.json");
+        let header = storage_test_header();
+        let grant = grant();
+        let namespace_hash = CanonicalHash::from_bytes([3u8; 32]);
+        {
+            let mut journal = crate::journal::ResourceJournalFileV1::open(&path, header.clone())
+                .expect("journal");
+            journal
+                .append_event(
+                    crate::journal::ResourceJournalEventV1::StorageNamespaceAdmitted {
+                        grant_hash: grant.grant_hash,
+                        handle_id: "rehydrated-handle".to_owned(),
+                        namespace_hash,
+                        grant: Box::new(grant.clone()),
+                        request: Box::new(storage_test_request()),
+                    },
+                )
+                .expect("admission");
+        }
+        let namespace = directory.path().join("managed/session-log");
+        std::fs::create_dir_all(&namespace).expect("managed root");
+        std::fs::write(
+            namespace.join("authority-admission.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "handle_id": "rehydrated-handle",
+                "namespace_hash": namespace_hash,
+            }))
+            .expect("marker json"),
+        )
+        .expect("marker");
+        std::fs::write(namespace.join("records.jsonl"), b"{\"seq\":1}\n").expect("records");
+
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant.clone()).expect("grant");
+        let service = AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            grant.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("rehydrate");
+        let receipts = service
+            .reconcile_unsettled_storage_grants_with_physical_bridge()
+            .expect("physical bridge");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].committed_sequence_or_version, Some(7));
+        service
+            .require_startup_reconciliation()
+            .expect("settlement clears startup blocker");
+
+        let journal =
+            crate::journal::ResourceJournalFileV1::open(&path, header).expect("reopen journal");
+        assert_eq!(journal.storage_recovery_records(grant.grant_hash).len(), 7);
+        assert_eq!(
+            std::fs::read(namespace.join("records.jsonl")).expect("retained records"),
+            b"{\"seq\":1}\n"
+        );
+    }
+
+    #[test]
+    fn r71_storage_physical_bridge_rejects_pending_without_marker() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority-resources.journal.json");
+        let header = storage_test_header();
+        let grant = grant();
+        {
+            let mut journal = crate::journal::ResourceJournalFileV1::open(&path, header.clone())
+                .expect("journal");
+            journal
+                .append_event(
+                    crate::journal::ResourceJournalEventV1::StorageNamespaceAdmitted {
+                        grant_hash: grant.grant_hash,
+                        handle_id: "missing-marker".to_owned(),
+                        namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
+                        grant: Box::new(grant.clone()),
+                        request: Box::new(storage_test_request()),
+                    },
+                )
+                .expect("admission");
+        }
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant.clone()).expect("grant");
+        let service = AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            grant.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("rehydrate");
+        assert!(matches!(
+            service.reconcile_unsettled_storage_grants_with_physical_bridge(),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
     }
 
     #[test]

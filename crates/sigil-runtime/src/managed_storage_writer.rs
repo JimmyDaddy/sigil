@@ -345,6 +345,7 @@ impl ManagedStorageWriterAdapterV1 {
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        self.write_admission_marker(&path, &handle)?;
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
             path,
@@ -414,6 +415,7 @@ impl ManagedStorageWriterAdapterV1 {
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        self.write_admission_marker(&path, &handle)?;
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
             path,
@@ -454,6 +456,51 @@ impl ManagedStorageWriterAdapterV1 {
             }
         }
         Ok(())
+    }
+
+    fn write_admission_marker(
+        &self,
+        path: &Path,
+        handle: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "handle_id": handle.handle_id.as_str(),
+            "namespace_hash": handle.namespace_hash,
+        }))
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        sigil_kernel::atomic_publish_private_file(&path.join("authority-admission.json"), &bytes)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))
+    }
+
+    fn physical_frontier(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+    ) -> Result<(u64, u64, CanonicalHash), ManagedStorageWriterErrorV1> {
+        let record_file = lease.path.join("records.jsonl");
+        let bytes = match std::fs::symlink_metadata(&record_file) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(ManagedStorageWriterErrorV1::Io(
+                        "managed record object must be a regular file".to_owned(),
+                    ));
+                }
+                std::fs::read(&record_file)
+                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
+        };
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "managed record object ends with a partial JSONL line".to_owned(),
+            ));
+        }
+        let record_count = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count() as u64;
+        Ok((bytes.len() as u64, record_count, content_hash(&bytes)))
     }
 
     /// Reads the owner-controlled record object for an admitted namespace without following
@@ -516,10 +563,21 @@ impl ManagedStorageWriterAdapterV1 {
         &self,
         lease: ManagedStorageWriterLeaseV1,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
+        let (byte_length, record_count, content_hash) = self.physical_frontier(&lease)?;
+        self.service
+            .record_physical_frontier(&lease.handle, byte_length, record_count, content_hash)
+            .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))?;
         self.service
             .finalize_namespace(lease.handle, "writer-batch-complete".to_owned())
             .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
     }
+}
+
+fn content_hash(bytes: &[u8]) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
 /// Authority-form grant for one declared writer channel (R71.6 production composition:
@@ -909,6 +967,64 @@ mod tests {
         );
         writer.write_record(&lease, b"seq=1").expect("write");
         writer.finalize(lease).expect("finalize");
+    }
+
+    #[test]
+    fn r71_sw_finalize_commits_physical_frontier_before_settlement() {
+        use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal_path = dir.path().join("authority-resources.journal.json");
+        let bootstrap_manifest_hash = hash(0x91);
+        let journal_instance_hash = hash(0x92);
+        let header = sigil_resource_authority::journal::ResourceJournalHeaderV1 {
+            schema_version: 1,
+            shard_name: "application-resources".to_owned(),
+            bootstrap_manifest_hash,
+            journal_instance_hash,
+            header_hash: crate::r71_shadow_planner::canonical_digest(
+                format!(
+                    "{:?}",
+                    (
+                        "application-resources",
+                        bootstrap_manifest_hash,
+                        journal_instance_hash
+                    )
+                )
+                .as_bytes(),
+            ),
+        };
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(session_log_grant()).expect("register");
+        let service = std::sync::Arc::new(
+            AuthorityManagedStorageServiceV1::new_with_journal(
+                table,
+                AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: hash(8),
+                },
+                &journal_path,
+                header.bootstrap_manifest_hash,
+                header.journal_instance_hash,
+            )
+            .expect("authority service"),
+        );
+        let broker = std::sync::Arc::new(KernelCapabilityBrokerV1::new());
+        let writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
+            service,
+            dir.path().to_path_buf(),
+            hash(10),
+            broker,
+        );
+        let lease = writer
+            .acquire(StorageWriterChannelV1::SessionLog)
+            .expect("acquire");
+        writer.write_record(&lease, b"seq=1").expect("write");
+        let receipt = writer.finalize(lease).expect("finalize");
+        assert_eq!(receipt.committed_sequence_or_version, Some(4));
+        let journal =
+            sigil_resource_authority::journal::ResourceJournalFileV1::open(journal_path, header)
+                .expect("reopen journal");
+        assert_eq!(journal.tail().expect("tail").sequence, 4);
     }
     #[test]
     fn r71_sw_named_acquire_per_session_and_unsafe_key_rejected() {

@@ -80,7 +80,74 @@ pub enum ResourceJournalEventV1 {
         generation: u64,
         quarantine_ref: String,
     },
+    /// Physical writer frontier observed before a normal settlement. This is deliberately
+    /// separate from `GenerationSettled`: the latter is the authority lifecycle fact, while
+    /// this record binds it to the bytes that were actually observed on disk.
+    DomainStoragePhysicalFrontierObserved {
+        grant_hash: CanonicalHash,
+        namespace_hash: CanonicalHash,
+        byte_length: u64,
+        record_count: u64,
+        content_hash: CanonicalHash,
+        frontier_hash: CanonicalHash,
+    },
+    /// RFC-0071 section 22.4: domain-storage failure/recovery chain, record 1.
+    DomainStorageFailureObserved {
+        grant_hash: CanonicalHash,
+        namespace_hash: CanonicalHash,
+        raised_envelope: Vec<u8>,
+        physical_frontier_hash: CanonicalHash,
+        request_hash: CanonicalHash,
+    },
+    /// RFC-0071 section 22.4: domain-storage failure/recovery chain, record 2.
+    DomainStorageResolutionStartedShadow {
+        grant_hash: CanonicalHash,
+        observed_record_hash: CanonicalHash,
+        action_token_hash: CanonicalHash,
+        started_envelope: Vec<u8>,
+        request_hash: CanonicalHash,
+    },
+    /// RFC-0071 section 22.4: generic recovery Prepared record 3.
+    RecoveryOperationPrepared {
+        grant_hash: CanonicalHash,
+        recovery_operation_id: String,
+        authorized_operation: Vec<u8>,
+        target_frontier_hash: CanonicalHash,
+    },
+    /// RFC-0071 section 22.4: domain-storage bridge Prepared record 4.
+    DomainStorageResolutionPrepared {
+        grant_hash: CanonicalHash,
+        started_shadow_record_hash: CanonicalHash,
+        recovery_prepared_record_hash: CanonicalHash,
+        bridge_frontier_hash: CanonicalHash,
+    },
+    /// RFC-0071 section 22.4: generic recovery Settled record 5.
+    RecoveryOperationSettled {
+        grant_hash: CanonicalHash,
+        recovery_operation_id: String,
+        repair_receipt: Vec<u8>,
+        settled_frontier_hash: CanonicalHash,
+    },
+    /// RFC-0071 section 22.4: domain-storage bridge Settled record 6.
+    DomainStorageResolutionSettled {
+        grant_hash: CanonicalHash,
+        resolution_prepared_record_hash: CanonicalHash,
+        recovery_settled_record_hash: CanonicalHash,
+        receipt_event: Vec<u8>,
+        terminal_or_successor_event: Vec<u8>,
+    },
+    /// RFC-0071 section 22.4: domain blocker projection record 7.
+    DomainBlockerProjected {
+        grant_hash: CanonicalHash,
+        resolution_settled_record_hash: CanonicalHash,
+        projected_event_ids_hash: CanonicalHash,
+        final_frontier_hash: CanonicalHash,
+        projected_event: Vec<u8>,
+    },
 }
+
+/// Maximum opaque envelope size accepted by the domain-storage recovery bridge.
+pub const MAX_DOMAIN_STORAGE_RECOVERY_ENVELOPE_BYTES: usize = 64 * 1024;
 
 /// Closed journal error classification.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -338,6 +405,9 @@ impl ResourceJournalFileV1 {
                 ResourceJournalEventV1::GenerationSettled { grant_hash, .. } => {
                     pending.remove(&grant_hash.to_hex());
                 }
+                ResourceJournalEventV1::RecoveryOperationSettled { grant_hash, .. } => {
+                    pending.remove(&grant_hash.to_hex());
+                }
                 _ => {}
             }
         }
@@ -372,6 +442,9 @@ impl ResourceJournalFileV1 {
                 ResourceJournalEventV1::GenerationSettled { grant_hash, .. } => {
                     settled.insert(grant_hash.to_hex());
                 }
+                ResourceJournalEventV1::RecoveryOperationSettled { grant_hash, .. } => {
+                    settled.insert(grant_hash.to_hex());
+                }
                 _ => {}
             }
         }
@@ -382,16 +455,75 @@ impl ResourceJournalFileV1 {
         &self,
         grant_hash: CanonicalHash,
     ) -> Option<ResourceJournalRecordV1> {
-        self.records.iter().rev().find_map(|durable| {
-            matches!(
-                durable.payload,
-                ResourceJournalEventV1::GenerationSettled {
-                    grant_hash: settled_hash,
+        self.records
+            .iter()
+            .rev()
+            .find_map(|durable| {
+                matches!(
+                    durable.payload,
+                    ResourceJournalEventV1::GenerationSettled {
+                        grant_hash: settled_hash,
+                        ..
+                    } if settled_hash == grant_hash
+                )
+                .then_some(durable.record.clone())
+            })
+            .or_else(|| {
+                self.records.iter().rev().find_map(|durable| {
+                    matches!(
+                        durable.payload,
+                        ResourceJournalEventV1::RecoveryOperationSettled {
+                            grant_hash: settled_hash,
+                            ..
+                        } if settled_hash == grant_hash
+                    )
+                    .then_some(durable.record.clone())
+                })
+            })
+    }
+
+    /// Returns the durable domain-storage recovery prefix for one grant. The caller must
+    /// compare the prefix against physical evidence before appending the next state; a table
+    /// miss is intentionally represented as an empty prefix, never as proof of no effect.
+    pub fn storage_recovery_records(
+        &self,
+        grant_hash: CanonicalHash,
+    ) -> Vec<(ResourceJournalRecordV1, ResourceJournalEventV1)> {
+        self.records
+            .iter()
+            .filter(|durable| match &durable.payload {
+                ResourceJournalEventV1::DomainStorageFailureObserved {
+                    grant_hash: current,
                     ..
-                } if settled_hash == grant_hash
-            )
-            .then_some(durable.record.clone())
-        })
+                }
+                | ResourceJournalEventV1::DomainStorageResolutionStartedShadow {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::RecoveryOperationPrepared {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::DomainStorageResolutionPrepared {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::RecoveryOperationSettled {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::DomainStorageResolutionSettled {
+                    grant_hash: current,
+                    ..
+                }
+                | ResourceJournalEventV1::DomainBlockerProjected {
+                    grant_hash: current,
+                    ..
+                } => *current == grant_hash,
+                _ => false,
+            })
+            .map(|durable| (durable.record.clone(), durable.payload.clone()))
+            .collect()
     }
 
     /// Appends one event using the exact current tail as the precondition and persists it.

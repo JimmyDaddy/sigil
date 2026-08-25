@@ -344,6 +344,16 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         handle: ManagedStorageNamespaceHandleV1,
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1>;
+
+    /// Commits the physical frontier observed by a writer before settlement. The authority
+    /// owns the durable record; the consumer may only submit bounded content facts.
+    fn record_physical_frontier(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+        byte_length: u64,
+        record_count: u64,
+        content_hash: CanonicalHash,
+    ) -> Result<(), ManagedStorageErrorV1>;
 }
 
 /// Closed storage error taxonomy.
