@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use sigil_kernel::managed_execution::{
     AccessWideningPolicyV1, BoundedOutputSummaryV1, BoundedProcessInputV1,
     BoundedProcessOutputFrameV1, BoundedPtySizeV1, ExecutionResourceReceiptV1,
@@ -94,6 +95,24 @@ pub trait ManagedTerminalLaunchServiceV1: Send + Sync {
         request: &ManagedExecutionRequestV1,
         environment: &BTreeMap<String, String>,
     ) -> Result<Child, ManagedExecutionErrorV1>;
+
+    fn launch_pty(
+        &self,
+        _request: &ManagedExecutionRequestV1,
+        _environment: &BTreeMap<String, String>,
+        _size: BoundedPtySizeV1,
+    ) -> Result<ManagedPtyLaunchV1, ManagedExecutionErrorV1> {
+        Err(ManagedExecutionErrorV1::ProviderUnavailable)
+    }
+}
+
+/// Sandbox-owned PTY launch material. Portable-PTY objects never cross the kernel/runtime
+/// contract; they are consumed immediately by the managed process handle below.
+pub struct ManagedPtyLaunchV1 {
+    master: Box<dyn MasterPty + Send>,
+    reader: Box<dyn std::io::Read + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
 /// Real command-backed terminal launcher. It is plan-bound by construction and is not a generic
@@ -139,6 +158,61 @@ impl ManagedTerminalLaunchServiceV1 for CommandManagedTerminalLaunchServiceV1 {
             self.enforcement.clone(),
         );
         ManagedExtensionLaunchServiceV1::launch(&launcher, request, environment)
+    }
+
+    fn launch_pty(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+        size: BoundedPtySizeV1,
+    ) -> Result<ManagedPtyLaunchV1, ManagedExecutionErrorV1> {
+        let expected_argv = std::iter::once(self.program.as_os_str().to_os_string())
+            .chain(self.args.iter().cloned())
+            .collect::<Vec<_>>();
+        let expected_environment = self
+            .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        if request.argv != expected_argv || request.environment != expected_environment {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        if size.rows == 0 || size.cols == 0 {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        let pty = native_pty_system()
+            .openpty(PtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let reader = pty
+            .master
+            .try_clone_reader()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let writer = pty
+            .master
+            .take_writer()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let mut command = CommandBuilder::new(&self.program);
+        command.args(&self.args);
+        command.cwd(&self.cwd);
+        command.env_clear();
+        for (key, value) in environment {
+            command.env(key, value);
+        }
+        let child = pty
+            .slave
+            .spawn_command(command)
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        Ok(ManagedPtyLaunchV1 {
+            master: pty.master,
+            reader,
+            writer,
+            child,
+        })
     }
 }
 
@@ -858,10 +932,20 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. }) && !is_extension {
             return Err(ManagedExecutionErrorV1::AdmissionMismatch);
         }
-        if request.limits.pty_required || request.capture.pty {
-            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
-        }
         let prepared = self.prepare(&bundle, &request)?;
+        if request.limits.pty_required || request.capture.pty {
+            if is_extension {
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+            let Some(size) = request.pty_size else {
+                return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+            };
+            let Some(launcher) = &self.terminal_launcher else {
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            };
+            let launch = launcher.launch_pty(&request, &prepared.env, size)?;
+            return self.start_persistent_pty(prepared, launch, request.limits.max_output_bytes);
+        }
         let mut child = if is_extension {
             let Some(launcher) = &self.extension_launcher else {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
@@ -947,6 +1031,50 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             attempt_id: prepared.attempt_id.clone(),
             prepared,
             finalizing: Arc::new(AtomicBool::new(false)),
+        };
+        Ok(Box::new(handle))
+    }
+}
+
+impl SandboxManagedExecutionServiceV1 {
+    fn start_persistent_pty(
+        &self,
+        prepared: PreparedLocalRunV1,
+        launch: ManagedPtyLaunchV1,
+        cap: u64,
+    ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
+        let process_id = launch.child.process_id();
+        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(process_id) {
+            Ok(owner) => owner,
+            Err(_) => {
+                let mut child = launch.child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
+        let stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
+        let stderr_cap = Arc::new(Mutex::new(CapState::new(cap)));
+        spawn_drain(
+            launch.reader,
+            ManagedProcessOutputChannelV1::Pty,
+            cap,
+            frame_tx,
+            Arc::clone(&stdout_cap),
+        );
+        let handle = LocalPersistentPtyProcessHandleV1 {
+            child: Arc::new(Mutex::new(launch.child)),
+            process_owner,
+            master: Arc::new(Mutex::new(Some(launch.master))),
+            stdin: Arc::new(Mutex::new(Some(launch.writer))),
+            stdin_open: Arc::new(AtomicBool::new(true)),
+            frame_rx: Some(frame_rx),
+            stdout_cap,
+            stderr_cap,
+            attempt_id: prepared.attempt_id.clone(),
+            prepared,
+            cancelled: Arc::new(AtomicBool::new(false)),
         };
         Ok(Box::new(handle))
     }
@@ -1142,26 +1270,248 @@ fn zero_summary() -> BoundedOutputSummaryV1 {
 
 impl LocalPersistentProcessHandleV1 {
     fn handle_resource_receipt(&self) -> ExecutionResourceReceiptV1 {
-        let prepared = &self.prepared;
-        ExecutionResourceReceiptV1 {
-            physical_attempt_id: prepared.attempt_id.clone(),
-            manifest_hash: prepared.draft.draft_hash,
-            sandbox_binding_hash: prepared.launch_plan.launch_plan_hash,
-            requested_enforcement: prepared.requested_enforcement.clone(),
-            effective_enforcement: EffectiveEnforcementV1 {
-                backend: prepared.effective_backend,
-                completeness: prepared.enforcement_completeness,
-                effective_capability_set_hash: prepared.effective_capability_set_hash,
-                access_widening_set_hash: zero_hash(),
-                functional_probe_hash: prepared.launch_plan.launch_plan_hash,
-                proof_set_hash: prepared.enforcement_proof_hash,
-            },
-            resources: vec![prepared.resource_receipt.clone()],
-            enforcement_proof_set_hash: prepared.launch_plan.launch_plan_hash,
-            environment_binding_hash: prepared.environment_binding_hash,
-            cleanup_status: ResourceCleanupStatusV1::Released,
-            effect_settlement: sigil_kernel::recovery::EffectSettlementV1::Applied,
+        resource_receipt_from_prepared(&self.prepared)
+    }
+}
+
+fn resource_receipt_from_prepared(prepared: &PreparedLocalRunV1) -> ExecutionResourceReceiptV1 {
+    ExecutionResourceReceiptV1 {
+        physical_attempt_id: prepared.attempt_id.clone(),
+        manifest_hash: prepared.draft.draft_hash,
+        sandbox_binding_hash: prepared.launch_plan.launch_plan_hash,
+        requested_enforcement: prepared.requested_enforcement.clone(),
+        effective_enforcement: EffectiveEnforcementV1 {
+            backend: prepared.effective_backend,
+            completeness: prepared.enforcement_completeness,
+            effective_capability_set_hash: prepared.effective_capability_set_hash,
+            access_widening_set_hash: zero_hash(),
+            functional_probe_hash: prepared.launch_plan.launch_plan_hash,
+            proof_set_hash: prepared.enforcement_proof_hash,
+        },
+        resources: vec![prepared.resource_receipt.clone()],
+        enforcement_proof_set_hash: prepared.launch_plan.launch_plan_hash,
+        environment_binding_hash: prepared.environment_binding_hash,
+        cleanup_status: ResourceCleanupStatusV1::Released,
+        effect_settlement: sigil_kernel::recovery::EffectSettlementV1::Applied,
+    }
+}
+
+struct LocalPersistentPtyProcessHandleV1 {
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    process_owner: sigil_process::ProcessTreeOwnerGuard,
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    stdin: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
+    stdin_open: Arc<AtomicBool>,
+    frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
+    stdout_cap: Arc<Mutex<CapState>>,
+    stderr_cap: Arc<Mutex<CapState>>,
+    attempt_id: PhysicalAttemptId,
+    prepared: PreparedLocalRunV1,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
+    fn process_ref(&self) -> ReflectiveOpaqueProcessRef {
+        ReflectiveOpaqueProcessRef::new(OpaqueProcessRef::new(format!(
+            "process-{}",
+            self.attempt_id.as_str()
+        )))
+    }
+
+    fn physical_attempt_id(&self) -> PhysicalAttemptId {
+        self.attempt_id.clone()
+    }
+
+    fn take_output_stream(
+        &mut self,
+    ) -> Result<Box<dyn ManagedProcessOutputStreamV1>, ManagedProcessControlErrorV1> {
+        let Some(rx) = self.frame_rx.take() else {
+            return Err(ManagedProcessControlErrorV1::StreamAlreadyTaken);
+        };
+        Ok(Box::new(LocalPersistentOutputStreamV1 { rx }))
+    }
+
+    async fn write_stdin(
+        &mut self,
+        input: BoundedProcessInputV1,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        if !self.stdin_open.load(Ordering::SeqCst) {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "write_stdin",
+            });
         }
+        let mut guard =
+            self.stdin
+                .lock()
+                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                    action: "write_stdin",
+                })?;
+        let Some(writer) = guard.as_mut() else {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "write_stdin",
+            });
+        };
+        use std::io::Write;
+        writer
+            .write_all(&input.payload)
+            .and_then(|_| writer.flush())
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "write_stdin",
+            })?;
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::WriteStdin,
+        ))
+    }
+
+    async fn resize_pty(
+        &mut self,
+        size: BoundedPtySizeV1,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        if size.rows == 0 || size.cols == 0 {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            });
+        }
+        let guard = self
+            .master
+            .lock()
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            })?;
+        let Some(master) = guard.as_ref() else {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            });
+        };
+        master
+            .resize(PtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            })?;
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::ResizePty,
+        ))
+    }
+
+    async fn close_stdin(
+        &mut self,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        if !self.stdin_open.swap(false, Ordering::SeqCst) {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            });
+        }
+        let mut guard =
+            self.stdin
+                .lock()
+                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                    action: "close_stdin",
+                })?;
+        guard.take();
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::WriteStdin,
+        ))
+    }
+
+    async fn cancel(
+        &mut self,
+        _reason: ProcessCancelReasonV1,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.process_owner
+            .terminate()
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
+        let _ = child.kill();
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::Cancel,
+        ))
+    }
+
+    async fn wait_and_finalize(
+        mut self: Box<Self>,
+    ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
+        let termination = {
+            let mut child = self
+                .child
+                .lock()
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+            match child.wait() {
+                Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
+                    let _ = status;
+                    ProcessTerminationV1::Cancelled
+                }
+                Ok(status) => classify_pty_status(status),
+                Err(_) => ProcessTerminationV1::OutcomeUncertain {
+                    evidence_digest: zero_hash(),
+                },
+            }
+        };
+        // Closing the master releases the PTY reader after the child has been reaped.
+        self.master
+            .lock()
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+            .take();
+        if let Some(mut rx) = self.frame_rx.take() {
+            while let Some(frame) = rx.recv().await {
+                let _ = frame;
+            }
+        }
+        let stdout_summary = self
+            .stdout_cap
+            .lock()
+            .map(|cap| cap.summary())
+            .unwrap_or_else(|_| zero_summary());
+        let stderr_summary = self
+            .stderr_cap
+            .lock()
+            .map(|cap| cap.summary())
+            .unwrap_or_else(|_| zero_summary());
+        Ok(ManagedExecutionReceiptV1 {
+            physical_attempt_id: self.attempt_id.clone(),
+            process: process_receipt_from(
+                &self.prepared,
+                termination,
+                stdout_summary,
+                stderr_summary,
+            ),
+            resources: resource_receipt_from_prepared(&self.prepared),
+            check: None,
+        })
+    }
+}
+
+fn classify_pty_status(status: portable_pty::ExitStatus) -> ProcessTerminationV1 {
+    if let Some(signal) = status.signal() {
+        return ProcessTerminationV1::Signaled {
+            signal: pty_signal_number(signal),
+        };
+    }
+    ProcessTerminationV1::Exited {
+        code: i32::try_from(status.exit_code()).unwrap_or(-1),
+    }
+}
+
+fn pty_signal_number(signal: &str) -> u32 {
+    match signal.to_ascii_uppercase().as_str() {
+        "SIGKILL" | "KILLED" => 9,
+        "SIGTERM" | "TERMINATED" => 15,
+        "SIGINT" | "INTERRUPTED" => 2,
+        "SIGHUP" | "HANGUP" => 1,
+        _ => 0,
     }
 }
 
@@ -1324,6 +1674,7 @@ mod tests {
             },
             capture: cap(),
             limits: limits(),
+            pty_size: None,
             environment: Vec::new(),
         }
     }
@@ -1360,6 +1711,38 @@ mod tests {
             root.to_path_buf(),
             OpaquePermissionSubjectRef::new("subj-1".to_owned()),
         )))
+    }
+
+    fn terminal_service(
+        root: &std::path::Path,
+        args: Vec<OsString>,
+    ) -> SandboxManagedExecutionServiceV1 {
+        let enforcement = ManagedExtensionLaunchEnforcementV1 {
+            requested: RequestedEnforcementV1 {
+                requirement: EnforcementRequirementClassV1::ExplicitUnconfined,
+                deny_ambient_system_temp_write: false,
+                deny_ambient_home_write: false,
+                deny_ungranted_workspace_write: false,
+                require_process_tree_ownership: false,
+                require_network_policy: false,
+                requested_capability_set_hash: zero_hash(),
+                profile_hash: zero_hash(),
+            },
+            backend: SandboxBackendClassV1::LocalUnconfined,
+            completeness: EnforcementCompletenessV1::None,
+            effective_access: std::collections::BTreeSet::new(),
+            effective_capability_set_hash: zero_hash(),
+            proof_set_hash: zero_hash(),
+        };
+        service(false, root).with_terminal_launcher(Arc::new(
+            CommandManagedTerminalLaunchServiceV1::new(
+                PathBuf::from("/bin/sh"),
+                args,
+                root.to_path_buf(),
+                Vec::new(),
+                enforcement,
+            ),
+        ))
     }
 
     #[test]
@@ -1457,6 +1840,86 @@ mod tests {
             error,
             ManagedExecutionErrorV1::ProviderUnavailable
         ));
+    }
+
+    #[test]
+    fn r71_managed_persistent_pty_supports_input_resize_and_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svc = terminal_service(
+            dir.path(),
+            vec![
+                OsString::from("-c"),
+                OsString::from("read line; printf '%s\\n' \"$line\""),
+            ],
+        );
+        let mut request = exec_request(
+            &["/bin/sh", "-c", "read line; printf '%s\\n' \"$line\""],
+            false,
+        );
+        request.capture.pty = true;
+        request.limits.pty_required = true;
+        request.pty_size = Some(BoundedPtySizeV1 { rows: 24, cols: 80 });
+        let mut handle =
+            futures::executor::block_on(svc.start_persistent(bundle("terminal"), request))
+                .expect("pty spawn");
+        futures::executor::block_on(handle.resize_pty(BoundedPtySizeV1 {
+            rows: 40,
+            cols: 120,
+        }))
+        .expect("resize");
+        let mut stream = handle.take_output_stream().expect("stream");
+        futures::executor::block_on(handle.write_stdin(BoundedProcessInputV1 {
+            payload: b"managed-pty\n".to_vec(),
+        }))
+        .expect("write");
+        futures::executor::block_on(handle.close_stdin()).expect("close");
+        let mut output = Vec::new();
+        while let Some(frame) = futures::executor::block_on(stream.next_frame()).expect("frame") {
+            if !frame.end_of_stream {
+                output.extend(frame.payload);
+            }
+        }
+        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("receipt");
+        assert!(
+            output
+                .windows(b"managed-pty".len())
+                .any(|window| window == b"managed-pty")
+        );
+        assert!(matches!(
+            receipt.process.termination,
+            ProcessTerminationV1::Exited { code: 0 }
+        ));
+        assert_eq!(
+            receipt.resources.cleanup_status,
+            ResourceCleanupStatusV1::Released
+        );
+    }
+
+    #[test]
+    fn r71_managed_persistent_pty_cancel_reaps_owned_process_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svc = terminal_service(
+            dir.path(),
+            vec![OsString::from("-c"), OsString::from("sleep 30")],
+        );
+        let mut request = exec_request(&["/bin/sh", "-c", "sleep 30"], false);
+        request.capture.pty = true;
+        request.limits.pty_required = true;
+        request.pty_size = Some(BoundedPtySizeV1 { rows: 24, cols: 80 });
+        let mut handle =
+            futures::executor::block_on(svc.start_persistent(bundle("terminal"), request))
+                .expect("pty spawn");
+        futures::executor::block_on(handle.cancel(ProcessCancelReasonV1::UserCancelled))
+            .expect("cancel");
+        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("receipt");
+        assert!(matches!(
+            receipt.process.termination,
+            ProcessTerminationV1::Cancelled
+        ));
+        assert_eq!(
+            receipt.resources.cleanup_status,
+            ResourceCleanupStatusV1::Released
+        );
     }
 
     #[test]

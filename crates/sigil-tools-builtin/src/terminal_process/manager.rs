@@ -165,6 +165,7 @@ impl TerminalProcessManager {
                     plan,
                     readiness,
                     lifecycle_sink,
+                    None,
                 )
                 .await;
         }
@@ -304,12 +305,28 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     ) -> Result<TerminalTaskEntry> {
-        if self.managed_execution.is_some() {
-            bail!(
-                "managed terminal PTY launch is not available on this provider; refusing legacy PTY fallback"
-            );
+        let managed_execution = self.managed_execution.clone();
+        let plan = self
+            .prepare_start(
+                request,
+                if managed_execution.is_some() {
+                    TerminalStartMode::ManagedPty
+                } else {
+                    TerminalStartMode::Pty
+                },
+            )
+            .await?;
+        if let Some(managed_execution) = managed_execution {
+            return self
+                .start_managed_with_readiness_and_sink(
+                    &managed_execution,
+                    plan,
+                    readiness,
+                    lifecycle_sink,
+                    Some(pty_size.unwrap_or_default()),
+                )
+                .await;
         }
-        let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
         // Construct the observer before the PTY child can emit or exit.
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
@@ -383,20 +400,22 @@ impl TerminalProcessManager {
         plan: TerminalTaskStartPlan,
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+        pty_size: Option<TerminalPtySize>,
     ) -> Result<TerminalTaskEntry> {
         let request = crate::ManagedTerminalStartRequestV1 {
             program: plan.shell.clone(),
             args: plan.shell_args.clone(),
             cwd: plan.resolved_cwd.absolute.clone(),
             environment: plan.env.clone(),
+            pty_size: pty_size.map(|size| sigil_kernel::managed_execution::BoundedPtySizeV1 {
+                rows: size.rows,
+                cols: size.cols,
+            }),
         };
-        let mut handle = managed_execution
+        let handle = managed_execution
             .start_persistent(request)
             .await
             .map_err(|error| anyhow!("managed terminal launch failed: {error}"))?;
-        let output_stream = handle
-            .take_output_stream()
-            .map_err(|error| anyhow!("managed terminal output stream unavailable: {error}"))?;
 
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
@@ -415,11 +434,6 @@ impl TerminalProcessManager {
         let (capture_failure_tx, _capture_failure_rx) = mpsc::unbounded_channel();
         let (stdout_writer, stdout_reader) = tokio::io::duplex(64 * 1024);
         let (stderr_writer, stderr_reader) = tokio::io::duplex(64 * 1024);
-        let output_router = tokio::spawn(route_managed_output(
-            output_stream,
-            stdout_writer,
-            stderr_writer,
-        ));
         let stdout_task = spawn_capture_task(
             Some(stdout_reader),
             TerminalOutputStream::Stdout,
@@ -439,13 +453,11 @@ impl TerminalProcessManager {
             capture_failure_tx,
         );
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
-        let managed_handle = Arc::new(Mutex::new(Some(handle)));
+        let (command_tx, cancel_rx) = mpsc::channel(1);
         let managed = ManagedTerminalTask {
             summary: Arc::clone(&summary),
             lifecycle: lifecycle.clone(),
-            control: TerminalTaskControl::Managed {
-                handle: Arc::clone(&managed_handle),
-            },
+            control: TerminalTaskControl::Managed { command_tx },
             lifecycle_route_abort: None,
         };
         self.tasks
@@ -463,8 +475,10 @@ impl TerminalProcessManager {
         .await?;
         self.record_permission_context(&plan)?;
         tokio::spawn(run_managed_terminal_worker(ManagedTerminalWorker {
-            handle: managed_handle,
-            output_router,
+            handle,
+            stdout_writer,
+            stderr_writer,
+            cancel_rx,
             summary,
             artifacts: plan.artifacts,
             stdout_task,
@@ -739,10 +753,6 @@ impl TerminalProcessManager {
             bail!("terminal task is not running: {}", task_id.as_str());
         }
 
-        let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
-            bail!("managed terminal process does not expose interactive input without a PTY");
-        };
-
         let input = input.into().into_bytes();
         if input.len() > MAX_TERMINAL_INPUT_BYTES {
             bail!(
@@ -751,6 +761,45 @@ impl TerminalProcessManager {
             );
         }
         let input_bytes = input.len() as u64;
+        if matches!(
+            current.handle.execution_backend,
+            Some(TerminalExecutionBackendKind::SandboxedPty)
+        ) && let TerminalTaskControl::Managed { command_tx } = &task.control
+        {
+            let (respond_to, response) = oneshot::channel();
+            command_tx
+                .send(ManagedTerminalCommand::WriteStdin {
+                    input: sigil_kernel::managed_execution::BoundedProcessInputV1 {
+                        payload: input,
+                    },
+                    respond_to,
+                })
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal task is no longer running: {}",
+                        task_id.as_str()
+                    )
+                })?;
+            response
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal input receipt was lost: {}",
+                        task_id.as_str()
+                    )
+                })?
+                .map_err(|error| anyhow!(error))?;
+            return Ok(TerminalInputResult {
+                task_id: task_id.clone(),
+                input_bytes,
+                backend: TerminalBackendKind::Pty,
+            });
+        }
+        let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
+            bail!("managed terminal process does not expose interactive input without a PTY");
+        };
+
         let input_tx = io_control
             .input_tx
             .lock()
@@ -790,6 +839,42 @@ impl TerminalProcessManager {
             bail!("terminal task is not running: {}", task_id.as_str());
         }
 
+        if matches!(
+            current.handle.execution_backend,
+            Some(TerminalExecutionBackendKind::SandboxedPty)
+        ) && let TerminalTaskControl::Managed { command_tx } = &task.control
+        {
+            let (respond_to, response) = oneshot::channel();
+            command_tx
+                .send(ManagedTerminalCommand::Resize {
+                    size: sigil_kernel::managed_execution::BoundedPtySizeV1 {
+                        rows: size.rows,
+                        cols: size.cols,
+                    },
+                    respond_to,
+                })
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal task is no longer running: {}",
+                        task_id.as_str()
+                    )
+                })?;
+            response
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal resize receipt was lost: {}",
+                        task_id.as_str()
+                    )
+                })?
+                .map_err(|error| anyhow!(error))?;
+            return Ok(TerminalResizeResult {
+                task_id: task_id.clone(),
+                size,
+                backend: TerminalBackendKind::Pty,
+            });
+        }
         let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
             bail!("terminal task backend does not support resize: process");
         };
@@ -880,11 +965,32 @@ impl TerminalProcessManager {
                     .mark_terminal(entry.status, entry.output_total_bytes);
                 Ok(self.snapshot(task_id).await?.entry)
             }
-            TerminalTaskControl::Managed { handle } => {
-                let _ = handle;
-                bail!(
-                    "managed terminal cancellation control is not yet exposed by this runtime port"
-                )
+            TerminalTaskControl::Managed { command_tx } => {
+                let (respond_to, response) = oneshot::channel();
+                command_tx
+                    .send(ManagedTerminalCommand::Cancel { respond_to })
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "managed terminal task is no longer running: {}",
+                            task_id.as_str()
+                        )
+                    })?;
+                match response.await {
+                    Ok(Ok(())) => Ok(self.snapshot(task_id).await?.entry),
+                    Ok(Err(error)) => Err(anyhow!(error)),
+                    Err(_) => {
+                        let entry = self.snapshot(task_id).await?.entry;
+                        if entry.status.is_terminal() {
+                            Ok(entry)
+                        } else {
+                            Err(anyhow!(
+                                "managed terminal cancellation receipt was lost before cleanup could be confirmed: {}",
+                                task_id.as_str()
+                            ))
+                        }
+                    }
+                }
             }
         }
     }
@@ -1022,6 +1128,7 @@ impl TerminalProcessManager {
                 .terminal_execution
                 .resolve_pty_execution(&resolved_cwd.absolute, &shell, &command, &env)?
                 .into(),
+            TerminalStartMode::ManagedPty => managed_pty_execution(),
         };
 
         {
@@ -1143,6 +1250,7 @@ pub(super) fn should_publish_lifecycle_event(
 enum TerminalStartMode {
     LocalProcess,
     Pty,
+    ManagedPty,
 }
 
 struct TerminalStartExecution {
@@ -1158,6 +1266,17 @@ fn local_process_execution() -> TerminalStartExecution {
     TerminalStartExecution {
         execution_backend: TerminalExecutionBackendKind::LocalProcess,
         execution_backend_capabilities: TerminalExecutionBackendCapabilities::local_process(),
+        enforcement_backend: ExecutionBackendKind::Local,
+        enforcement_backend_capabilities: ExecutionBackendCapabilities::default(),
+        sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        pty_command: None,
+    }
+}
+
+fn managed_pty_execution() -> TerminalStartExecution {
+    TerminalStartExecution {
+        execution_backend: TerminalExecutionBackendKind::SandboxedPty,
+        execution_backend_capabilities: TerminalExecutionBackendCapabilities::sandboxed_pty(),
         enforcement_backend: ExecutionBackendKind::Local,
         enforcement_backend_capabilities: ExecutionBackendCapabilities::default(),
         sandbox_profile: ExecutionSandboxProfile::Unconfined,
@@ -1202,8 +1321,21 @@ pub(super) enum TerminalTaskControl {
         preview_limit_bytes: usize,
     },
     Managed {
-        handle:
-            Arc<Mutex<Option<Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>>>>,
+        command_tx: mpsc::Sender<ManagedTerminalCommand>,
+    },
+}
+
+pub(super) enum ManagedTerminalCommand {
+    WriteStdin {
+        input: sigil_kernel::managed_execution::BoundedProcessInputV1,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    Resize {
+        size: sigil_kernel::managed_execution::BoundedPtySizeV1,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    Cancel {
+        respond_to: oneshot::Sender<Result<(), String>>,
     },
 }
 

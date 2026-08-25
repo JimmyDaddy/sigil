@@ -7,7 +7,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use sigil_kernel::managed_execution::{ManagedExecutionErrorV1, ManagedProcessHandleV1};
+use sigil_kernel::managed_execution::{
+    BoundedPtySizeV1, ManagedExecutionErrorV1, ManagedProcessHandleV1,
+};
 use sigil_kernel::{
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
     ExecutionReceipt, ExecutionRequest, RunCancellationHandle,
@@ -24,6 +26,7 @@ pub struct ManagedTerminalStartRequestV1 {
     pub args: Vec<String>,
     pub cwd: std::path::PathBuf,
     pub environment: std::collections::BTreeMap<String, String>,
+    pub pty_size: Option<BoundedPtySizeV1>,
 }
 
 /// Runtime-owned persistent terminal launch port. Built-in terminal lifecycle code only knows

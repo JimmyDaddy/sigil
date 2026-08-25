@@ -181,6 +181,7 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
             environment_profile: draft.environment_profile.clone(),
             capture,
             limits,
+            pty_size: None,
             environment: environment.clone(),
         };
         let proof = self.broker.seal_execution_proof(
@@ -336,17 +337,18 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             crate::r71_shadow_planner::canonical_digest(request.cwd.to_string_lossy().as_bytes())
                 .to_hex()
         ));
+        let pty_requested = request.pty_size.is_some();
         let capture = ExecutionCapturePolicy {
             stdout_capture: CaptureModeV1::ArtifactStreaming,
             stderr_capture: CaptureModeV1::ArtifactStreaming,
-            pty: false,
+            pty: pty_requested,
         };
         let limits = ExecutionResourceLimits {
             max_output_bytes: 64 * 1024 * 1024,
             max_runtime_ms: 24 * 60 * 60 * 1000,
             max_children: 64,
             max_fds: 1024,
-            pty_required: false,
+            pty_required: pty_requested,
         };
         let structured_command_digest = terminal_command_digest(&request);
         let plan_request = ManagedExecutionPlanRequestV1 {
@@ -373,6 +375,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             environment_profile: draft.environment_profile.clone(),
             capture,
             limits,
+            pty_size: request.pty_size,
             environment: environment.clone(),
         };
         let proof = self.broker.seal_execution_proof(
@@ -439,6 +442,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             environment_profile: draft.environment_profile.clone(),
             capture,
             limits: limits.clone(),
+            pty_size: None,
             environment,
         };
         let proof = self.broker.seal_execution_proof(
@@ -1074,6 +1078,7 @@ mod tests {
                 args: vec!["-c".to_owned(), "printf terminal-route".to_owned()],
                 cwd: root.path().to_path_buf(),
                 environment: std::collections::BTreeMap::new(),
+                pty_size: None,
             })
             .await
             .expect("managed terminal route");
@@ -1090,6 +1095,126 @@ mod tests {
             receipt.process.termination,
             sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code: 0 }
         ));
+    }
+
+    #[tokio::test]
+    async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
+        use sigil_tools_builtin::{ManagedTerminalExecutionPortV1, ManagedTerminalStartRequestV1};
+
+        let root = tempfile::tempdir().expect("workspace");
+        let execution_temp = tempfile::tempdir().expect("execution temp");
+        let route = RuntimeManagedCommandExecutionRouteV1::new(
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            execution_temp.path().to_path_buf(),
+        );
+        let mut handle = route
+            .start_persistent(ManagedTerminalStartRequestV1 {
+                program: "/bin/sh".to_owned(),
+                args: vec![
+                    "-c".to_owned(),
+                    "read line; printf '%s\\n' \"$line\"".to_owned(),
+                ],
+                cwd: root.path().to_path_buf(),
+                environment: std::collections::BTreeMap::new(),
+                pty_size: Some(sigil_kernel::managed_execution::BoundedPtySizeV1 {
+                    rows: 24,
+                    cols: 80,
+                }),
+            })
+            .await
+            .expect("managed pty terminal route");
+        handle
+            .resize_pty(sigil_kernel::managed_execution::BoundedPtySizeV1 {
+                rows: 32,
+                cols: 100,
+            })
+            .await
+            .expect("resize");
+        let mut stream = handle.take_output_stream().expect("managed stream");
+        handle
+            .write_stdin(sigil_kernel::managed_execution::BoundedProcessInputV1 {
+                payload: b"runtime-pty\n".to_vec(),
+            })
+            .await
+            .expect("write");
+        handle.close_stdin().await.expect("close");
+        let mut output = Vec::new();
+        while let Some(frame) = stream.next_frame().await.expect("output frame") {
+            if !frame.end_of_stream {
+                output.extend(frame.payload);
+            }
+        }
+        let receipt = handle.wait_and_finalize().await.expect("terminal receipt");
+        assert!(
+            output
+                .windows(b"runtime-pty".len())
+                .any(|window| window == b"runtime-pty")
+        );
+        assert!(matches!(
+            receipt.process.termination,
+            sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code: 0 }
+        ));
+        assert_eq!(
+            receipt.resources.cleanup_status,
+            sigil_kernel::resource::ResourceCleanupStatusV1::Released
+        );
+    }
+
+    #[tokio::test]
+    async fn r71_managed_terminal_manager_cancel_waits_for_persistent_receipt() -> anyhow::Result<()>
+    {
+        let root = tempfile::tempdir().expect("workspace");
+        let artifact_root = tempfile::tempdir().expect("artifacts");
+        let execution_temp = tempfile::tempdir().expect("execution temp");
+        let route = Arc::new(RuntimeManagedCommandExecutionRouteV1::new(
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            execution_temp.path().to_path_buf(),
+        ));
+        let manager = sigil_tools_builtin::TerminalProcessManager::new_with_artifact_root(
+            root.path(),
+            artifact_root.path(),
+            "state/artifacts/tasks",
+        )?
+        .with_managed_execution(route);
+        let entry = manager
+            .start_pty(
+                sigil_tools_builtin::TerminalStartRequest {
+                    command: "sleep 30".to_owned(),
+                    shell: Some("/bin/sh".to_owned()),
+                    ..Default::default()
+                },
+                Some(sigil_tools_builtin::TerminalPtySize { rows: 24, cols: 80 }),
+            )
+            .await?;
+        assert_eq!(
+            entry.handle.execution_backend,
+            Some(sigil_kernel::terminal_task::TerminalExecutionBackendKind::SandboxedPty)
+        );
+        manager
+            .resize(
+                &entry.handle.task_id,
+                sigil_tools_builtin::TerminalPtySize {
+                    rows: 32,
+                    cols: 100,
+                },
+            )
+            .await?;
+        let input = manager
+            .input(&entry.handle.task_id, "managed-input\n")
+            .await?;
+        assert_eq!(input.input_bytes, "managed-input\n".len() as u64);
+        let cancelled = manager.cancel(&entry.handle.task_id).await?;
+        assert!(matches!(
+            cancelled.status,
+            sigil_kernel::TerminalTaskStatus::Cancelled
+        ));
+        Ok(())
     }
 
     /// Minimal projection stub for the isolated composition test.

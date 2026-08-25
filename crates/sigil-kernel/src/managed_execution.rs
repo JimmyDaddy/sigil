@@ -208,6 +208,11 @@ pub struct ManagedExecutionRequestV1 {
     pub environment_profile: EnvironmentProfileRefV1,
     pub capture: ExecutionCapturePolicy,
     pub limits: ExecutionResourceLimits,
+    /// Initial PTY dimensions, when the approved capture contract requires a PTY.
+    ///
+    /// Dimensions are a bounded control input rather than host path material. Subsequent
+    /// resizes still travel through `ManagedProcessHandleV1` and produce a typed control receipt.
+    pub pty_size: Option<BoundedPtySizeV1>,
     /// Agreed environment (config-granted extension/server env); must match the sealed plan.
     pub environment: Vec<(OsString, OsString)>,
 }
