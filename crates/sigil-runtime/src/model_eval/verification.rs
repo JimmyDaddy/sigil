@@ -11,8 +11,6 @@ use sigil_kernel::{
     stable_workspace_id, write_file_with_mutation,
 };
 
-use crate::build_configured_execution_backend;
-
 use super::{MaterializedModelEvalFixture, ModelEvalPostRunMutation, sha256_digest};
 
 /// Durable verification evidence observed after one provider-backed repetition.
@@ -43,7 +41,19 @@ pub async fn verify_model_eval_run(
     }
 
     let root_config = RootConfig::load(config_path)?;
-    let execution_backend = build_configured_execution_backend(&root_config)?;
+    let paths = crate::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
+        &fixture.workspace_root,
+    );
+    let execution_port =
+        crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1::new(
+            std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            std::sync::Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            paths.scratch_root,
+        );
     let store = JsonlSessionStore::new(session_path)?;
     let mut session = Session::load_from_store(provider, model, store)?;
     let scope = EvidenceScope::Run(run_id.to_owned());
@@ -115,7 +125,7 @@ pub async fn verify_model_eval_run(
     for trusted_check in &trusted_checks {
         let recorded = run_verification_check(
             &mut session,
-            execution_backend.as_ref(),
+            &execution_port,
             VerificationCheckRunRequest {
                 workspace_root: fixture.workspace_root.clone(),
                 scope: scope.clone(),

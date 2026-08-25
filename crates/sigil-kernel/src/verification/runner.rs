@@ -1,5 +1,26 @@
 use super::*;
 
+/// Execution consumer port for trusted verification checks.
+///
+/// Verification records the resulting receipt and workspace evidence; it must not select a
+/// physical `ExecutionBackend`. The blanket implementation exists only for isolated legacy
+/// callers/tests. Runtime production routes implement this port with the managed authority
+/// planner/broker/sandbox path directly.
+#[async_trait::async_trait]
+pub trait VerificationExecutionPortV1: Send + Sync {
+    async fn execute_check(&self, request: ExecutionRequest) -> anyhow::Result<ExecutionReceipt>;
+}
+
+#[async_trait::async_trait]
+impl<T> VerificationExecutionPortV1 for T
+where
+    T: ExecutionBackend + ?Sized,
+{
+    async fn execute_check(&self, request: ExecutionRequest) -> anyhow::Result<ExecutionReceipt> {
+        self.execute(request).await
+    }
+}
+
 /// Request for executing one trusted verification check.
 #[derive(Debug, Clone)]
 pub struct VerificationCheckRunRequest {
@@ -42,13 +63,16 @@ pub struct PluginVerificationHookReceiptRequest {
 ///
 /// Returns an error when the workspace cannot be snapshotted, the durable check/command facts
 /// cannot be recorded, or the configured command cannot be spawned.
-pub async fn run_verification_check(
+pub async fn run_verification_check<E>(
     session: &mut Session,
-    execution_backend: &dyn ExecutionBackend,
+    execution_port: &E,
     request: VerificationCheckRunRequest,
-) -> Result<VerificationRecordedEntry> {
+) -> Result<VerificationRecordedEntry>
+where
+    E: VerificationExecutionPortV1 + ?Sized,
+{
     Ok(
-        run_verification_check_with_evidence(session, execution_backend, request)
+        run_verification_check_with_evidence(session, execution_port, request)
             .await?
             .recorded,
     )
@@ -59,11 +83,14 @@ pub(crate) struct VerificationCheckExecutionEvidence {
     pub command_event_id: Option<EventId>,
 }
 
-pub(crate) async fn run_verification_check_with_evidence(
+pub(crate) async fn run_verification_check_with_evidence<E>(
     session: &mut Session,
-    execution_backend: &dyn ExecutionBackend,
+    execution_port: &E,
     request: VerificationCheckRunRequest,
-) -> Result<VerificationCheckExecutionEvidence> {
+) -> Result<VerificationCheckExecutionEvidence>
+where
+    E: VerificationExecutionPortV1 + ?Sized,
+{
     let workspace_root = fs::canonicalize(&request.workspace_root).with_context(|| {
         format!(
             "failed to canonicalize verification workspace {}",
@@ -99,7 +126,7 @@ pub(crate) async fn run_verification_check_with_evidence(
 
     let started_at = Instant::now();
     let command_output = execute_check_command(
-        execution_backend,
+        execution_port,
         &workspace_root,
         &check.command,
         request.policy.timeout_ms,
@@ -431,8 +458,8 @@ impl CheckCommandOutput {
     }
 }
 
-async fn execute_check_command(
-    execution_backend: &dyn ExecutionBackend,
+async fn execute_check_command<E: VerificationExecutionPortV1 + ?Sized>(
+    execution_port: &E,
     workspace_root: &Path,
     command: &CheckCommand,
     timeout_ms: Option<u64>,
@@ -457,13 +484,16 @@ async fn execute_check_command(
         process_count_limit: None,
         capture: None,
     };
-    let receipt = execution_backend.execute(request).await.with_context(|| {
-        format!(
-            "failed to spawn verification check {} in {}",
-            format_check_command(command),
-            cwd.display()
-        )
-    })?;
+    let receipt = execution_port
+        .execute_check(request)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to spawn verification check {} in {}",
+                format_check_command(command),
+                cwd.display()
+            )
+        })?;
     let output = receipt.effective_output();
     Ok(CheckCommandOutput {
         backend: receipt.backend,

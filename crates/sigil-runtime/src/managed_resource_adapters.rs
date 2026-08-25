@@ -285,6 +285,37 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         }
     }
 
+    fn environment(request: &ExecutionRequest) -> Vec<(OsString, OsString)> {
+        let mut environment = std::collections::BTreeMap::<OsString, OsString>::new();
+        if request.environment_policy == sigil_kernel::ProcessEnvironmentPolicy::InheritParent {
+            // InheritParent is still an explicit managed environment agreement. Preserve the
+            // closed command-toolchain baseline, not every ambient secret/debug variable.
+            for name in [
+                "PATH",
+                "HOME",
+                "CARGO_HOME",
+                "RUSTUP_HOME",
+                "TMPDIR",
+                "TMP",
+                "TEMP",
+                "LANG",
+                "LC_ALL",
+                "LC_CTYPE",
+            ] {
+                if let Some(value) = std::env::var_os(name) {
+                    environment.insert(OsString::from(name), value);
+                }
+            }
+        }
+        environment.extend(
+            request
+                .env
+                .iter()
+                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+        );
+        environment.into_iter().collect()
+    }
+
     async fn start_managed_terminal(
         &self,
         request: sigil_tools_builtin::ManagedTerminalStartRequestV1,
@@ -381,11 +412,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             .collect::<Vec<_>>();
         let limits = Self::limits(&request);
         let capture = Self::capture(&limits);
-        let environment = request
-            .env
-            .iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
-            .collect::<Vec<_>>();
+        let environment = Self::environment(&request);
         let plan_request = ManagedExecutionPlanRequestV1 {
             argv: argv.clone(),
             cwd_subject_ref: cwd_subject_ref.clone(),
@@ -517,6 +544,15 @@ impl sigil_tools_builtin::ManagedCommandExecutionPortV1 for RuntimeManagedComman
         cancellation: Option<sigil_kernel::RunCancellationHandle>,
     ) -> Result<ExecutionReceipt> {
         self.execute_managed(request, cancellation).await
+    }
+}
+
+#[async_trait::async_trait]
+impl sigil_kernel::verification::VerificationExecutionPortV1
+    for RuntimeManagedCommandExecutionRouteV1
+{
+    async fn execute_check(&self, request: ExecutionRequest) -> anyhow::Result<ExecutionReceipt> {
+        self.execute_managed(request, None).await
     }
 }
 

@@ -7,15 +7,21 @@ use crate::{
     ExternalProvenanceEntry, ExternalTrust, FileType, JsonlSessionStore, ModelMessage,
     MutationCommitted, MutationPrepared, MutationSubject, MutationSyncClass, ReceiptStatus,
     RedactionState, Session, SessionContextProjection, SnapshotCoverage, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolArtifactSensitivity, ToolCall, ToolExecutionEntry, ToolExecutionStatus,
-    ToolResult, ToolResultMeta, VerificationBinding, VerificationReceipt,
+    ToolApprovalEntry, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolExecutionEntry,
+    ToolExecutionStatus, ToolResult, ToolResultMeta, VerificationBinding, VerificationReceipt,
     VerificationRecordedEntry,
 };
 
 fn session_fixture() -> Result<(tempfile::TempDir, Session)> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    Ok((temp, Session::new("test", "model").with_store(store)))
+    let artifact_store = ToolArtifactStore::for_session_store(&store);
+    Ok((
+        temp,
+        Session::new("test", "model")
+            .with_store(store)
+            .with_tool_artifact_store_override(artifact_store),
+    ))
 }
 
 fn append_result(session: &mut Session, index: usize, bytes: usize, paired: bool) -> Result<()> {
