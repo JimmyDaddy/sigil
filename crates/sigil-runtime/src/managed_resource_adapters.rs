@@ -285,6 +285,91 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         }
     }
 
+    async fn start_managed_terminal(
+        &self,
+        request: sigil_tools_builtin::ManagedTerminalStartRequestV1,
+    ) -> Result<
+        Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>,
+        sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+    > {
+        let argv = std::iter::once(OsString::from(&request.program))
+            .chain(request.args.iter().map(OsString::from))
+            .collect::<Vec<_>>();
+        let environment = request
+            .environment
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect::<Vec<_>>();
+        let cwd_subject_ref = OpaquePermissionSubjectRef::new(format!(
+            "managed-terminal-cwd:{}",
+            crate::r71_shadow_planner::canonical_digest(request.cwd.to_string_lossy().as_bytes())
+                .to_hex()
+        ));
+        let capture = ExecutionCapturePolicy {
+            stdout_capture: CaptureModeV1::ArtifactStreaming,
+            stderr_capture: CaptureModeV1::ArtifactStreaming,
+            pty: false,
+        };
+        let limits = ExecutionResourceLimits {
+            max_output_bytes: 64 * 1024 * 1024,
+            max_runtime_ms: 24 * 60 * 60 * 1000,
+            max_children: 64,
+            max_fds: 1024,
+            pty_required: false,
+        };
+        let structured_command_digest = terminal_command_digest(&request);
+        let plan_request = ManagedExecutionPlanRequestV1 {
+            argv: argv.clone(),
+            cwd_subject_ref: cwd_subject_ref.clone(),
+            purpose: ExecutionPurposeV1::Terminal,
+            structured_command_digest,
+            owner_scope: ResourceOwnerScopeV1::Application,
+            capture: capture.clone(),
+            limits: limits.clone(),
+            environment: environment.clone(),
+        };
+        let draft = self.planner.plan_execution(plan_request).map_err(|_| {
+            sigil_kernel::managed_execution::ManagedExecutionErrorV1::ExecutionPlanDrift
+        })?;
+        let attempt_id =
+            PhysicalAttemptId::new(format!("managed-terminal:{}", uuid::Uuid::new_v4()));
+        let managed_request = ManagedExecutionRequestV1 {
+            argv: argv.clone(),
+            cwd_subject_ref: cwd_subject_ref.clone(),
+            structured_command_digest,
+            admission_ref: OpaqueAdmissionId::new(attempt_id.as_str().to_owned()),
+            execution_plan_draft_hash: draft.draft_hash,
+            environment_profile: draft.environment_profile.clone(),
+            capture,
+            limits,
+            environment: environment.clone(),
+        };
+        let proof = self.broker.seal_execution_proof(
+            sigil_kernel::capability_issuer::ProofKindV1::ExecutionTerminal,
+            "builtin-terminal",
+            attempt_id.as_str().as_bytes().to_vec(),
+        );
+        let bundle = self.broker.issue_execution(proof).map_err(|_| {
+            sigil_kernel::managed_execution::ManagedExecutionErrorV1::AdmissionMismatch
+        })?;
+        let terminal_enforcement = terminal_enforcement(draft.environment_profile.profile_hash);
+        let launcher = Arc::new(
+            sigil_sandbox::managed::CommandManagedTerminalLaunchServiceV1::new(
+                PathBuf::from(&request.program),
+                request.args.iter().map(OsString::from).collect(),
+                request.cwd,
+                environment,
+                terminal_enforcement,
+            ),
+        );
+        let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
+            Arc::clone(&self.planner),
+            self.execution_temp_root.clone(),
+        )
+        .with_terminal_launcher(launcher);
+        service.start_persistent(bundle, managed_request).await
+    }
+
     async fn execute_managed(
         &self,
         mut request: ExecutionRequest,
@@ -435,6 +520,19 @@ impl sigil_tools_builtin::ManagedCommandExecutionPortV1 for RuntimeManagedComman
     }
 }
 
+#[async_trait::async_trait]
+impl sigil_tools_builtin::ManagedTerminalExecutionPortV1 for RuntimeManagedCommandExecutionRouteV1 {
+    async fn start_persistent(
+        &self,
+        request: sigil_tools_builtin::ManagedTerminalStartRequestV1,
+    ) -> Result<
+        Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>,
+        sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+    > {
+        self.start_managed_terminal(request).await
+    }
+}
+
 fn stream_capture(
     summary: &sigil_kernel::managed_execution::BoundedOutputSummaryV1,
     limit_bytes: u64,
@@ -508,6 +606,26 @@ fn extension_path_digest(path: &Path) -> CanonicalHash {
     crate::r71_shadow_planner::canonical_digest(path.to_string_lossy().as_bytes())
 }
 
+fn terminal_command_digest(
+    request: &sigil_tools_builtin::ManagedTerminalStartRequestV1,
+) -> CanonicalHash {
+    let mut bytes = b"managed-terminal-command-v1\0".to_vec();
+    bytes.extend_from_slice(request.program.as_bytes());
+    bytes.push(0);
+    for arg in &request.args {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
+    bytes.extend_from_slice(request.cwd.to_string_lossy().as_bytes());
+    for (key, value) in &request.environment {
+        bytes.push(0);
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.push(b'=');
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    crate::r71_shadow_planner::canonical_digest(&bytes)
+}
+
 fn extension_command_digest(program: &Path, args: &[OsString], cwd: &Path) -> CanonicalHash {
     let mut bytes = b"managed-extension-command-v1\0".to_vec();
     bytes.extend_from_slice(program.to_string_lossy().as_bytes());
@@ -573,6 +691,30 @@ fn extension_enforcement(
         effective_capability_set_hash: capability_hash,
         proof_set_hash: crate::r71_shadow_planner::canonical_digest(
             b"managed-extension-launcher-proof-v1",
+        ),
+    }
+}
+
+fn terminal_enforcement(
+    profile_hash: CanonicalHash,
+) -> sigil_sandbox::managed::ManagedExtensionLaunchEnforcementV1 {
+    sigil_sandbox::managed::ManagedExtensionLaunchEnforcementV1 {
+        requested: RequestedEnforcementV1 {
+            requirement: sigil_kernel::resource::EnforcementRequirementClassV1::ExplicitUnconfined,
+            deny_ambient_system_temp_write: false,
+            deny_ambient_home_write: false,
+            deny_ungranted_workspace_write: false,
+            require_process_tree_ownership: false,
+            require_network_policy: false,
+            requested_capability_set_hash: CanonicalHash::from_bytes([0u8; 32]),
+            profile_hash,
+        },
+        backend: SandboxBackendClassV1::LocalUnconfined,
+        completeness: sigil_kernel::resource::EnforcementCompletenessV1::None,
+        effective_access: BTreeSet::new(),
+        effective_capability_set_hash: CanonicalHash::from_bytes([0u8; 32]),
+        proof_set_hash: crate::r71_shadow_planner::canonical_digest(
+            b"managed-terminal-launcher-proof-v1",
         ),
     }
 }
@@ -875,6 +1017,43 @@ mod tests {
         assert_eq!(receipt.stdout, b"managed-route");
         assert_eq!(receipt.exit_code, Some(0));
         assert_eq!(receipt.backend, sigil_kernel::ExecutionBackendKind::Local);
+    }
+
+    #[tokio::test]
+    async fn r71_managed_terminal_route_seals_and_owns_persistent_process() {
+        use sigil_tools_builtin::{ManagedTerminalExecutionPortV1, ManagedTerminalStartRequestV1};
+
+        let root = tempfile::tempdir().expect("workspace");
+        let execution_temp = tempfile::tempdir().expect("execution temp");
+        let route = RuntimeManagedCommandExecutionRouteV1::new(
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            execution_temp.path().to_path_buf(),
+        );
+        let mut handle = route
+            .start_persistent(ManagedTerminalStartRequestV1 {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "printf terminal-route".to_owned()],
+                cwd: root.path().to_path_buf(),
+                environment: std::collections::BTreeMap::new(),
+            })
+            .await
+            .expect("managed terminal route");
+        let mut stream = handle.take_output_stream().expect("managed stream");
+        let mut output = Vec::new();
+        while let Some(frame) = stream.next_frame().await.expect("output frame") {
+            if !frame.end_of_stream {
+                output.extend(frame.payload);
+            }
+        }
+        let receipt = handle.wait_and_finalize().await.expect("terminal receipt");
+        assert_eq!(output, b"terminal-route");
+        assert!(matches!(
+            receipt.process.termination,
+            sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code: 0 }
+        ));
     }
 
     /// Minimal projection stub for the isolated composition test.

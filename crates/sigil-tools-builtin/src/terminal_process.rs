@@ -74,8 +74,8 @@ use lifecycle::TerminalLifecycleOwner;
 use manager::{CancelCommand, TerminalTaskStartPlan};
 use output::{LogSummary, current_epoch_ms, read_terminal_output_log, summarize_log};
 use worker::{
-    PtyWorker, TerminalWorker, cancel_pty_task, run_pty_worker, run_terminal_worker,
-    spawn_pty_runtime,
+    ManagedTerminalWorker, PtyWorker, TerminalWorker, cancel_pty_task, route_managed_output,
+    run_managed_terminal_worker, run_pty_worker, run_terminal_worker, spawn_pty_runtime,
 };
 
 const TERMINAL_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);

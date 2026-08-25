@@ -7,10 +7,35 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use sigil_kernel::managed_execution::{ManagedExecutionErrorV1, ManagedProcessHandleV1};
 use sigil_kernel::{
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
     ExecutionReceipt, ExecutionRequest, RunCancellationHandle,
 };
+
+/// Host-private request for one long-lived terminal process.
+///
+/// The request is intentionally consumed by the runtime adapter immediately. It is not a
+/// kernel contract: the runtime turns these host paths into opaque subject bindings before it
+/// calls the managed execution service.
+#[derive(Debug, Clone)]
+pub struct ManagedTerminalStartRequestV1 {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: std::path::PathBuf,
+    pub environment: std::collections::BTreeMap<String, String>,
+}
+
+/// Runtime-owned persistent terminal launch port. Built-in terminal lifecycle code only knows
+/// this port and the kernel process handle; it never selects an `ExecutionBackend` or spawns a
+/// child itself on the production route.
+#[async_trait]
+pub trait ManagedTerminalExecutionPortV1: Send + Sync {
+    async fn start_persistent(
+        &self,
+        request: ManagedTerminalStartRequestV1,
+    ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1>;
+}
 
 #[async_trait]
 pub trait ManagedCommandExecutionPortV1: Send + Sync {

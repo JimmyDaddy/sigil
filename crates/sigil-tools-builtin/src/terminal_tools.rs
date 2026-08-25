@@ -166,6 +166,7 @@ impl TerminalTaskControlHandle {
 #[derive(Default)]
 pub(crate) struct TerminalProcessManagers {
     terminal_execution_config: TerminalExecutionConfig,
+    managed_execution: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
     lifecycle_route: Option<TerminalLifecycleRoute>,
     scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
     managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
@@ -282,11 +283,20 @@ impl TerminalProcessManagers {
     pub(crate) fn new(terminal_execution_config: TerminalExecutionConfig) -> Self {
         Self {
             terminal_execution_config,
+            managed_execution: None,
             lifecycle_route: None,
             scratch_leases: None,
             terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
             managers: StdMutex::new(BTreeMap::new()),
         }
+    }
+
+    pub(crate) fn with_managed_execution(
+        mut self,
+        managed_execution: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
+    ) -> Self {
+        self.managed_execution = managed_execution;
+        self
     }
 
     pub(crate) fn with_lifecycle_route(
@@ -367,15 +377,17 @@ impl TerminalProcessManagers {
             return Ok(Arc::clone(manager));
         }
 
-        let manager = Arc::new(
-            TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
-                &workspace_root,
-                artifact_root,
-                artifact_label_root.to_path_buf(),
-                self.terminal_execution_config.clone(),
-            )?
-            .with_scratch_task_leases(self.scratch_leases.clone()),
-        );
+        let mut manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
+            &workspace_root,
+            artifact_root,
+            artifact_label_root.to_path_buf(),
+            self.terminal_execution_config.clone(),
+        )?
+        .with_scratch_task_leases(self.scratch_leases.clone());
+        if let Some(managed_execution) = &self.managed_execution {
+            manager = manager.with_managed_execution(Arc::clone(managed_execution));
+        }
+        let manager = Arc::new(manager);
         managers.insert(key, Arc::clone(&manager));
         Ok(manager)
     }

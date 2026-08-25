@@ -17,6 +17,7 @@ pub struct TerminalProcessManager {
     preview_limit_bytes: usize,
     artifact_limits: TerminalArtifactLimits,
     cancel_grace: Duration,
+    managed_execution: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
     /// RFC-0062 14.1: shared task-scoped scratch leases; released when a task terminalizes.
     scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
 }
@@ -80,8 +81,21 @@ impl TerminalProcessManager {
             preview_limit_bytes: DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES,
             artifact_limits: TerminalArtifactLimits::default(),
             cancel_grace: Duration::from_millis(DEFAULT_CANCEL_GRACE_MS),
+            managed_execution: None,
             scratch_leases: None,
         })
+    }
+
+    /// Binds the production terminal lifecycle to the runtime-owned managed execution port.
+    ///
+    /// The legacy constructor remains available for isolated unit fixtures; production boot
+    /// injects this port so terminal startup cannot silently select an `ExecutionBackend`.
+    pub fn with_managed_execution(
+        mut self,
+        managed_execution: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+    ) -> Self {
+        self.managed_execution = Some(managed_execution);
+        self
     }
 
     /// Binds the shared task-scoped scratch lease registry to every task lifecycle.
@@ -144,6 +158,16 @@ impl TerminalProcessManager {
         let plan = self
             .prepare_start(request, TerminalStartMode::LocalProcess)
             .await?;
+        if let Some(managed_execution) = &self.managed_execution {
+            return self
+                .start_managed_with_readiness_and_sink(
+                    managed_execution,
+                    plan,
+                    readiness,
+                    lifecycle_sink,
+                )
+                .await;
+        }
         // The lifecycle owner and its watch channel exist before the child can emit or exit.
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
@@ -280,6 +304,11 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     ) -> Result<TerminalTaskEntry> {
+        if self.managed_execution.is_some() {
+            bail!(
+                "managed terminal PTY launch is not available on this provider; refusing legacy PTY fallback"
+            );
+        }
         let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
         // Construct the observer before the PTY child can emit or exit.
         let lifecycle = TerminalLifecycleOwner::new(
@@ -345,6 +374,105 @@ impl TerminalProcessManager {
             lifecycle,
         }));
 
+        Ok(plan.initial_entry)
+    }
+
+    async fn start_managed_with_readiness_and_sink(
+        &self,
+        managed_execution: &Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+        plan: TerminalTaskStartPlan,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<TerminalTaskEntry> {
+        let request = crate::ManagedTerminalStartRequestV1 {
+            program: plan.shell.clone(),
+            args: plan.shell_args.clone(),
+            cwd: plan.resolved_cwd.absolute.clone(),
+            environment: plan.env.clone(),
+        };
+        let mut handle = managed_execution
+            .start_persistent(request)
+            .await
+            .map_err(|error| anyhow!("managed terminal launch failed: {error}"))?;
+        let output_stream = handle
+            .take_output_stream()
+            .map_err(|error| anyhow!("managed terminal output stream unavailable: {error}"))?;
+
+        let lifecycle = TerminalLifecycleOwner::new(
+            plan.task_id.clone(),
+            plan.initial_entry.handle.execution_backend,
+            plan.initial_entry.handle.sandbox_profile,
+            &readiness,
+        )?
+        .with_scratch_leases(self.scratch_leases.clone());
+        let lifecycle_route_baseline = lifecycle.snapshot();
+        let lifecycle_route_receiver = lifecycle.subscribe();
+        let output_file = Arc::new(Mutex::new(CombinedOutputWriter::new(
+            open_append_file(&plan.artifacts.absolute_output).await?,
+            self.artifact_limits.combined_bytes,
+        )));
+        let capture_ledger = Arc::new(TerminalCaptureLedger::with_lifecycle(lifecycle.clone()));
+        let (capture_failure_tx, _capture_failure_rx) = mpsc::unbounded_channel();
+        let (stdout_writer, stdout_reader) = tokio::io::duplex(64 * 1024);
+        let (stderr_writer, stderr_reader) = tokio::io::duplex(64 * 1024);
+        let output_router = tokio::spawn(route_managed_output(
+            output_stream,
+            stdout_writer,
+            stderr_writer,
+        ));
+        let stdout_task = spawn_capture_task(
+            Some(stdout_reader),
+            TerminalOutputStream::Stdout,
+            plan.artifacts.absolute_stdout.clone(),
+            Arc::clone(&output_file),
+            self.artifact_limits,
+            Arc::clone(&capture_ledger),
+            capture_failure_tx.clone(),
+        );
+        let stderr_task = spawn_capture_task(
+            Some(stderr_reader),
+            TerminalOutputStream::Stderr,
+            plan.artifacts.absolute_stderr.clone(),
+            Arc::clone(&output_file),
+            self.artifact_limits,
+            Arc::clone(&capture_ledger),
+            capture_failure_tx,
+        );
+        let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
+        let managed_handle = Arc::new(Mutex::new(Some(handle)));
+        let managed = ManagedTerminalTask {
+            summary: Arc::clone(&summary),
+            lifecycle: lifecycle.clone(),
+            control: TerminalTaskControl::Managed {
+                handle: Arc::clone(&managed_handle),
+            },
+            lifecycle_route_abort: None,
+        };
+        self.tasks
+            .lock()
+            .await
+            .insert(plan.task_id.clone(), managed);
+        self.attach_lifecycle_route(
+            &plan.task_id,
+            Arc::clone(&summary),
+            lifecycle.clone(),
+            lifecycle_route_receiver,
+            lifecycle_route_baseline,
+            lifecycle_sink,
+        )
+        .await?;
+        self.record_permission_context(&plan)?;
+        tokio::spawn(run_managed_terminal_worker(ManagedTerminalWorker {
+            handle: managed_handle,
+            output_router,
+            summary,
+            artifacts: plan.artifacts,
+            stdout_task,
+            stderr_task,
+            capture_ledger,
+            preview_limit_bytes: self.preview_limit_bytes,
+            lifecycle,
+        }));
         Ok(plan.initial_entry)
     }
 
@@ -612,7 +740,7 @@ impl TerminalProcessManager {
         }
 
         let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
-            bail!("terminal task backend does not support input: process");
+            bail!("managed terminal process does not expose interactive input without a PTY");
         };
 
         let input = input.into().into_bytes();
@@ -751,6 +879,12 @@ impl TerminalProcessManager {
                 task.lifecycle
                     .mark_terminal(entry.status, entry.output_total_bytes);
                 Ok(self.snapshot(task_id).await?.entry)
+            }
+            TerminalTaskControl::Managed { handle } => {
+                let _ = handle;
+                bail!(
+                    "managed terminal cancellation control is not yet exposed by this runtime port"
+                )
             }
         }
     }
@@ -1066,6 +1200,10 @@ pub(super) enum TerminalTaskControl {
         cancel_grace: Duration,
         artifacts: Arc<TerminalTaskArtifacts>,
         preview_limit_bytes: usize,
+    },
+    Managed {
+        handle:
+            Arc<Mutex<Option<Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>>>>,
     },
 }
 

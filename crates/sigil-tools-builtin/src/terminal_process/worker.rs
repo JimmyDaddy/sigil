@@ -60,6 +60,152 @@ pub(super) struct TerminalWorker {
     pub(super) lifecycle: TerminalLifecycleOwner,
 }
 
+pub(super) struct ManagedTerminalWorker {
+    pub(super) handle:
+        Arc<Mutex<Option<Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>>>>,
+    pub(super) output_router: JoinHandle<Result<()>>,
+    pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
+    pub(super) artifacts: TerminalTaskArtifacts,
+    pub(super) stdout_task: JoinHandle<Result<io::CaptureOutcome>>,
+    pub(super) stderr_task: JoinHandle<Result<io::CaptureOutcome>>,
+    pub(super) capture_ledger: Arc<TerminalCaptureLedger>,
+    pub(super) preview_limit_bytes: usize,
+    pub(super) lifecycle: TerminalLifecycleOwner,
+}
+
+/// Routes the single managed output stream into the two legacy artifact capture readers. The
+/// physical process is still owned by the managed sandbox; these duplex pipes are only a local
+/// projection boundary for the terminal artifact writer.
+pub(super) async fn route_managed_output(
+    mut stream: Box<dyn sigil_kernel::managed_execution::ManagedProcessOutputStreamV1>,
+    mut stdout: tokio::io::DuplexStream,
+    mut stderr: tokio::io::DuplexStream,
+) -> Result<()> {
+    while let Some(frame) = stream
+        .next_frame()
+        .await
+        .map_err(|error| anyhow!("managed terminal output stream failed: {error}"))?
+    {
+        if frame.end_of_stream || frame.payload.is_empty() {
+            continue;
+        }
+        let writer = match frame.channel {
+            sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Stdout
+            | sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Pty => &mut stdout,
+            sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Stderr => &mut stderr,
+        };
+        writer
+            .write_all(&frame.payload)
+            .await
+            .context("managed terminal output projection failed")?;
+    }
+    Ok(())
+}
+
+pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
+    let handle = {
+        let mut guard = worker.handle.lock().await;
+        guard.take()
+    };
+    let Some(handle) = handle else {
+        let entry = finalize_terminal_summary(
+            &worker.summary,
+            &worker.artifacts,
+            TerminalTaskStatus::Failed {
+                reason: "managed terminal handle disappeared before finalization".to_owned(),
+            },
+            None,
+            worker.preview_limit_bytes,
+            None,
+            TerminalCaptureEvidence::from_ledger(
+                &worker.capture_ledger,
+                Some(TerminalOutputTerminationReason::OutputCaptureFailed),
+            ),
+        )
+        .await;
+        worker
+            .lifecycle
+            .mark_terminal(entry.status.clone(), entry.output_total_bytes);
+        return;
+    };
+
+    let receipt = handle.wait_and_finalize().await;
+    let router_error = match worker.output_router.await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(error) => Some(format!("managed terminal output router failed: {error}")),
+    };
+    let mut stdout_task = CaptureTaskState::new(TerminalOutputStream::Stdout, worker.stdout_task);
+    let mut stderr_task = CaptureTaskState::new(TerminalOutputStream::Stderr, worker.stderr_task);
+    let capture_error = join_capture_tasks(&mut stdout_task, &mut stderr_task).await;
+    let capture_error = router_error.or(capture_error);
+    let (status, cleanup) = match receipt {
+        Ok(receipt) => (
+            managed_terminal_status(&receipt.process.termination),
+            Some(managed_cleanup_receipt(&receipt.resources.cleanup_status)),
+        ),
+        Err(error) => (
+            TerminalTaskStatus::Failed {
+                reason: format!("managed terminal finalization failed: {error}"),
+            },
+            None,
+        ),
+    };
+    let fallback = capture_error
+        .as_ref()
+        .map(|_| TerminalOutputTerminationReason::OutputCaptureFailed);
+    let entry = finalize_terminal_summary(
+        &worker.summary,
+        &worker.artifacts,
+        status,
+        capture_error,
+        worker.preview_limit_bytes,
+        cleanup,
+        TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback),
+    )
+    .await;
+    worker
+        .lifecycle
+        .mark_terminal(entry.status.clone(), entry.output_total_bytes);
+}
+
+fn managed_terminal_status(
+    termination: &sigil_kernel::managed_execution::ProcessTerminationV1,
+) -> TerminalTaskStatus {
+    match termination {
+        sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code } => {
+            TerminalTaskStatus::Exited {
+                exit_code: Some(*code),
+            }
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::Cancelled => {
+            TerminalTaskStatus::Cancelled
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut => {
+            TerminalTaskStatus::Failed {
+                reason: "managed terminal exceeded its execution limit".to_owned(),
+            }
+        }
+        other => TerminalTaskStatus::Failed {
+            reason: format!("managed terminal ended without a stable exit: {other:?}"),
+        },
+    }
+}
+
+fn managed_cleanup_receipt(
+    status: &sigil_kernel::resource::ResourceCleanupStatusV1,
+) -> ExecutionCleanupReceipt {
+    match status {
+        sigil_kernel::resource::ResourceCleanupStatusV1::Released => {
+            ExecutionCleanupReceipt::completed("managed authority released terminal resources")
+        }
+        _ => ExecutionCleanupReceipt {
+            status: ExecutionCleanupStatus::Unknown,
+            reason: Some(format!("managed authority cleanup status: {status:?}")),
+        },
+    }
+}
+
 pub(super) struct PtyWorker {
     pub(super) _process_owner: ProcessTreeOwnerGuard,
     pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,

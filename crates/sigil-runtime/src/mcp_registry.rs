@@ -1217,6 +1217,10 @@ fn register_local_tools(
     sigil_tools_builtin::ScratchNamespaceControl,
 )> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    let managed_terminal: Option<Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>> =
+        managed_command_execution.as_ref().map(|route| {
+            Arc::clone(route) as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>
+        });
     let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
         managed_command_execution
             .map(|route| route as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>)
@@ -1236,7 +1240,7 @@ fn register_local_tools(
         .unwrap_or_else(|| crate::authority_scratch_control(paths.scratch_root.clone()));
     let handles = match terminal_lifecycle_route {
         Some(RuntimeTerminalLifecycleRoute::Factory(factory)) => {
-            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config(
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
                 registry,
                 builtin_paths,
                 Arc::clone(&managed_executor),
@@ -1247,6 +1251,7 @@ fn register_local_tools(
                     factory,
                 )),
                 Some(scratch_control.clone()),
+                managed_terminal.clone(),
             )
         }
         route => {
@@ -1255,7 +1260,7 @@ fn register_local_tools(
                 Some(RuntimeTerminalLifecycleRoute::Factory(_)) => unreachable!(),
                 None => None,
             };
-            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config(
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
                 registry,
                 builtin_paths,
                 managed_executor,
@@ -1264,6 +1269,7 @@ fn register_local_tools(
                 ),
                 sink.map(sigil_tools_builtin::TerminalLifecycleRoute::Bound),
                 Some(scratch_control.clone()),
+                managed_terminal,
             )
         }
     };

@@ -193,6 +193,30 @@ pub fn register_builtin_tools_with_managed_execution_and_terminal_config(
     terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
     external_scratch_control: Option<ScratchNamespaceControl>,
 ) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+        None,
+    )
+}
+
+/// Registers built-ins with managed one-shot and persistent terminal execution ports.
+///
+/// The terminal port is optional only for legacy/unit fixtures. Current runtime composition
+/// injects it; when present, the terminal manager refuses its direct `Command`/PTY fallback.
+pub fn register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+    managed_terminal: Option<Arc<dyn crate::ManagedTerminalExecutionPortV1>>,
+) -> BuiltinToolHandles {
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
         terminal_execution_config.with_default_shell(default_shell.clone());
@@ -208,6 +232,7 @@ pub fn register_builtin_tools_with_managed_execution_and_terminal_config(
     });
     let terminal_managers = Arc::new(
         TerminalProcessManagers::new(terminal_execution_config)
+            .with_managed_execution(managed_terminal)
             .with_lifecycle_route(terminal_lifecycle_route)
             .with_scratch_task_leases(Some(Arc::clone(&scratch_control.tasks))),
     );

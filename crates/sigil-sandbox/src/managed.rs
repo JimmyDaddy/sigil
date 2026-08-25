@@ -70,6 +70,7 @@ pub struct SandboxManagedExecutionServiceV1 {
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     execution_temp_root: PathBuf,
     one_shot_launcher: Option<Arc<dyn ManagedOneShotLaunchServiceV1>>,
+    terminal_launcher: Option<Arc<dyn ManagedTerminalLaunchServiceV1>>,
     extension_launcher: Option<Arc<dyn ManagedExtensionLaunchServiceV1>>,
 }
 
@@ -82,6 +83,63 @@ pub trait ManagedOneShotLaunchServiceV1: Send + Sync {
         request: &ManagedExecutionRequestV1,
         environment: &BTreeMap<String, String>,
     ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
+/// Host-private terminal launch seam. Persistent terminal cwd and argv remain bound to the
+/// runtime-resolved plan; the sandbox service performs admission and process ownership around
+/// this one physical launch.
+pub trait ManagedTerminalLaunchServiceV1: Send + Sync {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
+/// Real command-backed terminal launcher. It is plan-bound by construction and is not a generic
+/// fallback: production composition must inject it explicitly for the Terminal purpose.
+pub struct CommandManagedTerminalLaunchServiceV1 {
+    program: PathBuf,
+    args: Vec<OsString>,
+    cwd: PathBuf,
+    environment: Vec<(OsString, OsString)>,
+    enforcement: ManagedExtensionLaunchEnforcementV1,
+}
+
+impl CommandManagedTerminalLaunchServiceV1 {
+    #[must_use]
+    pub fn new(
+        program: PathBuf,
+        args: Vec<OsString>,
+        cwd: PathBuf,
+        environment: Vec<(OsString, OsString)>,
+        enforcement: ManagedExtensionLaunchEnforcementV1,
+    ) -> Self {
+        Self {
+            program,
+            args,
+            cwd,
+            environment,
+            enforcement,
+        }
+    }
+}
+
+impl ManagedTerminalLaunchServiceV1 for CommandManagedTerminalLaunchServiceV1 {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        let launcher = CommandManagedExtensionLaunchServiceV1::new(
+            self.program.clone(),
+            self.args.clone(),
+            self.cwd.clone(),
+            self.environment.clone(),
+            self.enforcement.clone(),
+        );
+        ManagedExtensionLaunchServiceV1::launch(&launcher, request, environment)
+    }
 }
 
 /// Local host launcher used by the runtime managed one-shot route. It is valid only when the
@@ -225,6 +283,16 @@ impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 
     }
 }
 
+impl ManagedTerminalLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        ManagedExtensionLaunchServiceV1::launch(self, request, environment)
+    }
+}
+
 /// Purpose class derived from the issued bundle (never from the consumer request text).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SigilPurpose {
@@ -258,6 +326,7 @@ impl SandboxManagedExecutionServiceV1 {
             planner,
             execution_temp_root,
             one_shot_launcher: None,
+            terminal_launcher: None,
             extension_launcher: None,
         }
     }
@@ -268,6 +337,15 @@ impl SandboxManagedExecutionServiceV1 {
         launcher: Arc<dyn ManagedOneShotLaunchServiceV1>,
     ) -> Self {
         self.one_shot_launcher = Some(launcher);
+        self
+    }
+
+    #[must_use]
+    pub fn with_terminal_launcher(
+        mut self,
+        launcher: Arc<dyn ManagedTerminalLaunchServiceV1>,
+    ) -> Self {
+        self.terminal_launcher = Some(launcher);
         self
     }
 
@@ -789,19 +867,28 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             };
             launcher.launch(&request, &prepared.env)?
+        } else if let Some(launcher) = &self.terminal_launcher {
+            launcher.launch(&request, &prepared.env)?
         } else {
-            let mut command = Command::new(&request.argv[0]);
-            command
-                .args(request.argv.iter().skip(1))
-                .env_clear()
-                .envs(prepared.env.iter())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            sigil_process::configure_process_tree(&mut command);
-            command
-                .spawn()
-                .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?
+            #[cfg(not(test))]
+            {
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+            #[cfg(test)]
+            {
+                let mut command = Command::new(&request.argv[0]);
+                command
+                    .args(request.argv.iter().skip(1))
+                    .env_clear()
+                    .envs(prepared.env.iter())
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                sigil_process::configure_process_tree(&mut command);
+                command
+                    .spawn()
+                    .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?
+            }
         };
         let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
             Ok(owner) => owner,
