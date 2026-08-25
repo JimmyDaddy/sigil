@@ -35,7 +35,11 @@ pub use registry::{
     BuiltinToolHandles, BuiltinToolPaths, register_builtin_tools,
     register_builtin_tools_with_managed_execution_and_terminal_config,
     register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal,
-    register_builtin_tools_with_paths, register_builtin_tools_with_paths_and_execution_backend,
+    register_builtin_tools_with_paths, register_builtin_tools_with_unavailable_managed_execution,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use registry::{
+    register_builtin_tools_with_paths_and_execution_backend,
     register_builtin_tools_with_paths_execution_backend_and_execution_config,
     register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle,
     register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory,

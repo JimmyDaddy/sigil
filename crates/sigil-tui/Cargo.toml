@@ -32,6 +32,7 @@ uuid.workspace = true
 fs2.workspace = true
 sigil-mcp = { path = "../sigil-mcp" }
 sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
+sigil-tools-builtin = { path = "../sigil-tools-builtin", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

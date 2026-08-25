@@ -1753,8 +1753,7 @@ async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -
 
 #[tokio::test]
 #[cfg(target_os = "macos")]
-async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_backend() -> Result<()>
-{
+async fn build_tool_registry_rejects_uncomposed_terminal_pty_route() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let provider_capabilities =
         provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
@@ -1768,7 +1767,7 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
     let registry =
         build_tool_registry(&config, &provider_capabilities, temp.path().to_path_buf()).await?;
 
-    let result = registry
+    let error = registry
         .execute(
             ToolContext::new(temp.path().to_path_buf(), 5),
             ToolCall {
@@ -1784,36 +1783,13 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
                 .to_string(),
             },
         )
-        .await?;
-
-    assert!(!result.is_error());
-    assert_eq!(
-        result.metadata.details["execution_backend"],
-        json!("sandboxed_pty")
+        .await
+        .expect_err("uncomposed terminal execution must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("sandbox provider is unavailable")
     );
-    assert_eq!(
-        result.metadata.details["enforcement_backend"],
-        json!("macos_seatbelt")
-    );
-    assert_eq!(
-        result.metadata.details["sandbox_profile"],
-        json!("workspace_write")
-    );
-    assert_eq!(
-        result.metadata.details["enforcement_backend_capabilities"]["persistent_pty"],
-        json!(true)
-    );
-    let cancelled = registry
-        .execute(
-            ToolContext::new(temp.path().to_path_buf(), 5),
-            ToolCall {
-                id: "terminal-sandboxed-pty-cancel".to_owned(),
-                name: "terminal_cancel".to_owned(),
-                args_json: json!({ "task_id": "runtime-sandboxed-pty" }).to_string(),
-            },
-        )
-        .await?;
-    assert!(!cancelled.is_error());
     Ok(())
 }
 

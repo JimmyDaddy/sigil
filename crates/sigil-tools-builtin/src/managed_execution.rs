@@ -7,14 +7,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+#[cfg(any(test, feature = "test-support"))]
+use sigil_kernel::ExecutionBackend;
 use sigil_kernel::managed_execution::{
     BoundedPtySizeV1, ManagedExecutionErrorV1, ManagedProcessHandleV1,
 };
 use sigil_kernel::{
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
-    ExecutionReceipt, ExecutionRequest, RunCancellationHandle,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt, ExecutionReceipt,
+    ExecutionRequest, RunCancellationHandle,
 };
-
 /// Host-private request for one long-lived terminal process.
 ///
 /// The request is intentionally consumed by the runtime adapter immediately. It is not a
@@ -55,10 +56,12 @@ pub trait ManagedCommandExecutionPortV1: Send + Sync {
     ) -> Result<ExecutionReceipt>;
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct LegacyBackendCommandExecutionPortV1 {
     pub(crate) backend: std::sync::Arc<dyn ExecutionBackend>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ManagedCommandExecutionPortV1 for LegacyBackendCommandExecutionPortV1 {
     fn kind(&self) -> ExecutionBackendKind {
@@ -112,5 +115,15 @@ impl ManagedCommandExecutionPortV1 for UnavailableManagedCommandExecutionPortV1 
         Err(anyhow::anyhow!(
             "managed execution authority is unavailable; refusing direct process fallback"
         ))
+    }
+}
+
+#[async_trait]
+impl ManagedTerminalExecutionPortV1 for UnavailableManagedCommandExecutionPortV1 {
+    async fn start_persistent(
+        &self,
+        _request: ManagedTerminalStartRequestV1,
+    ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
+        Err(ManagedExecutionErrorV1::ProviderUnavailable)
     }
 }

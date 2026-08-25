@@ -3,12 +3,12 @@ use std::{
     sync::Arc,
 };
 
-use sigil_kernel::{ExecutionBackend, ExecutionConfig, ToolRegistry};
+#[cfg(any(test, feature = "test-support"))]
+use crate::execution_backends::LocalExecutionBackend;
 
 use crate::{
     changeset_tool::ApplyChangeSetTool,
     constants::{CHANGESET_ARTIFACT_ROOT, WORKSPACE_TEMP_ROOT},
-    execution_backends::LocalExecutionBackend,
     file_tools::{
         DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, WriteFileTool,
     },
@@ -25,7 +25,9 @@ use crate::{
     tool_artifact_tool::ReadToolArtifactTool,
     vcs_inspect::VcsInspectTool,
 };
-
+use sigil_kernel::ToolRegistry;
+#[cfg(any(test, feature = "test-support"))]
+use sigil_kernel::{ExecutionBackend, ExecutionConfig};
 /// Handles returned by built-in tool registration: terminal task control and the shared
 /// session-scoped scratch lease registry used by maintenance GC.
 #[derive(Debug, Clone)]
@@ -62,6 +64,7 @@ impl BuiltinToolPaths {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     register_builtin_tools_with_paths(
         registry,
@@ -77,6 +80,41 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     );
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub fn register_builtin_tools(registry: &mut ToolRegistry) {
+    register_builtin_tools_with_unavailable_managed_execution(
+        registry,
+        BuiltinToolPaths {
+            changesets_root: PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+            changesets_label_root: PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+            terminal_tasks_root: PathBuf::from(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            terminal_tasks_label_root: PathBuf::from(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            scratch_root: PathBuf::from(WORKSPACE_TEMP_ROOT),
+            scratch_label: WORKSPACE_TEMP_ROOT.to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        },
+    );
+}
+
+/// Registers built-ins without selecting a process backend. This is the safe default for
+/// callers that only need tool contracts or diagnostics; command and terminal execution fail
+/// closed until the runtime supplies an authority-owned managed execution route.
+pub fn register_builtin_tools_with_unavailable_managed_execution(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+        registry,
+        paths,
+        Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1),
+        TerminalExecutionConfig::default(),
+        None,
+        None,
+        None,
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -88,6 +126,15 @@ pub fn register_builtin_tools_with_paths(
     )
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub fn register_builtin_tools_with_paths(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_unavailable_managed_execution(registry, paths)
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_and_execution_backend(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -103,6 +150,7 @@ pub fn register_builtin_tools_with_paths_and_execution_backend(
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_execution_backend_and_execution_config(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -123,6 +171,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_and_execution_config(
 ///
 /// `external_scratch_control` shares the process-scoped scratch lease registry across repeated
 /// surface assemblies (Desktop serve); `None` creates a fresh registry (TUI worker).
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -142,6 +191,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_
 }
 
 /// Registers built-ins with a factory that freezes a lifecycle sink from each exact tool context.
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -160,6 +210,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,

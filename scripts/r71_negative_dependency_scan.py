@@ -54,6 +54,11 @@ PHYSICAL_IMPORT_ALLOWLIST = {
 LEGACY_PATTERNS = (
     (re.compile(r"\bMcpProcessLaunch::owned\s*\("), "production MCP raw child launch"),
     (re.compile(r"\blaunch_planned_mcp_process\s*\("), "production planned MCP child launch"),
+    (re.compile(r"\bLegacyBackendCommandExecutionPortV1\b"), "production legacy execution backend adapter"),
+    (
+        re.compile(r"\bregister_builtin_tools_with_paths(?:_and_execution_backend|_execution_backend)"),
+        "production builtin registration exposes the legacy execution backend seam",
+    ),
     (re.compile(r"\bFileProjectionStore\b"), "production path-rooted FileProjectionStore"),
     (re.compile(r'PathBuf::from\("\.sigil-(?:state|cache)"\)'), "cwd-relative legacy writable root"),
     (re.compile(r'Path::new\("\.sigil-(?:state|cache)"\)'), "cwd-relative legacy writable root"),

@@ -1216,11 +1216,26 @@ fn register_local_tools(
     sigil_tools_builtin::TerminalTaskControlHandle,
     sigil_tools_builtin::ScratchNamespaceControl,
 )> {
+    if managed_command_execution.is_none()
+        && root_config.execution.backend() == sigil_kernel::ExecutionBackendKind::Local
+        && root_config.execution.requires_sandbox()
+    {
+        let error = root_config
+            .execution
+            .validate_profile_capabilities(sigil_kernel::ExecutionBackendCapabilities::default())
+            .expect_err("Local execution must not satisfy a required sandbox profile");
+        bail!(error);
+    }
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    let managed_terminal: Option<Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>> =
-        managed_command_execution.as_ref().map(|route| {
-            Arc::clone(route) as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>
-        });
+    let managed_terminal: Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1> =
+        managed_command_execution
+            .as_ref()
+            .map(|route| {
+                Arc::clone(route) as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>
+            })
+            .unwrap_or_else(|| {
+                Arc::new(sigil_tools_builtin::UnavailableManagedCommandExecutionPortV1)
+            });
     let managed_code_intel: Option<Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>> =
         managed_command_execution.as_ref().map(|route| {
             Arc::clone(route) as Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>
@@ -1255,7 +1270,7 @@ fn register_local_tools(
                     factory,
                 )),
                 Some(scratch_control.clone()),
-                managed_terminal.clone(),
+                Some(Arc::clone(&managed_terminal)),
             )
         }
         route => {
@@ -1273,7 +1288,7 @@ fn register_local_tools(
                 ),
                 sink.map(sigil_tools_builtin::TerminalLifecycleRoute::Bound),
                 Some(scratch_control.clone()),
-                managed_terminal,
+                Some(managed_terminal),
             )
         }
     };
