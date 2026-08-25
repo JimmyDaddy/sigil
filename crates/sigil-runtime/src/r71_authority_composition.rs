@@ -272,12 +272,34 @@ fn compose_runtime_authority_inner(
             Arc::clone(&extension_execution),
         )
         .with_optional_product_updater(product_updater);
-    let storage_writer = std::sync::Arc::new(ManagedStorageWriterAdapterV1::with_storage_issuer(
-        storage,
-        state_anchor.to_path_buf(),
+    let artifact_staging_grant = crate::managed_storage_writer::grant_for_channel_with_context(
+        StorageWriterChannelV1::ArtifactStaging,
+        0x76,
+        authority,
         cutover_manifest_hash,
-        std::sync::Arc::clone(&broker),
-    ));
+    );
+    let artifact_store_grant = crate::managed_storage_writer::grant_for_channel_with_context(
+        StorageWriterChannelV1::ArtifactStore,
+        0x76,
+        authority,
+        cutover_manifest_hash,
+    );
+    let artifact_retire_authority = std::sync::Arc::new(
+        sigil_resource_authority::maintenance::ArtifactRetireAuthorityV1::new(
+            authority,
+            artifact_staging_grant.grant_hash,
+            artifact_store_grant.grant_hash,
+        ),
+    );
+    let storage_writer = std::sync::Arc::new(
+        ManagedStorageWriterAdapterV1::with_storage_issuer(
+            storage,
+            state_anchor.to_path_buf(),
+            cutover_manifest_hash,
+            std::sync::Arc::clone(&broker),
+        )
+        .with_artifact_retire_authority(artifact_retire_authority),
+    );
     Ok(RuntimeAuthorityCompositionV1 {
         services,
         storage_writer,

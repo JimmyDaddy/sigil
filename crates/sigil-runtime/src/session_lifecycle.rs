@@ -21,7 +21,8 @@ use sigil_kernel::{
     ConversationForked, ConversationTurnForkRequest, DurableEventType, ExternalProvenanceEntry,
     JsonlSessionStore, MessageRole, ModelMessage, RootConfig, Session, SessionLogEntry, SessionRef,
     SessionStreamRecord, ToolArtifactBindingV1, ToolArtifactGcReportV1, ToolArtifactGcRootsV1,
-    ToolArtifactStore, fork_conversation_at_turn, safe_persistence_text,
+    ToolArtifactRetireFrontierV1, ToolArtifactStore, fork_conversation_at_turn,
+    safe_persistence_text,
 };
 use thiserror::Error as ThisError;
 
@@ -912,8 +913,11 @@ impl LocalSessionLifecycleService {
             .session_id
             .clone()
             .ok_or_else(|| anyhow!("source session has no durable identity"))?;
-        let (artifact_store, _artifact_lease) =
-            self.artifact_store_for_source_path(&source.path, &source_session_id)?;
+        let (artifact_store, _artifact_lease) = self.artifact_store_for_source_path(
+            &source.path,
+            &source_session_id,
+            self.session_source_is_managed(&source.session_ref),
+        )?;
         let tool_artifacts = export_tool_artifacts(
             &artifact_store,
             &projection.tool_artifacts,
@@ -1112,10 +1116,30 @@ impl LocalSessionLifecycleService {
                 now_unix_ms,
             )?;
         }
-        let report = store.garbage_collect(
+        let inventory = store.manifest_inventory()?;
+        let selected_bytes = disabled.iter().fold(0_u64, |total, artifact_ref| {
+            total.saturating_add(
+                inventory
+                    .iter()
+                    .find(|entry| entry.descriptor.artifact_ref == *artifact_ref)
+                    .map_or(0, |entry| entry.descriptor.persisted_bytes),
+            )
+        });
+        let retire_frontier = ToolArtifactRetireFrontierV1 {
+            selected_refs_hash: artifact_retire_refs_hash(&disabled),
+            selected_count: disabled.len() as u64,
+            selected_bytes,
+            eligibility_frontier: session.durable_frontier_sequence().max(1),
+            policy_hash: artifact_retire_policy_hash(
+                &roots,
+                sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+            ),
+        };
+        let report = store.garbage_collect_with_retire_frontier(
             &roots,
             now_unix_ms,
             sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+            retire_frontier,
         )?;
         // RFC-0062 16.2: reconcile every durable tombstone plan whose manifest is already gone
         // (crash between the physical move and the Expired append) together with the manifests
@@ -1672,7 +1696,8 @@ impl LocalSessionLifecycleService {
                 bail!("managed artifact GC source must be one session key below the root");
             }
         }
-        let (store, lease) = self.artifact_store_for_source_path(&path, expected_session_id)?;
+        let (store, lease) =
+            self.artifact_store_for_source_path(&path, expected_session_id, managed_source)?;
         if store.session_scope_id() != expected_session_id {
             bail!("artifact GC session identity changed");
         }
@@ -1683,15 +1708,19 @@ impl LocalSessionLifecycleService {
         &self,
         source_path: &Path,
         session_scope_id: &str,
+        managed_source: bool,
     ) -> Result<(
         ToolArtifactStore,
         Option<crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
     )> {
         if let Some(writer) = &self.managed_writer {
-            let key = source_path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .context("managed artifact session key is unavailable")?;
+            let key = if managed_source {
+                source_path.parent().and_then(Path::file_name)
+            } else {
+                source_path.file_stem()
+            }
+            .and_then(|value| value.to_str())
+            .context("managed artifact session key is unavailable")?;
             let lease = crate::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
                 Arc::clone(writer),
                 key,
@@ -1700,7 +1729,10 @@ impl LocalSessionLifecycleService {
             )?;
             return Ok((lease.store(), Some(lease)));
         }
-        let _ = source_path;
+        if !managed_source {
+            #[cfg(test)]
+            return Ok((ToolArtifactStore::for_session_path(source_path), None));
+        }
         bail!("managed artifact authority lease unavailable")
     }
 
@@ -2960,6 +2992,23 @@ fn modified_at_unix_ms(metadata: &fs::Metadata) -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+fn artifact_retire_refs_hash(
+    refs: &[sigil_kernel::ToolArtifactRefV1],
+) -> sigil_kernel::resource::CanonicalHash {
+    let mut refs = refs.to_vec();
+    refs.sort();
+    let bytes = serde_json::to_vec(&refs).unwrap_or_default();
+    sigil_kernel::resource::CanonicalHash::from_bytes(Sha256::digest(bytes).into())
+}
+
+fn artifact_retire_policy_hash(
+    roots: &ToolArtifactGcRootsV1,
+    orphan_grace_ms: u64,
+) -> sigil_kernel::resource::CanonicalHash {
+    let bytes = serde_json::to_vec(&(roots, orphan_grace_ms)).unwrap_or_default();
+    sigil_kernel::resource::CanonicalHash::from_bytes(Sha256::digest(bytes).into())
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {

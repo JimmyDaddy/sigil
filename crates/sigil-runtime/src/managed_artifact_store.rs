@@ -21,9 +21,9 @@ use sigil_kernel::session::{
     ProcessStreamCaptureConfigV1, TOOL_ARTIFACT_MAX_BYTES, TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
     ToolArtifactDescriptorV1, ToolArtifactGcReportV1, ToolArtifactGcRootsV1,
     ToolArtifactManifestEntryV1, ToolArtifactPageV1, ToolArtifactProcessCaptureBackendV1,
-    ToolArtifactProcessCaptureSnapshotV1, ToolArtifactRefV1, ToolArtifactSelectorV1,
-    ToolArtifactStore, ToolArtifactStoreBackendV1, ToolArtifactTrashPruneReportV1,
-    ToolOutputStreamV1,
+    ToolArtifactProcessCaptureSnapshotV1, ToolArtifactRefV1, ToolArtifactRetireFrontierV1,
+    ToolArtifactSelectorV1, ToolArtifactStore, ToolArtifactStoreBackendV1,
+    ToolArtifactTrashPruneReportV1, ToolOutputStreamV1,
 };
 
 use crate::managed_storage_writer::{
@@ -298,19 +298,23 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
 
     fn read_blob(&self, content_sha256: &str) -> Result<Vec<u8>> {
         let (_operation, _staging, store) = self.with_mutation_lock()?;
-        let path = blob_path(&store, content_sha256)?;
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() > TOOL_ARTIFACT_MAX_BYTES as u64
-        {
-            bail!("managed artifact blob is not a bounded regular file");
-        }
-        let bytes = read_no_follow(&path)?;
-        if hash_bytes(&bytes) != content_sha256 {
-            bail!("managed artifact blob hash mismatch");
-        }
-        Ok(bytes)
+        read_blob_at(&store, content_sha256)
+    }
+
+    fn read_artifact(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+        content_sha256: &str,
+    ) -> Result<Vec<u8>> {
+        artifact_ref.validate()?;
+        let (_operation, _staging, store) = self.with_mutation_lock()?;
+        let lock_path = store
+            .join("locks")
+            .join(format!("{}.lock", artifact_ref.artifact_id));
+        let lock = open_private_lock(&lock_path)?;
+        lock.lock_shared()
+            .context("failed to acquire managed artifact read lease")?;
+        read_blob_at(&store, content_sha256)
     }
 
     fn resolve(&self, artifact_ref: &ToolArtifactRefV1) -> Result<ToolArtifactDescriptorV1> {
@@ -329,8 +333,21 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         artifact_ref: &ToolArtifactRefV1,
         selector: ToolArtifactSelectorV1,
     ) -> Result<ToolArtifactPageV1> {
-        let descriptor = self.resolve(artifact_ref)?;
-        let bytes = self.read_blob(&descriptor.content_sha256)?;
+        artifact_ref.validate()?;
+        let (_operation, _staging, store) = self.with_mutation_lock()?;
+        let lock_path = store
+            .join("locks")
+            .join(format!("{}.lock", artifact_ref.artifact_id));
+        let lock = open_private_lock(&lock_path)?;
+        lock.lock_shared()
+            .context("failed to acquire managed artifact read lease")?;
+        let manifest_path = store
+            .join("refs")
+            .join(format!("{}.json", artifact_ref.artifact_id));
+        let descriptor: ToolArtifactDescriptorV1 =
+            serde_json::from_slice(&read_bounded(&manifest_path, 16 * 1024)?)?;
+        descriptor.validate()?;
+        let bytes = read_blob_at(&store, &descriptor.content_sha256)?;
         ToolArtifactStore::tool_artifact_page_from_bytes(
             &descriptor,
             artifact_ref,
@@ -409,12 +426,253 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         bail!("managed artifact retirement requires the authority retire frontier")
     }
 
+    fn garbage_collect_with_retire_frontier(
+        &self,
+        roots: &ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+        orphan_grace_ms: u64,
+        retire_frontier: ToolArtifactRetireFrontierV1,
+    ) -> Result<ToolArtifactGcReportV1> {
+        roots.validate()?;
+        if orphan_grace_ms < sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS {
+            bail!("tool artifact orphan grace must be at least 24 hours");
+        }
+        let (_operation, staging_root, store_root) = self.with_mutation_lock()?;
+        let inventory = manifest_inventory_at(&store_root)?;
+        let mut candidates = Vec::new();
+        let mut retained_manifests = 0usize;
+        for entry in &inventory {
+            let descriptor = &entry.descriptor;
+            let protected = roots.contains(&descriptor.artifact_ref)
+                || descriptor.retention_class == sigil_kernel::ToolArtifactRetentionClass::Pinned;
+            let grace_elapsed =
+                now_unix_ms.saturating_sub(entry.manifest_modified_at_unix_ms) >= orphan_grace_ms;
+            if protected || !grace_elapsed {
+                retained_manifests = retained_manifests.saturating_add(1);
+            } else {
+                candidates.push(entry.clone());
+            }
+        }
+        let selected_bytes = candidates.iter().fold(0_u64, |total, entry| {
+            total.saturating_add(entry.descriptor.persisted_bytes)
+        });
+        let selected_refs = candidates
+            .iter()
+            .map(|entry| entry.descriptor.artifact_ref.clone())
+            .collect::<Vec<_>>();
+        let expected_refs_hash = artifact_refs_hash(&selected_refs);
+        if retire_frontier.selected_count != candidates.len() as u64
+            || retire_frontier.selected_bytes != selected_bytes
+            || retire_frontier.selected_refs_hash != expected_refs_hash
+        {
+            bail!("managed artifact retire frontier does not match the current manifest selection");
+        }
+        let tombstone_id = format!("tool-artifact-gc-{}", Uuid::new_v4().simple());
+        if candidates.is_empty() {
+            return Ok(ToolArtifactGcReportV1 {
+                tombstone_id,
+                scanned_manifests: inventory.len(),
+                retained_manifests,
+                tombstoned_manifests: 0,
+                tombstoned_blobs: 0,
+                tombstoned_orphan_blobs: 0,
+                tombstoned_staging_files: 0,
+                tombstoned_bytes: 0,
+                skipped_active_reads: 0,
+                tombstoned_refs: Vec::new(),
+            });
+        }
+        let mut token = self
+            .writer
+            .authorize_artifact_retirement(retire_frontier)
+            .map_err(|error| {
+                anyhow::anyhow!("managed artifact retire authorization failed: {error}")
+            })?;
+        self.writer
+            .consume_artifact_retirement(&mut token)
+            .map_err(|error| anyhow::anyhow!("managed artifact retire claim failed: {error}"))?;
+
+        let trash_root = store_root.join("trash").join(&tombstone_id);
+        let trash_refs = trash_root.join("refs");
+        let trash_blobs = trash_root.join("blobs");
+        let staging_trash_root = staging_root.join("trash");
+        let trash_staging = staging_trash_root.join(&tombstone_id);
+        create_private_dir(&store_root.join("trash"))?;
+        create_private_dir(&staging_trash_root)?;
+        create_private_dir(&trash_root)?;
+        create_private_dir(&trash_refs)?;
+        create_private_dir(&trash_blobs)?;
+        create_private_dir(&trash_staging)?;
+
+        let mut tombstoned_manifests = 0usize;
+        let mut tombstoned_refs = Vec::new();
+        let mut skipped_active_reads = 0usize;
+        for entry in candidates {
+            let artifact_ref = &entry.descriptor.artifact_ref;
+            let lock_path = store_root
+                .join("locks")
+                .join(format!("{}.lock", artifact_ref.artifact_id));
+            let lock = open_private_lock(&lock_path)?;
+            match lock.try_lock_exclusive() {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    skipped_active_reads = skipped_active_reads.saturating_add(1);
+                    retained_manifests = retained_manifests.saturating_add(1);
+                    continue;
+                }
+                Err(error) => return Err(error).context("failed to lock managed artifact for GC"),
+            }
+            let source = store_root
+                .join("refs")
+                .join(format!("{}.json", artifact_ref.artifact_id));
+            let destination = trash_refs.join(
+                source
+                    .file_name()
+                    .context("managed artifact manifest has no file name")?,
+            );
+            fs::rename(&source, &destination).with_context(|| {
+                format!(
+                    "failed to tombstone managed artifact {}",
+                    artifact_ref.artifact_id
+                )
+            })?;
+            let source_binding = store_root
+                .join("refs")
+                .join(format!("{}.event", artifact_ref.artifact_id));
+            if fs::symlink_metadata(&source_binding).is_ok() {
+                fs::rename(
+                    &source_binding,
+                    trash_refs.join(format!("{}.event", artifact_ref.artifact_id)),
+                )?;
+            }
+            tombstoned_manifests = tombstoned_manifests.saturating_add(1);
+            tombstoned_refs.push(artifact_ref.clone());
+        }
+        sync_parent(&store_root.join("refs"))?;
+        sync_parent(&trash_refs)?;
+
+        let live_hashes = manifest_inventory_at(&store_root)?
+            .into_iter()
+            .map(|entry| entry.descriptor.content_sha256)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut tombstoned_blobs = 0usize;
+        let mut tombstoned_orphan_blobs = 0usize;
+        let mut tombstoned_staging_files = 0usize;
+        let mut tombstoned_bytes = 0_u64;
+        for (source, bytes) in
+            collect_unreferenced_blobs(&store_root, &live_hashes, now_unix_ms, orphan_grace_ms)?
+        {
+            let destination = trash_blobs.join(
+                source
+                    .file_name()
+                    .context("managed artifact blob has no file name")?,
+            );
+            fs::rename(&source, &destination)?;
+            tombstoned_blobs = tombstoned_blobs.saturating_add(1);
+            tombstoned_orphan_blobs = tombstoned_orphan_blobs.saturating_add(1);
+            tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
+        }
+        for (source, bytes) in
+            collect_old_staging_files(&staging_root.join("staging"), now_unix_ms, orphan_grace_ms)?
+        {
+            let destination = trash_staging.join(
+                source
+                    .file_name()
+                    .context("managed artifact staging file has no file name")?,
+            );
+            fs::rename(&source, &destination)?;
+            tombstoned_staging_files = tombstoned_staging_files.saturating_add(1);
+            tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
+        }
+        sync_parent(&trash_blobs)?;
+        sync_parent(&trash_staging)?;
+        sync_parent(&staging_trash_root)?;
+        sync_parent(&trash_root)?;
+        Ok(ToolArtifactGcReportV1 {
+            tombstone_id,
+            scanned_manifests: inventory.len(),
+            retained_manifests,
+            tombstoned_manifests,
+            tombstoned_blobs,
+            tombstoned_orphan_blobs,
+            tombstoned_staging_files,
+            tombstoned_bytes,
+            skipped_active_reads,
+            tombstoned_refs,
+        })
+    }
+
     fn prune_garbage_trash(
         &self,
-        _now_unix_ms: u64,
-        _trash_grace_ms: u64,
+        now_unix_ms: u64,
+        trash_grace_ms: u64,
     ) -> Result<ToolArtifactTrashPruneReportV1> {
-        bail!("managed artifact trash pruning requires the authority retire frontier")
+        if trash_grace_ms < sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS {
+            bail!("tool artifact trash grace must be at least 24 hours");
+        }
+        let (_operation, staging_root, store_root) = self.with_mutation_lock()?;
+        let mut eligible = Vec::new();
+        for root in [store_root.join("trash"), staging_root.join("trash")] {
+            let entries = match fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error).context("failed to read managed artifact trash"),
+            };
+            for entry in entries {
+                let path = entry?.path();
+                let metadata = fs::symlink_metadata(&path)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!("managed artifact trash contains an unsafe entry");
+                }
+                if now_unix_ms.saturating_sub(modified_at(&metadata)) >= trash_grace_ms {
+                    eligible.push(path);
+                }
+            }
+        }
+        if eligible.is_empty() {
+            return Ok(ToolArtifactTrashPruneReportV1 {
+                removed_tombstones: 0,
+                removed_bytes: 0,
+            });
+        }
+        let selected_bytes = eligible
+            .iter()
+            .map(|path| directory_file_bytes(path))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .sum();
+        let mut token = self
+            .writer
+            .authorize_artifact_retirement(ToolArtifactRetireFrontierV1 {
+                selected_refs_hash: artifact_labels_hash(&eligible),
+                selected_count: eligible.len() as u64,
+                selected_bytes,
+                eligibility_frontier: now_unix_ms.max(1),
+                policy_hash: canonical_sha256(
+                    format!("artifact-trash-prune:{trash_grace_ms}").as_bytes(),
+                ),
+            })
+            .map_err(|error| {
+                anyhow::anyhow!("managed artifact trash authorization failed: {error}")
+            })?;
+        self.writer
+            .consume_artifact_retirement(&mut token)
+            .map_err(|error| anyhow::anyhow!("managed artifact trash claim failed: {error}"))?;
+        let mut removed_bytes = 0_u64;
+        for path in &eligible {
+            removed_bytes = removed_bytes.saturating_add(directory_file_bytes(path)?);
+            fs::remove_dir_all(path)?;
+        }
+        sync_parent(&store_root.join("trash"))?;
+        sync_parent(&staging_root.join("trash"))?;
+        Ok(ToolArtifactTrashPruneReportV1 {
+            removed_tombstones: eligible
+                .iter()
+                .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            removed_bytes,
+        })
     }
 
     fn begin_process_capture(
@@ -538,6 +796,156 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+fn read_blob_at(store_root: &Path, content_sha256: &str) -> Result<Vec<u8>> {
+    let path = blob_path(store_root, content_sha256)?;
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > TOOL_ARTIFACT_MAX_BYTES as u64
+    {
+        bail!("managed artifact blob is not a bounded regular file");
+    }
+    let bytes = read_no_follow(&path)?;
+    if hash_bytes(&bytes) != content_sha256 {
+        bail!("managed artifact blob hash mismatch");
+    }
+    Ok(bytes)
+}
+
+fn canonical_sha256(bytes: &[u8]) -> sigil_kernel::resource::CanonicalHash {
+    sigil_kernel::resource::CanonicalHash::from_bytes(Sha256::digest(bytes).into())
+}
+
+fn artifact_refs_hash(refs: &[ToolArtifactRefV1]) -> sigil_kernel::resource::CanonicalHash {
+    let mut refs = refs.to_vec();
+    refs.sort();
+    canonical_sha256(&serde_json::to_vec(&refs).unwrap_or_default())
+}
+
+fn artifact_labels_hash(paths: &[PathBuf]) -> sigil_kernel::resource::CanonicalHash {
+    let labels = paths
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+        .collect::<Vec<_>>();
+    canonical_sha256(&serde_json::to_vec(&labels).unwrap_or_default())
+}
+
+fn open_private_lock(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open managed artifact lock {}", path.display()))?;
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("managed artifact lock is not a regular file");
+    }
+    file.sync_data()?;
+    Ok(file)
+}
+
+fn manifest_inventory_at(store_root: &Path) -> Result<Vec<ToolArtifactManifestEntryV1>> {
+    let refs = store_root.join("refs");
+    let directory = match fs::read_dir(&refs) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("failed to read managed artifact refs"),
+    };
+    let mut entries = Vec::new();
+    for entry in directory {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 {
+            bail!("managed artifact manifest is unsafe");
+        }
+        let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&read_no_follow(&path)?)?;
+        entries.push(ToolArtifactManifestEntryV1 {
+            descriptor,
+            manifest_modified_at_unix_ms: modified_at(&metadata),
+        });
+    }
+    entries.sort_by(|left, right| {
+        left.descriptor
+            .artifact_ref
+            .cmp(&right.descriptor.artifact_ref)
+    });
+    Ok(entries)
+}
+
+fn collect_unreferenced_blobs(
+    store_root: &Path,
+    live_hashes: &std::collections::BTreeSet<String>,
+    now_unix_ms: u64,
+    grace_ms: u64,
+) -> Result<Vec<(PathBuf, u64)>> {
+    let blobs = store_root.join("blobs");
+    let mut candidates = Vec::new();
+    let directories = match fs::read_dir(&blobs) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(error.into()),
+    };
+    for directory in directories {
+        let directory = directory?.path();
+        let metadata = fs::symlink_metadata(&directory)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("managed artifact blob prefix is unsafe");
+        }
+        for entry in fs::read_dir(&directory)? {
+            let path = entry?.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("managed artifact blob is unsafe");
+            }
+            let bytes = read_no_follow(&path)?;
+            let hash = hash_bytes(&bytes);
+            if !live_hashes.contains(&hash)
+                && now_unix_ms.saturating_sub(modified_at(&metadata)) >= grace_ms
+            {
+                candidates.push((path, metadata.len()));
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn collect_old_staging_files(
+    staging_root: &Path,
+    now_unix_ms: u64,
+    grace_ms: u64,
+) -> Result<Vec<(PathBuf, u64)>> {
+    let entries = match fs::read_dir(staging_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("managed artifact staging entry is unsafe");
+        }
+        if now_unix_ms.saturating_sub(modified_at(&metadata)) >= grace_ms {
+            candidates.push((path, metadata.len()));
+        }
+    }
+    Ok(candidates)
 }
 
 fn blob_path(root: &Path, hash: &str) -> Result<PathBuf> {
@@ -712,31 +1120,38 @@ mod tests {
 
     fn writer(root: &Path) -> Arc<ManagedStorageWriterAdapterV1> {
         let mut table = AuthorityStorageGrantTableV1::new();
+        let staging_grant = crate::managed_storage_writer::grant_for_channel(
+            StorageWriterChannelV1::ArtifactStaging,
+            0x81,
+        );
+        let store_grant = crate::managed_storage_writer::grant_for_channel(
+            StorageWriterChannelV1::ArtifactStore,
+            0x82,
+        );
         table
-            .register(crate::managed_storage_writer::grant_for_channel(
-                StorageWriterChannelV1::ArtifactStaging,
-                0x81,
-            ))
+            .register(staging_grant.clone())
             .expect("staging grant");
-        table
-            .register(crate::managed_storage_writer::grant_for_channel(
-                StorageWriterChannelV1::ArtifactStore,
-                0x82,
-            ))
-            .expect("store grant");
+        table.register(store_grant.clone()).expect("store grant");
+        let generation = AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x28; 32]),
+        };
         let service: Arc<dyn ManagedStorageServiceV1> =
-            Arc::new(AuthorityManagedStorageServiceV1::new(
-                table,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: CanonicalHash::from_bytes([0x28; 32]),
-                },
-            ));
-        Arc::new(ManagedStorageWriterAdapterV1::new(
-            service,
-            root.to_path_buf(),
-            CanonicalHash::from_bytes([0x84; 32]),
-        ))
+            Arc::new(AuthorityManagedStorageServiceV1::new(table, generation));
+        Arc::new(
+            ManagedStorageWriterAdapterV1::new(
+                service,
+                root.to_path_buf(),
+                CanonicalHash::from_bytes([0x84; 32]),
+            )
+            .with_artifact_retire_authority(Arc::new(
+                sigil_resource_authority::maintenance::ArtifactRetireAuthorityV1::new(
+                    generation,
+                    staging_grant.grant_hash,
+                    store_grant.grant_hash,
+                ),
+            )),
+        )
     }
 
     #[test]
@@ -824,5 +1239,50 @@ mod tests {
         assert_eq!(descriptor.persisted_bytes, 6);
         assert_eq!(segments[0].persisted_bytes, 3);
         assert_eq!(segments[1].persisted_bytes, 3);
+    }
+
+    #[test]
+    fn managed_artifact_gc_and_trash_prune_consume_authority_frontier() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let writer = writer(root.path());
+        let lease = ManagedArtifactStoreLeaseV1::acquire(
+            Arc::clone(&writer),
+            "session-gc",
+            "session-gc-id",
+        )
+        .expect("artifact lease");
+        let store = lease.store();
+        let descriptor = store
+            .capture_text(
+                "call-gc",
+                "shell",
+                "retire me",
+                sigil_kernel::ToolArtifactSensitivity::Ordinary,
+            )
+            .expect("capture");
+        let refs = vec![descriptor.artifact_ref.clone()];
+        let report = store
+            .garbage_collect_with_retire_frontier(
+                &ToolArtifactGcRootsV1::default(),
+                u64::MAX,
+                sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+                ToolArtifactRetireFrontierV1 {
+                    selected_refs_hash: artifact_refs_hash(&refs),
+                    selected_count: 1,
+                    selected_bytes: descriptor.persisted_bytes,
+                    eligibility_frontier: 1,
+                    policy_hash: canonical_sha256(b"gc-policy"),
+                },
+            )
+            .expect("managed GC");
+        assert_eq!(report.tombstoned_refs, refs);
+        assert!(store.resolve(&descriptor.artifact_ref).is_err());
+        let pruned = store
+            .prune_garbage_trash(
+                u64::MAX,
+                sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+            )
+            .expect("managed trash prune");
+        assert_eq!(pruned.removed_tombstones, 1);
     }
 }

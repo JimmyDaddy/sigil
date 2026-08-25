@@ -124,6 +124,10 @@ pub enum ManagedStorageWriterErrorV1 {
     LeafNotOwnerOnly,
     #[error("writer io failed: {0}")]
     Io(String),
+    #[error("artifact retire authority is unavailable")]
+    RetireAuthorityUnavailable,
+    #[error("artifact retire authorization failed: {0}")]
+    RetireAuthorizationFailed(String),
 }
 
 /// One admitted namespace lease: the authority-declared physical directory plus the handle.
@@ -162,6 +166,8 @@ pub struct ManagedStorageWriterAdapterV1 {
     /// namespaces (production grant ns), never the kernel startup-probe marker.
     storage_issuer:
         Option<std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>>,
+    artifact_retire_authority:
+        Option<std::sync::Arc<sigil_resource_authority::maintenance::ArtifactRetireAuthorityV1>>,
 }
 
 impl std::fmt::Debug for ManagedStorageWriterAdapterV1 {
@@ -170,6 +176,10 @@ impl std::fmt::Debug for ManagedStorageWriterAdapterV1 {
             .debug_struct("ManagedStorageWriterAdapterV1")
             .field("state_anchor", &self.state_anchor)
             .field("issuer_attached", &self.storage_issuer.is_some())
+            .field(
+                "artifact_retire_authority_attached",
+                &self.artifact_retire_authority.is_some(),
+            )
             .finish()
     }
 }
@@ -187,6 +197,7 @@ impl ManagedStorageWriterAdapterV1 {
             state_anchor,
             cutover_manifest_hash,
             storage_issuer: None,
+            artifact_retire_authority: None,
         }
     }
 
@@ -204,7 +215,58 @@ impl ManagedStorageWriterAdapterV1 {
             state_anchor,
             cutover_manifest_hash,
             storage_issuer: Some(storage_issuer),
+            artifact_retire_authority: None,
         }
+    }
+
+    /// Attaches the authority-owned paired ArtifactStaging/ArtifactStore retire frontier.
+    #[must_use]
+    pub fn with_artifact_retire_authority(
+        mut self,
+        authority: std::sync::Arc<sigil_resource_authority::maintenance::ArtifactRetireAuthorityV1>,
+    ) -> Self {
+        self.artifact_retire_authority = Some(authority);
+        self
+    }
+
+    /// Exchanges a pathless semantic eligibility frontier for an authority one-shot token.
+    pub fn authorize_artifact_retirement(
+        &self,
+        frontier: sigil_kernel::session::ToolArtifactRetireFrontierV1,
+    ) -> Result<
+        sigil_resource_authority::maintenance::ArtifactRetireTokenV1,
+        ManagedStorageWriterErrorV1,
+    > {
+        let authority = self
+            .artifact_retire_authority
+            .as_ref()
+            .ok_or(ManagedStorageWriterErrorV1::RetireAuthorityUnavailable)?;
+        authority
+            .authorize(
+                sigil_resource_authority::maintenance::ArtifactRetireEligibilityEvidenceV1 {
+                    authority_generation: authority.authority_generation(),
+                    artifact_staging_grant_hash: authority.artifact_staging_grant_hash(),
+                    artifact_store_grant_hash: authority.artifact_store_grant_hash(),
+                    selected_refs_hash: frontier.selected_refs_hash,
+                    selected_count: frontier.selected_count,
+                    selected_bytes: frontier.selected_bytes,
+                    eligibility_frontier: frontier.eligibility_frontier,
+                    policy_hash: frontier.policy_hash,
+                },
+            )
+            .map_err(|error| {
+                ManagedStorageWriterErrorV1::RetireAuthorizationFailed(error.to_string())
+            })
+    }
+
+    /// Consumes the authority-issued artifact retirement proof at the physical writer boundary.
+    pub fn consume_artifact_retirement(
+        &self,
+        token: &mut sigil_resource_authority::maintenance::ArtifactRetireTokenV1,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        token.consume_claim().map_err(|error| {
+            ManagedStorageWriterErrorV1::RetireAuthorizationFailed(error.to_string())
+        })
     }
 
     /// Authority-declared managed NAMED leaf path (validating, non-creating) so consumers can

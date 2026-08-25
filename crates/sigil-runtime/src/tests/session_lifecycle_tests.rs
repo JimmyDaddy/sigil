@@ -2307,11 +2307,23 @@ fn managed_session_log_source_is_cataloged_and_reopened() -> Result<()> {
 
 #[test]
 fn managed_session_artifact_gc_uses_authority_roots_without_legacy_sibling() -> Result<()> {
+    use crate::managed_storage_writer::{
+        ManagedStorageWriterAdapterV1, StorageWriterChannelV1, grant_for_channel_with_context,
+    };
+    use sigil_kernel::managed_storage::ManagedStorageServiceV1;
+    use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash};
+    use sigil_resource_authority::storage::{
+        AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
+    };
+
     let temp = tempfile::tempdir()?;
+    let state_anchor = temp.path().join("state");
+    fs::create_dir(&state_anchor)?;
+    let state_anchor = fs::canonicalize(state_anchor)?;
     let session_dir = temp.path().join("legacy-sessions");
-    let managed_root = temp.path().join("state/managed/session-log");
-    let artifact_store_root = temp.path().join("state/managed/artifact-store");
-    let artifact_staging_root = temp.path().join("state/managed/artifact-staging");
+    let managed_root = state_anchor.join("managed/session-log");
+    let artifact_store_root = state_anchor.join("managed/artifact-store");
+    let artifact_staging_root = state_anchor.join("managed/artifact-staging");
     let managed_session = managed_root.join("session-gc").join("records.jsonl");
     fs::create_dir_all(managed_session.parent().expect("managed session parent"))?;
     finalized_session(&managed_session, "managed artifact gc")?;
@@ -2320,11 +2332,51 @@ fn managed_session_artifact_gc_uses_authority_roots_without_legacy_sibling() -> 
         .expect("managed session has a record")
         .session_id()
         .to_owned();
+    let generation = AuthorityGeneration {
+        epoch: 1,
+        instance_hash: CanonicalHash::from_bytes([0x68; 32]),
+    };
+    let cutover_manifest_hash = CanonicalHash::from_bytes([0x69; 32]);
+    let staging_grant = grant_for_channel_with_context(
+        StorageWriterChannelV1::ArtifactStaging,
+        0x76,
+        generation,
+        cutover_manifest_hash,
+    );
+    let store_grant = grant_for_channel_with_context(
+        StorageWriterChannelV1::ArtifactStore,
+        0x76,
+        generation,
+        cutover_manifest_hash,
+    );
+    let lifecycle_grant = grant_for_channel_with_context(
+        StorageWriterChannelV1::SessionLifecycleLog,
+        0x76,
+        generation,
+        cutover_manifest_hash,
+    );
+    let mut table = AuthorityStorageGrantTableV1::new();
+    table.register(staging_grant.clone())?;
+    table.register(store_grant.clone())?;
+    table.register(lifecycle_grant)?;
+    let storage: Arc<dyn ManagedStorageServiceV1> =
+        Arc::new(AuthorityManagedStorageServiceV1::new(table, generation));
+    let writer = Arc::new(
+        ManagedStorageWriterAdapterV1::new(storage, state_anchor.clone(), cutover_manifest_hash)
+            .with_artifact_retire_authority(Arc::new(
+                sigil_resource_authority::maintenance::ArtifactRetireAuthorityV1::new(
+                    generation,
+                    staging_grant.grant_hash,
+                    store_grant.grant_hash,
+                ),
+            )),
+    );
     let service = LocalSessionLifecycleService::new(
         "workspace-managed-artifacts",
         &session_dir,
         temp.path().join("exports"),
     )
+    .with_managed_writer(writer, "workspace-managed-artifacts")?
     .with_managed_session_log_root(&managed_root)?
     .with_managed_artifact_roots(&artifact_store_root, &artifact_staging_root)?;
 

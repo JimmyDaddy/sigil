@@ -25,6 +25,7 @@ use uuid::Uuid;
 #[cfg(any(test, feature = "test-support"))]
 use super::{JsonlSessionStore, session_id_for_path};
 use crate::persistence::redact_cross_stream_boundary;
+use crate::resource::CanonicalHash;
 use crate::{
     MessageRole, ModelMessage, ToolError, ToolResult, safe_persistence_json_value,
     safe_persistence_text, stable_event_hash, tool::PreCapturedToolArtifact,
@@ -2465,6 +2466,20 @@ pub struct ToolArtifactGcRootsV1 {
     pub explicit_holds: BTreeSet<ToolArtifactRefV1>,
 }
 
+/// Authority-produced semantic eligibility frontier for one artifact retirement pass.
+///
+/// This is not a delete command and contains no physical path. The runtime adapter must bind it
+/// to the authority-owned paired ArtifactStaging/ArtifactStore grants before moving anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolArtifactRetireFrontierV1 {
+    pub selected_refs_hash: CanonicalHash,
+    pub selected_count: u64,
+    pub selected_bytes: u64,
+    pub eligibility_frontier: u64,
+    pub policy_hash: CanonicalHash,
+}
+
 impl ToolArtifactGcRootsV1 {
     /// Validates every opaque root reference.
     ///
@@ -2540,6 +2555,14 @@ pub trait ToolArtifactStoreBackendV1: std::fmt::Debug + Send + Sync {
     fn publish_blob(&self, content_sha256: &str, bytes: &[u8]) -> Result<()>;
     fn publish_descriptor_manifest(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()>;
     fn read_blob(&self, content_sha256: &str) -> Result<Vec<u8>>;
+    fn read_artifact(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+        content_sha256: &str,
+    ) -> Result<Vec<u8>> {
+        let _ = artifact_ref;
+        self.read_blob(content_sha256)
+    }
     fn resolve(&self, artifact_ref: &ToolArtifactRefV1) -> Result<ToolArtifactDescriptorV1>;
     fn read_page(
         &self,
@@ -2559,6 +2582,16 @@ pub trait ToolArtifactStoreBackendV1: std::fmt::Debug + Send + Sync {
         now_unix_ms: u64,
         orphan_grace_ms: u64,
     ) -> Result<ToolArtifactGcReportV1>;
+    fn garbage_collect_with_retire_frontier(
+        &self,
+        roots: &ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+        orphan_grace_ms: u64,
+        retire_frontier: ToolArtifactRetireFrontierV1,
+    ) -> Result<ToolArtifactGcReportV1> {
+        let _ = retire_frontier;
+        self.garbage_collect(roots, now_unix_ms, orphan_grace_ms)
+    }
     fn prune_garbage_trash(
         &self,
         now_unix_ms: u64,
@@ -2922,7 +2955,8 @@ impl ToolArtifactStore {
     pub fn read_all(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<Vec<u8>> {
         self.validate_retrievable_session_descriptor(descriptor)?;
         if let Some(backend) = &self.backend {
-            let bytes = backend.read_blob(&descriptor.content_sha256)?;
+            let bytes =
+                backend.read_artifact(&descriptor.artifact_ref, &descriptor.content_sha256)?;
             if bytes.len() > TOOL_ARTIFACT_MAX_BYTES {
                 bail!("tool artifact blob exceeds its hard limit");
             }
@@ -3287,6 +3321,35 @@ impl ToolArtifactStore {
         }
     }
 
+    /// Runs managed GC with an authority-produced semantic retirement frontier.
+    pub fn garbage_collect_with_retire_frontier(
+        &self,
+        roots: &ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+        orphan_grace_ms: u64,
+        retire_frontier: ToolArtifactRetireFrontierV1,
+    ) -> Result<ToolArtifactGcReportV1> {
+        roots.validate()?;
+        if orphan_grace_ms < TOOL_ARTIFACT_ORPHAN_GRACE_MS {
+            bail!("tool artifact orphan grace must be at least 24 hours");
+        }
+        if let Some(backend) = &self.backend {
+            return backend.garbage_collect_with_retire_frontier(
+                roots,
+                now_unix_ms,
+                orphan_grace_ms,
+                retire_frontier,
+            );
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for garbage collection");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let _ = retire_frontier;
+            self.garbage_collect(roots, now_unix_ms, orphan_grace_ms)
+        }
+    }
+
     /// Permanently unlinks GC trash only after the mandatory grace period.
     ///
     /// # Errors
@@ -3597,7 +3660,8 @@ impl ToolArtifactStore {
             return ToolArtifactAvailability::PolicyRevoked;
         }
         if let Some(backend) = &self.backend {
-            return match backend.read_blob(&descriptor.content_sha256) {
+            return match backend.read_artifact(&descriptor.artifact_ref, &descriptor.content_sha256)
+            {
                 Ok(bytes) if stable_event_hash(&bytes) == descriptor.content_sha256 => {
                     ToolArtifactAvailability::Available
                 }
