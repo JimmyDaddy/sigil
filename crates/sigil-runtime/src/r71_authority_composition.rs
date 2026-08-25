@@ -201,6 +201,11 @@ fn compose_runtime_authority_inner(
         .map_err(|error| {
             RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
         })?;
+    storage_service
+        .require_startup_reconciliation()
+        .map_err(|error| {
+            RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
+        })?;
     let storage: Arc<dyn ManagedStorageServiceV1> = Arc::new(storage_service);
     let registry = Arc::new(std::sync::Mutex::new(
         sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),

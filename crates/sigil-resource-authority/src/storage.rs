@@ -172,6 +172,20 @@ impl AuthorityManagedStorageServiceV1 {
         &self.table
     }
 
+    /// Production boot may not continue while an admitted namespace from a previous process
+    /// lacks a durable settlement. Reconciliation requires a domain/physical evidence bridge;
+    /// silently settling here would erase an effect frontier that this authority cannot prove.
+    pub fn require_startup_reconciliation(&self) -> Result<(), ManagedStorageErrorV1> {
+        let blocked = self
+            .blocked_grants_after_restart
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        if blocked.keys().next().is_some() {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        Ok(())
+    }
+
     fn append_journal_event(
         &self,
         event: ResourceJournalEventV1,
@@ -711,6 +725,10 @@ mod tests {
             journal_header.journal_instance_hash,
         )
         .expect("rehydrate");
+        assert!(matches!(
+            service.require_startup_reconciliation(),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
         let receipts = service
             .reconcile_unsettled_storage_grants("recovered-cleanup")
             .expect("reconcile");
