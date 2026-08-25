@@ -5,10 +5,11 @@
 //! import authority concrete types nor receive an authority token.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use fs2::FileExt;
 use serde::Deserialize;
 
 use sigil_kernel::managed_storage::{
@@ -238,24 +239,31 @@ impl AuthorityManagedStorageServiceV1 {
         if byte_length > record.grant.quota_profile.max_bytes {
             return Err(ManagedStorageErrorV1::JournalUnavailable);
         }
-        let frontier_hash = hash_debug(&(
-            record.grant.grant_hash,
-            record.namespace_hash,
-            byte_length,
-            record_count,
-            content_hash,
-        ));
         drop(admitted);
-        self.append_journal_event(
-            ResourceJournalEventV1::DomainStoragePhysicalFrontierObserved {
-                grant_hash: record.grant.grant_hash,
-                namespace_hash: record.namespace_hash,
+
+        let observed = if self.journal.is_some() {
+            let observed = self.observe_physical_frontier(&record)?;
+            if observed.byte_length != byte_length
+                || observed.record_count != record_count
+                || observed.content_hash != content_hash
+            {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            observed
+        } else {
+            PhysicalStorageFrontierV1 {
                 byte_length,
                 record_count,
                 content_hash,
-                frontier_hash,
-            },
-        )?;
+                frontier_hash: self.physical_frontier_hash(
+                    &record,
+                    byte_length,
+                    record_count,
+                    content_hash,
+                )?,
+            }
+        };
+        self.ensure_physical_frontier(&record, observed)?;
         Ok(())
     }
 
@@ -286,6 +294,7 @@ impl AuthorityManagedStorageServiceV1 {
         let mut receipts = Vec::with_capacity(records.len());
         for (handle_id, record) in records {
             let frontier = self.observe_physical_frontier(&record)?;
+            self.ensure_physical_frontier(&record, frontier)?;
             self.append_storage_recovery_chain(&record, frontier)?;
             let handle = ManagedStorageNamespaceHandleV1::new(
                 OpaqueKernelCapabilityHandleId::new(handle_id),
@@ -365,6 +374,17 @@ impl AuthorityManagedStorageServiceV1 {
             }
         }
         let directory = matched.ok_or(ManagedStorageErrorV1::JournalUnavailable)?;
+        let namespace_lock = open_physical_namespace_lock(&directory)?;
+        let frontier = self.read_physical_frontier(record, &directory)?;
+        drop(namespace_lock);
+        Ok(frontier)
+    }
+
+    fn read_physical_frontier(
+        &self,
+        record: &StorageAdmissionRecordV1,
+        directory: &Path,
+    ) -> Result<PhysicalStorageFrontierV1, ManagedStorageErrorV1> {
         let record_path = directory.join("records.jsonl");
         let bytes = match fs::symlink_metadata(&record_path) {
             Ok(metadata) => {
@@ -393,14 +413,100 @@ impl AuthorityManagedStorageServiceV1 {
             byte_length: bytes.len() as u64,
             record_count,
             content_hash,
-            frontier_hash: hash_debug(&(
-                record.grant.grant_hash,
-                record.namespace_hash,
+            frontier_hash: self.physical_frontier_hash(
+                record,
                 bytes.len() as u64,
                 record_count,
                 content_hash,
-            )),
+            )?,
         })
+    }
+
+    fn physical_frontier_hash(
+        &self,
+        record: &StorageAdmissionRecordV1,
+        byte_length: u64,
+        record_count: u64,
+        content_hash: CanonicalHash,
+    ) -> Result<CanonicalHash, ManagedStorageErrorV1> {
+        let journal_instance_hash = self
+            .journal
+            .as_ref()
+            .map(|journal| {
+                journal
+                    .lock()
+                    .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)
+                    .and_then(|journal| {
+                        journal
+                            .header()
+                            .map(|header| header.journal_instance_hash)
+                            .ok_or(ManagedStorageErrorV1::JournalUnavailable)
+                    })
+            })
+            .transpose()?
+            .unwrap_or(CanonicalHash::from_bytes([0u8; 32]));
+        Ok(hash_debug(&(
+            record.grant.grant_hash,
+            record.handle_id.as_str(),
+            record.namespace_hash,
+            record.grant.resource_ref.generation,
+            self.authority_generation,
+            journal_instance_hash,
+            byte_length,
+            record_count,
+            content_hash,
+        )))
+    }
+
+    fn ensure_physical_frontier(
+        &self,
+        record: &StorageAdmissionRecordV1,
+        frontier: PhysicalStorageFrontierV1,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
+        let mut journal = journal
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let existing = journal
+            .storage_physical_frontier_records(record.grant.grant_hash, record.namespace_hash);
+        if existing.iter().any(
+            |(_, byte_length, record_count, content_hash, frontier_hash)| {
+                *byte_length == frontier.byte_length
+                    && *record_count == frontier.record_count
+                    && *content_hash == frontier.content_hash
+                    && *frontier_hash == frontier.frontier_hash
+            },
+        ) {
+            if existing.iter().any(
+                |(_, byte_length, record_count, content_hash, frontier_hash)| {
+                    *byte_length != frontier.byte_length
+                        || *record_count != frontier.record_count
+                        || *content_hash != frontier.content_hash
+                        || *frontier_hash != frontier.frontier_hash
+                },
+            ) {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            return Ok(());
+        }
+        if !existing.is_empty() {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        journal
+            .append_event(
+                ResourceJournalEventV1::DomainStoragePhysicalFrontierObserved {
+                    grant_hash: record.grant.grant_hash,
+                    namespace_hash: record.namespace_hash,
+                    byte_length: frontier.byte_length,
+                    record_count: frontier.record_count,
+                    content_hash: frontier.content_hash,
+                    frontier_hash: frontier.frontier_hash,
+                },
+            )
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        Ok(())
     }
 
     fn append_storage_recovery_chain(
@@ -711,6 +817,12 @@ impl AuthorityManagedStorageServiceV1 {
         &self,
         cleanup_status: &str,
     ) -> Result<Vec<ManagedStorageStorageReceiptV1>, ManagedStorageErrorV1> {
+        // A journal-backed pending admission must go through the physical verifier. The old
+        // in-memory helper remains available for isolated authority tests only; allowing it to
+        // settle a durable pending grant would bypass the frontier proof required by P1-7.
+        if self.journal.is_some() {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
         let handles = self
             .table
             .admitted_namespaces
@@ -897,7 +1009,27 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
-        let operation_digest = hash_debug(&(&record.request, &reason));
+        let physical_binding = if handle
+            .handle_id
+            .as_str()
+            .starts_with("handle-probe-storage-")
+        {
+            None
+        } else if let Some(journal) = &self.journal {
+            let journal = journal
+                .lock()
+                .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+            let observations = journal
+                .storage_physical_frontier_records(record.grant.grant_hash, record.namespace_hash);
+            if observations.len() != 1 {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+            let (observation_record, _, _, _, frontier_hash) = observations[0].clone();
+            Some((frontier_hash, observation_record.record_hash))
+        } else {
+            None
+        };
+        let operation_digest = hash_debug(&(&record.request, &reason, physical_binding));
         let settlement = match self.existing_settlement(record.grant.grant_hash)? {
             Some(existing) => Some(existing),
             None => self.append_journal_event(ResourceJournalEventV1::GenerationSettled {
@@ -905,6 +1037,9 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                 resource_id: record.grant.resource_ref.resource_id.as_str().to_owned(),
                 generation: record.grant.resource_ref.generation,
                 cleanup_status: reason,
+                physical_frontier_hash: physical_binding.map(|(frontier_hash, _)| frontier_hash),
+                physical_observation_record_hash: physical_binding
+                    .map(|(_, observation_record_hash)| observation_record_hash),
             })?,
         };
         self.table.record_finalized(&handle.namespace_hash)?;
@@ -943,6 +1078,9 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             ),
             committed_frontier_hash,
             receipt_hash,
+            physical_frontier_hash: physical_binding.map(|(frontier_hash, _)| frontier_hash),
+            physical_observation_record_hash: physical_binding
+                .map(|(_, observation_record_hash)| observation_record_hash),
         })
     }
 }
@@ -1058,6 +1196,31 @@ fn storage_owner_leaf(
     }
 }
 
+/// Shared authority/writer lock for one physical managed namespace. The writer holds this lock
+/// while appending and syncing `records.jsonl`; the authority holds it while re-reading the
+/// exact bytes used for the durable frontier proof.
+fn open_physical_namespace_lock(directory: &Path) -> Result<File, ManagedStorageErrorV1> {
+    let path = directory.join(".authority-storage.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ManagedStorageErrorV1::JournalUnavailable);
+    }
+    file.lock_exclusive()
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+    Ok(file)
+}
+
 /// Authority-private storage capability verifier facet (RA-owned; factory returns only
 /// the kernel verifier trait object).
 pub struct AuthorityStorageCapabilityActivationEvidenceVerifierV1;
@@ -1110,6 +1273,8 @@ pub fn sample_storage_receipt() -> ManagedStorageStorageReceiptV1 {
         committed_sequence_or_version: Some(7),
         committed_frontier_hash: CanonicalHash::from_bytes([7u8; 32]),
         receipt_hash: CanonicalHash::from_bytes([6u8; 32]),
+        physical_frontier_hash: None,
+        physical_observation_record_hash: None,
     }
 }
 
@@ -1228,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    fn r71_storage_rehydrates_pending_admission_and_reconciles_once() {
+    fn r71_storage_rehydrates_pending_admission_requires_physical_bridge() {
         let directory = tempfile::tempdir().expect("journal directory");
         let path = directory.path().join("authority-resources.journal.json");
         let authority_generation = grant().authority_generation;
@@ -1263,17 +1428,10 @@ mod tests {
             service.require_startup_reconciliation(),
             Err(ManagedStorageErrorV1::JournalUnavailable)
         ));
-        let receipts = service
-            .reconcile_unsettled_storage_grants("recovered-cleanup")
-            .expect("reconcile");
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].committed_sequence_or_version, Some(3));
-        assert!(
-            service
-                .reconcile_unsettled_storage_grants("replay")
-                .expect("idempotent reconcile")
-                .is_empty()
-        );
+        assert!(matches!(
+            service.reconcile_unsettled_storage_grants("recovered-cleanup"),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
 
         let mut reopened_table = AuthorityStorageGrantTableV1::new();
         reopened_table.register(grant()).expect("grant");
@@ -1285,12 +1443,10 @@ mod tests {
             journal_header.journal_instance_hash,
         )
         .expect("reopen");
-        assert!(
-            reopened
-                .reconcile_unsettled_storage_grants("already-settled")
-                .expect("reopen reconcile")
-                .is_empty()
-        );
+        assert!(matches!(
+            reopened.reconcile_unsettled_storage_grants("already-settled"),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
     }
 
     #[test]
@@ -1343,7 +1499,7 @@ mod tests {
             .reconcile_unsettled_storage_grants_with_physical_bridge()
             .expect("physical bridge");
         assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].committed_sequence_or_version, Some(7));
+        assert_eq!(receipts[0].committed_sequence_or_version, Some(8));
         service
             .require_startup_reconciliation()
             .expect("settlement clears startup blocker");

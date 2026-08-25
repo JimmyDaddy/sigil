@@ -329,6 +329,12 @@ pub struct ManagedStorageStorageReceiptV1 {
     pub committed_sequence_or_version: Option<u64>,
     pub committed_frontier_hash: CanonicalHash,
     pub receipt_hash: CanonicalHash,
+    /// Authority-owned binding to the exact physical bytes used for normal settlement. Probe
+    /// receipts and isolated in-memory authority receipts may leave these absent.
+    #[serde(default)]
+    pub physical_frontier_hash: Option<CanonicalHash>,
+    #[serde(default)]
+    pub physical_observation_record_hash: Option<CanonicalHash>,
 }
 
 /// Consumer facing pathless managed storage service (authority implementation).

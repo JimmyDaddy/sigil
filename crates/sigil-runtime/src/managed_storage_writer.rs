@@ -7,8 +7,10 @@
 //! every batch is an admit -> owner-only no-follow leaf -> append -> finalize(namespace) cycle
 //! with a kernel-shaped storage receipt. The authority remains the only allocator.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+use fs2::FileExt;
 
 use sigil_kernel::managed_storage::{
     ManagedStorageNamespaceHandleV1, ManagedStorageServiceV1, ManagedStorageStorageReceiptV1,
@@ -430,13 +432,15 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedStorageWriterLeaseV1,
         record: &[u8],
     ) -> Result<(), ManagedStorageWriterErrorV1> {
+        let _namespace_lock = open_namespace_lock(&lease.path)?;
         let record_file = lease.path.join("records.jsonl");
+        let existed = std::fs::symlink_metadata(&record_file).is_ok();
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let mut file = options
             .open(&record_file)
@@ -445,6 +449,11 @@ impl ManagedStorageWriterAdapterV1 {
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         file.write_all(b"\n")
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if !existed {
+            sync_parent_directory(&record_file)?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -477,6 +486,7 @@ impl ManagedStorageWriterAdapterV1 {
         &self,
         lease: &ManagedStorageWriterLeaseV1,
     ) -> Result<(u64, u64, CanonicalHash), ManagedStorageWriterErrorV1> {
+        let _namespace_lock = open_namespace_lock(&lease.path)?;
         let record_file = lease.path.join("records.jsonl");
         let bytes = match std::fs::symlink_metadata(&record_file) {
             Ok(metadata) => {
@@ -485,8 +495,22 @@ impl ManagedStorageWriterAdapterV1 {
                         "managed record object must be a regular file".to_owned(),
                     ));
                 }
-                std::fs::read(&record_file)
-                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NOFOLLOW);
+                }
+                let mut file = options
+                    .open(&record_file)
+                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                file.sync_all()
+                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                bytes
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
@@ -546,6 +570,7 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedStorageWriterLeaseV1,
         bytes: &[u8],
     ) -> Result<(), ManagedStorageWriterErrorV1> {
+        let _namespace_lock = open_namespace_lock(&lease.path)?;
         let record_file = lease.path.join("records.jsonl");
         if let Ok(metadata) = std::fs::symlink_metadata(&record_file)
             && (metadata.file_type().is_symlink() || !metadata.is_file())
@@ -578,6 +603,47 @@ fn content_hash(bytes: &[u8]) -> CanonicalHash {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorageWriterErrorV1> {
+    let path = directory.join(".authority-storage.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed namespace lock must be a regular file".to_owned(),
+        ));
+    }
+    file.lock_exclusive()
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    Ok(file)
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
+    let parent = path.parent().ok_or_else(|| {
+        ManagedStorageWriterErrorV1::Io("managed record path has no parent".to_owned())
+    })?;
+    #[cfg(unix)]
+    {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
+    Ok(())
 }
 
 /// Authority-form grant for one declared writer channel (R71.6 production composition:
@@ -1010,7 +1076,7 @@ mod tests {
         );
         let broker = std::sync::Arc::new(KernelCapabilityBrokerV1::new());
         let writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
-            service,
+            service.clone(),
             dir.path().to_path_buf(),
             hash(10),
             broker,
@@ -1018,13 +1084,35 @@ mod tests {
         let lease = writer
             .acquire(StorageWriterChannelV1::SessionLog)
             .expect("acquire");
+        let namespace_hash = lease.namespace_digest();
+        let grant_hash = session_log_grant().grant_hash;
         writer.write_record(&lease, b"seq=1").expect("write");
+        let (byte_length, record_count, content_hash) =
+            writer.physical_frontier(&lease).expect("physical frontier");
+        service
+            .record_physical_frontier(&lease.handle, byte_length, record_count, content_hash)
+            .expect("first frontier observation");
+        service
+            .record_physical_frontier(&lease.handle, byte_length, record_count, content_hash)
+            .expect("idempotent frontier observation");
         let receipt = writer.finalize(lease).expect("finalize");
         assert_eq!(receipt.committed_sequence_or_version, Some(4));
         let journal =
             sigil_resource_authority::journal::ResourceJournalFileV1::open(journal_path, header)
                 .expect("reopen journal");
         assert_eq!(journal.tail().expect("tail").sequence, 4);
+        let observations = journal.storage_physical_frontier_records(grant_hash, namespace_hash);
+        assert_eq!(observations.len(), 1);
+        let observation = &observations[0];
+        assert_eq!(receipt.physical_frontier_hash, Some(observation.4));
+        assert_eq!(
+            receipt.physical_observation_record_hash,
+            Some(observation.0.record_hash)
+        );
+        assert_eq!(
+            journal.storage_settlement_binding(grant_hash),
+            Some((Some(observation.4), Some(observation.0.record_hash)))
+        );
     }
     #[test]
     fn r71_sw_named_acquire_per_session_and_unsafe_key_rejected() {

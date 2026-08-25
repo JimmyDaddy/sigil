@@ -2,7 +2,7 @@
 
 状态：gated（2026-08-25 implementation-completeness review；R71.0–R71.8 的历史 candidate/qualification evidence 保留，但当前 release decision 受新增 implementation findings 约束）
 
-> 当前审查覆盖与逐项回应见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。本轮已接通 authority-owned storage physical-frontier observation、startup recovery replay 与七态 resource-journal bridge；但 builtin terminal legacy execution seam、durable quota journal、Desktop/restart/domain-session projection 及跨平台 crash qualification 尚未闭合，因此不得将历史 R71.8 closure evidence 单独解释为当前 `Implemented/Frozen`。
+> 当前审查覆盖与逐项回应见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。本轮已接通 authority-owned storage physical-frontier observation、startup recovery replay 与七态 resource-journal bridge；最新 review slice 又补上 managed writer 的 namespace lock、file/parent durability、authority exact re-read、幂等 frontier 与 settlement/receipt binding。但 builtin terminal legacy execution seam、durable quota journal、Desktop/restart/domain-session projection 及跨平台 crash qualification 尚未闭合，因此不得将历史 R71.8 closure evidence 单独解释为当前 `Implemented/Frozen`。
 
 创建日期：2026-08-23
 

@@ -74,6 +74,10 @@ pub enum ResourceJournalEventV1 {
         resource_id: String,
         generation: u64,
         cleanup_status: String,
+        #[serde(default)]
+        physical_frontier_hash: Option<CanonicalHash>,
+        #[serde(default)]
+        physical_observation_record_hash: Option<CanonicalHash>,
     },
     GenerationQuarantined {
         resource_id: String,
@@ -479,6 +483,65 @@ impl ResourceJournalFileV1 {
                     )
                     .then_some(durable.record.clone())
                 })
+            })
+    }
+
+    /// Returns every physical frontier observation for one exact admitted grant/namespace.
+    /// Callers must compare all returned facts; a different second observation is evidence of
+    /// physical drift rather than a new valid frontier for the same one-shot namespace.
+    pub fn storage_physical_frontier_records(
+        &self,
+        grant_hash: CanonicalHash,
+        namespace_hash: CanonicalHash,
+    ) -> Vec<(
+        ResourceJournalRecordV1,
+        u64,
+        u64,
+        CanonicalHash,
+        CanonicalHash,
+    )> {
+        self.records
+            .iter()
+            .filter_map(|durable| match &durable.payload {
+                ResourceJournalEventV1::DomainStoragePhysicalFrontierObserved {
+                    grant_hash: current_grant,
+                    namespace_hash: current_namespace,
+                    byte_length,
+                    record_count,
+                    content_hash,
+                    frontier_hash,
+                } if *current_grant == grant_hash && *current_namespace == namespace_hash => {
+                    Some((
+                        durable.record.clone(),
+                        *byte_length,
+                        *record_count,
+                        *content_hash,
+                        *frontier_hash,
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns the physical binding carried by the terminal normal settlement, if one exists.
+    pub fn storage_settlement_binding(
+        &self,
+        grant_hash: CanonicalHash,
+    ) -> Option<(Option<CanonicalHash>, Option<CanonicalHash>)> {
+        self.records
+            .iter()
+            .rev()
+            .find_map(|durable| match &durable.payload {
+                ResourceJournalEventV1::GenerationSettled {
+                    grant_hash: current,
+                    physical_frontier_hash,
+                    physical_observation_record_hash,
+                    ..
+                } if *current == grant_hash => {
+                    Some((*physical_frontier_hash, *physical_observation_record_hash))
+                }
+                _ => None,
             })
     }
 
