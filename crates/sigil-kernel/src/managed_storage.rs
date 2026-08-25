@@ -345,21 +345,31 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         capability: ValidatedStorageAdmissionCapabilityV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1>;
 
+    /// Validates that a physical mutation is still covered by an admitted namespace. The
+    /// runtime calls this while holding the namespace lock, so settlement wins the race before a
+    /// post-settlement write can reach the physical object.
+    fn validate_namespace_write(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), ManagedStorageErrorV1>;
+
     fn finalize_namespace(
         &self,
         handle: ManagedStorageNamespaceHandleV1,
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1>;
 
-    /// Commits the physical frontier observed by a writer before settlement. The authority
-    /// owns the durable record; the consumer may only submit bounded content facts.
-    fn record_physical_frontier(
+    /// Re-reads and settles one physical writer frontier as one authority-owned operation.
+    /// The authority must hold the physical namespace lock from the re-read through the durable
+    /// observation and settlement, so a writer cannot append after proof and before settlement.
+    fn finalize_namespace_with_physical_frontier(
         &self,
-        handle: &ManagedStorageNamespaceHandleV1,
+        handle: ManagedStorageNamespaceHandleV1,
         byte_length: u64,
         record_count: u64,
         content_hash: CanonicalHash,
-    ) -> Result<(), ManagedStorageErrorV1>;
+        reason: String,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1>;
 }
 
 /// Closed storage error taxonomy.

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -212,16 +213,17 @@ impl AuthorityManagedStorageServiceV1 {
         Ok(())
     }
 
-    /// Records the physical frontier observed by a managed writer immediately before the
-    /// authority settlement. The writer supplies only bounded facts; the authority owns the
-    /// journal record and computes the final frontier binding.
-    pub fn record_physical_frontier(
+    /// Re-reads and settles a journal-backed physical writer frontier while holding the same
+    /// namespace lock used by the writer. The submitted facts are only a bounded hint: the
+    /// authority revalidates the bytes and keeps the lock through observation and settlement.
+    pub fn finalize_namespace_with_physical_frontier(
         &self,
-        handle: &ManagedStorageNamespaceHandleV1,
+        handle: ManagedStorageNamespaceHandleV1,
         byte_length: u64,
         record_count: u64,
         content_hash: CanonicalHash,
-    ) -> Result<(), ManagedStorageErrorV1> {
+        reason: String,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
         let admitted = self
             .table
             .admitted_namespaces
@@ -236,35 +238,33 @@ impl AuthorityManagedStorageServiceV1 {
         {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
-        if byte_length > record.grant.quota_profile.max_bytes {
-            return Err(ManagedStorageErrorV1::JournalUnavailable);
-        }
         drop(admitted);
 
-        let observed = if self.journal.is_some() {
-            let observed = self.observe_physical_frontier(&record)?;
-            if observed.byte_length != byte_length
-                || observed.record_count != record_count
-                || observed.content_hash != content_hash
-            {
-                return Err(ManagedStorageErrorV1::JournalUnavailable);
-            }
-            observed
-        } else {
-            PhysicalStorageFrontierV1 {
-                byte_length,
-                record_count,
-                content_hash,
-                frontier_hash: self.physical_frontier_hash(
-                    &record,
-                    byte_length,
-                    record_count,
-                    content_hash,
-                )?,
-            }
-        };
+        // Startup probes and isolated in-memory authority tests have no durable physical
+        // bridge. Their existing logical settlement semantics remain unchanged.
+        if self.journal.is_none()
+            || handle
+                .handle_id
+                .as_str()
+                .starts_with("handle-probe-storage-")
+        {
+            return self.finalize_namespace(handle, reason);
+        }
+
+        let directory = self.physical_namespace_directory(&record)?;
+        let _namespace_lock = open_physical_namespace_lock(&directory)?;
+        let observed = self.read_physical_frontier(&record, &directory)?;
+        if observed.byte_length != byte_length
+            || observed.record_count != record_count
+            || observed.content_hash != content_hash
+        {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
         self.ensure_physical_frontier(&record, observed)?;
-        Ok(())
+        // The physical lock remains held while finalize appends GenerationSettled and removes
+        // the admitted handle. A concurrent writer therefore cannot create an unbound frontier
+        // between the proof and the settlement.
+        self.finalize_namespace(handle, reason)
     }
 
     /// Reconciles pending writer admissions through the production physical frontier bridge.
@@ -293,7 +293,9 @@ impl AuthorityManagedStorageServiceV1 {
 
         let mut receipts = Vec::with_capacity(records.len());
         for (handle_id, record) in records {
-            let frontier = self.observe_physical_frontier(&record)?;
+            let directory = self.physical_namespace_directory(&record)?;
+            let _namespace_lock = open_physical_namespace_lock(&directory)?;
+            let frontier = self.read_physical_frontier(&record, &directory)?;
             self.ensure_physical_frontier(&record, frontier)?;
             self.append_storage_recovery_chain(&record, frontier)?;
             let handle = ManagedStorageNamespaceHandleV1::new(
@@ -313,23 +315,29 @@ impl AuthorityManagedStorageServiceV1 {
         Ok(receipts)
     }
 
-    fn observe_physical_frontier(
+    fn physical_namespace_directory(
         &self,
         record: &StorageAdmissionRecordV1,
-    ) -> Result<PhysicalStorageFrontierV1, ManagedStorageErrorV1> {
+    ) -> Result<PathBuf, ManagedStorageErrorV1> {
         let root = self
             .journal_root
             .as_ref()
-            .ok_or(ManagedStorageErrorV1::JournalUnavailable)?
+            .ok_or(ManagedStorageErrorV1::JournalUnavailable)?;
+        #[cfg(windows)]
+        reject_reparse_components(root, false)
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let root = root
             .canonicalize()
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
         let Some(leaf) = storage_owner_leaf(record.grant.semantic_owner) else {
             return Err(ManagedStorageErrorV1::JournalUnavailable);
         };
         let leaf_root = root.join("managed").join(leaf);
+        reject_reparse_components(&leaf_root, false)
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
         let leaf_metadata = fs::symlink_metadata(&leaf_root)
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
-        if leaf_metadata.file_type().is_symlink() || !leaf_metadata.is_dir() {
+        if !is_safe_physical_metadata(&leaf_metadata) || !leaf_metadata.is_dir() {
             return Err(ManagedStorageErrorV1::JournalUnavailable);
         }
 
@@ -340,7 +348,7 @@ impl AuthorityManagedStorageServiceV1 {
             let entry = entry.map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
             let metadata = fs::symlink_metadata(entry.path())
                 .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
-            if metadata.file_type().is_symlink() {
+            if !is_safe_physical_metadata(&metadata) {
                 return Err(ManagedStorageErrorV1::JournalUnavailable);
             }
             if metadata.is_dir() {
@@ -356,11 +364,12 @@ impl AuthorityManagedStorageServiceV1 {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => return Err(ManagedStorageErrorV1::JournalUnavailable),
             };
-            if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+            if !is_safe_physical_metadata(&marker_metadata) || !marker_metadata.is_file() {
                 return Err(ManagedStorageErrorV1::JournalUnavailable);
             }
             let marker: PhysicalStorageAdmissionMarkerV1 = serde_json::from_slice(
-                &fs::read(&marker_path).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?,
+                &read_no_follow_file(&marker_path)
+                    .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?,
             )
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
             if marker.schema_version != 1 {
@@ -373,11 +382,7 @@ impl AuthorityManagedStorageServiceV1 {
                 return Err(ManagedStorageErrorV1::JournalUnavailable);
             }
         }
-        let directory = matched.ok_or(ManagedStorageErrorV1::JournalUnavailable)?;
-        let namespace_lock = open_physical_namespace_lock(&directory)?;
-        let frontier = self.read_physical_frontier(record, &directory)?;
-        drop(namespace_lock);
-        Ok(frontier)
+        matched.ok_or(ManagedStorageErrorV1::JournalUnavailable)
     }
 
     fn read_physical_frontier(
@@ -388,13 +393,14 @@ impl AuthorityManagedStorageServiceV1 {
         let record_path = directory.join("records.jsonl");
         let bytes = match fs::symlink_metadata(&record_path) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
                     return Err(ManagedStorageErrorV1::JournalUnavailable);
                 }
                 if metadata.len() > record.grant.quota_profile.max_bytes {
                     return Err(ManagedStorageErrorV1::JournalUnavailable);
                 }
-                fs::read(&record_path).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+                read_no_follow_file(&record_path)
+                    .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(_) => return Err(ManagedStorageErrorV1::JournalUnavailable),
@@ -855,19 +861,41 @@ impl AuthorityManagedStorageServiceV1 {
 }
 
 impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
-    fn record_physical_frontier(
+    fn validate_namespace_write(
         &self,
         handle: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        let admitted = self
+            .table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+        let record = admitted
+            .get(handle.handle_id.as_str())
+            .ok_or(ManagedStorageErrorV1::HandleFinalized)?;
+        if record.namespace_hash != handle.namespace_hash
+            || record.grant.capability_family != handle.capability_family
+        {
+            return Err(ManagedStorageErrorV1::CapabilityMismatch);
+        }
+        Ok(())
+    }
+
+    fn finalize_namespace_with_physical_frontier(
+        &self,
+        handle: ManagedStorageNamespaceHandleV1,
         byte_length: u64,
         record_count: u64,
         content_hash: CanonicalHash,
-    ) -> Result<(), ManagedStorageErrorV1> {
-        AuthorityManagedStorageServiceV1::record_physical_frontier(
+        reason: String,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
+        AuthorityManagedStorageServiceV1::finalize_namespace_with_physical_frontier(
             self,
             handle,
             byte_length,
             record_count,
             content_hash,
+            reason,
         )
     }
 
@@ -1201,6 +1229,8 @@ fn storage_owner_leaf(
 /// exact bytes used for the durable frontier proof.
 fn open_physical_namespace_lock(directory: &Path) -> Result<File, ManagedStorageErrorV1> {
     let path = directory.join(".authority-storage.lock");
+    reject_reparse_components(&path, true)
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -1208,17 +1238,100 @@ fn open_physical_namespace_lock(directory: &Path) -> Result<File, ManagedStorage
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options
         .open(&path)
         .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
     let metadata =
         fs::symlink_metadata(&path).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
         return Err(ManagedStorageErrorV1::JournalUnavailable);
     }
     file.lock_exclusive()
         .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
     Ok(file)
+}
+
+fn is_safe_physical_metadata(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Rejects symlink/reparse ancestors before a physical managed object is opened. The final
+/// component may be absent when the caller is about to create it; an absent ancestor is always
+/// an error so `create(true)` cannot traverse an unverified parent.
+fn reject_reparse_components(path: &Path, allow_missing_leaf: bool) -> std::io::Result<()> {
+    let components = path.components().collect::<Vec<_>>();
+    let last = components.len().saturating_sub(1);
+    let mut current = PathBuf::new();
+    for (index, component) in components.into_iter().enumerate() {
+        current.push(component.as_os_str());
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && allow_missing_leaf
+                    && index == last =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if !is_safe_physical_metadata(&metadata) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "physical managed path contains a symlink or reparse point: {}",
+                    current.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_no_follow_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    reject_reparse_components(path, false)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options.open(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "physical managed object is not a regular non-reparse file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Authority-private storage capability verifier facet (RA-owned; factory returns only

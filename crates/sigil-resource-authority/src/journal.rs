@@ -681,9 +681,34 @@ fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
     fs::File::open(parent)?.sync_all()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "journal parent is not a real Windows directory",
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(parent)?.sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "journal parent durability is unsupported on this platform",
+    ))
 }
 
 fn replay_snapshot(

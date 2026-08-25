@@ -42,6 +42,7 @@ uuid.workspace = true
 url.workspace = true
 unicode-normalization.workspace = true
 unicode-segmentation.workspace = true
+windows-sys.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

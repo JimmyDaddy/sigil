@@ -52,7 +52,7 @@ pub fn canonical_identity(path: &Path) -> Result<CanonicalLocalIdentity, Identit
         (metadata.ino(), metadata.nlink())
     };
     #[cfg(not(unix))]
-    let (_inode, link_count) = (0u64, 1u64);
+    let (inode, link_count) = (0u64, 1u64);
     let mut digest_material = Vec::new();
     digest_material.extend_from_slice(path.to_string_lossy().as_bytes());
     digest_material.extend_from_slice(&inode.to_le_bytes());

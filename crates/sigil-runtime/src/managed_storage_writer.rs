@@ -114,6 +114,8 @@ pub enum ManagedStorageWriterErrorV1 {
     AdmissionFailed(String),
     #[error("managed storage finalize failed: {0}")]
     FinalizeFailed(String),
+    #[error("managed storage lease rejected: {0}")]
+    LeaseRejected(String),
     #[error("writer leaf resolves outside the state anchor")]
     LeafEscapesAnchor,
     #[error("writer leaf is a symlink (no-follow)")]
@@ -138,8 +140,9 @@ impl ManagedStorageWriterLeaseV1 {
         self.handle.namespace_hash
     }
 
-    /// Authority-declared physical directory (owner-only, no-follow). The consumer never derives
-    /// this from env/cwd; it is the authority bootstrap layout.
+    /// Authority-declared physical directory (owner-only, no-follow). Production mutations still
+    /// go through this adapter's closed methods, which revalidate the admitted handle under the
+    /// namespace lock before opening a managed object.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -295,11 +298,15 @@ impl ManagedStorageWriterAdapterV1 {
         }
         let (_, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?.join(key);
+        if let Some(parent) = path.parent() {
+            reject_existing_reparse_components(parent)?;
+        }
         std::fs::create_dir_all(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        reject_reparse_components(&path, false)?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
+        if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
             return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
         }
         #[cfg(unix)]
@@ -362,11 +369,15 @@ impl ManagedStorageWriterAdapterV1 {
     ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
         let (semantic_owner, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?;
+        if let Some(parent) = path.parent() {
+            reject_existing_reparse_components(parent)?;
+        }
         std::fs::create_dir_all(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        reject_reparse_components(&path, false)?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
+        if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
             return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
         }
         #[cfg(unix)]
@@ -433,7 +444,11 @@ impl ManagedStorageWriterAdapterV1 {
         record: &[u8],
     ) -> Result<(), ManagedStorageWriterErrorV1> {
         let _namespace_lock = open_namespace_lock(&lease.path)?;
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
         let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
         let existed = std::fs::symlink_metadata(&record_file).is_ok();
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
@@ -441,6 +456,12 @@ impl ManagedStorageWriterAdapterV1 {
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         }
         let mut file = options
             .open(&record_file)
@@ -488,9 +509,10 @@ impl ManagedStorageWriterAdapterV1 {
     ) -> Result<(u64, u64, CanonicalHash), ManagedStorageWriterErrorV1> {
         let _namespace_lock = open_namespace_lock(&lease.path)?;
         let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
         let bytes = match std::fs::symlink_metadata(&record_file) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
                     return Err(ManagedStorageWriterErrorV1::Io(
                         "managed record object must be a regular file".to_owned(),
                     ));
@@ -501,6 +523,12 @@ impl ManagedStorageWriterAdapterV1 {
                 {
                     use std::os::unix::fs::OpenOptionsExt;
                     options.custom_flags(libc::O_NOFOLLOW);
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+                    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
                 }
                 let mut file = options
                     .open(&record_file)
@@ -535,6 +563,7 @@ impl ManagedStorageWriterAdapterV1 {
         max_bytes: usize,
     ) -> Result<Vec<u8>, ManagedStorageWriterErrorV1> {
         let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
         let metadata = match std::fs::symlink_metadata(&record_file) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -542,7 +571,7 @@ impl ManagedStorageWriterAdapterV1 {
                 return Err(ManagedStorageWriterErrorV1::Io(error.to_string()));
             }
         };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
             return Err(ManagedStorageWriterErrorV1::Io(
                 "managed record object must be a regular file".to_owned(),
             ));
@@ -552,8 +581,7 @@ impl ManagedStorageWriterAdapterV1 {
                 "managed record object exceeds {max_bytes} bytes"
             )));
         }
-        let bytes = std::fs::read(&record_file)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        let bytes = read_no_follow_file(&record_file)?;
         if bytes.len() > max_bytes {
             return Err(ManagedStorageWriterErrorV1::Io(format!(
                 "managed record object exceeds {max_bytes} bytes"
@@ -571,9 +599,13 @@ impl ManagedStorageWriterAdapterV1 {
         bytes: &[u8],
     ) -> Result<(), ManagedStorageWriterErrorV1> {
         let _namespace_lock = open_namespace_lock(&lease.path)?;
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
         let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
         if let Ok(metadata) = std::fs::symlink_metadata(&record_file)
-            && (metadata.file_type().is_symlink() || !metadata.is_file())
+            && (!is_safe_physical_metadata(&metadata) || !metadata.is_file())
         {
             return Err(ManagedStorageWriterErrorV1::Io(
                 "managed record object must be a regular file".to_owned(),
@@ -590,10 +622,13 @@ impl ManagedStorageWriterAdapterV1 {
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
         let (byte_length, record_count, content_hash) = self.physical_frontier(&lease)?;
         self.service
-            .record_physical_frontier(&lease.handle, byte_length, record_count, content_hash)
-            .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))?;
-        self.service
-            .finalize_namespace(lease.handle, "writer-batch-complete".to_owned())
+            .finalize_namespace_with_physical_frontier(
+                lease.handle,
+                byte_length,
+                record_count,
+                content_hash,
+                "writer-batch-complete".to_owned(),
+            )
             .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
     }
 }
@@ -607,6 +642,7 @@ fn content_hash(bytes: &[u8]) -> CanonicalHash {
 
 fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorageWriterErrorV1> {
     let path = directory.join(".authority-storage.lock");
+    reject_reparse_components(&path, true)?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -614,12 +650,18 @@ fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorage
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options
         .open(&path)
         .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
         return Err(ManagedStorageWriterErrorV1::Io(
             "managed namespace lock must be a regular file".to_owned(),
         ));
@@ -627,6 +669,108 @@ fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorage
     file.lock_exclusive()
         .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
     Ok(file)
+}
+
+fn is_safe_physical_metadata(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Rejects symlink/reparse ancestors before a physical managed object is opened. The final
+/// component may be absent when the caller is about to create it; absent ancestors fail closed.
+fn reject_reparse_components(
+    path: &Path,
+    allow_missing_leaf: bool,
+) -> Result<(), ManagedStorageWriterErrorV1> {
+    let components = path.components().collect::<Vec<_>>();
+    let last = components.len().saturating_sub(1);
+    let mut current = PathBuf::new();
+    for (index, component) in components.into_iter().enumerate() {
+        current.push(component.as_os_str());
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && allow_missing_leaf
+                    && index == last =>
+            {
+                continue;
+            }
+            Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
+        };
+        if !is_safe_physical_metadata(&metadata) {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "physical managed path contains a symlink or reparse point: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Performs the same check for a path that may still have a missing directory suffix. This is
+/// used immediately before `create_dir_all`; after creation the complete path is checked with
+/// `reject_reparse_components` before any managed file is opened.
+fn reject_existing_reparse_components(path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
+    let components = path.components();
+    let mut current = PathBuf::new();
+    for component in components {
+        current.push(component.as_os_str());
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
+        };
+        if !is_safe_physical_metadata(&metadata) {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "physical managed path contains a symlink or reparse point: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn read_no_follow_file(path: &Path) -> Result<Vec<u8>, ManagedStorageWriterErrorV1> {
+    reject_reparse_components(path, false)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed record object must be a regular non-reparse file".to_owned(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    Ok(bytes)
 }
 
 fn sync_parent_directory(path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
@@ -639,9 +783,35 @@ fn sync_parent_directory(path: &Path) -> Result<(), ManagedStorageWriterErrorV1>
             .and_then(|directory| directory.sync_all())
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = parent;
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        let metadata = std::fs::symlink_metadata(parent)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "managed record parent is not a real Windows directory".to_owned(),
+            ));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        options
+            .open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed record parent durability is unsupported on this platform".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -1087,15 +1257,34 @@ mod tests {
         let namespace_hash = lease.namespace_digest();
         let grant_hash = session_log_grant().grant_hash;
         writer.write_record(&lease, b"seq=1").expect("write");
-        let (byte_length, record_count, content_hash) =
-            writer.physical_frontier(&lease).expect("physical frontier");
-        service
-            .record_physical_frontier(&lease.handle, byte_length, record_count, content_hash)
-            .expect("first frontier observation");
-        service
-            .record_physical_frontier(&lease.handle, byte_length, record_count, content_hash)
-            .expect("idempotent frontier observation");
-        let receipt = writer.finalize(lease).expect("finalize");
+        let stale_frontier = writer.physical_frontier(&lease).expect("physical frontier");
+        assert_eq!(
+            stale_frontier,
+            writer.physical_frontier(&lease).expect("stable frontier")
+        );
+        writer.write_record(&lease, b"seq=2").expect("second write");
+        let current_frontier = writer.physical_frontier(&lease).expect("current frontier");
+        let shadow_handle = sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1::new(
+            lease.handle.handle_id.clone(),
+            lease.handle.namespace_hash,
+            lease.handle.capability_family,
+            sigil_kernel::resource::OpaqueKernelCapabilityAuthenticatorV1::new(
+                "test-shadow".to_owned(),
+            ),
+        );
+        let receipt = service
+            .finalize_namespace_with_physical_frontier(
+                shadow_handle,
+                current_frontier.0,
+                current_frontier.1,
+                current_frontier.2,
+                "writer-batch-complete".to_owned(),
+            )
+            .expect("finalize");
+        assert!(matches!(
+            writer.write_record(&lease, b"post-settlement"),
+            Err(ManagedStorageWriterErrorV1::LeaseRejected(_))
+        ));
         assert_eq!(receipt.committed_sequence_or_version, Some(4));
         let journal =
             sigil_resource_authority::journal::ResourceJournalFileV1::open(journal_path, header)
