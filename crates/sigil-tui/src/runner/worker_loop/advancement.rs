@@ -79,6 +79,8 @@ pub(in crate::runner) struct WorkerAdvancementContext<'a, P> {
     pub(in crate::runner) managed_extension_execution: &'a Option<
         Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    pub(in crate::runner) managed_verification_execution:
+        &'a Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     pub(in crate::runner) state: &'a mut WorkerLoopState,
 }
 
@@ -97,6 +99,7 @@ impl<'a, P> WorkerAdvancementContext<'a, P> {
             role_provider_builder: self.role_provider_builder,
             context_resolver: self.context_resolver,
             managed_extension_execution: self.managed_extension_execution,
+            managed_verification_execution: self.managed_verification_execution,
             state: &mut *self.state,
         }
     }
@@ -614,6 +617,7 @@ where
         message_tx,
         elicitation_handler,
         role_provider_builder,
+        managed_verification_execution,
         state,
         ..
     } = context;
@@ -701,6 +705,7 @@ where
             base_registry: agent.tool_registry().clone(),
             agent_supervisor: state.agent.supervisor.clone(),
             role_provider_builder: Arc::clone(role_provider_builder),
+            managed_verification_execution: managed_verification_execution.as_ref().map(Arc::clone),
             task_result_tx: state.run.result_tx.clone(),
             approval_rx,
             handler,
@@ -736,6 +741,7 @@ where
         message_tx,
         elicitation_handler,
         role_provider_builder,
+        managed_verification_execution,
         state,
         ..
     } = context;
@@ -971,6 +977,9 @@ where
                     base_registry: agent.tool_registry().clone(),
                     agent_supervisor: state.agent.supervisor.clone(),
                     role_provider_builder: Arc::clone(role_provider_builder),
+                    managed_verification_execution: managed_verification_execution
+                        .as_ref()
+                        .map(Arc::clone),
                     task_result_tx: state.run.result_tx.clone(),
                     approval_rx,
                     handler,
@@ -1029,6 +1038,7 @@ where
         elicitation_handler,
         mcp_event_handler,
         managed_extension_execution,
+        managed_verification_execution: _,
         state,
         ..
     } = context;
@@ -2759,6 +2769,7 @@ where
         message_tx,
         elicitation_handler,
         role_provider_builder,
+        managed_verification_execution,
         context_resolver,
         state,
         ..
@@ -3063,6 +3074,7 @@ where
                         message_tx,
                         Arc::clone(elicitation_handler),
                         Arc::clone(role_provider_builder),
+                        managed_verification_execution.as_ref().map(Arc::clone),
                         &state.session.log_path,
                         &mut state.run.next_id,
                         &state.terminal_lifecycle_router,

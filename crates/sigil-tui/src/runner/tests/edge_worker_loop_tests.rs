@@ -1851,6 +1851,7 @@ fn spawn_loop_with_shared_agent(
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
                     managed_extension_execution: None,
+                    managed_verification_execution: None,
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,

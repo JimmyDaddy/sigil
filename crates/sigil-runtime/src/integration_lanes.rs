@@ -15,18 +15,20 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use futures::future::join_all;
 use sha2::{Digest, Sha256};
+use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     ChangeSet, ChangeSetFileAction, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
-    CompletionCriteria, EvidenceScope, ExecutionBackend, IntegrationBaseRepresentation,
-    IntegrationLaneCandidate, IntegrationLaneCleanupRecorded, IntegrationLaneCleanupStatus,
-    IntegrationLaneId, IntegrationLaneMemberApplied, IntegrationLaneMemberEffect,
-    IntegrationLanePrepared, IntegrationLaneStatus, IntegrationLaneTarget, IntegrationLaneTerminal,
+    CompletionCriteria, EvidenceScope, IntegrationBaseRepresentation, IntegrationLaneCandidate,
+    IntegrationLaneCleanupRecorded, IntegrationLaneCleanupStatus, IntegrationLaneId,
+    IntegrationLaneMemberApplied, IntegrationLaneMemberEffect, IntegrationLanePrepared,
+    IntegrationLaneStatus, IntegrationLaneTarget, IntegrationLaneTerminal,
     IntegrationLaneVerificationLinked, IntegrationPlan, IntegrationPlanId,
     IsolatedWorkspaceCleanupStatus, ReceiptStatus, SandboxProfileRequirement, Session, ToolEffect,
     TrustedCheckSpec, VerificationAutoRunPolicy, VerificationCheckRunRequest, VerificationPolicy,
     VerificationReceipt, VerificationScope, WorkspaceSnapshotId, WorkspaceTrust,
     run_verification_check, stable_event_uuid,
 };
+#[cfg(test)]
 use sigil_tools_builtin::LocalExecutionBackend;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -82,7 +84,7 @@ pub struct GitIntegrationRunRequest {
     pub plan: IntegrationPlan,
     pub artifacts: Vec<IntegrationArtifact>,
     pub frozen_base: Option<FrozenGitWorktreeBase>,
-    pub verification_backend: Option<Arc<dyn ExecutionBackend>>,
+    pub verification_execution_port: Option<Arc<dyn VerificationExecutionPortV1>>,
 }
 
 /// Recovery-critical runtime event emitted at the physical lane boundary.
@@ -178,10 +180,15 @@ pub async fn run_git_integration_lanes_with_events(
 ) -> Result<GitIntegrationRunOutput> {
     validate_integration_request(&request)?;
     validate_physical_base(&request)?;
-    let verification_backend = request
-        .verification_backend
-        .clone()
-        .unwrap_or_else(|| Arc::new(LocalExecutionBackend));
+    let verification_execution_port = match request.verification_execution_port.clone() {
+        Some(port) => port,
+        #[cfg(test)]
+        None => Arc::new(LocalExecutionBackend),
+        #[cfg(not(test))]
+        None => {
+            bail!("integration lane verification requires the managed verification execution port")
+        }
+    };
     let artifacts = request
         .artifacts
         .iter()
@@ -309,7 +316,7 @@ pub async fn run_git_integration_lanes_with_events(
                 lane_artifacts,
                 target,
                 verification_scope_hashes,
-                verification_backend.clone(),
+                verification_execution_port.clone(),
                 event_sender.clone(),
             )
         },
@@ -325,7 +332,7 @@ async fn execute_git_integration_lane(
     artifacts: Vec<IntegrationArtifact>,
     target: IntegrationLaneTarget,
     verification_scope_hashes: Vec<String>,
-    verification_backend: Arc<dyn ExecutionBackend>,
+    verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
     event_sender: Option<UnboundedSender<IntegrationLaneRuntimeEventRequest>>,
 ) -> GitIntegrationLaneResult {
     let started_at_unix_ms = unix_time_ms();
@@ -366,7 +373,7 @@ async fn execute_git_integration_lane(
                 &target,
                 &candidate,
                 &verification_scope_hashes,
-                verification_backend.as_ref(),
+                verification_execution_port.as_ref(),
             )
             .await
             {
@@ -643,7 +650,7 @@ async fn verify_lane_candidate(
     target: &IntegrationLaneTarget,
     candidate: &IntegrationLaneCandidate,
     verification_scope_hashes: &[String],
-    execution_backend: &dyn ExecutionBackend,
+    verification_execution_port: &dyn VerificationExecutionPortV1,
 ) -> Result<Vec<VerificationReceipt>> {
     if verification_scope_hashes.is_empty() {
         bail!("integration lane verification requires at least one scope");
@@ -742,7 +749,7 @@ async fn verify_lane_candidate(
         let mut verification_session = Session::new("sigil-runtime", "integration-verification-v1");
         let recorded = run_verification_check(
             &mut verification_session,
-            execution_backend,
+            verification_execution_port,
             VerificationCheckRunRequest {
                 workspace_root: workspace.workspace_root().to_path_buf(),
                 scope: EvidenceScope::Task(format!(

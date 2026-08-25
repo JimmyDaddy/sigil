@@ -947,6 +947,9 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    managed_verification_execution: Option<
+        Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>,
+    >,
     session_log_path: &Path,
     next_run_id: &mut u64,
     _terminal_lifecycle_router: &ChannelTerminalLifecycleRouter,
@@ -1133,6 +1136,8 @@ where
                                         base_registry: task_base_registry,
                                         agent_supervisor: task_agent_supervisor,
                                         role_provider_builder: role_provider_builder.as_ref(),
+                                        managed_verification_execution:
+                                            managed_verification_execution.clone(),
                                         handler: &mut handler,
                                         cancellation_handle,
                                         tool_artifact_read_budget,
@@ -1190,6 +1195,8 @@ where
                                         base_registry: task_base_registry,
                                         agent_supervisor: task_agent_supervisor,
                                         role_provider_builder: role_provider_builder.as_ref(),
+                                        managed_verification_execution:
+                                            managed_verification_execution.clone(),
                                         handler: &mut handler,
                                         cancellation_handle,
                                         tool_artifact_read_budget,
@@ -1289,6 +1296,8 @@ where
                                                 agent_supervisor: task_agent_supervisor,
                                                 role_provider_builder:
                                                     role_provider_builder.as_ref(),
+                                                managed_verification_execution:
+                                                    managed_verification_execution.clone(),
                                                 handler: &mut handler,
                                                 cancellation_handle,
                                                 tool_artifact_read_budget,

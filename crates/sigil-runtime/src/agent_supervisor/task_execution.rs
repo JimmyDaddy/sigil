@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::{Result, anyhow};
+use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
@@ -33,6 +34,7 @@ pub struct AdmittedTaskExecution<'a, H> {
     pub base_registry: ToolRegistry,
     pub agent_supervisor: AgentSupervisor,
     pub role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    pub verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
     pub handler: &'a mut H,
     pub cancellation_handle: RunCancellationHandle,
     pub tool_artifact_read_budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
@@ -80,6 +82,7 @@ pub struct ContinuedTaskExecution<'a, H> {
     pub base_registry: ToolRegistry,
     pub agent_supervisor: AgentSupervisor,
     pub role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    pub verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
     pub handler: &'a mut H,
     pub cancellation_handle: RunCancellationHandle,
     pub tool_artifact_read_budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
@@ -532,6 +535,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
         handler,
         cancellation_handle,
         tool_artifact_read_budget,
@@ -556,6 +560,7 @@ where
         &base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
     )
     .await
     .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
@@ -609,6 +614,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
         handler,
         cancellation_handle,
         tool_artifact_read_budget,
@@ -749,6 +755,7 @@ where
         &base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
     )
     .await
     .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;

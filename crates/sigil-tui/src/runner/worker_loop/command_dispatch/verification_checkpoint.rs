@@ -24,6 +24,7 @@ where
         role_provider_builder: _,
         context_resolver: _,
         managed_extension_execution: _,
+        managed_verification_execution,
         state,
     } = context;
     let mut command_result = Some(command);
@@ -415,28 +416,23 @@ where
                     ));
                     continue;
                 };
-                let execution_backend =
-                    match sigil_runtime::build_configured_execution_backend(root_config) {
-                        Ok(backend) => backend,
-                        Err(error) => {
-                            let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
-                                LocalOperationOutcome::failed(
-                                    "task-verification-rerun",
-                                    LocalOperationKind::TaskVerificationRerun,
-                                    true,
-                                    format!(
-                                        "failed to build verification execution backend: {error:#}"
-                                    ),
-                                ),
-                            ));
-                            continue;
-                        }
-                    };
+                let Some(verification_execution_port) = managed_verification_execution.as_ref()
+                else {
+                    let _ = message_tx.send(WorkerMessage::LocalOperationOutcome(
+                        LocalOperationOutcome::failed(
+                            "task-verification-rerun",
+                            LocalOperationKind::TaskVerificationRerun,
+                            true,
+                            "verification rerun requires the managed execution route",
+                        ),
+                    ));
+                    continue;
+                };
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
                 match runtime.block_on(rerun_task_verification_check(
                     session,
                     &mut handler,
-                    execution_backend.as_ref(),
+                    verification_execution_port.as_ref(),
                     &options.workspace_root,
                     &request,
                 )) {
@@ -512,27 +508,22 @@ where
                     });
                     continue;
                 }
-                let execution_backend =
-                    match sigil_runtime::build_configured_execution_backend(root_config) {
-                        Ok(backend) => backend,
-                        Err(error) => {
-                            let entries = state
-                                .session
-                                .current
-                                .as_ref()
-                                .map(|session| session.entries().to_vec())
-                                .unwrap_or_default();
-                            let _ =
-                                message_tx.send(WorkerMessage::TaskIntegrationAcceptanceFailed {
-                                    request,
-                                    error: format!(
-                                        "failed to build parent verification backend: {error:#}"
-                                    ),
-                                    entries,
-                                });
-                            continue;
-                        }
-                    };
+                let Some(verification_execution_port) = managed_verification_execution.as_ref()
+                else {
+                    let entries = state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| session.entries().to_vec())
+                        .unwrap_or_default();
+                    let _ = message_tx.send(WorkerMessage::TaskIntegrationAcceptanceFailed {
+                        request,
+                        error: "parent verification requires the managed execution route"
+                            .to_owned(),
+                        entries,
+                    });
+                    continue;
+                };
                 let Some(session) = state.session.current.as_mut() else {
                     let _ = message_tx.send(WorkerMessage::TaskIntegrationAcceptanceFailed {
                         request,
@@ -547,7 +538,7 @@ where
                     sigil_runtime::integration_lanes::accept_task_integration_review(
                         session,
                         &mut handler,
-                        execution_backend,
+                        Arc::clone(verification_execution_port),
                         &secret_redactor,
                         &options.workspace_root,
                         &request,

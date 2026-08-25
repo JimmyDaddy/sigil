@@ -1,4 +1,5 @@
 use super::*;
+use crate::verification::VerificationExecutionPortV1;
 
 pub(super) fn append_task_readiness<H>(
     session: &mut Session,
@@ -14,7 +15,7 @@ where
 pub(super) async fn run_task_step_verification_checks<H>(
     session: &mut Session,
     handler: &mut H,
-    execution_backend: Option<&dyn ExecutionBackend>,
+    verification_execution_port: Option<&dyn VerificationExecutionPortV1>,
     request: &SequentialTaskRequest,
     step: &TaskStepSpec,
     options: &AgentRunOptions,
@@ -35,8 +36,9 @@ where
     if check_ids.is_empty() {
         return Ok(false);
     }
-    let execution_backend = execution_backend
-        .ok_or_else(|| anyhow!("verification check execution requires an execution backend"))?;
+    let verification_execution_port = verification_execution_port.ok_or_else(|| {
+        anyhow!("verification check execution requires the managed verification execution port")
+    })?;
 
     let projection = session.verification_state_projection();
     let step_scope = task_step_evidence_scope(&request.task_id, &step.step_id);
@@ -71,7 +73,7 @@ where
         execute_task_verification_check(
             session,
             handler,
-            execution_backend,
+            verification_execution_port,
             TaskVerificationExecution {
                 workspace_root: &options.workspace_root,
                 scope: &step_scope,
@@ -101,7 +103,7 @@ where
 pub async fn rerun_task_verification_check<H>(
     session: &mut Session,
     handler: &mut H,
-    execution_backend: &dyn ExecutionBackend,
+    verification_execution_port: &dyn VerificationExecutionPortV1,
     workspace_root: &Path,
     request: &TaskVerificationRerunRequest,
 ) -> Result<TaskVerificationRerunOutput>
@@ -248,7 +250,7 @@ where
     execute_task_verification_check(
         session,
         handler,
-        execution_backend,
+        verification_execution_port,
         TaskVerificationExecution {
             workspace_root,
             scope: &step_scope,
@@ -277,7 +279,7 @@ struct TaskVerificationExecution<'a> {
 async fn execute_task_verification_check<H>(
     session: &mut Session,
     handler: &mut H,
-    execution_backend: &dyn ExecutionBackend,
+    verification_execution_port: &dyn VerificationExecutionPortV1,
     execution: TaskVerificationExecution<'_>,
 ) -> Result<TaskVerificationRerunOutput>
 where
@@ -323,7 +325,7 @@ where
     )?;
     let verification_evidence = match run_verification_check_with_evidence(
         session,
-        execution_backend,
+        verification_execution_port,
         VerificationCheckRunRequest {
             workspace_root: workspace_root.to_path_buf(),
             scope: scope.clone(),

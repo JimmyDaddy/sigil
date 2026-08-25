@@ -16,7 +16,7 @@ use crate::{
     AgentRunPurpose, AgentRunTerminalReason, AgentUserInputRouteEntryV1, ApprovalHandler,
     AssistantMessageKind, ChangeSet, CheckPromotion, CheckSpecId, CheckpointRestored,
     CompletionCriteria, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler,
-    EvidenceScope, ExecutionBackend, ExecutionMutationProfile, FileType, IntegrationLaneChanged,
+    EvidenceScope, ExecutionMutationProfile, FileType, IntegrationLaneChanged,
     IntegrationLaneStatus, IntegrationPlanId, IntegrationPlanRecorded, IntegrationProjection,
     IntegrationProposalSpec, JsonlSessionStore, MergeReviewId, MergeReviewRequested, ModelMessage,
     MutationCommitted, MutationPrepared, MutationReconciled, MutationResolution, MutationSubject,

@@ -23,6 +23,7 @@ where
         role_provider_builder,
         context_resolver: _,
         managed_extension_execution: _,
+        managed_verification_execution,
         state,
     } = context;
     let mut command_result = Some(command);
@@ -305,6 +306,9 @@ where
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
+                        managed_verification_execution: managed_verification_execution
+                            .as_ref()
+                            .map(Arc::clone),
                         task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,
@@ -441,6 +445,9 @@ where
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
+                        managed_verification_execution: managed_verification_execution
+                            .as_ref()
+                            .map(Arc::clone),
                         task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,
@@ -566,6 +573,9 @@ where
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
+                        managed_verification_execution: managed_verification_execution
+                            .as_ref()
+                            .map(Arc::clone),
                         task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,
@@ -823,6 +833,9 @@ where
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
+                        managed_verification_execution: managed_verification_execution
+                            .as_ref()
+                            .map(Arc::clone),
                         task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,

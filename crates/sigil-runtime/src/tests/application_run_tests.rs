@@ -38,6 +38,7 @@ use sigil_kernel::{
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
+use sigil_tools_builtin::LocalExecutionBackend;
 
 use super::{
     ApplicationCancellationTicket, ApplicationRunControl, ApplicationRunEventHandler,
@@ -3229,6 +3230,7 @@ credential = { source = "none" }
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -3373,6 +3375,7 @@ credential = { source = "none" }
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::clone(&provider_builder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -3677,6 +3680,7 @@ credential = { source = "none" }
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -4928,6 +4932,7 @@ async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Re
             executor_requests: Arc::clone(&executor_requests),
             guidance_review_requests: Arc::clone(&guidance_review_requests),
         }),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -6010,6 +6015,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -6193,6 +6199,7 @@ max_plan_steps = 64
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();

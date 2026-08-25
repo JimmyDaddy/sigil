@@ -2045,6 +2045,8 @@ struct ApplicationTaskExecutionRuntime {
     agent_supervisor: crate::AgentSupervisor,
     role_provider_builder:
         Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
+    verification_execution_port:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
 }
 
 /// Runtime facts used to execute a read-only plan review after an automatic route decision.
@@ -2732,6 +2734,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
     } = task_execution;
     // New approved Plans already carry first-class direct execution admission. Legacy sessions may
     // still contain a materialized/adopted candidate, so preserve their historical admission
@@ -2784,6 +2787,8 @@ where
             handler,
             cancellation_handle: cancellation_handle.clone(),
             tool_artifact_read_budget: None,
+            verification_execution_port: verification_execution_port
+                .context("current-schema task execution requires the managed verification route")?,
         },
         approval_handler,
     )
@@ -2831,6 +2836,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
     } = task_execution;
     let result = crate::agent_supervisor::task_execution::bind_task_run_cancellation_scope(
         session,
@@ -2838,9 +2844,9 @@ where
         cancellation_handle,
     );
     let continuation_entry_frontier = session.entries().len();
-    let result = match result {
-        Ok(()) => {
-            crate::agent_supervisor::task_execution::continue_task_execution(
+    let result =
+        match result {
+            Ok(()) => crate::agent_supervisor::task_execution::continue_task_execution(
                 session,
                 crate::agent_supervisor::task_execution::ContinuedTaskExecution {
                     requested_task_id: Some(action.task_id.clone()),
@@ -2860,13 +2866,15 @@ where
                     handler,
                     cancellation_handle: cancellation_handle.clone(),
                     tool_artifact_read_budget: None,
+                    verification_execution_port: verification_execution_port.context(
+                        "current-schema task continuation requires the managed verification route",
+                    )?,
                 },
                 approval_handler,
             )
-            .await
-        }
-        Err(error) => Err(error),
-    };
+            .await,
+            Err(error) => Err(error),
+        };
     let status = crate::agent_supervisor::task_execution::finalize_task_continuation_root(
         session,
         &action.task_id,
@@ -3792,6 +3800,10 @@ async fn prepare_application_run_internal(
                     provider.capabilities(),
                 ),
                 role_provider_builder: Arc::clone(role_provider_builder),
+                verification_execution_port: services.authority_composition().map(|composition| {
+                    Arc::clone(&composition.command_execution)
+                        as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
+                }),
             },
         );
     let conversation_coordinator = crate::ConversationCoordinator::new(
@@ -5252,23 +5264,31 @@ pub async fn rerun_application_verification_with_attachment(
         if session.session_scope_id() != expected_session_scope_id {
             bail!("durable session identity changed before verification rerun");
         }
-        let execution_backend = crate::build_configured_execution_backend(&root_config)?;
-        Ok::<_, anyhow::Error>((
-            session,
-            session_lease,
-            workspace_root,
-            execution_backend,
-            request,
-        ))
+        Ok::<_, anyhow::Error>((session, session_lease, workspace_root, request))
     })
     .await
     .map_err(|_| anyhow!("verification rerun preparation worker failed"))??;
-    let (mut session, _session_lease, workspace_root, execution_backend, request) = preparation;
+    let (mut session, _session_lease, workspace_root, request) = preparation;
+    let verification_execution_port: Arc<
+        dyn sigil_kernel::verification::VerificationExecutionPortV1,
+    > = {
+        let route = Arc::clone(
+            &services
+                .authority_composition()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "current-schema verification rerun requires the managed verification route"
+                    )
+                })?
+                .command_execution,
+        );
+        route
+    };
     let mut handler = NoopEventHandler;
     rerun_task_verification_check(
         &mut session,
         &mut handler,
-        execution_backend.as_ref(),
+        verification_execution_port.as_ref(),
         &workspace_root,
         &request,
     )

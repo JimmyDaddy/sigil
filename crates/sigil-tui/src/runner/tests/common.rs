@@ -408,6 +408,7 @@ where
                     role_provider_builder,
                     context_resolver,
                     managed_extension_execution,
+                    managed_verification_execution: None,
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,

@@ -120,7 +120,7 @@ async fn disjoint_git_integration_lanes_overlap_and_preserve_parent() -> Result<
                 ),
             ],
             frozen_base: None,
-            verification_backend: Some(verification_backend),
+            verification_execution_port: Some(verification_backend),
         }),
     )
     .await
@@ -232,7 +232,7 @@ async fn dependent_lane_applies_members_in_stable_plan_order() -> Result<()> {
                 ),
             ],
             frozen_base: None,
-            verification_backend: None,
+            verification_execution_port: None,
         },
         Some(event_tx.clone()),
     )
@@ -296,7 +296,7 @@ async fn conflicting_lane_retains_partial_private_ref_without_parent_mutation() 
             ),
         ],
         frozen_base: None,
-        verification_backend: None,
+        verification_execution_port: None,
     })
     .await?;
 
@@ -353,7 +353,7 @@ async fn overlay_plan_is_rejected_before_managed_ref_materialization() -> Result
             "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
         )],
         frozen_base: None,
-        verification_backend: None,
+        verification_execution_port: None,
     })
     .await
     .expect_err("overlay plans must not enter managed-ref integration");
@@ -399,7 +399,7 @@ async fn managed_ref_plan_rejects_base_commit_drift_before_ref_creation() -> Res
             "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old-a\n+new-a\n",
         )],
         frozen_base: None,
-        verification_backend: None,
+        verification_execution_port: None,
     })
     .await
     .expect_err("base commit drift must reject managed-ref integration");
@@ -502,7 +502,7 @@ async fn snapshot_workspace_lanes_overlap_preserve_overlay_and_emit_recovery_fac
                 ),
             ],
             frozen_base: Some(frozen),
-            verification_backend: None,
+            verification_execution_port: None,
         },
         Some(event_tx.clone()),
     )
@@ -2065,7 +2065,7 @@ async fn ready_lane_session(
             plan: plan.clone(),
             artifacts: artifacts.to_vec(),
             frozen_base: None,
-            verification_backend: None,
+            verification_execution_port: None,
         },
         Some(event_tx),
     )

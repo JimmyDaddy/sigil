@@ -1,12 +1,13 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Result, anyhow, bail};
+use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
-    ControlEntry, EventHandler, EvidenceScope, ExecutionBackend, IntegrationPlanId,
-    IntegrationPromotionAttemptId, ReadinessInput, ReceiptStatus, RunEvent, RunStatus, Session,
-    TaskParentVerificationRecorded, TrustedCheckSpec, VerificationCheckRunRequest,
-    VerificationPolicy, VerificationRecordedEntry, VerificationVerdict, WorkspaceTrust,
-    build_workspace_snapshot, evaluate_readiness, run_verification_check, stable_workspace_id,
+    ControlEntry, EventHandler, EvidenceScope, IntegrationPlanId, IntegrationPromotionAttemptId,
+    ReadinessInput, ReceiptStatus, RunEvent, RunStatus, Session, TaskParentVerificationRecorded,
+    TrustedCheckSpec, VerificationCheckRunRequest, VerificationPolicy, VerificationRecordedEntry,
+    VerificationVerdict, WorkspaceTrust, build_workspace_snapshot, evaluate_readiness,
+    run_verification_check, stable_workspace_id,
 };
 
 use super::{PromotedVerificationTarget, unix_time_ms};
@@ -48,7 +49,7 @@ pub struct ParentVerificationRunOutput {
 pub async fn run_authoritative_parent_verification<H>(
     session: &mut Session,
     handler: &mut H,
-    execution_backend: Arc<dyn ExecutionBackend>,
+    verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
     request: ParentVerificationRunRequest,
 ) -> Result<ParentVerificationRunOutput>
 where
@@ -94,7 +95,7 @@ where
                 .clone();
             let verification = run_verification_check(
                 session,
-                execution_backend.as_ref(),
+                verification_execution_port.as_ref(),
                 VerificationCheckRunRequest {
                     workspace_root: workspace_root.clone(),
                     scope: evidence_scope.clone(),

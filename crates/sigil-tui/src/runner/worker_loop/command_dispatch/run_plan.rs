@@ -49,6 +49,7 @@ where
         role_provider_builder,
         context_resolver,
         managed_extension_execution: _,
+        managed_verification_execution,
         state,
     } = context;
 
@@ -265,6 +266,8 @@ where
                 }
                 let plan_review_root_config = Arc::clone(&plan_review_root_config);
                 let session_log_path = state.session.log_path.clone();
+                let managed_verification_execution =
+                    managed_verification_execution.as_ref().map(Arc::clone);
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -400,6 +403,10 @@ where
                                                     agent_supervisor: task_agent_supervisor,
                                                     role_provider_builder:
                                                         task_role_provider_builder.as_ref(),
+                                                    managed_verification_execution:
+                                                        managed_verification_execution
+                                                            .as_ref()
+                                                            .map(Arc::clone),
                                                     handler: &mut handler,
                                                     cancellation_handle,
                                                     tool_artifact_read_budget,
@@ -468,6 +475,10 @@ where
                                                         agent_supervisor: task_agent_supervisor,
                                                         role_provider_builder:
                                                             task_role_provider_builder.as_ref(),
+                                                        managed_verification_execution:
+                                                            managed_verification_execution
+                                                                .as_ref()
+                                                                .map(Arc::clone),
                                                         handler: &mut handler,
                                                         cancellation_handle,
                                                         tool_artifact_read_budget,
@@ -579,6 +590,10 @@ where
                                                                 task_agent_supervisor,
                                                             role_provider_builder:
                                                                 task_role_provider_builder.as_ref(),
+                                                            managed_verification_execution:
+                                                                managed_verification_execution
+                                                                    .as_ref()
+                                                                    .map(Arc::clone),
                                                             handler: &mut handler,
                                                             cancellation_handle,
                                                             tool_artifact_read_budget,
@@ -1394,6 +1409,16 @@ where
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
+                    let Some(verification_execution_port) =
+                        managed_verification_execution.as_ref().map(Arc::clone)
+                    else {
+                        state.session.current = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "planner continuation requires the managed verification route"
+                                .to_owned(),
+                        ));
+                        continue;
+                    };
                     let prepared = runtime.block_on(
                         sigil_runtime::agent_supervisor::task_role_runtime::prepare_task_planner_user_input_continuation(
                             &effective_config,
@@ -1401,6 +1426,7 @@ where
                             agent.tool_registry(),
                             state.agent.supervisor.clone(),
                             role_provider_builder.as_ref(),
+                            verification_execution_port,
                             &mut run_session,
                             route,
                             &command,

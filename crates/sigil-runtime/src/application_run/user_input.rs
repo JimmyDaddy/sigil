@@ -409,6 +409,7 @@ pub async fn prepare_application_user_input_decision(
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            verification_execution_port,
         } = task_execution;
         let max_plan_steps = root_config.task.max_plan_steps;
         let prepared_planner = crate::agent_supervisor::task_role_runtime::prepare_task_planner_user_input_continuation(
@@ -417,6 +418,9 @@ pub async fn prepare_application_user_input_decision(
             &base_registry,
             agent_supervisor,
             role_provider_builder.as_ref(),
+            verification_execution_port
+                .context("current-schema planner continuation requires the managed verification route")
+                .map_err(ApplicationRunPrepareError::execution)?,
             &mut prepared.execution.session,
             &route,
             &command,

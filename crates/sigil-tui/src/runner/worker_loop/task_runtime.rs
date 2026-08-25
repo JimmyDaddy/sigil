@@ -12,6 +12,8 @@ pub(in crate::runner) struct TaskRunSpawn {
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
     pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    pub(in crate::runner) managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     pub(in crate::runner) task_result_tx: WorkerEventPayloadSender<RunTaskResult>,
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
@@ -35,6 +37,8 @@ pub(in crate::runner) struct TaskContinueSpawn {
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
     pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    pub(in crate::runner) managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     pub(in crate::runner) task_result_tx: WorkerEventPayloadSender<RunTaskResult>,
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
@@ -79,6 +83,8 @@ pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
     pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    pub(in crate::runner) managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     pub(in crate::runner) task_result_tx: WorkerEventPayloadSender<RunTaskResult>,
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
@@ -105,6 +111,7 @@ pub(in crate::runner) fn spawn_task_run(
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            managed_verification_execution,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -129,6 +136,7 @@ pub(in crate::runner) fn spawn_task_run(
                 base_registry,
                 agent_supervisor,
                 role_provider_builder: role_provider_builder.as_ref(),
+                managed_verification_execution,
                 approval_rx,
                 handler: &mut handler,
                 cancellation_handle,
@@ -171,6 +179,7 @@ pub(in crate::runner) fn spawn_task_continue(
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            managed_verification_execution,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -196,6 +205,7 @@ pub(in crate::runner) fn spawn_task_continue(
                 base_registry,
                 agent_supervisor,
                 role_provider_builder: role_provider_builder.as_ref(),
+                managed_verification_execution,
                 approval_rx,
                 handler: &mut handler,
                 cancellation_handle,
@@ -313,6 +323,7 @@ pub(in crate::runner) fn spawn_skill_child_run(
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            managed_verification_execution,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -337,6 +348,7 @@ pub(in crate::runner) fn spawn_skill_child_run(
                 base_registry,
                 agent_supervisor,
                 role_provider_builder: role_provider_builder.as_ref(),
+                managed_verification_execution,
                 approval_rx,
                 handler: &mut handler,
                 cancellation_handle,
@@ -368,6 +380,8 @@ pub(in crate::runner) struct TaskRunOrchestration<'a> {
     base_registry: ToolRegistry,
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
     cancellation_handle: RunCancellationHandle,
@@ -383,6 +397,8 @@ pub(in crate::runner) struct AdmittedTaskRunOrchestration<'a> {
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
     pub(in crate::runner) role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    pub(in crate::runner) managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     pub(in crate::runner) handler: &'a mut ChannelEventHandler,
     pub(in crate::runner) cancellation_handle: RunCancellationHandle,
     pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
@@ -403,6 +419,8 @@ pub(in crate::runner) struct RoutedTaskContinuationOrchestration<'a> {
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
     pub(in crate::runner) role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    pub(in crate::runner) managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     pub(in crate::runner) handler: &'a mut ChannelEventHandler,
     pub(in crate::runner) cancellation_handle: RunCancellationHandle,
     pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
@@ -420,6 +438,8 @@ pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
     base_registry: ToolRegistry,
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
     cancellation_handle: RunCancellationHandle,
@@ -435,6 +455,8 @@ pub(in crate::runner) struct TaskContinueOrchestration<'a> {
     base_registry: ToolRegistry,
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
     cancellation_handle: RunCancellationHandle,
@@ -454,6 +476,7 @@ pub(in crate::runner) async fn run_task_orchestration(
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        managed_verification_execution,
         approval_rx,
         handler,
         cancellation_handle,
@@ -471,6 +494,7 @@ pub(in crate::runner) async fn run_task_orchestration(
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            managed_verification_execution,
             handler,
             cancellation_handle,
             tool_artifact_read_budget,
@@ -497,6 +521,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        managed_verification_execution,
         handler,
         cancellation_handle,
         tool_artifact_read_budget,
@@ -512,6 +537,9 @@ where
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            verification_execution_port: managed_verification_execution.ok_or_else(|| {
+                anyhow::anyhow!("task execution requires the managed verification route")
+            })?,
             handler,
             cancellation_handle,
             tool_artifact_read_budget: Some(tool_artifact_read_budget),
@@ -572,6 +600,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        managed_verification_execution,
         handler,
         cancellation_handle,
         tool_artifact_read_budget,
@@ -579,27 +608,33 @@ where
     let result = bind_task_run_cancellation_scope(session, &task_id, &cancellation_handle);
     let continuation_entry_frontier = session.entries().len();
     let result = match result {
-        Ok(()) => {
-            sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
-                session,
-                sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {
-                    requested_task_id: Some(task_id.clone()),
-                    guidance: Some(guidance.expose_secret().to_owned()),
-                    guidance_promotion: None,
-                    continuation_guidance_receipt: Some(guidance_receipt),
-                    root_config,
-                    options,
-                    base_registry,
-                    agent_supervisor,
-                    role_provider_builder,
-                    handler,
-                    cancellation_handle: cancellation_handle.clone(),
-                    tool_artifact_read_budget: Some(tool_artifact_read_budget),
-                },
-                approval_handler,
-            )
-            .await
-        }
+        Ok(()) => match managed_verification_execution {
+            Some(verification_execution_port) => {
+                sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
+                    session,
+                    sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {
+                        requested_task_id: Some(task_id.clone()),
+                        guidance: Some(guidance.expose_secret().to_owned()),
+                        guidance_promotion: None,
+                        continuation_guidance_receipt: Some(guidance_receipt),
+                        root_config,
+                        options,
+                        base_registry,
+                        agent_supervisor,
+                        role_provider_builder,
+                        verification_execution_port,
+                        handler,
+                        cancellation_handle: cancellation_handle.clone(),
+                        tool_artifact_read_budget: Some(tool_artifact_read_budget),
+                    },
+                    approval_handler,
+                )
+                .await
+            }
+            None => Err(anyhow::anyhow!(
+                "task continuation requires the managed verification route"
+            )),
+        },
         Err(error) => Err(anyhow::Error::msg(error)),
     };
     finalize_task_continuation_root(
@@ -666,6 +701,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        managed_verification_execution,
         approval_rx,
         handler,
         cancellation_handle,
@@ -684,6 +720,9 @@ pub(in crate::runner) async fn continue_task_orchestration(
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            verification_execution_port: managed_verification_execution.ok_or_else(|| {
+                anyhow::anyhow!("task continuation requires the managed verification route")
+            })?,
             handler,
             cancellation_handle,
             tool_artifact_read_budget: Some(tool_artifact_read_budget),
@@ -709,6 +748,7 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        managed_verification_execution,
         approval_rx,
         handler,
         cancellation_handle,
@@ -735,6 +775,8 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         child_role,
         agent_supervisor,
         role_provider_builder,
+        managed_verification_execution
+            .ok_or_else(|| "skill execution requires the managed verification route".to_owned())?,
     )
     .await?;
     let orchestrator = orchestrator
@@ -1045,6 +1087,7 @@ pub(in crate::runner) async fn build_skill_child_role_runtime(
     child_role: AgentRole,
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &dyn TaskRoleProviderBuilder,
+    verification_execution_port: Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>,
 ) -> std::result::Result<TaskRoleRuntime, String> {
     let planner_provider = role_provider_builder
         .build(root_config, AgentRole::Planner)
@@ -1100,8 +1143,6 @@ pub(in crate::runner) async fn build_skill_child_role_runtime(
     .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
-    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
-        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
     let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
         Agent::new(planner_provider, planner_registry),
@@ -1117,14 +1158,14 @@ pub(in crate::runner) async fn build_skill_child_role_runtime(
         root_config.task.multi_agent_mode,
         root_config.task.max_planning_research_agents,
     )
-    .with_integration_verification_backend(execution_backend.clone());
+    .with_integration_verification_port(verification_execution_port.clone());
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
             .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
             .with_max_parallel_changeset_steps(configured_max_parallel_changeset_steps(
                 &root_config.task,
             ))
-            .with_execution_backend(execution_backend),
+            .with_verification_execution_port(verification_execution_port),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
             workspace_root.clone(),

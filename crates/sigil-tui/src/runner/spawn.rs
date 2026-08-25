@@ -198,6 +198,10 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             let managed_extension_execution = authority_composition
                 .as_ref()
                 .map(|composition| Arc::clone(&composition.extension_execution));
+            let managed_verification_execution = authority_composition.as_ref().map(|composition| {
+                Arc::clone(&composition.command_execution)
+                    as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
+            });
             let extension_network_admission = ExtensionProcessNetworkAdmission::new(
                 options.permission_context.network_policy,
                 false,
@@ -423,6 +427,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
                     managed_extension_execution,
+                    managed_verification_execution,
                 },
                 WorkerLoopTerminalRuntime::new(
                     terminal_lifecycle_router,

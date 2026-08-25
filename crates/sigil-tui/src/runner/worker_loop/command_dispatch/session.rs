@@ -22,6 +22,7 @@ where
         role_provider_builder: _,
         context_resolver: _,
         managed_extension_execution: _,
+        managed_verification_execution: _,
         state,
     } = context;
     let mut command_result = Some(command);
