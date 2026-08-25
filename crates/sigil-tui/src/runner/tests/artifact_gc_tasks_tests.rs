@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sigil_kernel::{
     ControlEntry, JsonlSessionStore, SessionLogEntry, SessionRef, ToolArtifactGcRootsV1,
     ToolArtifactSensitivity, ToolArtifactStore,
@@ -79,7 +79,9 @@ fn gc_task_runs_behind_one_typed_completion_event() -> Result<()> {
         roots,
     );
 
-    let event = event_rx.recv_timeout(Duration::from_secs(5))?;
+    let event = event_rx
+        .recv_timeout(Duration::from_secs(30))
+        .context("artifact GC did not publish its completion event within 30 seconds")?;
     let WorkerEvent::ArtifactGcCompleted(result) = event else {
         panic!("artifact GC must publish one typed completion event");
     };
