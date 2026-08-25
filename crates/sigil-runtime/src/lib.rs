@@ -5,15 +5,17 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 pub use session_scratch::authority_scratch_control;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sigil_kernel::ExecutionBackend;
 pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunOptions, ExecutionBackend, InteractionMode, McpServerConfig,
-    McpServerStartup, MutationEventRecorder, NetworkEffect, NetworkPolicy,
-    PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
-    ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectKind, ToolSubjectScope, WorkspaceTrust, default_user_config_dir,
+    Agent, AgentRole, AgentRunOptions, InteractionMode, McpServerConfig, McpServerStartup,
+    MutationEventRecorder, NetworkEffect, NetworkPolicy, PermissionEvaluationContext, Provider,
+    ProviderCapabilities, ReasoningEffort, RootConfig, ScopedToolRegistry, SecretRedactor,
+    SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope, WorkspaceTrust, default_user_config_dir,
 };
 pub use sigil_mcp::{
     McpDeclarationLaunchMetadata, McpElicitationAction, McpElicitationHandler,
@@ -416,8 +418,7 @@ pub use mcp_registry::{
     activate_mcp_tools_from_product_surface,
     activate_mcp_tools_from_product_surface_with_managed_extension_execution,
     attach_remote_mcp_activation_presenter,
-    attach_remote_mcp_activation_presenter_with_managed_extension_execution,
-    build_configured_execution_backend, build_tool_registry,
+    attach_remote_mcp_activation_presenter_with_managed_extension_execution, build_tool_registry,
     build_tool_registry_with_mcp_elicitation, build_tool_registry_with_mcp_handlers,
     build_tool_registry_with_mutation_recorder,
     build_tool_registry_with_mutation_recorder_and_workspace_trust,
@@ -438,6 +439,9 @@ pub use mcp_registry::{
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission_and_managed_extension_execution,
     register_mcp_server_declarations,
 };
+
+#[cfg(test)]
+pub use mcp_registry::build_configured_execution_backend;
 pub use provider_factory::{
     ProviderCapabilityRow, ProviderCapabilityStatus, ProviderCapabilityView, SecretResolution,
     SecretSource, build_provider, build_provider_async, build_provider_for_model_ref,

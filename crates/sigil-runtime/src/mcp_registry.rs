@@ -1309,6 +1309,7 @@ fn register_local_tools(
 /// # Errors
 ///
 /// Returns an error when the configured backend cannot satisfy the requested isolation policy.
+#[cfg(test)]
 pub fn build_configured_execution_backend(
     root_config: &RootConfig,
 ) -> Result<Arc<dyn ExecutionBackend>> {

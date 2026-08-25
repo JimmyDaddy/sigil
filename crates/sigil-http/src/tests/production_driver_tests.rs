@@ -4129,6 +4129,8 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
     std::fs::create_dir_all(&workspace).expect("workspace should create");
     let sessions = temp.path().join("sessions");
     std::fs::create_dir(&sessions).expect("session directory should create");
+    let state_root = temp.path().join("state").to_string_lossy().into_owned();
+    let cache_root = temp.path().join("cache").to_string_lossy().into_owned();
 
     // Local chat-completions fixture answering the revision plan review with a typed draft.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -4172,6 +4174,10 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
         &config_path,
         format!(
             r#"config_version = 2
+
+[storage]
+state_root = "{state_root}"
+cache_root = "{cache_root}"
 
 [workspace]
 root = "workspace"

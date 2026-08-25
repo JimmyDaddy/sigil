@@ -540,6 +540,10 @@ impl HttpProductionRunDriver {
         let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
         let cancellation_handle = cancellation_owner.handle();
         let cancellation_timeout = self.options.cancellation_timeout;
+        let managed_command_execution = self
+            .services
+            .authority_composition()
+            .map(|composition| Arc::clone(&composition.command_execution));
         let runtime = self.runtime.clone();
         self.runtime.spawn(async move {
             let _held_session_attachment = attachment;
@@ -552,13 +556,14 @@ impl HttpProductionRunDriver {
                     run_id,
                     event_bus,
                 };
-                sigil_runtime::application_run::execute_plan_review_revision(
+                sigil_runtime::application_run::execute_plan_review_revision_with_managed_execution(
                     &root_config,
                     &workspace_root,
                     &session_log_path,
                     &request,
                     &mut handler,
                     Some(cancellation_handle),
+                    managed_command_execution,
                 )
                 .await
             });

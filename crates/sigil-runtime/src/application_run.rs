@@ -6394,13 +6394,16 @@ fn application_task_run_status_label(status: TaskRunStatus) -> &'static str {
 /// surface is exposed and the permission mode is read-only; every terminal outcome (draft
 /// committed, no-draft closure, cancelled, failed) is written durably through
 /// [`PlanReviewCoordinator::close_plan_review_run`].
-pub async fn execute_plan_review_revision<H>(
+pub async fn execute_plan_review_revision_with_managed_execution<H>(
     root_config: &RootConfig,
     workspace_root: &Path,
     session_log_path: &Path,
     request: &crate::PlanReviewRunRequest,
     handler: &mut H,
     cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<crate::PlanReviewRunOutcome>
 where
     H: ApplicationRunEventHandler + Send,
@@ -6440,16 +6443,50 @@ where
             scratch_label: "cache/tmp".to_owned(),
             scratch_quota: sigil_tools_builtin::ScratchQuota::default(),
         };
-        let execution_backend = crate::build_configured_execution_backend(root_config)?;
-        let scratch_control = crate::authority_scratch_control(paths.scratch_root.clone());
-        sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
-            &mut base_registry,
-            builtin_paths,
-            execution_backend,
-            &root_config.execution,
-            None,
-            Some(scratch_control),
-        );
+        let managed_command_execution = match managed_command_execution {
+            Some(route) => Some(route),
+            None => {
+                #[cfg(test)]
+                {
+                    let execution_backend =
+                        crate::build_configured_execution_backend(root_config)?;
+                    let scratch_control =
+                        crate::authority_scratch_control(paths.scratch_root.clone());
+                    sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+                        &mut base_registry,
+                        builtin_paths.clone(),
+                        execution_backend,
+                        &root_config.execution,
+                        None,
+                        Some(scratch_control),
+                    );
+                    None
+                }
+                #[cfg(not(test))]
+                {
+                    bail!(
+                        "current-schema plan review requires the managed command execution route"
+                    );
+                }
+            }
+        };
+        if let Some(managed_command_execution) = managed_command_execution {
+            let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
+                managed_command_execution.clone();
+            let managed_terminal: Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1> =
+                managed_command_execution;
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+                &mut base_registry,
+                builtin_paths,
+                managed_executor,
+                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                    &root_config.execution,
+                ),
+                None,
+                None,
+                Some(managed_terminal),
+            );
+        }
         crate::register_agent_tools(&mut base_registry, root_config)?;
         let tool_registry =
             crate::build_plan_review_tool_registry(&base_registry, root_config).into_registry();
@@ -6562,6 +6599,31 @@ where
         }
     })?;
     Ok(outcome)
+}
+
+/// Test-only compatibility wrapper for plan-review fixtures that do not compose authority.
+#[cfg(test)]
+pub async fn execute_plan_review_revision<H>(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    session_log_path: &Path,
+    request: &crate::PlanReviewRunRequest,
+    handler: &mut H,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
+) -> Result<crate::PlanReviewRunOutcome>
+where
+    H: ApplicationRunEventHandler + Send,
+{
+    execute_plan_review_revision_with_managed_execution(
+        root_config,
+        workspace_root,
+        session_log_path,
+        request,
+        handler,
+        cancellation,
+        None,
+    )
+    .await
 }
 
 struct PublicApplicationEventBridge<'a, H> {
