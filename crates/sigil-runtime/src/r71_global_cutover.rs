@@ -1308,6 +1308,11 @@ mod tests {
         let exec = dir.path().join("exec");
         let config_path = dir.path().join("sigil.toml");
         let release_root = dir.path().join("release-owner");
+        std::fs::write(
+            &config_path,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
         std::fs::create_dir_all(&state).expect("state dir");
         std::fs::create_dir_all(state.join("cache")).expect("cache dir");
         std::fs::create_dir_all(&exec).expect("exec dir");
