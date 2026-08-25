@@ -31,10 +31,10 @@ use sigil_kernel::managed_execution::{
 use sigil_kernel::resource::{
     CanonicalHash, EffectiveEnforcementV1, EnforcementCompletenessV1,
     EnforcementRequirementClassV1, EnvironmentProfileClassV1, IssuedExecutionAdmissionBundleV1,
-    OpaqueProcessRef, OpaqueResourceId, OpaqueSpawnIntentId, PhysicalAttemptId,
-    ReflectiveOpaqueProcessRef, RequestedEnforcementV1, ResourceAccessV1, ResourceCleanupStatusV1,
-    ResourceJournalScopeV1, ResourceKindV1, ResourceOwnerScopeV1, ResourceRefV1,
-    SandboxBackendClassV1,
+    OpaquePermissionSubjectRef, OpaqueProcessRef, OpaqueResourceId, OpaqueSpawnIntentId,
+    PhysicalAttemptId, ReflectiveOpaqueProcessRef, RequestedEnforcementV1, ResourceAccessV1,
+    ResourceCleanupStatusV1, ResourceJournalScopeV1, ResourceKindV1, ResourceOwnerScopeV1,
+    ResourceRefV1, SandboxBackendClassV1,
 };
 
 use crate::environment::{apply_reserved_environment, standard_reserved_environment};
@@ -69,7 +69,62 @@ fn env_hash(env: &BTreeMap<String, String>) -> CanonicalHash {
 pub struct SandboxManagedExecutionServiceV1 {
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     execution_temp_root: PathBuf,
+    one_shot_launcher: Option<Arc<dyn ManagedOneShotLaunchServiceV1>>,
     extension_launcher: Option<Arc<dyn ManagedExtensionLaunchServiceV1>>,
+}
+
+/// Host-private one-shot launch seam. The service owns admission, planning, output bounds and
+/// receipts; this injected launcher owns only the physical cwd/process material for one bound
+/// command. Keeping it separate prevents a path-bearing command from entering the kernel request.
+pub trait ManagedOneShotLaunchServiceV1: Send + Sync {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
+/// Local host launcher used by the runtime managed one-shot route. It is valid only when the
+/// planner has selected the explicit-unconfined Local profile; the sandbox still performs that
+/// check before invoking this launcher.
+pub struct CommandManagedOneShotLaunchServiceV1 {
+    cwd: PathBuf,
+    cwd_subject_ref: OpaquePermissionSubjectRef,
+}
+
+impl CommandManagedOneShotLaunchServiceV1 {
+    #[must_use]
+    pub fn new(cwd: PathBuf, cwd_subject_ref: OpaquePermissionSubjectRef) -> Self {
+        Self {
+            cwd,
+            cwd_subject_ref,
+        }
+    }
+}
+
+impl ManagedOneShotLaunchServiceV1 for CommandManagedOneShotLaunchServiceV1 {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        if request.argv.is_empty() || request.cwd_subject_ref != self.cwd_subject_ref {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        let mut command = Command::new(&request.argv[0]);
+        command
+            .args(request.argv.iter().skip(1))
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        sigil_process::configure_process_tree(&mut command);
+        command
+            .spawn()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
+    }
 }
 
 /// Observed enforcement returned by the host-injected extension launcher. The sandbox owns the
@@ -202,8 +257,18 @@ impl SandboxManagedExecutionServiceV1 {
         Self {
             planner,
             execution_temp_root,
+            one_shot_launcher: None,
             extension_launcher: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_one_shot_launcher(
+        mut self,
+        launcher: Arc<dyn ManagedOneShotLaunchServiceV1>,
+    ) -> Self {
+        self.one_shot_launcher = Some(launcher);
+        self
     }
 
     #[must_use]
@@ -513,6 +578,7 @@ fn bounded_read(reader: &mut impl Read, cap_bytes: u64) -> std::io::Result<Bound
         summary: BoundedOutputSummaryV1 {
             observed_bytes: observed,
             retained_bytes: retained.len() as u64,
+            retained_payload: retained.clone(),
             content_digest: content_digest(&retained),
             truncated: observed > cap_bytes,
             artifact_ref: None,
@@ -595,6 +661,7 @@ impl CapState {
         BoundedOutputSummaryV1 {
             observed_bytes: self.observed,
             retained_bytes: self.retained.len() as u64,
+            retained_payload: self.retained.clone(),
             content_digest: content_digest(&self.retained),
             truncated: self.observed > self.cap,
             artifact_ref: None,
@@ -669,17 +736,10 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
         let prepared = self.prepare(&bundle, &request)?;
-        let mut command = Command::new(&request.argv[0]);
-        command
-            .args(request.argv.iter().skip(1))
-            .env_clear()
-            .envs(prepared.env.iter())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let Some(launcher) = &self.one_shot_launcher else {
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        };
+        let mut child = launcher.launch(&request, &prepared.env)?;
         let cap = request.limits.max_output_bytes;
         let stdout_pipe = child
             .stdout
@@ -986,6 +1046,7 @@ fn zero_summary() -> BoundedOutputSummaryV1 {
     BoundedOutputSummaryV1 {
         observed_bytes: 0,
         retained_bytes: 0,
+        retained_payload: Vec::new(),
         content_digest: zero_hash(),
         truncated: false,
         artifact_ref: None,
@@ -1208,6 +1269,10 @@ mod tests {
             Arc::new(TestPlannerV1 { isolation }),
             root.to_path_buf(),
         )
+        .with_one_shot_launcher(Arc::new(CommandManagedOneShotLaunchServiceV1::new(
+            root.to_path_buf(),
+            OpaquePermissionSubjectRef::new("subj-1".to_owned()),
+        )))
     }
 
     #[test]

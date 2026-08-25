@@ -347,6 +347,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
         None,
         None,
         None,
+        None,
     )
     .await?
     .registry)
@@ -413,6 +414,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
         scratch_control,
         managed_memory_writer,
         None,
+        None,
     )
     .await
 }
@@ -434,6 +436,9 @@ pub async fn build_tool_surface_with_terminal_lifecycle_and_managed_extension_ex
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
@@ -448,6 +453,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle_and_managed_extension_ex
         scratch_control,
         managed_memory_writer,
         managed_extension_execution,
+        managed_command_execution,
     )
     .await
 }
@@ -521,6 +527,7 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         None,
         None,
         None,
+        None,
     )
     .await?
     .registry)
@@ -544,6 +551,9 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -556,6 +566,7 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
         external_scratch_control,
         managed_memory_writer.clone(),
+        managed_command_execution,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -805,6 +816,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         workspace_root.clone(),
         workspace_trust,
         terminal_lifecycle_route,
+        None,
         None,
         None,
     )?;
@@ -1196,13 +1208,21 @@ fn register_local_tools(
     managed_memory_writer: Option<
         std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<(
     Option<sigil_code_intel::CodeIntelligenceService>,
     sigil_tools_builtin::TerminalTaskControlHandle,
     sigil_tools_builtin::ScratchNamespaceControl,
 )> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    let execution_backend = build_configured_execution_backend(root_config)?;
+    let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
+        managed_command_execution
+            .map(|route| route as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>)
+            .unwrap_or_else(|| {
+                Arc::new(sigil_tools_builtin::UnavailableManagedCommandExecutionPortV1)
+            });
     let builtin_paths = sigil_tools_builtin::BuiltinToolPaths {
         changesets_root: paths.changesets_root.clone(),
         changesets_label_root: PathBuf::from("state/artifacts/changesets"),
@@ -1216,12 +1236,16 @@ fn register_local_tools(
         .unwrap_or_else(|| crate::authority_scratch_control(paths.scratch_root.clone()));
     let handles = match terminal_lifecycle_route {
         Some(RuntimeTerminalLifecycleRoute::Factory(factory)) => {
-            sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config(
                 registry,
                 builtin_paths,
-                execution_backend,
-                &root_config.execution,
-                factory,
+                Arc::clone(&managed_executor),
+                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                    &root_config.execution,
+                ),
+                Some(sigil_tools_builtin::TerminalLifecycleRoute::Factory(
+                    factory,
+                )),
                 Some(scratch_control.clone()),
             )
         }
@@ -1231,12 +1255,14 @@ fn register_local_tools(
                 Some(RuntimeTerminalLifecycleRoute::Factory(_)) => unreachable!(),
                 None => None,
             };
-            sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config(
                 registry,
                 builtin_paths,
-                execution_backend,
-                &root_config.execution,
-                sink,
+                managed_executor,
+                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                    &root_config.execution,
+                ),
+                sink.map(sigil_tools_builtin::TerminalLifecycleRoute::Bound),
                 Some(scratch_control.clone()),
             )
         }

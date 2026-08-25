@@ -54,7 +54,11 @@ fn bash_tool(test_root: &Path) -> BashTool {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
 }
@@ -69,7 +73,11 @@ fn posix_bash_tool(test_root: &Path) -> Result<BashTool> {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?,
     })
 }
@@ -3790,7 +3798,11 @@ fn temporary_file_guidance_is_model_visible() {
             scratch_namespaces: Arc::new(
                 crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
             ),
-            backend: Arc::new(LocalExecutionBackend),
+            executor: Arc::new(
+                crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                    backend: Arc::new(LocalExecutionBackend),
+                },
+            ),
             shell: crate::shell_runtime::ResolvedShell::detect_default(),
         }
         .spec(),
@@ -5243,7 +5255,11 @@ fn scratch_tool_descriptions_match_session_scoped_lifecycle() {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
     .spec();
@@ -5883,7 +5899,11 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     };
     let ctx = ToolContext::new(workspace, 5);
@@ -5928,7 +5948,11 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
     .execute(ctx.clone(), "bash".to_owned(), json!({ "command": "true" }))

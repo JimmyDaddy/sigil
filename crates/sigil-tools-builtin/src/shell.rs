@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    EnvironmentContainment, ExecutionBackend, ExecutionCleanupStatus, ExecutionContainmentRequest,
+    EnvironmentContainment, ExecutionCleanupStatus, ExecutionContainmentRequest,
     ExecutionOutputReceipt, ExecutionReceipt, ExecutionRequest, ExecutionStreamCapture,
     ExecutionTerminationCause, FilesystemContainment, NetworkContainment, ProcessContainment, Tool,
     ToolAccess, ToolAnalysisReason, ToolAnalysisReasonCode, ToolAnalysisStatus, ToolCategory,
@@ -30,6 +30,7 @@ use crate::{
     constants::{
         DEFAULT_TEXT_LIMIT_BYTES, HARD_TEXT_LIMIT_BYTES, SIGIL_SCRATCH_DIR_ENV, WORKSPACE_TEMP_ROOT,
     },
+    managed_execution::ManagedCommandExecutionPortV1,
     path::{
         ResolvedToolPath, absolute_path_from, canonical_workspace_root, lexically_normalize_path,
         resolve_existing_prefix, resolve_tool_path_from_base,
@@ -110,7 +111,7 @@ pub(crate) struct BashTool {
     pub(crate) scratch_quota: ScratchQuota,
     pub(crate) scratch_control: ScratchNamespaceControl,
     pub(crate) scratch_namespaces: Arc<ScratchNamespaceLeaseRegistry>,
-    pub(crate) backend: Arc<dyn ExecutionBackend>,
+    pub(crate) executor: Arc<dyn ManagedCommandExecutionPortV1>,
     pub(crate) shell: ResolvedShell,
 }
 
@@ -172,8 +173,8 @@ impl Tool for BashTool {
                 .get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
         )?;
         let mut plan = analysis.permission_plan();
-        let capabilities = self.backend.capabilities();
-        let network_receipt = self.backend.planned_network_receipt();
+        let capabilities = self.executor.capabilities();
+        let network_receipt = self.executor.planned_network_receipt();
         let filesystem_proven = matches!(
             plan.containment.filesystem,
             FilesystemContainment::Unspecified
@@ -199,7 +200,7 @@ impl Tool for BashTool {
             "execution_backend".to_owned(),
             format!(
                 "{}:{}:{}",
-                self.backend.kind().as_str(),
+                self.executor.kind().as_str(),
                 serde_json::to_string(&capabilities)?,
                 serde_json::to_string(&network_receipt)?
             ),
@@ -440,7 +441,7 @@ impl Tool for BashTool {
             details: json!({ "execution_mode": "foreground" }),
         })?;
         let receipt = self
-            .backend
+            .executor
             .execute_with_cancellation(request, ctx.cancellation_handle())
             .await?;
         if matches!(

@@ -12,6 +12,7 @@ use crate::{
     file_tools::{
         DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, WriteFileTool,
     },
+    managed_execution::ManagedCommandExecutionPortV1,
     scratch_namespace::ScratchNamespaceControl,
     shell::BashTool,
     shell_runtime::ResolvedShell,
@@ -167,6 +168,31 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
     external_scratch_control: Option<ScratchNamespaceControl>,
 ) -> BuiltinToolHandles {
+    let managed_executor: Arc<dyn ManagedCommandExecutionPortV1> = Arc::new(
+        crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+            backend: Arc::clone(&execution_backend),
+        },
+    );
+    register_builtin_tools_with_managed_execution_and_terminal_config(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+    )
+}
+
+/// Registers built-ins with an authority-owned managed one-shot command port. The terminal
+/// manager remains on its legacy lifecycle seam until its own R71.4 slice is complete.
+pub fn register_builtin_tools_with_managed_execution_and_terminal_config(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+) -> BuiltinToolHandles {
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
         terminal_execution_config.with_default_shell(default_shell.clone());
@@ -210,7 +236,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         scratch_quota: paths.scratch_quota,
         scratch_control: scratch_control.clone(),
         scratch_namespaces: Arc::clone(&scratch_control.namespaces),
-        backend: Arc::clone(&execution_backend),
+        executor: managed_executor,
         shell: default_shell,
     }));
     registry.register(Arc::new(TerminalStartTool {

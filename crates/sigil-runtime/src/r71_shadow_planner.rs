@@ -27,6 +27,9 @@ pub struct ShadowPlannerConfigV1 {
     pub schema_version: u32,
     pub workspace_id: String,
     pub capture_product_defaults: bool,
+    /// The current managed Local binder can only prove explicit unconfined execution. It must
+    /// not advertise the isolated profile until a real platform binder is injected.
+    pub local_execution_explicit_unconfined: bool,
 }
 
 impl Default for ShadowPlannerConfigV1 {
@@ -35,6 +38,7 @@ impl Default for ShadowPlannerConfigV1 {
             schema_version: 1,
             workspace_id: "shadow-workspace".to_owned(),
             capture_product_defaults: true,
+            local_execution_explicit_unconfined: true,
         }
     }
 }
@@ -107,7 +111,11 @@ impl ShadowPlannerV1 {
                 quota_profile: quota.clone(),
                 retention_policy: ResourceRetentionPolicyV1::ReleaseOnSettlement,
                 cleanup_policy: ResourceCleanupPolicyV1::ReleaseExactGenerationOnSettlement,
-                environment_class: EnvironmentProfileClassV1::FreshIsolatedHome,
+                environment_class: if self.config.local_execution_explicit_unconfined {
+                    EnvironmentProfileClassV1::ExplicitUnconfined
+                } else {
+                    EnvironmentProfileClassV1::FreshIsolatedHome
+                },
                 toolchain_class: None,
                 subject_binding_hash: None,
                 canonical_hash: canonical_digest(b"shadow-stable-key-1"),
@@ -171,6 +179,9 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
         ));
         let environment_profile_class = match request.purpose {
             ExecutionPurposeV1::ExtensionProcess => EnvironmentProfileClassV1::ExtensionProcess,
+            _ if self.config.local_execution_explicit_unconfined => {
+                EnvironmentProfileClassV1::ExplicitUnconfined
+            }
             _ => EnvironmentProfileClassV1::FreshIsolatedHome,
         };
         let draft = ManagedExecutionPlanDraftV1 {

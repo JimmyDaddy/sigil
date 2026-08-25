@@ -268,6 +268,10 @@ pub enum ProcessTerminationV1 {
 pub struct BoundedOutputSummaryV1 {
     pub observed_bytes: u64,
     pub retained_bytes: u64,
+    /// Bounded bytes retained by the authority-owned capture policy. This is the only output
+    /// payload that a consumer may project; consumers must not re-open a process path or rebuild
+    /// output from an unbounded post-execution source.
+    pub retained_payload: Vec<u8>,
     pub content_digest: CanonicalHash,
     pub truncated: bool,
     pub artifact_ref: Option<crate::resource::OpaqueArtifactRefV1>,

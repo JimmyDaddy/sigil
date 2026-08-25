@@ -18,8 +18,10 @@ use sigil_kernel::managed_projection::ManagedProjectionServiceV1;
 use sigil_kernel::managed_storage::ManagedStorageServiceV1;
 use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash, ResourceJournalScopeV1};
 
-use crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1;
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
+use crate::managed_resource_adapters::{
+    RuntimeManagedCommandExecutionRouteV1, RuntimeManagedExtensionExecutionRouteV1,
+};
 use crate::managed_storage_writer::{ManagedStorageWriterAdapterV1, StorageWriterChannelV1};
 
 /// Composed runtime authority surface (everything a new-epoch boot needs once).
@@ -35,6 +37,8 @@ pub struct RuntimeAuthorityCompositionV1 {
     pub tool_authority: sigil_kernel::tool_authority::KernelToolAuthorityV1,
     /// Managed Extension route used by eager/lazy MCP stdio activation.
     pub extension_execution: std::sync::Arc<RuntimeManagedExtensionExecutionRouteV1>,
+    /// Managed one-shot command route used by the built-in Bash surface.
+    pub command_execution: std::sync::Arc<RuntimeManagedCommandExecutionRouteV1>,
 }
 
 impl std::fmt::Debug for RuntimeAuthorityCompositionV1 {
@@ -240,6 +244,11 @@ fn compose_runtime_authority_inner(
         Arc::clone(&broker),
         execution_temp_root.to_path_buf(),
     ));
+    let command_execution = std::sync::Arc::new(RuntimeManagedCommandExecutionRouteV1::new(
+        Arc::clone(&planner),
+        Arc::clone(&broker),
+        execution_temp_root.to_path_buf(),
+    ));
     let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new_with_borrowed_native_save(
         authority,
         storage.clone() as Arc<dyn ManagedStorageServiceV1>,
@@ -279,6 +288,7 @@ fn compose_runtime_authority_inner(
             Arc::clone(&broker),
         ),
         extension_execution,
+        command_execution,
     })
 }
 

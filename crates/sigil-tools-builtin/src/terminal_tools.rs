@@ -273,7 +273,7 @@ impl TerminalReadGuardState {
 }
 
 #[derive(Clone)]
-pub(crate) enum TerminalLifecycleRoute {
+pub enum TerminalLifecycleRoute {
     Bound(Arc<dyn sigil_kernel::TerminalLifecycleSink>),
     Factory(Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>),
 }

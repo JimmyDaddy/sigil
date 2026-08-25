@@ -3469,6 +3469,9 @@ async fn assemble_application_tool_surface(
             .authority_composition()
             .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
         managed_extension_execution.clone(),
+        services
+            .authority_composition()
+            .map(|composition| std::sync::Arc::clone(&composition.command_execution)),
     )
     .await?;
     // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run

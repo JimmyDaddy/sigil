@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::{Result, anyhow};
 use sigil_kernel::capability_issuer::{KernelCapabilityIssuerV1, VerifiedExecutionBundleViewV1};
 use sigil_kernel::managed_execution::{
     CaptureModeV1, ExecutionCapturePolicy, ExecutionPurposeV1, ExecutionResourceLimits,
@@ -24,6 +25,12 @@ use sigil_kernel::resource::{
     CanonicalHash, IssuedExecutionAdmissionBundleV1, OpaqueAdmissionId, OpaquePermissionSubjectRef,
     PhysicalAttemptId, RequestedEnforcementV1, ResourceAccessV1, ResourceOwnerScopeV1,
     SandboxBackendClassV1,
+};
+use sigil_kernel::{
+    EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionCaptureOutcome, ExecutionNetworkReceipt, ExecutionOutputReceipt,
+    ExecutionOutputStream, ExecutionReceipt, ExecutionRequest, ExecutionResourceReceipt,
+    ExecutionStreamCapture, ExecutionTerminationCause, ToolOutputStreamV1,
 };
 use sigil_resource_authority::factory::ResourceAuthorityServiceBundleV1;
 use sigil_sandbox::managed::ManagedExtensionLaunchEnforcementV1;
@@ -200,6 +207,300 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
         )
         .with_extension_launcher(launcher);
         service.start_persistent(bundle, request).await
+    }
+}
+
+/// Runtime adapter for non-interactive built-in commands. It owns the physical launch material
+/// only after the tool has produced its ordinary permission-bound request; admission, planning,
+/// broker issue, sandbox launch and receipt construction remain on the managed path.
+#[derive(Clone)]
+pub struct RuntimeManagedCommandExecutionRouteV1 {
+    planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1>,
+    broker: Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
+    execution_temp_root: PathBuf,
+}
+
+impl std::fmt::Debug for RuntimeManagedCommandExecutionRouteV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeManagedCommandExecutionRouteV1")
+            .field("execution_temp_root", &"[hidden]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeManagedCommandExecutionRouteV1 {
+    #[must_use]
+    pub fn new(
+        planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1>,
+        broker: Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
+        execution_temp_root: PathBuf,
+    ) -> Self {
+        Self {
+            planner,
+            broker,
+            execution_temp_root,
+        }
+    }
+
+    fn command_digest(request: &ExecutionRequest) -> CanonicalHash {
+        let mut bytes = b"managed-one-shot-command-v1\0".to_vec();
+        bytes.extend_from_slice(request.program.as_bytes());
+        bytes.push(0);
+        for arg in &request.args {
+            bytes.extend_from_slice(arg.as_bytes());
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(request.cwd.to_string_lossy().as_bytes());
+        crate::r71_shadow_planner::canonical_digest(&bytes)
+    }
+
+    fn cwd_subject(request: &ExecutionRequest) -> OpaquePermissionSubjectRef {
+        OpaquePermissionSubjectRef::new(format!(
+            "managed-one-shot-cwd:{}",
+            crate::r71_shadow_planner::canonical_digest(request.cwd.to_string_lossy().as_bytes())
+                .to_hex()
+        ))
+    }
+
+    fn limits(request: &ExecutionRequest) -> ExecutionResourceLimits {
+        ExecutionResourceLimits {
+            max_output_bytes: 8 * 1024 * 1024,
+            max_runtime_ms: request.timeout_millis().unwrap_or(24 * 60 * 60 * 1000),
+            max_children: request.process_count_limit.unwrap_or(64),
+            max_fds: 1024,
+            pty_required: false,
+        }
+    }
+
+    fn capture(limits: &ExecutionResourceLimits) -> ExecutionCapturePolicy {
+        ExecutionCapturePolicy {
+            stdout_capture: CaptureModeV1::BoundedRing {
+                max_bytes: limits.max_output_bytes,
+            },
+            stderr_capture: CaptureModeV1::BoundedRing {
+                max_bytes: limits.max_output_bytes,
+            },
+            pty: false,
+        }
+    }
+
+    async fn execute_managed(
+        &self,
+        mut request: ExecutionRequest,
+        _cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    ) -> Result<ExecutionReceipt> {
+        let cwd_subject_ref = Self::cwd_subject(&request);
+        let argv = std::iter::once(OsString::from(&request.program))
+            .chain(request.args.iter().map(OsString::from))
+            .collect::<Vec<_>>();
+        let limits = Self::limits(&request);
+        let capture = Self::capture(&limits);
+        let environment = request
+            .env
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect::<Vec<_>>();
+        let plan_request = ManagedExecutionPlanRequestV1 {
+            argv: argv.clone(),
+            cwd_subject_ref: cwd_subject_ref.clone(),
+            purpose: ExecutionPurposeV1::OneShot,
+            structured_command_digest: Self::command_digest(&request),
+            owner_scope: ResourceOwnerScopeV1::Application,
+            capture: capture.clone(),
+            limits: limits.clone(),
+            environment: environment.clone(),
+        };
+        let draft = self
+            .planner
+            .plan_execution(plan_request)
+            .map_err(|error| anyhow!("managed one-shot planning failed: {error}"))?;
+        let attempt_id =
+            PhysicalAttemptId::new(format!("managed-one-shot:{}", uuid::Uuid::new_v4()));
+        let structured_command_digest = Self::command_digest(&request);
+        let managed_request = ManagedExecutionRequestV1 {
+            argv,
+            cwd_subject_ref: cwd_subject_ref.clone(),
+            structured_command_digest,
+            admission_ref: OpaqueAdmissionId::new(attempt_id.as_str().to_owned()),
+            execution_plan_draft_hash: draft.draft_hash,
+            environment_profile: draft.environment_profile.clone(),
+            capture,
+            limits: limits.clone(),
+            environment,
+        };
+        let proof = self.broker.seal_execution_proof(
+            sigil_kernel::capability_issuer::ProofKindV1::ExecutionOneShot,
+            "builtin-command",
+            attempt_id.as_str().as_bytes().to_vec(),
+        );
+        let bundle = self
+            .broker
+            .issue_execution(proof)
+            .map_err(|error| anyhow!("managed one-shot admission failed: {error}"))?;
+        let launcher = Arc::new(
+            sigil_sandbox::managed::CommandManagedOneShotLaunchServiceV1::new(
+                request.cwd.clone(),
+                cwd_subject_ref,
+            ),
+        );
+        let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
+            Arc::clone(&self.planner),
+            self.execution_temp_root.clone(),
+        )
+        .with_one_shot_launcher(launcher);
+        let managed_receipt = service
+            .execute_once(bundle, managed_request)
+            .await
+            .map_err(|error| anyhow!("managed one-shot execution failed: {error}"))?;
+        let process = &managed_receipt.process;
+        let output = ExecutionOutputReceipt {
+            schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+            stdout: stream_capture(&process.stdout_summary, limits.max_output_bytes),
+            stderr: stream_capture(&process.stderr_summary, limits.max_output_bytes),
+            combined_total_bytes: process
+                .stdout_summary
+                .observed_bytes
+                .saturating_add(process.stderr_summary.observed_bytes),
+            combined_hard_limit_bytes: limits.max_output_bytes.saturating_mul(2),
+            termination: map_termination(&process.termination),
+        };
+        let exit_code = match process.termination {
+            sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code } => Some(code),
+            _ => None,
+        };
+        let capture_outcome = request.capture.take().map(|capture| {
+            let mut sink = capture.sink;
+            let stdout_result = sink.write_stream(
+                ToolOutputStreamV1::Stdout,
+                &process.stdout_summary.retained_payload,
+            );
+            let stderr_result = sink.write_stream(
+                ToolOutputStreamV1::Stderr,
+                &process.stderr_summary.retained_payload,
+            );
+            if stdout_result.is_err() || stderr_result.is_err() {
+                sink.mark_process_write_failed();
+            }
+            ExecutionCaptureOutcome {
+                sink,
+                source: source_completeness(&process.termination),
+                observed_bytes: output.combined_total_bytes,
+                reader_failed: false,
+            }
+        });
+        Ok(ExecutionReceipt {
+            backend: ExecutionBackendKind::Local,
+            capabilities: ExecutionBackendCapabilities::default(),
+            network: ExecutionNetworkReceipt::unknown(
+                "managed Local execution is explicitly unconfined and has no network enforcement",
+            ),
+            resources: ExecutionResourceReceipt::default(),
+            environment_policy: request.environment_policy,
+            exit_code,
+            stdout: process.stdout_summary.retained_payload.clone(),
+            stderr: process.stderr_summary.retained_payload.clone(),
+            timed_out: matches!(
+                process.termination,
+                sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut
+            ),
+            output,
+            capture: capture_outcome,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl sigil_tools_builtin::ManagedCommandExecutionPortV1 for RuntimeManagedCommandExecutionRouteV1 {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Local
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities::default()
+    }
+
+    fn planned_network_receipt(&self) -> ExecutionNetworkReceipt {
+        ExecutionNetworkReceipt::unknown(
+            "managed Local execution is explicitly unconfined and has no network enforcement",
+        )
+    }
+
+    async fn execute_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    ) -> Result<ExecutionReceipt> {
+        self.execute_managed(request, cancellation).await
+    }
+}
+
+fn stream_capture(
+    summary: &sigil_kernel::managed_execution::BoundedOutputSummaryV1,
+    limit_bytes: u64,
+) -> ExecutionStreamCapture {
+    ExecutionStreamCapture {
+        total_bytes: summary.observed_bytes,
+        returned_bytes: summary.retained_bytes,
+        omitted_bytes: summary
+            .observed_bytes
+            .saturating_sub(summary.retained_bytes),
+        retained_head_bytes: summary.retained_bytes,
+        retained_tail_bytes: 0,
+        retained_limit_bytes: limit_bytes,
+        hard_limit_bytes: limit_bytes,
+        total_lines: summary
+            .retained_payload
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count() as u64,
+        truncated: summary.truncated,
+    }
+}
+
+fn map_termination(
+    termination: &sigil_kernel::managed_execution::ProcessTerminationV1,
+) -> ExecutionTerminationCause {
+    match termination {
+        sigil_kernel::managed_execution::ProcessTerminationV1::Exited { .. } => {
+            ExecutionTerminationCause::Exited
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut => {
+            ExecutionTerminationCause::TimedOut
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::Cancelled => {
+            ExecutionTerminationCause::Cancelled
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::NotSpawned => {
+            ExecutionTerminationCause::ReaderFailed {
+                stream: ExecutionOutputStream::Combined,
+                reason: "managed process was not spawned".to_owned(),
+            }
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::Signaled { .. }
+        | sigil_kernel::managed_execution::ProcessTerminationV1::OutcomeUncertain { .. } => {
+            ExecutionTerminationCause::ReaderFailed {
+                stream: ExecutionOutputStream::Combined,
+                reason: "managed process termination did not provide an exit code".to_owned(),
+            }
+        }
+    }
+}
+
+fn source_completeness(
+    termination: &sigil_kernel::managed_execution::ProcessTerminationV1,
+) -> sigil_kernel::ToolSourceCompletenessV1 {
+    match termination {
+        sigil_kernel::managed_execution::ProcessTerminationV1::Exited { .. } => {
+            sigil_kernel::ToolSourceCompletenessV1::Complete
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut => {
+            sigil_kernel::ToolSourceCompletenessV1::Interrupted
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::Cancelled => {
+            sigil_kernel::ToolSourceCompletenessV1::Interrupted
+        }
+        _ => sigil_kernel::ToolSourceCompletenessV1::ReaderFailed,
     }
 }
 
@@ -537,6 +838,43 @@ mod tests {
         let _ = composed.file_access;
         let _ = composed.storage;
         let _ = composed.projection;
+    }
+
+    #[tokio::test]
+    async fn r71_managed_command_route_seals_and_executes_one_shot() {
+        use sigil_tools_builtin::ManagedCommandExecutionPortV1;
+
+        let root = tempfile::tempdir().expect("workspace");
+        let execution_temp = tempfile::tempdir().expect("execution temp");
+        let route = RuntimeManagedCommandExecutionRouteV1::new(
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+            execution_temp.path().to_path_buf(),
+        );
+        let receipt = route
+            .execute_with_cancellation(
+                sigil_kernel::ExecutionRequest {
+                    program: "/bin/sh".to_owned(),
+                    args: vec!["-c".to_owned(), "printf managed-route".to_owned()],
+                    cwd: root.path().to_path_buf(),
+                    env: std::collections::BTreeMap::new(),
+                    environment_policy: sigil_kernel::ProcessEnvironmentPolicy::default(),
+                    timeout_ms: Some(30_000),
+                    timeout_secs: 30,
+                    cpu_time_ms: None,
+                    memory_limit_bytes: None,
+                    process_count_limit: None,
+                    capture: None,
+                },
+                None,
+            )
+            .await
+            .expect("managed command route");
+        assert_eq!(receipt.stdout, b"managed-route");
+        assert_eq!(receipt.exit_code, Some(0));
+        assert_eq!(receipt.backend, sigil_kernel::ExecutionBackendKind::Local);
     }
 
     /// Minimal projection stub for the isolated composition test.
