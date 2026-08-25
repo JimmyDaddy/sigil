@@ -46,6 +46,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
 serial_test = "3"
 
 [lints]

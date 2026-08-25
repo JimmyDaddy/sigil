@@ -985,9 +985,7 @@ impl AppState {
         &self,
     ) -> Option<sigil_kernel::ToolArtifactStore> {
         let Some(writer) = self.managed_history_writer.as_ref() else {
-            return Some(sigil_kernel::ToolArtifactStore::for_session_path(
-                &self.session_log_path,
-            ));
+            return None;
         };
         let composition = self.authority_composition.as_ref()?;
         let staging =

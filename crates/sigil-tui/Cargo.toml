@@ -31,6 +31,7 @@ uuid.workspace = true
 [dev-dependencies]
 fs2.workspace = true
 sigil-mcp = { path = "../sigil-mcp" }
+sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

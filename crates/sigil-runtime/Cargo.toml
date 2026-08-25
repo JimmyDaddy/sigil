@@ -46,6 +46,7 @@ windows-sys.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
 tokio.workspace = true
 
 [lints]

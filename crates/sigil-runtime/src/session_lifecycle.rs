@@ -1700,38 +1700,8 @@ impl LocalSessionLifecycleService {
             )?;
             return Ok((lease.store(), Some(lease)));
         }
-        let Some(session_root) = self.managed_session_log_root.as_deref() else {
-            return Ok((ToolArtifactStore::for_session_path(source_path), None));
-        };
-        let Some(store_root) = self.managed_artifact_store_root.as_deref() else {
-            return Ok((ToolArtifactStore::for_session_path(source_path), None));
-        };
-        let Some(staging_root) = self.managed_artifact_staging_root.as_deref() else {
-            return Ok((ToolArtifactStore::for_session_path(source_path), None));
-        };
-        let Ok(session_root) = session_root.canonicalize() else {
-            return Ok((ToolArtifactStore::for_session_path(source_path), None));
-        };
-        let Ok(source_path) = source_path.canonicalize() else {
-            return Ok((ToolArtifactStore::for_session_path(source_path), None));
-        };
-        let Some(key) = source_path
-            .parent()
-            .and_then(|parent| parent.strip_prefix(&session_root).ok())
-            .filter(|relative| relative.components().count() == 1)
-            .and_then(Path::file_name)
-            .and_then(|value| value.to_str())
-        else {
-            return Ok((ToolArtifactStore::for_session_path(&source_path), None));
-        };
-        Ok((
-            ToolArtifactStore::for_session_path_with_roots(
-                &source_path,
-                store_root.join(key),
-                staging_root.join(key),
-            ),
-            None,
-        ))
+        let _ = source_path;
+        bail!("managed artifact authority lease unavailable")
     }
 
     fn allocate_export_path(

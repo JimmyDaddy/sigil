@@ -1,10 +1,16 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(any(test, feature = "test-support"))]
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+    path::Path,
 };
 
 use aho_corasick::AhoCorasick;
@@ -12,9 +18,11 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(any(test, feature = "test-support"))]
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+#[cfg(any(test, feature = "test-support"))]
 use super::{JsonlSessionStore, session_id_for_path};
 use crate::persistence::redact_cross_stream_boundary;
 use crate::{
@@ -56,6 +64,7 @@ pub const TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES: usize = 1024;
 const TOOL_RESULT_FACT_PATH_LIMIT: usize = 128;
 const TOOL_RESULT_FACT_PATH_MAX_BYTES: usize = 1024;
 const TOOL_ARTIFACT_REF_PREFIX: &str = "ta1_";
+#[cfg(any(test, feature = "test-support"))]
 const TOOL_ARTIFACT_MANIFEST_MAX_ENTRIES: usize = 100_000;
 
 pub type ToolArtifactId = String;
@@ -1100,7 +1109,7 @@ pub struct ToolResultRecordedV2 {
 impl ToolResultRecordedV3 {
     /// Builds a bounded terminal fallback V3 record when the regular projection fails
     /// (RFC-0062 10.5); only a dead session writer may escalate to the control plane.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn terminal_fallback(
         result: &ToolResult,
         sensitivity: ToolArtifactSensitivity,
@@ -2514,12 +2523,14 @@ pub struct ToolArtifactTrashPruneReportV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[cfg(any(test, feature = "test-support"))]
 struct ToolArtifactBlobUsageLedgerV1 {
     schema_version: u16,
     bytes: u64,
     dirty: bool,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 const TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION: u16 = 1;
 
 /// Physical artifact operations are owned by the runtime/authority composition. The kernel
@@ -2589,7 +2600,9 @@ pub struct ToolArtifactStore {
     session_scope_id: String,
     session_scope_id_hash: String,
     session_log_path: PathBuf,
+    #[cfg(any(test, feature = "test-support"))]
     root: Option<PathBuf>,
+    #[cfg(any(test, feature = "test-support"))]
     staging_root: Option<PathBuf>,
     backend: Option<Arc<dyn ToolArtifactStoreBackendV1>>,
 }
@@ -2608,11 +2621,13 @@ impl ToolArtifactStore {
         self.session_log_path.clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn for_session_store(store: &JsonlSessionStore) -> Self {
         Self::for_session_path(store.path())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn for_session_path(session_path: &Path) -> Self {
         let normalized_path = if session_path.exists() {
@@ -2640,6 +2655,7 @@ impl ToolArtifactStore {
     /// Creates a session artifact store with separately authority-owned published and staging
     /// roots. The session path remains the logical identity used for scope binding; neither
     /// managed root is derived from env/cwd or exposed through the descriptor contract.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn for_session_path_with_roots(
         session_path: &Path,
@@ -2690,18 +2706,22 @@ impl ToolArtifactStore {
             session_scope_id_hash: stable_event_hash(session_scope_id.as_bytes()),
             session_scope_id,
             session_log_path,
+            #[cfg(any(test, feature = "test-support"))]
             root: None,
+            #[cfg(any(test, feature = "test-support"))]
             staging_root: None,
             backend: Some(backend),
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn root(&self) -> &Path {
         self.root.as_deref().unwrap_or_else(|| Path::new(""))
     }
 
     /// Authority-owned root used only for capture staging files.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn staging_root(&self) -> &Path {
         self.staging_root
@@ -2911,29 +2931,34 @@ impl ToolArtifactStore {
             }
             return Ok(bytes);
         }
-        let read_lock = self.open_ref_lock(&descriptor.artifact_ref)?;
-        read_lock
-            .try_lock_shared()
-            .context("tool artifact is being retired")?;
-        let path = self.blob_path(&descriptor.content_sha256)?;
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to inspect tool artifact {}", path.display()))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            bail!("tool artifact blob is not a plain file");
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for this facade");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let read_lock = self.open_ref_lock(&descriptor.artifact_ref)?;
+            read_lock
+                .try_lock_shared()
+                .context("tool artifact is being retired")?;
+            let path = self.blob_path(&descriptor.content_sha256)?;
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("failed to inspect tool artifact {}", path.display()))?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                bail!("tool artifact blob is not a plain file");
+            }
+            if metadata.len() > TOOL_ARTIFACT_MAX_BYTES as u64 {
+                bail!("tool artifact blob exceeds its hard limit");
+            }
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            File::open(&path)
+                .with_context(|| format!("failed to open tool artifact {}", path.display()))?
+                .take(TOOL_ARTIFACT_MAX_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .with_context(|| format!("failed to read tool artifact {}", path.display()))?;
+            if stable_event_hash(&bytes) != descriptor.content_sha256 {
+                bail!("tool artifact content hash mismatch");
+            }
+            Ok(bytes)
         }
-        if metadata.len() > TOOL_ARTIFACT_MAX_BYTES as u64 {
-            bail!("tool artifact blob exceeds its hard limit");
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        File::open(&path)
-            .with_context(|| format!("failed to open tool artifact {}", path.display()))?
-            .take(TOOL_ARTIFACT_MAX_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("failed to read tool artifact {}", path.display()))?;
-        if stable_event_hash(&bytes) != descriptor.content_sha256 {
-            bail!("tool artifact content hash mismatch");
-        }
-        Ok(bytes)
     }
 
     /// Resolves an opaque session-scoped reference without consulting or scanning JSONL.
@@ -2947,29 +2972,37 @@ impl ToolArtifactStore {
             }
             return Ok(descriptor);
         }
-        let path = self.ref_path(artifact_ref)?;
-        let metadata = fs::symlink_metadata(&path).with_context(|| {
-            format!(
-                "failed to inspect tool artifact ref {}",
-                artifact_ref.artifact_id
-            )
-        })?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 {
-            bail!("tool artifact ref manifest is not a bounded plain file");
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for this facade");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let path = self.ref_path(artifact_ref)?;
+            let metadata = fs::symlink_metadata(&path).with_context(|| {
+                format!(
+                    "failed to inspect tool artifact ref {}",
+                    artifact_ref.artifact_id
+                )
+            })?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > 16 * 1024
+            {
+                bail!("tool artifact ref manifest is not a bounded plain file");
+            }
+            let bytes = fs::read(&path).with_context(|| {
+                format!(
+                    "failed to read tool artifact ref {}",
+                    artifact_ref.artifact_id
+                )
+            })?;
+            let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&bytes)
+                .context("failed to decode tool artifact ref manifest")?;
+            self.validate_retrievable_session_descriptor(&descriptor)?;
+            if descriptor.artifact_ref != *artifact_ref {
+                bail!("tool artifact ref manifest identity mismatch");
+            }
+            Ok(descriptor)
         }
-        let bytes = fs::read(&path).with_context(|| {
-            format!(
-                "failed to read tool artifact ref {}",
-                artifact_ref.artifact_id
-            )
-        })?;
-        let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&bytes)
-            .context("failed to decode tool artifact ref manifest")?;
-        self.validate_retrievable_session_descriptor(&descriptor)?;
-        if descriptor.artifact_ref != *artifact_ref {
-            bail!("tool artifact ref manifest identity mismatch");
-        }
-        Ok(descriptor)
     }
 
     /// Reads the bounded descriptor manifest inventory without opening the session JSONL.
@@ -2985,53 +3018,59 @@ impl ToolArtifactStore {
             }
             return Ok(manifests);
         }
-        let refs_dir = self.legacy_root().join("refs");
-        let entries = match fs::read_dir(&refs_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to read {}", refs_dir.display()));
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for this facade");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let refs_dir = self.legacy_root().join("refs");
+            let entries = match fs::read_dir(&refs_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to read {}", refs_dir.display()));
+                }
+            };
+            let mut manifests = Vec::new();
+            for entry in entries {
+                let entry =
+                    entry.with_context(|| format!("failed to read {}", refs_dir.display()))?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                if manifests.len() == TOOL_ARTIFACT_MANIFEST_MAX_ENTRIES {
+                    bail!("tool artifact manifest inventory exceeds its entry limit");
+                }
+                let metadata = fs::symlink_metadata(&path)
+                    .with_context(|| format!("failed to inspect {}", path.display()))?;
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                    || metadata.len() > 16 * 1024
+                {
+                    bail!("tool artifact inventory contains an unsafe manifest");
+                }
+                let bytes = fs::read(&path)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&bytes)
+                    .context("failed to decode tool artifact inventory manifest")?;
+                self.validate_session_descriptor_identity(&descriptor)?;
+                let expected_path = self.ref_path(&descriptor.artifact_ref)?;
+                if expected_path != path {
+                    bail!("tool artifact inventory manifest path does not match its identity");
+                }
+                manifests.push(ToolArtifactManifestEntryV1 {
+                    descriptor,
+                    manifest_modified_at_unix_ms: metadata_modified_at_unix_ms(&metadata),
+                });
             }
-        };
-        let mut manifests = Vec::new();
-        for entry in entries {
-            let entry = entry.with_context(|| format!("failed to read {}", refs_dir.display()))?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            if manifests.len() == TOOL_ARTIFACT_MANIFEST_MAX_ENTRIES {
-                bail!("tool artifact manifest inventory exceeds its entry limit");
-            }
-            let metadata = fs::symlink_metadata(&path)
-                .with_context(|| format!("failed to inspect {}", path.display()))?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || metadata.len() > 16 * 1024
-            {
-                bail!("tool artifact inventory contains an unsafe manifest");
-            }
-            let bytes =
-                fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-            let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&bytes)
-                .context("failed to decode tool artifact inventory manifest")?;
-            self.validate_session_descriptor_identity(&descriptor)?;
-            let expected_path = self.ref_path(&descriptor.artifact_ref)?;
-            if expected_path != path {
-                bail!("tool artifact inventory manifest path does not match its identity");
-            }
-            manifests.push(ToolArtifactManifestEntryV1 {
-                descriptor,
-                manifest_modified_at_unix_ms: metadata_modified_at_unix_ms(&metadata),
+            manifests.sort_by(|left, right| {
+                left.descriptor
+                    .artifact_ref
+                    .cmp(&right.descriptor.artifact_ref)
             });
+            Ok(manifests)
         }
-        manifests.sort_by(|left, right| {
-            left.descriptor
-                .artifact_ref
-                .cmp(&right.descriptor.artifact_ref)
-        });
-        Ok(manifests)
     }
 
     /// Moves unreachable, grace-expired manifests and blobs into immutable trash.
@@ -3084,163 +3123,168 @@ impl ToolArtifactStore {
         if let Some(backend) = &self.backend {
             return backend.garbage_collect(roots, now_unix_ms, orphan_grace_ms);
         }
-        let inventory = self.manifest_inventory()?;
-        let tombstone_id = format!("tool-artifact-gc-{}", Uuid::new_v4().simple());
-        let mut candidates = Vec::new();
-        let mut retained_manifests = 0usize;
-        for entry in &inventory {
-            let descriptor = &entry.descriptor;
-            let protected = roots.contains(&descriptor.artifact_ref)
-                || descriptor.retention_class == ToolArtifactRetentionClass::Pinned;
-            let grace_elapsed =
-                now_unix_ms.saturating_sub(entry.manifest_modified_at_unix_ms) >= orphan_grace_ms;
-            if protected || !grace_elapsed {
-                retained_manifests = retained_manifests.saturating_add(1);
-            } else {
-                candidates.push(entry.clone());
-            }
-        }
-        let trash_root = self.legacy_root().join("trash").join(&tombstone_id);
-        let trash_refs = trash_root.join("refs");
-        let trash_blobs = trash_root.join("blobs");
-        let staging_trash_root = self.legacy_staging_root().join("trash");
-        let trash_staging = staging_trash_root.join(&tombstone_id);
-        self.ensure_root_dir()?;
-        create_private_dir(&self.legacy_root().join("trash"))?;
-        create_private_dir(&staging_trash_root)?;
-        create_private_dir(&self.legacy_root().join("refs"))?;
-        create_private_dir(&trash_root)?;
-        create_private_dir(&trash_refs)?;
-        create_private_dir(&trash_blobs)?;
-        create_private_dir(&trash_staging)?;
-
-        let mut tombstoned_manifests = 0usize;
-        let mut tombstoned_refs = Vec::new();
-        let mut skipped_active_reads = 0usize;
-        for entry in candidates {
-            let artifact_ref = &entry.descriptor.artifact_ref;
-            let lock = self.open_ref_lock(artifact_ref)?;
-            match lock.try_lock() {
-                Ok(()) => {}
-                Err(fs::TryLockError::WouldBlock) => {
-                    skipped_active_reads = skipped_active_reads.saturating_add(1);
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for garbage collection");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let inventory = self.manifest_inventory()?;
+            let tombstone_id = format!("tool-artifact-gc-{}", Uuid::new_v4().simple());
+            let mut candidates = Vec::new();
+            let mut retained_manifests = 0usize;
+            for entry in &inventory {
+                let descriptor = &entry.descriptor;
+                let protected = roots.contains(&descriptor.artifact_ref)
+                    || descriptor.retention_class == ToolArtifactRetentionClass::Pinned;
+                let grace_elapsed = now_unix_ms.saturating_sub(entry.manifest_modified_at_unix_ms)
+                    >= orphan_grace_ms;
+                if protected || !grace_elapsed {
                     retained_manifests = retained_manifests.saturating_add(1);
-                    continue;
-                }
-                Err(fs::TryLockError::Error(error)) => {
-                    return Err(error).context("failed to lock tool artifact for GC");
+                } else {
+                    candidates.push(entry.clone());
                 }
             }
-            let source = self.ref_path(artifact_ref)?;
-            let destination = trash_refs.join(
-                source
-                    .file_name()
-                    .context("tool artifact manifest has no file name")?,
-            );
-            fs::rename(&source, &destination).with_context(|| {
-                format!(
-                    "failed to tombstone tool artifact manifest {}",
-                    artifact_ref.artifact_id
-                )
-            })?;
-            let source_binding = self
-                .legacy_root()
-                .join("refs")
-                .join(format!("{}.event", artifact_ref.artifact_id));
-            if source_binding.exists() {
-                let destination_binding =
-                    trash_refs.join(format!("{}.event", artifact_ref.artifact_id));
-                fs::rename(&source_binding, &destination_binding).with_context(|| {
+            let trash_root = self.legacy_root().join("trash").join(&tombstone_id);
+            let trash_refs = trash_root.join("refs");
+            let trash_blobs = trash_root.join("blobs");
+            let staging_trash_root = self.legacy_staging_root().join("trash");
+            let trash_staging = staging_trash_root.join(&tombstone_id);
+            self.ensure_root_dir()?;
+            create_private_dir(&self.legacy_root().join("trash"))?;
+            create_private_dir(&staging_trash_root)?;
+            create_private_dir(&self.legacy_root().join("refs"))?;
+            create_private_dir(&trash_root)?;
+            create_private_dir(&trash_refs)?;
+            create_private_dir(&trash_blobs)?;
+            create_private_dir(&trash_staging)?;
+
+            let mut tombstoned_manifests = 0usize;
+            let mut tombstoned_refs = Vec::new();
+            let mut skipped_active_reads = 0usize;
+            for entry in candidates {
+                let artifact_ref = &entry.descriptor.artifact_ref;
+                let lock = self.open_ref_lock(artifact_ref)?;
+                match lock.try_lock() {
+                    Ok(()) => {}
+                    Err(fs::TryLockError::WouldBlock) => {
+                        skipped_active_reads = skipped_active_reads.saturating_add(1);
+                        retained_manifests = retained_manifests.saturating_add(1);
+                        continue;
+                    }
+                    Err(fs::TryLockError::Error(error)) => {
+                        return Err(error).context("failed to lock tool artifact for GC");
+                    }
+                }
+                let source = self.ref_path(artifact_ref)?;
+                let destination = trash_refs.join(
+                    source
+                        .file_name()
+                        .context("tool artifact manifest has no file name")?,
+                );
+                fs::rename(&source, &destination).with_context(|| {
                     format!(
-                        "failed to tombstone tool artifact source binding {}",
+                        "failed to tombstone tool artifact manifest {}",
                         artifact_ref.artifact_id
                     )
                 })?;
+                let source_binding = self
+                    .legacy_root()
+                    .join("refs")
+                    .join(format!("{}.event", artifact_ref.artifact_id));
+                if source_binding.exists() {
+                    let destination_binding =
+                        trash_refs.join(format!("{}.event", artifact_ref.artifact_id));
+                    fs::rename(&source_binding, &destination_binding).with_context(|| {
+                        format!(
+                            "failed to tombstone tool artifact source binding {}",
+                            artifact_ref.artifact_id
+                        )
+                    })?;
+                }
+                tombstoned_manifests = tombstoned_manifests.saturating_add(1);
+                tombstoned_refs.push(entry.descriptor.artifact_ref.clone());
             }
-            tombstoned_manifests = tombstoned_manifests.saturating_add(1);
-            tombstoned_refs.push(entry.descriptor.artifact_ref.clone());
-        }
-        sync_dir(&self.legacy_root().join("refs"))?;
-        sync_dir(&trash_refs)?;
+            sync_dir(&self.legacy_root().join("refs"))?;
+            sync_dir(&trash_refs)?;
 
-        let usage_lock = self.open_blob_usage_lock()?;
-        usage_lock
-            .lock()
-            .context("failed to lock tool artifact blob usage ledger for GC")?;
-        let usage_before_gc = self.load_or_reconcile_blob_usage()?;
-        self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
-            schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
-            bytes: usage_before_gc,
-            dirty: true,
-        })?;
+            let usage_lock = self.open_blob_usage_lock()?;
+            usage_lock
+                .lock()
+                .context("failed to lock tool artifact blob usage ledger for GC")?;
+            let usage_before_gc = self.load_or_reconcile_blob_usage()?;
+            self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
+                schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
+                bytes: usage_before_gc,
+                dirty: true,
+            })?;
 
-        let live_hashes = self
-            .manifest_inventory()?
-            .into_iter()
-            .map(|entry| entry.descriptor.content_sha256)
-            .collect::<BTreeSet<_>>();
-        let mut tombstoned_blobs = 0usize;
-        let mut tombstoned_orphan_blobs = 0usize;
-        let mut tombstoned_staging_files = 0usize;
-        let mut tombstoned_bytes = 0u64;
-        for (source, bytes) in
-            self.grace_expired_orphan_blobs(&live_hashes, now_unix_ms, orphan_grace_ms)?
-        {
-            let destination = trash_blobs.join(
-                source
-                    .file_name()
-                    .context("tool artifact blob has no file name")?,
-            );
-            fs::rename(&source, &destination)
-                .with_context(|| format!("failed to tombstone {}", source.display()))?;
-            tombstoned_blobs = tombstoned_blobs.saturating_add(1);
-            tombstoned_orphan_blobs = tombstoned_orphan_blobs.saturating_add(1);
-            tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
-        }
-        for (source, bytes) in self.grace_expired_staging_files(now_unix_ms, orphan_grace_ms)? {
-            let destination = trash_staging.join(
-                source
-                    .file_name()
-                    .context("tool artifact staging file has no file name")?,
-            );
-            fs::rename(&source, &destination)
-                .with_context(|| format!("failed to tombstone {}", source.display()))?;
-            tombstoned_staging_files = tombstoned_staging_files.saturating_add(1);
-            tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
-        }
-        sync_dir(&trash_blobs)?;
-        sync_dir(&trash_staging)?;
-        sync_dir(&staging_trash_root)?;
-        sync_dir(&trash_root)?;
-        let usage_after_gc = directory_file_bytes(&self.legacy_root().join("blobs"))?;
-        self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
-            schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
-            bytes: usage_after_gc,
-            dirty: false,
-        })?;
-        if tombstoned_manifests == 0 && tombstoned_blobs == 0 && tombstoned_staging_files == 0 {
-            fs::remove_dir_all(&trash_root)
-                .with_context(|| format!("failed to remove empty {}", trash_root.display()))?;
-            sync_dir(&self.legacy_root().join("trash"))?;
-            if trash_staging != trash_root {
-                fs::remove_dir_all(&trash_staging).with_context(|| {
-                    format!("failed to remove empty {}", trash_staging.display())
-                })?;
-                sync_dir(&staging_trash_root)?;
+            let live_hashes = self
+                .manifest_inventory()?
+                .into_iter()
+                .map(|entry| entry.descriptor.content_sha256)
+                .collect::<BTreeSet<_>>();
+            let mut tombstoned_blobs = 0usize;
+            let mut tombstoned_orphan_blobs = 0usize;
+            let mut tombstoned_staging_files = 0usize;
+            let mut tombstoned_bytes = 0u64;
+            for (source, bytes) in
+                self.grace_expired_orphan_blobs(&live_hashes, now_unix_ms, orphan_grace_ms)?
+            {
+                let destination = trash_blobs.join(
+                    source
+                        .file_name()
+                        .context("tool artifact blob has no file name")?,
+                );
+                fs::rename(&source, &destination)
+                    .with_context(|| format!("failed to tombstone {}", source.display()))?;
+                tombstoned_blobs = tombstoned_blobs.saturating_add(1);
+                tombstoned_orphan_blobs = tombstoned_orphan_blobs.saturating_add(1);
+                tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
             }
+            for (source, bytes) in self.grace_expired_staging_files(now_unix_ms, orphan_grace_ms)? {
+                let destination = trash_staging.join(
+                    source
+                        .file_name()
+                        .context("tool artifact staging file has no file name")?,
+                );
+                fs::rename(&source, &destination)
+                    .with_context(|| format!("failed to tombstone {}", source.display()))?;
+                tombstoned_staging_files = tombstoned_staging_files.saturating_add(1);
+                tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
+            }
+            sync_dir(&trash_blobs)?;
+            sync_dir(&trash_staging)?;
+            sync_dir(&staging_trash_root)?;
+            sync_dir(&trash_root)?;
+            let usage_after_gc = directory_file_bytes(&self.legacy_root().join("blobs"))?;
+            self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
+                schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
+                bytes: usage_after_gc,
+                dirty: false,
+            })?;
+            if tombstoned_manifests == 0 && tombstoned_blobs == 0 && tombstoned_staging_files == 0 {
+                fs::remove_dir_all(&trash_root)
+                    .with_context(|| format!("failed to remove empty {}", trash_root.display()))?;
+                sync_dir(&self.legacy_root().join("trash"))?;
+                if trash_staging != trash_root {
+                    fs::remove_dir_all(&trash_staging).with_context(|| {
+                        format!("failed to remove empty {}", trash_staging.display())
+                    })?;
+                    sync_dir(&staging_trash_root)?;
+                }
+            }
+            Ok(ToolArtifactGcReportV1 {
+                tombstone_id,
+                scanned_manifests: inventory.len(),
+                retained_manifests,
+                tombstoned_manifests,
+                tombstoned_blobs,
+                tombstoned_orphan_blobs,
+                tombstoned_staging_files,
+                tombstoned_bytes,
+                skipped_active_reads,
+                tombstoned_refs,
+            })
         }
-        Ok(ToolArtifactGcReportV1 {
-            tombstone_id,
-            scanned_manifests: inventory.len(),
-            retained_manifests,
-            tombstoned_manifests,
-            tombstoned_blobs,
-            tombstoned_orphan_blobs,
-            tombstoned_staging_files,
-            tombstoned_bytes,
-            skipped_active_reads,
-            tombstoned_refs,
-        })
     }
 
     /// Permanently unlinks GC trash only after the mandatory grace period.
@@ -3259,49 +3303,55 @@ impl ToolArtifactStore {
         if let Some(backend) = &self.backend {
             return backend.prune_garbage_trash(now_unix_ms, trash_grace_ms);
         }
-        let mut trash_roots = vec![self.legacy_root().join("trash")];
-        let staging_trash = self.legacy_staging_root().join("trash");
-        if staging_trash != trash_roots[0] {
-            trash_roots.push(staging_trash);
-        }
-        let mut removed_tombstone_ids = BTreeSet::new();
-        let mut removed_bytes = 0u64;
-        for trash in trash_roots {
-            let entries = match fs::read_dir(&trash) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to read {}", trash.display()));
-                }
-            };
-            for entry in entries {
-                let entry = entry.with_context(|| format!("failed to read {}", trash.display()))?;
-                let path = entry.path();
-                let metadata = fs::symlink_metadata(&path)
-                    .with_context(|| format!("failed to inspect {}", path.display()))?;
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    bail!("tool artifact trash contains an unsafe entry");
-                }
-                if now_unix_ms.saturating_sub(metadata_modified_at_unix_ms(&metadata))
-                    < trash_grace_ms
-                {
-                    continue;
-                }
-                let bytes = safe_directory_file_bytes(&path)?;
-                fs::remove_dir_all(&path)
-                    .with_context(|| format!("failed to prune {}", path.display()))?;
-                if let Some(tombstone_id) = path.file_name().and_then(|name| name.to_str()) {
-                    removed_tombstone_ids.insert(tombstone_id.to_owned());
-                }
-                removed_bytes = removed_bytes.saturating_add(bytes);
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for trash pruning");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut trash_roots = vec![self.legacy_root().join("trash")];
+            let staging_trash = self.legacy_staging_root().join("trash");
+            if staging_trash != trash_roots[0] {
+                trash_roots.push(staging_trash);
             }
-            sync_dir(&trash)?;
+            let mut removed_tombstone_ids = BTreeSet::new();
+            let mut removed_bytes = 0u64;
+            for trash in trash_roots {
+                let entries = match fs::read_dir(&trash) {
+                    Ok(entries) => entries,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("failed to read {}", trash.display()));
+                    }
+                };
+                for entry in entries {
+                    let entry =
+                        entry.with_context(|| format!("failed to read {}", trash.display()))?;
+                    let path = entry.path();
+                    let metadata = fs::symlink_metadata(&path)
+                        .with_context(|| format!("failed to inspect {}", path.display()))?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        bail!("tool artifact trash contains an unsafe entry");
+                    }
+                    if now_unix_ms.saturating_sub(metadata_modified_at_unix_ms(&metadata))
+                        < trash_grace_ms
+                    {
+                        continue;
+                    }
+                    let bytes = safe_directory_file_bytes(&path)?;
+                    fs::remove_dir_all(&path)
+                        .with_context(|| format!("failed to prune {}", path.display()))?;
+                    if let Some(tombstone_id) = path.file_name().and_then(|name| name.to_str()) {
+                        removed_tombstone_ids.insert(tombstone_id.to_owned());
+                    }
+                    removed_bytes = removed_bytes.saturating_add(bytes);
+                }
+                sync_dir(&trash)?;
+            }
+            Ok(ToolArtifactTrashPruneReportV1 {
+                removed_tombstones: removed_tombstone_ids.len(),
+                removed_bytes,
+            })
         }
-        Ok(ToolArtifactTrashPruneReportV1 {
-            removed_tombstones: removed_tombstone_ids.len(),
-            removed_bytes,
-        })
     }
 
     /// Writes a rebuildable lifecycle cache for fork/GC bookkeeping.
@@ -3321,12 +3371,17 @@ impl ToolArtifactStore {
         if let Some(backend) = &self.backend {
             return backend.bind_source_event(artifact_ref, source_event_id);
         }
-        let refs_dir = self.legacy_root().join("refs");
-        self.ensure_root_dir()?;
-        create_private_dir(&refs_dir)?;
-        let path = refs_dir.join(format!("{}.event", artifact_ref.artifact_id));
-        publish_private_noclobber(&refs_dir, &path, source_event_id.as_bytes())?;
-        sync_dir(&refs_dir)
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for source binding");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let refs_dir = self.legacy_root().join("refs");
+            self.ensure_root_dir()?;
+            create_private_dir(&refs_dir)?;
+            let path = refs_dir.join(format!("{}.event", artifact_ref.artifact_id));
+            publish_private_noclobber(&refs_dir, &path, source_event_id.as_bytes())?;
+            sync_dir(&refs_dir)
+        }
     }
 
     /// Reads the rebuildable lifecycle binding used by fork/GC code.
@@ -3337,26 +3392,31 @@ impl ToolArtifactStore {
         if let Some(backend) = &self.backend {
             return backend.source_event_id(artifact_ref);
         }
-        let path = self
-            .legacy_root()
-            .join("refs")
-            .join(format!("{}.event", artifact_ref.artifact_id));
-        let metadata = fs::symlink_metadata(&path).with_context(|| {
-            format!(
-                "failed to inspect source binding {}",
-                artifact_ref.artifact_id
-            )
-        })?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 256 {
-            bail!("tool artifact source binding is not a bounded plain file");
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for source binding");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let path = self
+                .legacy_root()
+                .join("refs")
+                .join(format!("{}.event", artifact_ref.artifact_id));
+            let metadata = fs::symlink_metadata(&path).with_context(|| {
+                format!(
+                    "failed to inspect source binding {}",
+                    artifact_ref.artifact_id
+                )
+            })?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 256 {
+                bail!("tool artifact source binding is not a bounded plain file");
+            }
+            let value = fs::read_to_string(&path).with_context(|| {
+                format!("failed to read source binding {}", artifact_ref.artifact_id)
+            })?;
+            if value.trim().is_empty() {
+                bail!("tool artifact source binding is empty");
+            }
+            Ok(value)
         }
-        let value = fs::read_to_string(&path).with_context(|| {
-            format!("failed to read source binding {}", artifact_ref.artifact_id)
-        })?;
-        if value.trim().is_empty() {
-            bail!("tool artifact source binding is empty");
-        }
-        Ok(value)
     }
 
     /// Reads one bounded typed page by opaque reference.
@@ -3371,70 +3431,75 @@ impl ToolArtifactStore {
             page.validate()?;
             return Ok(page);
         }
-        let read_lock = self.open_ref_lock(artifact_ref)?;
-        read_lock
-            .try_lock_shared()
-            .context("tool artifact is being retired")?;
-        let descriptor = self.resolve(artifact_ref)?;
-        let path = self.blob_path(&descriptor.content_sha256)?;
-        let blob_hash = hash_file(&path, TOOL_ARTIFACT_MAX_BYTES as u64)
-            .with_context(|| format!("failed to verify tool artifact {}", path.display()))?;
-        if blob_hash != descriptor.content_sha256 {
-            bail!("tool artifact content hash mismatch");
-        }
-        let selected = match &selector {
-            ToolArtifactSelectorV1::ByteSlice { offset, limit } => {
-                read_byte_slice(&path, *offset, *limit)?
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for artifact paging");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let read_lock = self.open_ref_lock(artifact_ref)?;
+            read_lock
+                .try_lock_shared()
+                .context("tool artifact is being retired")?;
+            let descriptor = self.resolve(artifact_ref)?;
+            let path = self.blob_path(&descriptor.content_sha256)?;
+            let blob_hash = hash_file(&path, TOOL_ARTIFACT_MAX_BYTES as u64)
+                .with_context(|| format!("failed to verify tool artifact {}", path.display()))?;
+            if blob_hash != descriptor.content_sha256 {
+                bail!("tool artifact content hash mismatch");
             }
-            ToolArtifactSelectorV1::LinePage {
-                start_line,
-                line_count,
-            } => {
-                if descriptor.encoding != ToolArtifactEncoding::Utf8 {
-                    bail!("line paging requires a UTF-8 tool artifact");
+            let selected = match &selector {
+                ToolArtifactSelectorV1::ByteSlice { offset, limit } => {
+                    read_byte_slice(&path, *offset, *limit)?
                 }
-                read_line_page(&path, *start_line, *line_count)?
-            }
-            ToolArtifactSelectorV1::SearchLiteral {
-                query,
-                start_offset,
-                max_matches,
-                context_lines,
-            } => {
-                if descriptor.encoding != ToolArtifactEncoding::Utf8 {
-                    bail!("literal search requires a UTF-8 tool artifact");
+                ToolArtifactSelectorV1::LinePage {
+                    start_line,
+                    line_count,
+                } => {
+                    if descriptor.encoding != ToolArtifactEncoding::Utf8 {
+                        bail!("line paging requires a UTF-8 tool artifact");
+                    }
+                    read_line_page(&path, *start_line, *line_count)?
                 }
-                read_literal_search(&path, query, *start_offset, *max_matches, *context_lines)?
-            }
-        };
-        let (body, body_encoding) = if descriptor.encoding == ToolArtifactEncoding::Utf8 {
-            match String::from_utf8(selected.bytes.clone()) {
-                Ok(body) => (body, ToolArtifactPageEncoding::Utf8),
-                Err(_) => (
+                ToolArtifactSelectorV1::SearchLiteral {
+                    query,
+                    start_offset,
+                    max_matches,
+                    context_lines,
+                } => {
+                    if descriptor.encoding != ToolArtifactEncoding::Utf8 {
+                        bail!("literal search requires a UTF-8 tool artifact");
+                    }
+                    read_literal_search(&path, query, *start_offset, *max_matches, *context_lines)?
+                }
+            };
+            let (body, body_encoding) = if descriptor.encoding == ToolArtifactEncoding::Utf8 {
+                match String::from_utf8(selected.bytes.clone()) {
+                    Ok(body) => (body, ToolArtifactPageEncoding::Utf8),
+                    Err(_) => (
+                        BASE64_STANDARD.encode(&selected.bytes),
+                        ToolArtifactPageEncoding::Base64,
+                    ),
+                }
+            } else {
+                (
                     BASE64_STANDARD.encode(&selected.bytes),
                     ToolArtifactPageEncoding::Base64,
-                ),
-            }
-        } else {
-            (
-                BASE64_STANDARD.encode(&selected.bytes),
-                ToolArtifactPageEncoding::Base64,
-            )
-        };
-        let page = ToolArtifactPageV1 {
-            artifact_ref: artifact_ref.clone(),
-            selector,
-            body,
-            body_encoding,
-            returned_bytes: selected.bytes.len() as u32,
-            page_sha256: stable_event_hash(&selected.bytes),
-            artifact_sha256: descriptor.content_sha256,
-            eof: selected.eof,
-            match_count: selected.match_count,
-            next_selector: selected.next_selector,
-        };
-        page.validate()?;
-        Ok(page)
+                )
+            };
+            let page = ToolArtifactPageV1 {
+                artifact_ref: artifact_ref.clone(),
+                selector,
+                body,
+                body_encoding,
+                returned_bytes: selected.bytes.len() as u32,
+                page_sha256: stable_event_hash(&selected.bytes),
+                artifact_sha256: descriptor.content_sha256,
+                eof: selected.eof,
+                match_count: selected.match_count,
+                next_selector: selected.next_selector,
+            };
+            page.validate()?;
+            Ok(page)
+        }
     }
 
     /// Builds a bounded page from bytes supplied by a physical artifact backend. This keeps
@@ -3540,16 +3605,23 @@ impl ToolArtifactStore {
                 Err(_) => ToolArtifactAvailability::Missing,
             };
         }
-        let Ok(path) = self.blob_path(&descriptor.content_sha256) else {
-            return ToolArtifactAvailability::PolicyRevoked;
-        };
-        if !path.exists() {
-            return ToolArtifactAvailability::Missing;
-        }
-        match hash_file(&path, TOOL_ARTIFACT_MAX_BYTES as u64) {
-            Ok(hash) if hash == descriptor.content_sha256 => ToolArtifactAvailability::Available,
-            Ok(_) => ToolArtifactAvailability::HashMismatch,
-            Err(_) => ToolArtifactAvailability::HashMismatch,
+        #[cfg(not(any(test, feature = "test-support")))]
+        return ToolArtifactAvailability::Missing;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let Ok(path) = self.blob_path(&descriptor.content_sha256) else {
+                return ToolArtifactAvailability::PolicyRevoked;
+            };
+            if !path.exists() {
+                return ToolArtifactAvailability::Missing;
+            }
+            match hash_file(&path, TOOL_ARTIFACT_MAX_BYTES as u64) {
+                Ok(hash) if hash == descriptor.content_sha256 => {
+                    ToolArtifactAvailability::Available
+                }
+                Ok(_) => ToolArtifactAvailability::HashMismatch,
+                Err(_) => ToolArtifactAvailability::HashMismatch,
+            }
         }
     }
 
@@ -3575,18 +3647,21 @@ impl ToolArtifactStore {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn legacy_root(&self) -> &Path {
         self.root
             .as_deref()
             .expect("legacy artifact backend root is unavailable on a pathless facade")
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn legacy_staging_root(&self) -> &Path {
         self.staging_root
             .as_deref()
             .expect("legacy artifact backend staging root is unavailable on a pathless facade")
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn ensure_root_dir(&self) -> Result<()> {
         let session_dir = self
             .legacy_root()
@@ -3602,6 +3677,7 @@ impl ToolArtifactStore {
         create_private_dir(self.legacy_staging_root())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn open_ref_lock(&self, artifact_ref: &ToolArtifactRefV1) -> Result<File> {
         artifact_ref.validate()?;
         let locks_dir = self.legacy_root().join("locks");
@@ -3635,88 +3711,96 @@ impl ToolArtifactStore {
         if let Some(backend) = &self.backend {
             return backend.publish_blob(content_sha256, bytes);
         }
-        let blob_path = self.blob_path(content_sha256)?;
-        let blob_dir = blob_path
-            .parent()
-            .context("tool artifact blob path has no parent")?;
-        let staging_dir = self.legacy_staging_root().join("staging");
-        self.ensure_root_dir()?;
-        create_private_dir(&self.legacy_root().join("blobs"))?;
-        create_private_dir(blob_dir)?;
-        create_private_dir(&staging_dir)?;
-        let usage_lock = self.open_blob_usage_lock()?;
-        usage_lock
-            .lock()
-            .context("failed to lock tool artifact blob usage ledger")?;
-        if blob_path.exists() {
-            if hash_file(&blob_path, TOOL_ARTIFACT_MAX_BYTES as u64)? != content_sha256 {
-                bail!("existing tool artifact blob hash mismatch");
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for blob publication");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let blob_path = self.blob_path(content_sha256)?;
+            let blob_dir = blob_path
+                .parent()
+                .context("tool artifact blob path has no parent")?;
+            let staging_dir = self.legacy_staging_root().join("staging");
+            self.ensure_root_dir()?;
+            create_private_dir(&self.legacy_root().join("blobs"))?;
+            create_private_dir(blob_dir)?;
+            create_private_dir(&staging_dir)?;
+            let usage_lock = self.open_blob_usage_lock()?;
+            usage_lock
+                .lock()
+                .context("failed to lock tool artifact blob usage ledger")?;
+            if blob_path.exists() {
+                if hash_file(&blob_path, TOOL_ARTIFACT_MAX_BYTES as u64)? != content_sha256 {
+                    bail!("existing tool artifact blob hash mismatch");
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        let current_usage = self.load_or_reconcile_blob_usage()?;
-        if current_usage.saturating_add(bytes.len() as u64) > TOOL_ARTIFACT_SESSION_BUDGET_BYTES {
-            bail!(
-                "tool artifact session budget exceeded: {} + {} > {}",
-                current_usage,
-                bytes.len(),
-                TOOL_ARTIFACT_SESSION_BUDGET_BYTES
-            );
-        }
-        let reserved_usage = current_usage.saturating_add(bytes.len() as u64);
-        // Reserve before publishing. A process crash may conservatively over-count until the
-        // event-driven GC/recovery reconciliation, but can never under-count committed bytes.
-        // Ordinary returned failures roll this reservation back under the same exclusive lock.
-        self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
-            schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
-            bytes: reserved_usage,
-            dirty: false,
-        })?;
-        let publish_result = (|| -> Result<()> {
-            let staging_path = staging_dir.join(format!("{}.part", Uuid::new_v4().simple()));
-            let mut staging = create_private_file(&staging_path)?;
-            staging
-                .write_all(bytes)
-                .with_context(|| format!("failed to write {}", staging_path.display()))?;
-            staging
-                .sync_all()
-                .with_context(|| format!("failed to sync {}", staging_path.display()))?;
-            drop(staging);
-            match fs::hard_link(&staging_path, &blob_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if hash_file(&blob_path, TOOL_ARTIFACT_MAX_BYTES as u64)? != content_sha256 {
+            let current_usage = self.load_or_reconcile_blob_usage()?;
+            if current_usage.saturating_add(bytes.len() as u64) > TOOL_ARTIFACT_SESSION_BUDGET_BYTES
+            {
+                bail!(
+                    "tool artifact session budget exceeded: {} + {} > {}",
+                    current_usage,
+                    bytes.len(),
+                    TOOL_ARTIFACT_SESSION_BUDGET_BYTES
+                );
+            }
+            let reserved_usage = current_usage.saturating_add(bytes.len() as u64);
+            // Reserve before publishing. A process crash may conservatively over-count until the
+            // event-driven GC/recovery reconciliation, but can never under-count committed bytes.
+            // Ordinary returned failures roll this reservation back under the same exclusive lock.
+            self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
+                schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
+                bytes: reserved_usage,
+                dirty: false,
+            })?;
+            let publish_result = (|| -> Result<()> {
+                let staging_path = staging_dir.join(format!("{}.part", Uuid::new_v4().simple()));
+                let mut staging = create_private_file(&staging_path)?;
+                staging
+                    .write_all(bytes)
+                    .with_context(|| format!("failed to write {}", staging_path.display()))?;
+                staging
+                    .sync_all()
+                    .with_context(|| format!("failed to sync {}", staging_path.display()))?;
+                drop(staging);
+                match fs::hard_link(&staging_path, &blob_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if hash_file(&blob_path, TOOL_ARTIFACT_MAX_BYTES as u64)? != content_sha256
+                        {
+                            let _ = fs::remove_file(&staging_path);
+                            bail!("racing tool artifact blob hash mismatch");
+                        }
+                    }
+                    Err(error) => {
                         let _ = fs::remove_file(&staging_path);
-                        bail!("racing tool artifact blob hash mismatch");
+                        return Err(error).with_context(|| {
+                            format!("failed to publish tool artifact {}", blob_path.display())
+                        });
                     }
                 }
-                Err(error) => {
-                    let _ = fs::remove_file(&staging_path);
-                    return Err(error).with_context(|| {
-                        format!("failed to publish tool artifact {}", blob_path.display())
-                    });
-                }
+                let _ = fs::remove_file(&staging_path);
+                harden_private_file(&blob_path)?;
+                sync_dir(blob_dir)
+            })();
+            if let Err(error) = publish_result {
+                let rollback = self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
+                    schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
+                    bytes: current_usage,
+                    dirty: false,
+                });
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(error.context(format!(
+                        "tool artifact quota rollback also failed: {rollback_error:#}"
+                    ))),
+                };
             }
-            let _ = fs::remove_file(&staging_path);
-            harden_private_file(&blob_path)?;
-            sync_dir(blob_dir)
-        })();
-        if let Err(error) = publish_result {
-            let rollback = self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
-                schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
-                bytes: current_usage,
-                dirty: false,
-            });
-            return match rollback {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(error.context(format!(
-                    "tool artifact quota rollback also failed: {rollback_error:#}"
-                ))),
-            };
+            Ok(())
         }
-        Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn open_blob_usage_lock(&self) -> Result<File> {
         self.ensure_root_dir()?;
         let path = self.legacy_root().join("usage.lock");
@@ -3740,6 +3824,7 @@ impl ToolArtifactStore {
         Ok(file)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn load_or_reconcile_blob_usage(&self) -> Result<u64> {
         let path = self.legacy_root().join("usage.json");
         let ledger = match fs::symlink_metadata(&path) {
@@ -3776,6 +3861,7 @@ impl ToolArtifactStore {
         Ok(bytes)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn persist_blob_usage_ledger(&self, ledger: ToolArtifactBlobUsageLedgerV1) -> Result<()> {
         let bytes =
             serde_json::to_vec(&ledger).context("failed to encode tool artifact blob usage")?;
@@ -3787,18 +3873,24 @@ impl ToolArtifactStore {
         if let Some(backend) = &self.backend {
             return backend.publish_descriptor_manifest(descriptor);
         }
-        let path = self.ref_path(&descriptor.artifact_ref)?;
-        let refs_dir = path
-            .parent()
-            .context("tool artifact ref path has no parent")?;
-        self.ensure_root_dir()?;
-        create_private_dir(refs_dir)?;
-        let bytes =
-            serde_json::to_vec(descriptor).context("failed to encode tool artifact manifest")?;
-        publish_private_noclobber(refs_dir, &path, &bytes)?;
-        sync_dir(refs_dir)
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for descriptor publication");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let path = self.ref_path(&descriptor.artifact_ref)?;
+            let refs_dir = path
+                .parent()
+                .context("tool artifact ref path has no parent")?;
+            self.ensure_root_dir()?;
+            create_private_dir(refs_dir)?;
+            let bytes = serde_json::to_vec(descriptor)
+                .context("failed to encode tool artifact manifest")?;
+            publish_private_noclobber(refs_dir, &path, &bytes)?;
+            sync_dir(refs_dir)
+        }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn ref_path(&self, artifact_ref: &ToolArtifactRefV1) -> Result<PathBuf> {
         artifact_ref.validate()?;
         Ok(self
@@ -3807,6 +3899,7 @@ impl ToolArtifactStore {
             .join(format!("{}.json", artifact_ref.artifact_id)))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn blob_path(&self, content_sha256: &str) -> Result<PathBuf> {
         let digest = content_sha256
             .strip_prefix("sha256:")
@@ -3821,6 +3914,7 @@ impl ToolArtifactStore {
             .join(format!("{digest}.blob")))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn grace_expired_orphan_blobs(
         &self,
         live_hashes: &BTreeSet<String>,
@@ -3885,6 +3979,7 @@ impl ToolArtifactStore {
         Ok(candidates)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn grace_expired_staging_files(
         &self,
         now_unix_ms: u64,
@@ -3952,7 +4047,9 @@ struct ProcessCaptureState {
     managed: Option<Box<dyn ToolArtifactProcessCaptureBackendV1>>,
     stdout_staging: Option<std::fs::File>,
     stderr_staging: Option<std::fs::File>,
+    #[cfg(any(test, feature = "test-support"))]
     stdout_staging_path: Option<std::path::PathBuf>,
+    #[cfg(any(test, feature = "test-support"))]
     stderr_staging_path: Option<std::path::PathBuf>,
     stdout_bytes: u64,
     stderr_bytes: u64,
@@ -3979,6 +4076,7 @@ impl Drop for ToolArtifactCaptureSink {
         // staging creation). Close the descriptors first so removal also works on platforms
         // that cannot delete an open file, then best-effort remove the tracked paths. On unix
         // the entries were already unlinked at creation, so this is a no-op safety net.
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(state) = self.process.as_mut() {
             state.stdout_staging.take();
             state.stderr_staging.take();
@@ -4006,10 +4104,12 @@ impl PartialEq for ToolArtifactCaptureSink {
 
 /// RFC-0062 16.2: RAII removal of process staging files on every finalize path (success or
 /// error); the sink Drop covers sinks that never reach finalize.
+#[cfg(any(test, feature = "test-support"))]
 struct StagingCleanupGuard {
     paths: Vec<std::path::PathBuf>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StagingCleanupGuard {
     fn new(stdout: Option<std::path::PathBuf>, stderr: Option<std::path::PathBuf>) -> Self {
         Self {
@@ -4018,6 +4118,7 @@ impl StagingCleanupGuard {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for StagingCleanupGuard {
     fn drop(&mut self) {
         for path in &self.paths {
@@ -4045,7 +4146,9 @@ impl ToolArtifactCaptureSink {
                 managed: Some(managed),
                 stdout_staging: None,
                 stderr_staging: None,
+                #[cfg(any(test, feature = "test-support"))]
                 stdout_staging_path: None,
+                #[cfg(any(test, feature = "test-support"))]
                 stderr_staging_path: None,
                 stdout_bytes: 0,
                 stderr_bytes: 0,
@@ -4055,65 +4158,72 @@ impl ToolArtifactCaptureSink {
             });
             return Ok(sink);
         }
-        self.store.ensure_root_dir()?;
-        let staging_dir = self.store.legacy_staging_root().join("staging");
-        create_private_dir(&staging_dir)?;
-        // RFC-0062 16.2: on Windows the directory must be protected BEFORE any file is created,
-        // otherwise a wide parent ACL lets other principals open the staging files while they
-        // still contain policy-unredacted bytes and keep the handle past the later DACL update.
-        // Files then inherit this owner-only DACL at creation; per-file verification follows.
-        #[cfg(windows)]
-        crate::secure_private_path_permissions(&staging_dir)?;
-        let stdout_path = staging_dir.join(format!("{}.stdout.part", Uuid::new_v4().simple()));
-        let stderr_path = staging_dir.join(format!("{}.stderr.part", Uuid::new_v4().simple()));
-        let stdout_staging = open_read_write_private_file(&stdout_path)?;
-        // RFC-0062 16.2: unlink-after-open makes staging crash-safe on unix — the directory
-        // entry disappears immediately, so process crash / kill -9 / power loss cannot leave
-        // policy-unredacted raw bytes on disk; the open descriptor keeps the file alive for
-        // the capture lifetime. On platforms that cannot unlink an open file the paths stay
-        // tracked and are removed by finalize/Drop/grace GC instead.
-        #[cfg(unix)]
-        if let Err(error) = std::fs::remove_file(&stdout_path) {
-            return Err(error).with_context(|| {
-                format!("failed to unlink staged capture {}", stdout_path.display())
-            });
-        }
-        let stderr_staging = match open_read_write_private_file(&stderr_path) {
-            Ok(file) => file,
-            Err(error) => {
-                #[cfg(unix)]
-                let _ = std::fs::remove_file(&stderr_path);
-                return Err(error);
-            }
-        };
-        #[cfg(unix)]
-        if let Err(error) = std::fs::remove_file(&stderr_path) {
-            return Err(error).with_context(|| {
-                format!("failed to unlink staged capture {}", stderr_path.display())
-            });
-        }
-        // RFC-0062 16.2: per-file DACL verification on Windows. The directory was protected
-        // before creation so files inherit the owner-only ACL; this verifies each file and
-        // covers the case where inheritance was not applied.
-        #[cfg(windows)]
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for process capture");
+        #[cfg(any(test, feature = "test-support"))]
         {
-            crate::secure_private_path_permissions(&stdout_path)?;
-            crate::secure_private_path_permissions(&stderr_path)?;
+            self.store.ensure_root_dir()?;
+            let staging_dir = self.store.legacy_staging_root().join("staging");
+            create_private_dir(&staging_dir)?;
+            // RFC-0062 16.2: on Windows the directory must be protected BEFORE any file is created,
+            // otherwise a wide parent ACL lets other principals open the staging files while they
+            // still contain policy-unredacted bytes and keep the handle past the later DACL update.
+            // Files then inherit this owner-only DACL at creation; per-file verification follows.
+            #[cfg(windows)]
+            crate::secure_private_path_permissions(&staging_dir)?;
+            let stdout_path = staging_dir.join(format!("{}.stdout.part", Uuid::new_v4().simple()));
+            let stderr_path = staging_dir.join(format!("{}.stderr.part", Uuid::new_v4().simple()));
+            let stdout_staging = open_read_write_private_file(&stdout_path)?;
+            // RFC-0062 16.2: unlink-after-open makes staging crash-safe on unix — the directory
+            // entry disappears immediately, so process crash / kill -9 / power loss cannot leave
+            // policy-unredacted raw bytes on disk; the open descriptor keeps the file alive for
+            // the capture lifetime. On platforms that cannot unlink an open file the paths stay
+            // tracked and are removed by finalize/Drop/grace GC instead.
+            #[cfg(unix)]
+            if let Err(error) = std::fs::remove_file(&stdout_path) {
+                return Err(error).with_context(|| {
+                    format!("failed to unlink staged capture {}", stdout_path.display())
+                });
+            }
+            let stderr_staging = match open_read_write_private_file(&stderr_path) {
+                Ok(file) => file,
+                Err(error) => {
+                    #[cfg(unix)]
+                    let _ = std::fs::remove_file(&stderr_path);
+                    return Err(error);
+                }
+            };
+            #[cfg(unix)]
+            if let Err(error) = std::fs::remove_file(&stderr_path) {
+                return Err(error).with_context(|| {
+                    format!("failed to unlink staged capture {}", stderr_path.display())
+                });
+            }
+            // RFC-0062 16.2: per-file DACL verification on Windows. The directory was protected
+            // before creation so files inherit the owner-only ACL; this verifies each file and
+            // covers the case where inheritance was not applied.
+            #[cfg(windows)]
+            {
+                crate::secure_private_path_permissions(&stdout_path)?;
+                crate::secure_private_path_permissions(&stderr_path)?;
+            }
+            sink.process = Some(ProcessCaptureState {
+                config,
+                managed: None,
+                stdout_staging: Some(stdout_staging),
+                stderr_staging: Some(stderr_staging),
+                #[cfg(any(test, feature = "test-support"))]
+                stdout_staging_path: Some(stdout_path),
+                #[cfg(any(test, feature = "test-support"))]
+                stderr_staging_path: Some(stderr_path),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                staged_bytes: 0,
+            });
+            Ok(sink)
         }
-        sink.process = Some(ProcessCaptureState {
-            config,
-            managed: None,
-            stdout_staging: Some(stdout_staging),
-            stderr_staging: Some(stderr_staging),
-            stdout_staging_path: Some(stdout_path),
-            stderr_staging_path: Some(stderr_path),
-            stdout_bytes: 0,
-            stderr_bytes: 0,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            staged_bytes: 0,
-        });
-        Ok(sink)
     }
 
     /// RFC-0062 10.2: marks the capture as storage-failed so settlement reports Unavailable.
@@ -4200,6 +4310,7 @@ impl ToolArtifactCaptureSink {
         };
         // Remove staging files on every path out of this function, including success. The sink
         // Drop is the safety net for sinks that never reach finalize.
+        #[cfg(any(test, feature = "test-support"))]
         let _staging_cleanup = StagingCleanupGuard::new(
             state.stdout_staging_path.take(),
             state.stderr_staging_path.take(),
@@ -4479,6 +4590,7 @@ fn bounded_artifact_bytes(bytes: &[u8]) -> BoundedArtifactBytes {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn hash_file(path: &Path, max_bytes: u64) -> Result<String> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect tool artifact {}", path.display()))?;
@@ -4501,6 +4613,7 @@ fn hash_file(path: &Path, max_bytes: u64) -> Result<String> {
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn directory_file_bytes(root: &Path) -> Result<u64> {
     let mut pending = vec![root.to_path_buf()];
     let mut total = 0_u64;
@@ -4535,6 +4648,7 @@ fn directory_file_bytes(root: &Path) -> Result<u64> {
     Ok(total)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn safe_directory_file_bytes(root: &Path) -> Result<u64> {
     let mut pending = vec![root.to_path_buf()];
     let mut total = 0u64;
@@ -4573,6 +4687,7 @@ struct SelectedArtifactBytes {
     next_selector: Option<ToolArtifactSelectorV1>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn read_byte_slice(path: &Path, offset: u64, limit: u32) -> Result<SelectedArtifactBytes> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -4600,6 +4715,7 @@ fn read_byte_slice(path: &Path, offset: u64, limit: u32) -> Result<SelectedArtif
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn read_line_page(path: &Path, start_line: u64, line_count: u32) -> Result<SelectedArtifactBytes> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -4739,6 +4855,7 @@ fn read_line_page_from_bytes(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn read_literal_search(
     path: &Path,
     query: &str,
@@ -4990,6 +5107,7 @@ fn selector_reserved_bytes(selector: &ToolArtifactSelectorV1) -> u64 {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn publish_private_noclobber(dir: &Path, destination: &Path, bytes: &[u8]) -> Result<()> {
     let staging = dir.join(format!(".{}.part", Uuid::new_v4().simple()));
     let mut file = create_private_file(&staging)?;
@@ -5024,6 +5142,7 @@ fn current_unix_ms() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn metadata_modified_at_unix_ms(metadata: &fs::Metadata) -> u64 {
     metadata
         .modified()
@@ -5076,6 +5195,7 @@ fn next_char_boundary(value: &str, min_index: usize) -> usize {
     index
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn create_private_dir(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -5098,6 +5218,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
+#[cfg(any(test, feature = "test-support"))]
 fn create_private_file(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -5112,6 +5233,7 @@ fn create_private_file(path: &Path) -> Result<File> {
 
 /// Owner-only read+write staging file used by harness-owned process capture.
 #[cfg(unix)]
+#[cfg(any(test, feature = "test-support"))]
 fn open_read_write_private_file(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -5126,6 +5248,7 @@ fn open_read_write_private_file(path: &Path) -> Result<File> {
 }
 
 #[cfg(not(unix))]
+#[cfg(any(test, feature = "test-support"))]
 fn open_read_write_private_file(path: &Path) -> Result<File> {
     #[cfg(windows)]
     {
@@ -5162,6 +5285,7 @@ fn open_read_write_private_file(path: &Path) -> Result<File> {
 }
 
 #[cfg(not(unix))]
+#[cfg(any(test, feature = "test-support"))]
 fn create_private_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .write(true)
@@ -5173,6 +5297,7 @@ fn create_private_file(path: &Path) -> Result<File> {
 }
 
 #[cfg(unix)]
+#[cfg(any(test, feature = "test-support"))]
 fn harden_private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -5181,11 +5306,13 @@ fn harden_private_dir(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg(any(test, feature = "test-support"))]
 fn harden_private_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
+#[cfg(any(test, feature = "test-support"))]
 fn harden_private_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -5194,11 +5321,13 @@ fn harden_private_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg(any(test, feature = "test-support"))]
 fn harden_private_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
+#[cfg(any(test, feature = "test-support"))]
 fn sync_dir(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("failed to open tool artifact dir {}", path.display()))?
@@ -5207,6 +5336,7 @@ fn sync_dir(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg(any(test, feature = "test-support"))]
 fn sync_dir(_path: &Path) -> Result<()> {
     Ok(())
 }

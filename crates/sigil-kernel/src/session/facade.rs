@@ -624,11 +624,7 @@ impl Session {
 
     #[must_use]
     pub fn tool_artifact_store(&self) -> Option<ToolArtifactStore> {
-        self.tool_artifact_store_override.clone().or_else(|| {
-            self.store
-                .as_ref()
-                .map(ToolArtifactStore::for_session_store)
-        })
+        self.tool_artifact_store_override.clone()
     }
 
     /// Persists one tool result and its body-free receipts/provenance as one crash-safe bundle.

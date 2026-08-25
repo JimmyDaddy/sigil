@@ -26,6 +26,7 @@ uuid.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

@@ -24,7 +24,7 @@ use sigil_kernel::{
     PublicRouteRecoveryCode, PublicRunEvent, PublicRunEventKind, RootConfig, SecretString,
     SessionLogEntry, SessionRef, ToolAnalysisStatus, ToolApproval, ToolApprovalContext,
     ToolApprovalUserDecision, ToolArtifactAvailability, ToolArtifactDescriptorV1,
-    ToolArtifactEncoding, ToolArtifactRefV1, ToolArtifactStore, ToolCall, ToolOperation,
+    ToolArtifactEncoding, ToolArtifactRefV1, ToolCall, ToolOperation,
     ToolOutputArchivedArtifactBindingV1, ToolPermissionEffect, ToolPermissionSummary, ToolSpec,
     ToolSubject, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
@@ -1630,9 +1630,7 @@ fn authority_artifact_store_for_session(
             == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
     });
     let Some(composition) = services.authority_composition() else {
-        return Some(AuthorityArtifactStoreLease::legacy(
-            ToolArtifactStore::for_session_path(Path::new(&session.session_log_path)),
-        ));
+        return None;
     };
     let staging = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;
     let store = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore;
@@ -1640,9 +1638,7 @@ fn authority_artifact_store_for_session(
         || !composition.declared_channels.contains(&staging)
         || !composition.declared_channels.contains(&store)
     {
-        return Some(AuthorityArtifactStoreLease::legacy(
-            ToolArtifactStore::for_session_path(Path::new(&session.session_log_path)),
-        ));
+        return None;
     }
     let key = Path::new(&session.session_log_path)
         .file_stem()
@@ -1658,31 +1654,16 @@ fn authority_artifact_store_for_session(
 }
 
 struct AuthorityArtifactStoreLease {
-    managed: Option<sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
-    legacy: Option<ToolArtifactStore>,
+    managed: sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1,
 }
 
 impl AuthorityArtifactStoreLease {
     fn managed(lease: sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1) -> Self {
-        Self {
-            managed: Some(lease),
-            legacy: None,
-        }
+        Self { managed: lease }
     }
 
-    fn legacy(store: ToolArtifactStore) -> Self {
-        Self {
-            managed: None,
-            legacy: Some(store),
-        }
-    }
-
-    fn store(&self) -> ToolArtifactStore {
-        self.managed
-            .as_ref()
-            .map(sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::store)
-            .or_else(|| self.legacy.clone())
-            .expect("artifact store lease must contain a store")
+    fn store(&self) -> sigil_kernel::ToolArtifactStore {
+        self.managed.store()
     }
 }
 

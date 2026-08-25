@@ -127,7 +127,7 @@ def _mask_rust_non_code(lines: list[str]) -> list[str]:
 
 
 class _Ctx:
-    """Per-file lexical context for cfg(test) module detection."""
+    """Per-file lexical context for non-shipping test-support code detection."""
 
     def __init__(self, text: str):
         self.lines = text.splitlines()
@@ -143,7 +143,7 @@ class _Ctx:
         for index, line in enumerate(self.code_lines):
             if any(brace_depth >= scope for scope in test_scope_depths):
                 test_lines[index] = True
-            if re.search(r"#\[cfg\(test\)\]", line) or re.search(
+            if re.search(r"#\[cfg\((?:test|any\(test,\s*feature\s*=\s*)\)\)\]", line) or re.search(
                 r"\bmod\s+tests\b", line
             ):
                 pending_test_item = True
