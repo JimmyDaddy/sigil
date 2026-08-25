@@ -31,6 +31,43 @@ def test_cfg_test_string_does_not_open_test_scope() -> None:
     assert not context.cfg_test_or_mod_tests(1)
 
 
+def test_standalone_cfg_test_item_is_excluded() -> None:
+    context = scanner._Ctx(
+        "#[cfg(test)]\n"
+        "fn test_only_writer() {\n"
+        "    let _ = File::create(\"test-only\");\n"
+        "}\n"
+        "File::create(\"shipping\");"
+    )
+    assert context.cfg_test_or_mod_tests(1)
+    assert context.cfg_test_or_mod_tests(2)
+    assert not context.cfg_test_or_mod_tests(4)
+
+
+def test_test_support_cfg_item_is_excluded() -> None:
+    context = scanner._Ctx(
+        '#[cfg(any(test, feature = "test-support"))]\n'
+        "fn test_support_writer() {\n"
+        "    let _ = File::create(\"test-only\");\n"
+        "}\n"
+        "File::create(\"shipping\");"
+    )
+    assert context.cfg_test_or_mod_tests(1)
+    assert context.cfg_test_or_mod_tests(2)
+    assert not context.cfg_test_or_mod_tests(4)
+
+
+def test_non_test_feature_cfg_item_remains_shipping() -> None:
+    context = scanner._Ctx(
+        '#[cfg(feature = "other-feature")]\n'
+        "fn shipping_feature_writer() {\n"
+        "    let _ = File::create(\"shipping\");\n"
+        "}"
+    )
+    assert not context.cfg_test_or_mod_tests(1)
+    assert not context.cfg_test_or_mod_tests(2)
+
+
 def test_filename_does_not_count_as_database_producer() -> None:
     sites = scanner.scan_sites(
         ROOT
@@ -75,4 +112,4 @@ if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("r71 inventory scanner tests: 6 passed")
+    print("r71 inventory scanner tests: 9 passed")

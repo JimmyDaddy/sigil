@@ -143,7 +143,12 @@ class _Ctx:
         for index, line in enumerate(self.code_lines):
             if any(brace_depth >= scope for scope in test_scope_depths):
                 test_lines[index] = True
-            if re.search(r"#\[cfg\((?:test|any\(test,\s*feature\s*=\s*)\)\)\]", line) or re.search(
+            standalone_cfg_test = re.search(r"#\[cfg\(\s*test\s*\)\]", line)
+            cfg_test_support = re.search(
+                r"#\[cfg\(\s*any\(\s*test\s*,\s*feature\s*=\s*\"test-support\"\s*\)\s*\)\]",
+                self.lines[index],
+            )
+            if standalone_cfg_test or cfg_test_support or re.search(
                 r"\bmod\s+tests\b", line
             ):
                 pending_test_item = True
