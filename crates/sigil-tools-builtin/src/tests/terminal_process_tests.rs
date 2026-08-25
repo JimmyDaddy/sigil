@@ -174,6 +174,21 @@ fn terminal_process_manager_permission_context_reports_missing_task() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn unavailable_managed_terminal_never_falls_back_to_direct_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let manager = TerminalProcessManager::new(temp.path())?
+        .with_managed_execution(Arc::new(crate::UnavailableManagedCommandExecutionPortV1));
+
+    let error = manager
+        .start(TerminalStartRequest::new("sleep 30"))
+        .await
+        .expect_err("unavailable managed terminal must reject startup");
+
+    assert!(error.to_string().contains("managed terminal launch failed"));
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn terminal_cwd_accepts_prefixed_workspace_paths_and_keeps_confinement() -> Result<()> {

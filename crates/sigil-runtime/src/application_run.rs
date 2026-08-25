@@ -6484,7 +6484,7 @@ where
                 ),
                 None,
                 None,
-                Some(managed_terminal),
+                managed_terminal,
             );
         }
         crate::register_agent_tools(&mut base_registry, root_config)?;

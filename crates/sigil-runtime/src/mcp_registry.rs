@@ -1270,7 +1270,7 @@ fn register_local_tools(
                     factory,
                 )),
                 Some(scratch_control.clone()),
-                Some(Arc::clone(&managed_terminal)),
+                Arc::clone(&managed_terminal),
             )
         }
         route => {
@@ -1288,7 +1288,7 @@ fn register_local_tools(
                 ),
                 sink.map(sigil_tools_builtin::TerminalLifecycleRoute::Bound),
                 Some(scratch_control.clone()),
-                Some(managed_terminal),
+                managed_terminal,
             )
         }
     };

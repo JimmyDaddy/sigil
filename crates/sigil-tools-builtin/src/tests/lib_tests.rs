@@ -38,6 +38,7 @@ use super::{
     TerminalStartRequest, TerminalStartTool, WriteFileTool, register_builtin_tools,
     register_builtin_tools_with_paths,
     register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle,
+    register_builtin_tools_with_unavailable_managed_execution,
 };
 
 use serial_test::serial;
@@ -4328,6 +4329,19 @@ fn register_builtin_tools_registers_multiple_tools() {
             .access,
         ToolAccess::Execute
     );
+}
+
+#[test]
+fn unavailable_registration_binds_fail_closed_terminal_port() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let mut registry = ToolRegistry::new();
+    let handles = register_builtin_tools_with_unavailable_managed_execution(
+        &mut registry,
+        BuiltinToolPaths::workspace_defaults(workspace.path()),
+    );
+
+    assert!(handles.terminal.managed_execution_is_bound());
+    Ok(())
 }
 
 #[serial]

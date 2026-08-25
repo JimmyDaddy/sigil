@@ -75,6 +75,13 @@ KERNEL_ARTIFACT_LEGACY_PATTERNS = (
      "kernel artifact store performs direct filesystem IO"),
 )
 
+PLUGIN_LEGACY_PATTERNS = (
+    (
+        re.compile(r"\bExecutionBackend\b"),
+        "production plugin hook retains the legacy ExecutionBackend seam",
+    ),
+)
+
 
 def package_for_path(relative: str) -> str:
     if relative.startswith("crates/"):
@@ -140,6 +147,13 @@ def check_source(root: Path) -> list[str]:
                         f"{relative}:{line_number}: {description}: {original.strip()}"
                     )
 
+        if relative == "crates/sigil-runtime/src/plugins.rs":
+            for pattern, description in PLUGIN_LEGACY_PATTERNS:
+                if pattern.search(code):
+                    findings.append(
+                        f"{relative}:{line_number}: {description}: {original.strip()}"
+                    )
+
         if "sigil_resource_authority::" in code or "sigil_sandbox::" in code:
             if relative not in PHYSICAL_IMPORT_ALLOWLIST.get(package, set()):
                 findings.append(
@@ -172,6 +186,55 @@ def check_source(root: Path) -> list[str]:
     return findings
 
 
+def check_registration_invariants(root: Path) -> list[str]:
+    """Check shipping registration ownership beyond legacy-symbol matching.
+
+    The terminal manager still contains a test fixture fallback, so this gate verifies the
+    production boundary that prevents shipping registration from constructing that fallback.
+    It also makes the plugin hook's managed-only constructor contract explicit.
+    """
+
+    findings: list[str] = []
+    registry_path = root / "crates/sigil-tools-builtin/src/registry.rs"
+    try:
+        registry_source = registry_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"failed to read terminal registration source: {error}"]
+
+    unavailable_start = registry_source.find(
+        "pub fn register_builtin_tools_with_unavailable_managed_execution"
+    )
+    if unavailable_start < 0:
+        findings.append("shipping terminal registration helper is missing")
+    else:
+        next_function = registry_source.find("\npub fn ", unavailable_start + 1)
+        helper = registry_source[
+            unavailable_start : next_function if next_function >= 0 else len(registry_source)
+        ]
+        expected_terminal_binding = re.compile(
+            r"TerminalExecutionConfig::default\(\),\s*"
+            r"None,\s*None,\s*"
+            r"Arc::new\(\s*crate::managed_execution::"
+            r"UnavailableManagedCommandExecutionPortV1\s*\)",
+            re.DOTALL,
+        )
+        if not expected_terminal_binding.search(helper):
+            findings.append(
+                "shipping unavailable builtin registration does not bind an unavailable managed terminal port"
+            )
+
+    full_signature = re.search(
+        r"pub fn register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal"
+        r"[\s\S]*?managed_terminal:\s*([^,\n]+)",
+        registry_source,
+    )
+    if not full_signature or "Option" in full_signature.group(1):
+        findings.append(
+            "shipping builtin registration still exposes an optional managed terminal port"
+        )
+    return findings
+
+
 def check_inventory(root: Path) -> list[str]:
     findings: list[str] = []
     for checker in (
@@ -198,6 +261,7 @@ def main() -> int:
         _metadata, dependency_findings = run_metadata(ROOT)
         findings.extend(dependency_findings)
         findings.extend(check_source(ROOT))
+        findings.extend(check_registration_invariants(ROOT))
         findings.extend(check_inventory(ROOT))
     except Exception as error:  # parser/metadata failures are fail-closed gate findings
         findings.append(f"negative dependency scanner error: {error}")

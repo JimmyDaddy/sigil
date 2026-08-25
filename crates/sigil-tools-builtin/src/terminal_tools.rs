@@ -120,6 +120,11 @@ impl TerminalTaskControlHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn managed_execution_is_bound(&self) -> bool {
+        self.managers.managed_execution.is_some()
+    }
+
     /// Cancels one task through the exact process manager that admitted it.
     ///
     /// # Errors

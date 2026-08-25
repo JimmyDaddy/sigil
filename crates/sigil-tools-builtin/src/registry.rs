@@ -110,7 +110,7 @@ pub fn register_builtin_tools_with_unavailable_managed_execution(
         TerminalExecutionConfig::default(),
         None,
         None,
-        None,
+        Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1),
     )
 }
 
@@ -224,7 +224,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
             backend: Arc::clone(&execution_backend),
         },
     );
-    register_builtin_tools_with_managed_execution_and_terminal_config(
+    register_builtin_tools_with_legacy_terminal(
         registry,
         paths,
         managed_executor,
@@ -234,8 +234,8 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     )
 }
 
-/// Registers built-ins with an authority-owned managed one-shot command port. The terminal
-/// manager remains on its legacy lifecycle seam until its own R71.4 slice is complete.
+/// Registers built-ins with an authority-owned managed command port and a fail-closed terminal
+/// port. Callers that have not composed the authority owner must use the unavailable helper.
 pub fn register_builtin_tools_with_managed_execution_and_terminal_config(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -251,15 +251,55 @@ pub fn register_builtin_tools_with_managed_execution_and_terminal_config(
         terminal_execution_config,
         terminal_lifecycle_route,
         external_scratch_control,
-        None,
+        Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1),
     )
 }
 
 /// Registers built-ins with managed one-shot and persistent terminal execution ports.
 ///
-/// The terminal port is optional only for legacy/unit fixtures. Current runtime composition
-/// injects it; when present, the terminal manager refuses its direct `Command`/PTY fallback.
+/// The terminal port is mandatory in normal builds, so terminal startup cannot fall back to a
+/// direct `Command` or PTY spawn when authority composition is missing.
 pub fn register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+    managed_terminal: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+        Some(managed_terminal),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn register_builtin_tools_with_legacy_terminal(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+        None,
+    )
+}
+
+fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
     managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,

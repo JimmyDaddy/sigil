@@ -415,7 +415,7 @@ impl TerminalProcessManager {
         let handle = managed_execution
             .start_persistent(request)
             .await
-            .map_err(|error| anyhow!("managed terminal launch failed: {error}"))?;
+            .map_err(|error| anyhow::Error::new(error).context("managed terminal launch failed"))?;
 
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),

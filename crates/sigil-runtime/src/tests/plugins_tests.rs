@@ -725,7 +725,7 @@ timeout_ms = 45000
     let registration = report.registrations.hooks[0].clone();
     let backend = RecordingExecutionBackend::default();
     let requests = backend.requests.clone();
-    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+    let runner = PluginHookExecutionRunner::new_legacy(Arc::new(backend));
 
     let outcome = runner
         .execute(PluginHookExecutionRequest::new(
@@ -826,7 +826,7 @@ async fn plugin_hook_runner_enforces_manifest_approval_before_execution() {
         registration.hook.approval = approval;
         let backend = RecordingExecutionBackend::default();
         let requests = backend.requests.clone();
-        let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+        let runner = PluginHookExecutionRunner::new_legacy(Arc::new(backend));
 
         let error = runner
             .execute(PluginHookExecutionRequest::new(
@@ -881,7 +881,7 @@ allow_secrets = true
         network: ExecutionNetworkReceipt::allowed("profile allows network access"),
         ..RecordingExecutionBackend::default()
     };
-    let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
+    let runner = PluginHookExecutionRunner::new_legacy_with_sandbox_profile(
         Arc::new(backend),
         ExecutionSandboxProfile::BuildNetworked,
     );
@@ -955,7 +955,7 @@ async fn plugin_hook_network_deny_without_proven_isolation_is_zero_execute() {
 
     for backend in backends {
         let requests = backend.requests.clone();
-        let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
+        let runner = PluginHookExecutionRunner::new_legacy_with_sandbox_profile(
             Arc::new(backend),
             ExecutionSandboxProfile::BuildNetworked,
         )
@@ -987,7 +987,7 @@ async fn plugin_hook_network_ask_without_approval_is_zero_execute() {
     let registration = trusted_read_only_hook_registration(workspace.path());
     let backend = RecordingExecutionBackend::default();
     let requests = backend.requests.clone();
-    let runner = PluginHookExecutionRunner::new(Arc::new(backend)).with_network_admission(
+    let runner = PluginHookExecutionRunner::new_legacy(Arc::new(backend)).with_network_admission(
         ExtensionProcessNetworkAdmission::new(NetworkPolicy::Ask, false),
     );
 
@@ -1014,7 +1014,7 @@ async fn plugin_hook_network_ask_with_approval_executes() {
     let registration = trusted_read_only_hook_registration(workspace.path());
     let backend = RecordingExecutionBackend::default();
     let requests = backend.requests.clone();
-    let runner = PluginHookExecutionRunner::new(Arc::new(backend)).with_network_admission(
+    let runner = PluginHookExecutionRunner::new_legacy(Arc::new(backend)).with_network_admission(
         ExtensionProcessNetworkAdmission::new(NetworkPolicy::Ask, true),
     );
 
@@ -1046,7 +1046,7 @@ async fn plugin_hook_network_deny_with_proven_isolation_executes() {
         ..RecordingExecutionBackend::default()
     };
     let requests = backend.requests.clone();
-    let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
+    let runner = PluginHookExecutionRunner::new_legacy_with_sandbox_profile(
         Arc::new(backend),
         ExecutionSandboxProfile::BuildNetworked,
     )
@@ -1098,7 +1098,7 @@ approval = "allow"
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted discovery should succeed");
     let runner =
-        PluginHookExecutionRunner::new(Arc::new(sigil_tools_builtin::LocalExecutionBackend));
+        PluginHookExecutionRunner::new_legacy(Arc::new(sigil_tools_builtin::LocalExecutionBackend));
 
     let outcome = runner
         .execute(PluginHookExecutionRequest::new(
@@ -1141,7 +1141,8 @@ command = "hook-runner"
         .expect("trusted plugin discovery should succeed");
     let mut registration = report.registrations.hooks[0].clone();
     registration.trust = PluginTrustDecision::NeedsReview;
-    let runner = PluginHookExecutionRunner::new(Arc::new(RecordingExecutionBackend::default()));
+    let runner =
+        PluginHookExecutionRunner::new_legacy(Arc::new(RecordingExecutionBackend::default()));
 
     let error = runner
         .execute(PluginHookExecutionRequest::new(
@@ -1215,7 +1216,7 @@ approval = "allow"
         }),
         ..RecordingExecutionBackend::default()
     };
-    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+    let runner = PluginHookExecutionRunner::new_legacy(Arc::new(backend));
     let mut request = PluginHookExecutionRequest::new(
         report.registrations.hooks[0].clone(),
         workspace.path().to_path_buf(),
@@ -1348,7 +1349,7 @@ approval = "allow"
         workspace_write: Some(("note.txt".to_owned(), "new".to_owned())),
         ..RecordingExecutionBackend::default()
     };
-    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+    let runner = PluginHookExecutionRunner::new_legacy(Arc::new(backend));
 
     let outcome = runner
         .execute(
@@ -1412,7 +1413,7 @@ approval = "allow"
         .expect("trusted plugin discovery should succeed");
     let backend = RecordingExecutionBackend::default();
     let requests = backend.requests.clone();
-    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+    let runner = PluginHookExecutionRunner::new_legacy(Arc::new(backend));
 
     let error = runner
         .execute(PluginHookExecutionRequest::new(
@@ -1462,7 +1463,8 @@ approval = "allow"
         store.clone(),
         state.path().join("mutation-artifacts"),
     );
-    let runner = PluginHookExecutionRunner::new(Arc::new(RecordingExecutionBackend::default()));
+    let runner =
+        PluginHookExecutionRunner::new_legacy(Arc::new(RecordingExecutionBackend::default()));
 
     let outcome = runner
         .execute(

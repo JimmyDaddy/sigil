@@ -57,8 +57,15 @@ pub trait ManagedCommandExecutionPortV1: Send + Sync {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct LegacyBackendCommandExecutionPortV1 {
+pub struct LegacyBackendCommandExecutionPortV1 {
     pub(crate) backend: std::sync::Arc<dyn ExecutionBackend>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl LegacyBackendCommandExecutionPortV1 {
+    pub fn new(backend: std::sync::Arc<dyn ExecutionBackend>) -> Self {
+        Self { backend }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

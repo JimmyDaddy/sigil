@@ -27,6 +27,8 @@ pub use execution_backends::{
     LongLivedStdioProcessPlan, MacosSeatbeltExecutionBackend, build_execution_backend,
     long_lived_stdio_process_plan,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use managed_execution::LegacyBackendCommandExecutionPortV1;
 pub use managed_execution::{
     ManagedCommandExecutionPortV1, ManagedTerminalExecutionPortV1, ManagedTerminalStartRequestV1,
     UnavailableManagedCommandExecutionPortV1,
