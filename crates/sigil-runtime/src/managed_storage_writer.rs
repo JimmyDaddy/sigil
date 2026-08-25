@@ -631,6 +631,18 @@ impl ManagedStorageWriterAdapterV1 {
             )
             .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
     }
+
+    /// Internal artifact-layer liveness check. Artifact physical operations must keep the
+    /// authority handle as the mutation capability; a copied root is not sufficient after the
+    /// namespace has settled.
+    pub(crate) fn validate_artifact_lease(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
 }
 
 fn content_hash(bytes: &[u8]) -> CanonicalHash {

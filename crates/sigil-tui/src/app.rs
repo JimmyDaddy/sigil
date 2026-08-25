@@ -996,20 +996,13 @@ impl AppState {
         if !composition.declared_channels.contains(&staging)
             || !composition.declared_channels.contains(&store)
         {
-            return Some(sigil_kernel::ToolArtifactStore::for_session_path(
-                &self.session_log_path,
-            ));
+            return None;
         }
-        let key = self.session_log_path.file_stem()?.to_str()?;
-        let store_root = writer.managed_named_leaf_path(store, key).ok()?;
-        let staging_root = writer.managed_named_leaf_path(staging, key).ok()?;
-        Some(
-            sigil_kernel::ToolArtifactStore::for_session_path_with_roots(
-                &self.session_log_path,
-                store_root,
-                staging_root,
-            ),
-        )
+        // The app shell does not own the worker's paired artifact lease. Returning a
+        // path-backed kernel store here would reopen the P1-10 bypass; the worker-provided
+        // runtime attachment is the only current-schema reader route.
+        let _ = (writer, composition, staging, store);
+        None
     }
 
     /// The boot authority composition (None before boot attachment). Used by the production

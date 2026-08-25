@@ -59,6 +59,17 @@ LEGACY_PATTERNS = (
     (re.compile(r'Path::new\("\.sigil-(?:state|cache)"\)'), "cwd-relative legacy writable root"),
 )
 
+KERNEL_ARTIFACT_LEGACY_PATTERNS = (
+    (re.compile(r"\bToolArtifactStore::for_session_path(?:_with_roots)?\s*\("),
+     "path-rooted kernel artifact store constructor"),
+    (re.compile(r"\b(?:root|staging_root):\s*Option<PathBuf>"),
+     "kernel artifact store retains a physical root"),
+    (re.compile(r"\bfn\s+legacy_(?:staging_)?root\s*\("),
+     "kernel artifact store exposes a legacy physical root"),
+    (re.compile(r"\b(?:OpenOptions::new|File::open|fs::(?:create_dir_all|hard_link|read|read_dir|remove_file|rename|symlink_metadata))\b"),
+     "kernel artifact store performs direct filesystem IO"),
+)
+
 
 def package_for_path(relative: str) -> str:
     if relative.startswith("crates/"):
@@ -116,6 +127,13 @@ def check_source(root: Path) -> list[str]:
                 description == "cwd-relative legacy writable root" and pattern.search(original)
             ):
                 findings.append(f"{relative}:{line_number}: {description}: {original.strip()}")
+
+        if relative == "crates/sigil-kernel/src/session/tool_artifact.rs":
+            for pattern, description in KERNEL_ARTIFACT_LEGACY_PATTERNS:
+                if pattern.search(code):
+                    findings.append(
+                        f"{relative}:{line_number}: {description}: {original.strip()}"
+                    )
 
         if "sigil_resource_authority::" in code or "sigil_sandbox::" in code:
             if relative not in PHYSICAL_IMPORT_ALLOWLIST.get(package, set()):

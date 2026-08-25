@@ -126,6 +126,7 @@ pub mod integration_lanes;
 pub mod interactive_session_attachment;
 pub mod isolated_workspace;
 pub mod machine_protocol;
+pub mod managed_artifact_store;
 pub mod managed_resource_adapters;
 pub mod managed_storage_writer;
 pub mod mcp_declaration;

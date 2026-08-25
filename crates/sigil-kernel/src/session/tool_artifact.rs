@@ -2522,14 +2522,76 @@ struct ToolArtifactBlobUsageLedgerV1 {
 
 const TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION: u16 = 1;
 
-/// Local session-owned immutable artifact backend.
+/// Physical artifact operations are owned by the runtime/authority composition. The kernel
+/// keeps only this narrow semantic port and never needs to receive an artifact root for the
+/// managed current-schema route.
+pub trait ToolArtifactStoreBackendV1: std::fmt::Debug + Send + Sync {
+    fn publish_blob(&self, content_sha256: &str, bytes: &[u8]) -> Result<()>;
+    fn publish_descriptor_manifest(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()>;
+    fn read_blob(&self, content_sha256: &str) -> Result<Vec<u8>>;
+    fn resolve(&self, artifact_ref: &ToolArtifactRefV1) -> Result<ToolArtifactDescriptorV1>;
+    fn read_page(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+        selector: ToolArtifactSelectorV1,
+    ) -> Result<ToolArtifactPageV1>;
+    fn manifest_inventory(&self) -> Result<Vec<ToolArtifactManifestEntryV1>>;
+    fn bind_source_event(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+        source_event_id: &str,
+    ) -> Result<()>;
+    fn source_event_id(&self, artifact_ref: &ToolArtifactRefV1) -> Result<String>;
+    fn garbage_collect(
+        &self,
+        roots: &ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+        orphan_grace_ms: u64,
+    ) -> Result<ToolArtifactGcReportV1>;
+    fn prune_garbage_trash(
+        &self,
+        now_unix_ms: u64,
+        trash_grace_ms: u64,
+    ) -> Result<ToolArtifactTrashPruneReportV1>;
+    fn begin_process_capture(
+        self: Arc<Self>,
+        config: ProcessStreamCaptureConfigV1,
+    ) -> Result<Box<dyn ToolArtifactProcessCaptureBackendV1>>;
+}
+
+/// Opaque process-capture staging result returned by the physical runtime adapter.
+#[derive(Debug)]
+pub struct ToolArtifactProcessCaptureSnapshotV1 {
+    pub stdout_bytes: Vec<u8>,
+    pub stderr_bytes: Vec<u8>,
+    pub stdout_observed_bytes: u64,
+    pub stderr_observed_bytes: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+/// Physical staging handle used by `ToolArtifactCaptureSink` without exposing a path.
+pub trait ToolArtifactProcessCaptureBackendV1: Send + Sync {
+    fn write_stream(
+        &mut self,
+        stream: ToolOutputStreamV1,
+        bytes: &[u8],
+        per_stream_limit: u64,
+    ) -> Result<(u64, bool)>;
+    fn finish(self: Box<Self>) -> Result<ToolArtifactProcessCaptureSnapshotV1>;
+}
+
+/// Session-scoped semantic artifact facade. Current-schema production instances are constructed
+/// with `from_backend`; path-backed constructors remain only for legacy/test compatibility while
+/// the remaining legacy call sites are removed slice by slice.
 #[derive(Debug, Clone)]
 pub struct ToolArtifactStore {
     session_scope_id: String,
     session_scope_id_hash: String,
     session_log_path: PathBuf,
-    root: PathBuf,
-    staging_root: PathBuf,
+    root: Option<PathBuf>,
+    staging_root: Option<PathBuf>,
+    backend: Option<Arc<dyn ToolArtifactStoreBackendV1>>,
 }
 
 impl ToolArtifactStore {
@@ -2599,20 +2661,52 @@ impl ToolArtifactStore {
             session_scope_id_hash: stable_event_hash(session_scope_id.as_bytes()),
             session_scope_id,
             session_log_path: normalized_path,
-            root: artifact_store_root,
-            staging_root: artifact_staging_root,
+            root: Some(artifact_store_root),
+            staging_root: Some(artifact_staging_root),
+            backend: None,
         }
+    }
+
+    /// Builds a pathless artifact facade backed by an authority-admitted runtime adapter.
+    pub fn from_backend(
+        session_scope_id: impl Into<String>,
+        backend: Arc<dyn ToolArtifactStoreBackendV1>,
+    ) -> Result<Self> {
+        Self::from_backend_with_session_path(session_scope_id, PathBuf::new(), backend)
+    }
+
+    /// Pathless physical facade with a logical session reference retained for lifecycle
+    /// coordination. The path is never used as an artifact root or opened by the kernel.
+    pub fn from_backend_with_session_path(
+        session_scope_id: impl Into<String>,
+        session_log_path: PathBuf,
+        backend: Arc<dyn ToolArtifactStoreBackendV1>,
+    ) -> Result<Self> {
+        let session_scope_id = session_scope_id.into();
+        if session_scope_id.trim().is_empty() {
+            bail!("tool artifact session scope is empty");
+        }
+        Ok(Self {
+            session_scope_id_hash: stable_event_hash(session_scope_id.as_bytes()),
+            session_scope_id,
+            session_log_path,
+            root: None,
+            staging_root: None,
+            backend: Some(backend),
+        })
     }
 
     #[must_use]
     pub fn root(&self) -> &Path {
-        &self.root
+        self.root.as_deref().unwrap_or_else(|| Path::new(""))
     }
 
     /// Authority-owned root used only for capture staging files.
     #[must_use]
     pub fn staging_root(&self) -> &Path {
-        &self.staging_root
+        self.staging_root
+            .as_deref()
+            .unwrap_or_else(|| Path::new(""))
     }
 
     #[must_use]
@@ -2807,6 +2901,16 @@ impl ToolArtifactStore {
 
     pub fn read_all(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<Vec<u8>> {
         self.validate_retrievable_session_descriptor(descriptor)?;
+        if let Some(backend) = &self.backend {
+            let bytes = backend.read_blob(&descriptor.content_sha256)?;
+            if bytes.len() > TOOL_ARTIFACT_MAX_BYTES {
+                bail!("tool artifact blob exceeds its hard limit");
+            }
+            if stable_event_hash(&bytes) != descriptor.content_sha256 {
+                bail!("tool artifact content hash mismatch");
+            }
+            return Ok(bytes);
+        }
         let read_lock = self.open_ref_lock(&descriptor.artifact_ref)?;
         read_lock
             .try_lock_shared()
@@ -2835,6 +2939,14 @@ impl ToolArtifactStore {
     /// Resolves an opaque session-scoped reference without consulting or scanning JSONL.
     pub fn resolve(&self, artifact_ref: &ToolArtifactRefV1) -> Result<ToolArtifactDescriptorV1> {
         artifact_ref.validate()?;
+        if let Some(backend) = &self.backend {
+            let descriptor = backend.resolve(artifact_ref)?;
+            self.validate_retrievable_session_descriptor(&descriptor)?;
+            if descriptor.artifact_ref != *artifact_ref {
+                bail!("tool artifact ref manifest identity mismatch");
+            }
+            return Ok(descriptor);
+        }
         let path = self.ref_path(artifact_ref)?;
         let metadata = fs::symlink_metadata(&path).with_context(|| {
             format!(
@@ -2866,7 +2978,14 @@ impl ToolArtifactStore {
     ///
     /// Returns an error for an oversized, malformed, symlinked, or cross-session manifest.
     pub fn manifest_inventory(&self) -> Result<Vec<ToolArtifactManifestEntryV1>> {
-        let refs_dir = self.root.join("refs");
+        if let Some(backend) = &self.backend {
+            let manifests = backend.manifest_inventory()?;
+            for entry in &manifests {
+                self.validate_session_descriptor_identity(&entry.descriptor)?;
+            }
+            return Ok(manifests);
+        }
+        let refs_dir = self.legacy_root().join("refs");
         let entries = match fs::read_dir(&refs_dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2962,6 +3081,9 @@ impl ToolArtifactStore {
         if orphan_grace_ms < TOOL_ARTIFACT_ORPHAN_GRACE_MS {
             bail!("tool artifact orphan grace must be at least 24 hours");
         }
+        if let Some(backend) = &self.backend {
+            return backend.garbage_collect(roots, now_unix_ms, orphan_grace_ms);
+        }
         let inventory = self.manifest_inventory()?;
         let tombstone_id = format!("tool-artifact-gc-{}", Uuid::new_v4().simple());
         let mut candidates = Vec::new();
@@ -2978,15 +3100,15 @@ impl ToolArtifactStore {
                 candidates.push(entry.clone());
             }
         }
-        let trash_root = self.root.join("trash").join(&tombstone_id);
+        let trash_root = self.legacy_root().join("trash").join(&tombstone_id);
         let trash_refs = trash_root.join("refs");
         let trash_blobs = trash_root.join("blobs");
-        let staging_trash_root = self.staging_root.join("trash");
+        let staging_trash_root = self.legacy_staging_root().join("trash");
         let trash_staging = staging_trash_root.join(&tombstone_id);
         self.ensure_root_dir()?;
-        create_private_dir(&self.root.join("trash"))?;
+        create_private_dir(&self.legacy_root().join("trash"))?;
         create_private_dir(&staging_trash_root)?;
-        create_private_dir(&self.root.join("refs"))?;
+        create_private_dir(&self.legacy_root().join("refs"))?;
         create_private_dir(&trash_root)?;
         create_private_dir(&trash_refs)?;
         create_private_dir(&trash_blobs)?;
@@ -3022,7 +3144,7 @@ impl ToolArtifactStore {
                 )
             })?;
             let source_binding = self
-                .root
+                .legacy_root()
                 .join("refs")
                 .join(format!("{}.event", artifact_ref.artifact_id));
             if source_binding.exists() {
@@ -3038,7 +3160,7 @@ impl ToolArtifactStore {
             tombstoned_manifests = tombstoned_manifests.saturating_add(1);
             tombstoned_refs.push(entry.descriptor.artifact_ref.clone());
         }
-        sync_dir(&self.root.join("refs"))?;
+        sync_dir(&self.legacy_root().join("refs"))?;
         sync_dir(&trash_refs)?;
 
         let usage_lock = self.open_blob_usage_lock()?;
@@ -3090,7 +3212,7 @@ impl ToolArtifactStore {
         sync_dir(&trash_staging)?;
         sync_dir(&staging_trash_root)?;
         sync_dir(&trash_root)?;
-        let usage_after_gc = directory_file_bytes(&self.root.join("blobs"))?;
+        let usage_after_gc = directory_file_bytes(&self.legacy_root().join("blobs"))?;
         self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
             schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
             bytes: usage_after_gc,
@@ -3099,7 +3221,7 @@ impl ToolArtifactStore {
         if tombstoned_manifests == 0 && tombstoned_blobs == 0 && tombstoned_staging_files == 0 {
             fs::remove_dir_all(&trash_root)
                 .with_context(|| format!("failed to remove empty {}", trash_root.display()))?;
-            sync_dir(&self.root.join("trash"))?;
+            sync_dir(&self.legacy_root().join("trash"))?;
             if trash_staging != trash_root {
                 fs::remove_dir_all(&trash_staging).with_context(|| {
                     format!("failed to remove empty {}", trash_staging.display())
@@ -3134,8 +3256,11 @@ impl ToolArtifactStore {
         if trash_grace_ms < TOOL_ARTIFACT_ORPHAN_GRACE_MS {
             bail!("tool artifact trash grace must be at least 24 hours");
         }
-        let mut trash_roots = vec![self.root.join("trash")];
-        let staging_trash = self.staging_root.join("trash");
+        if let Some(backend) = &self.backend {
+            return backend.prune_garbage_trash(now_unix_ms, trash_grace_ms);
+        }
+        let mut trash_roots = vec![self.legacy_root().join("trash")];
+        let staging_trash = self.legacy_staging_root().join("trash");
         if staging_trash != trash_roots[0] {
             trash_roots.push(staging_trash);
         }
@@ -3193,7 +3318,10 @@ impl ToolArtifactStore {
         if source_event_id.trim().is_empty() || source_event_id.len() > 256 {
             bail!("tool artifact source event id is malformed");
         }
-        let refs_dir = self.root.join("refs");
+        if let Some(backend) = &self.backend {
+            return backend.bind_source_event(artifact_ref, source_event_id);
+        }
+        let refs_dir = self.legacy_root().join("refs");
         self.ensure_root_dir()?;
         create_private_dir(&refs_dir)?;
         let path = refs_dir.join(format!("{}.event", artifact_ref.artifact_id));
@@ -3206,8 +3334,11 @@ impl ToolArtifactStore {
     /// Callers must not treat the returned event id as sufficient authorization to read a blob.
     pub fn source_event_id(&self, artifact_ref: &ToolArtifactRefV1) -> Result<String> {
         artifact_ref.validate()?;
+        if let Some(backend) = &self.backend {
+            return backend.source_event_id(artifact_ref);
+        }
         let path = self
-            .root
+            .legacy_root()
             .join("refs")
             .join(format!("{}.event", artifact_ref.artifact_id));
         let metadata = fs::symlink_metadata(&path).with_context(|| {
@@ -3235,6 +3366,11 @@ impl ToolArtifactStore {
         selector: ToolArtifactSelectorV1,
     ) -> Result<ToolArtifactPageV1> {
         selector.validate()?;
+        if let Some(backend) = &self.backend {
+            let page = backend.read_page(artifact_ref, selector)?;
+            page.validate()?;
+            return Ok(page);
+        }
         let read_lock = self.open_ref_lock(artifact_ref)?;
         read_lock
             .try_lock_shared()
@@ -3301,11 +3437,108 @@ impl ToolArtifactStore {
         Ok(page)
     }
 
+    /// Builds a bounded page from bytes supplied by a physical artifact backend. This keeps
+    /// paging/search semantics in the kernel while the backend retains ownership of the blob
+    /// handle and filesystem.
+    pub fn tool_artifact_page_from_bytes(
+        descriptor: &ToolArtifactDescriptorV1,
+        artifact_ref: &ToolArtifactRefV1,
+        selector: ToolArtifactSelectorV1,
+        bytes: &[u8],
+    ) -> Result<ToolArtifactPageV1> {
+        descriptor.validate()?;
+        artifact_ref.validate()?;
+        selector.validate()?;
+        if stable_event_hash(bytes) != descriptor.content_sha256 {
+            bail!("tool artifact content hash mismatch");
+        }
+        let selected = match &selector {
+            ToolArtifactSelectorV1::ByteSlice { offset, limit } => {
+                let start = (*offset).min(bytes.len() as u64) as usize;
+                let end = start.saturating_add(*limit as usize).min(bytes.len());
+                SelectedArtifactBytes {
+                    bytes: bytes[start..end].to_vec(),
+                    eof: end == bytes.len(),
+                    match_count: 0,
+                    next_selector: (end < bytes.len()).then_some(
+                        ToolArtifactSelectorV1::ByteSlice {
+                            offset: end as u64,
+                            limit: *limit,
+                        },
+                    ),
+                }
+            }
+            ToolArtifactSelectorV1::LinePage {
+                start_line,
+                line_count,
+            } => {
+                if descriptor.encoding != ToolArtifactEncoding::Utf8 {
+                    bail!("line paging requires a UTF-8 tool artifact");
+                }
+                read_line_page_from_bytes(bytes, *start_line, *line_count)?
+            }
+            ToolArtifactSelectorV1::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            } => {
+                if descriptor.encoding != ToolArtifactEncoding::Utf8 {
+                    bail!("literal search requires a UTF-8 tool artifact");
+                }
+                read_literal_search_from_bytes(
+                    bytes,
+                    query,
+                    *start_offset,
+                    *max_matches,
+                    *context_lines,
+                )?
+            }
+        };
+        let (body, body_encoding) = if descriptor.encoding == ToolArtifactEncoding::Utf8 {
+            match String::from_utf8(selected.bytes.clone()) {
+                Ok(body) => (body, ToolArtifactPageEncoding::Utf8),
+                Err(_) => (
+                    BASE64_STANDARD.encode(&selected.bytes),
+                    ToolArtifactPageEncoding::Base64,
+                ),
+            }
+        } else {
+            (
+                BASE64_STANDARD.encode(&selected.bytes),
+                ToolArtifactPageEncoding::Base64,
+            )
+        };
+        let page = ToolArtifactPageV1 {
+            artifact_ref: artifact_ref.clone(),
+            selector,
+            body,
+            body_encoding,
+            returned_bytes: selected.bytes.len() as u32,
+            page_sha256: stable_event_hash(&selected.bytes),
+            artifact_sha256: descriptor.content_sha256.clone(),
+            eof: selected.eof,
+            match_count: selected.match_count,
+            next_selector: selected.next_selector,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+
     pub fn availability(&self, descriptor: &ToolArtifactDescriptorV1) -> ToolArtifactAvailability {
         if descriptor.validate().is_err()
             || descriptor.session_scope_id_hash != self.session_scope_id_hash
         {
             return ToolArtifactAvailability::PolicyRevoked;
+        }
+        if let Some(backend) = &self.backend {
+            return match backend.read_blob(&descriptor.content_sha256) {
+                Ok(bytes) if stable_event_hash(&bytes) == descriptor.content_sha256 => {
+                    ToolArtifactAvailability::Available
+                }
+                Ok(_) => ToolArtifactAvailability::HashMismatch,
+                Err(_) => ToolArtifactAvailability::Missing,
+            };
         }
         let Ok(path) = self.blob_path(&descriptor.content_sha256) else {
             return ToolArtifactAvailability::PolicyRevoked;
@@ -3342,24 +3575,36 @@ impl ToolArtifactStore {
         Ok(())
     }
 
+    fn legacy_root(&self) -> &Path {
+        self.root
+            .as_deref()
+            .expect("legacy artifact backend root is unavailable on a pathless facade")
+    }
+
+    fn legacy_staging_root(&self) -> &Path {
+        self.staging_root
+            .as_deref()
+            .expect("legacy artifact backend staging root is unavailable on a pathless facade")
+    }
+
     fn ensure_root_dir(&self) -> Result<()> {
         let session_dir = self
-            .root
+            .legacy_root()
             .parent()
             .context("tool artifact root has no parent")?;
         create_private_dir(session_dir)?;
-        create_private_dir(&self.root)?;
+        create_private_dir(self.legacy_root())?;
         let staging_parent = self
-            .staging_root
+            .legacy_staging_root()
             .parent()
             .context("tool artifact staging root has no parent")?;
         create_private_dir(staging_parent)?;
-        create_private_dir(&self.staging_root)
+        create_private_dir(self.legacy_staging_root())
     }
 
     fn open_ref_lock(&self, artifact_ref: &ToolArtifactRefV1) -> Result<File> {
         artifact_ref.validate()?;
-        let locks_dir = self.root.join("locks");
+        let locks_dir = self.legacy_root().join("locks");
         self.ensure_root_dir()?;
         create_private_dir(&locks_dir)?;
         let path = locks_dir.join(format!("{}.lock", artifact_ref.artifact_id));
@@ -3387,13 +3632,16 @@ impl ToolArtifactStore {
         if bytes.len() > TOOL_ARTIFACT_MAX_BYTES {
             bail!("tool artifact blob exceeds its hard limit");
         }
+        if let Some(backend) = &self.backend {
+            return backend.publish_blob(content_sha256, bytes);
+        }
         let blob_path = self.blob_path(content_sha256)?;
         let blob_dir = blob_path
             .parent()
             .context("tool artifact blob path has no parent")?;
-        let staging_dir = self.staging_root.join("staging");
+        let staging_dir = self.legacy_staging_root().join("staging");
         self.ensure_root_dir()?;
-        create_private_dir(&self.root.join("blobs"))?;
+        create_private_dir(&self.legacy_root().join("blobs"))?;
         create_private_dir(blob_dir)?;
         create_private_dir(&staging_dir)?;
         let usage_lock = self.open_blob_usage_lock()?;
@@ -3471,7 +3719,7 @@ impl ToolArtifactStore {
 
     fn open_blob_usage_lock(&self) -> Result<File> {
         self.ensure_root_dir()?;
-        let path = self.root.join("usage.lock");
+        let path = self.legacy_root().join("usage.lock");
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true).truncate(false);
         #[cfg(unix)]
@@ -3493,7 +3741,7 @@ impl ToolArtifactStore {
     }
 
     fn load_or_reconcile_blob_usage(&self) -> Result<u64> {
-        let path = self.root.join("usage.json");
+        let path = self.legacy_root().join("usage.json");
         let ledger = match fs::symlink_metadata(&path) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink()
@@ -3519,7 +3767,7 @@ impl ToolArtifactStore {
         if let Some(ledger) = ledger.filter(|ledger| !ledger.dirty) {
             return Ok(ledger.bytes);
         }
-        let bytes = directory_file_bytes(&self.root.join("blobs"))?;
+        let bytes = directory_file_bytes(&self.legacy_root().join("blobs"))?;
         self.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
             schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
             bytes,
@@ -3531,11 +3779,14 @@ impl ToolArtifactStore {
     fn persist_blob_usage_ledger(&self, ledger: ToolArtifactBlobUsageLedgerV1) -> Result<()> {
         let bytes =
             serde_json::to_vec(&ledger).context("failed to encode tool artifact blob usage")?;
-        crate::atomic_publish_private_file(&self.root.join("usage.json"), &bytes)
+        crate::atomic_publish_private_file(&self.legacy_root().join("usage.json"), &bytes)
             .context("failed to publish tool artifact blob usage ledger")
     }
 
     fn publish_descriptor_manifest(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()> {
+        if let Some(backend) = &self.backend {
+            return backend.publish_descriptor_manifest(descriptor);
+        }
         let path = self.ref_path(&descriptor.artifact_ref)?;
         let refs_dir = path
             .parent()
@@ -3551,7 +3802,7 @@ impl ToolArtifactStore {
     fn ref_path(&self, artifact_ref: &ToolArtifactRefV1) -> Result<PathBuf> {
         artifact_ref.validate()?;
         Ok(self
-            .root
+            .legacy_root()
             .join("refs")
             .join(format!("{}.json", artifact_ref.artifact_id)))
     }
@@ -3564,7 +3815,7 @@ impl ToolArtifactStore {
             bail!("tool artifact content hash is malformed");
         }
         Ok(self
-            .root
+            .legacy_root()
             .join("blobs")
             .join(&digest[..2])
             .join(format!("{digest}.blob")))
@@ -3576,7 +3827,7 @@ impl ToolArtifactStore {
         now_unix_ms: u64,
         orphan_grace_ms: u64,
     ) -> Result<Vec<(PathBuf, u64)>> {
-        let blobs_root = self.root.join("blobs");
+        let blobs_root = self.legacy_root().join("blobs");
         let prefix_entries = match fs::read_dir(&blobs_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -3639,7 +3890,7 @@ impl ToolArtifactStore {
         now_unix_ms: u64,
         orphan_grace_ms: u64,
     ) -> Result<Vec<(PathBuf, u64)>> {
-        let staging_root = self.staging_root.join("staging");
+        let staging_root = self.legacy_staging_root().join("staging");
         let entries = match fs::read_dir(&staging_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -3698,6 +3949,7 @@ pub struct ToolArtifactCaptureSink {
 /// RFC-0062 9.2: per-stream staging for harness-owned process capture.
 struct ProcessCaptureState {
     config: ProcessStreamCaptureConfigV1,
+    managed: Option<Box<dyn ToolArtifactProcessCaptureBackendV1>>,
     stdout_staging: Option<std::fs::File>,
     stderr_staging: Option<std::fs::File>,
     stdout_staging_path: Option<std::path::PathBuf>,
@@ -3786,8 +4038,25 @@ impl ToolArtifactCaptureSink {
             self.encoding,
             self.sensitivity,
         );
+        if let Some(backend) = &self.store.backend {
+            let managed = backend.clone().begin_process_capture(config)?;
+            sink.process = Some(ProcessCaptureState {
+                config,
+                managed: Some(managed),
+                stdout_staging: None,
+                stderr_staging: None,
+                stdout_staging_path: None,
+                stderr_staging_path: None,
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                staged_bytes: 0,
+            });
+            return Ok(sink);
+        }
         self.store.ensure_root_dir()?;
-        let staging_dir = self.store.staging_root.join("staging");
+        let staging_dir = self.store.legacy_staging_root().join("staging");
         create_private_dir(&staging_dir)?;
         // RFC-0062 16.2: on Windows the directory must be protected BEFORE any file is created,
         // otherwise a wide parent ACL lets other principals open the staging files while they
@@ -3833,6 +4102,7 @@ impl ToolArtifactCaptureSink {
         }
         sink.process = Some(ProcessCaptureState {
             config,
+            managed: None,
             stdout_staging: Some(stdout_staging),
             stderr_staging: Some(stderr_staging),
             stdout_staging_path: Some(stdout_path),
@@ -3859,6 +4129,21 @@ impl ToolArtifactCaptureSink {
             return Ok(());
         };
         let limit = state.config.artifact_staging_limit_bytes_per_stream;
+        if let Some(backend) = state.managed.as_mut() {
+            let (observed_bytes, truncated) = backend.write_stream(stream, bytes, limit)?;
+            match stream {
+                ToolOutputStreamV1::Stdout => {
+                    state.stdout_bytes = observed_bytes;
+                    state.stdout_truncated = truncated;
+                }
+                ToolOutputStreamV1::Stderr => {
+                    state.stderr_bytes = observed_bytes;
+                    state.stderr_truncated = truncated;
+                }
+                ToolOutputStreamV1::Combined => {}
+            }
+            return Ok(());
+        }
         let (file, stream_bytes, truncated) = match stream {
             ToolOutputStreamV1::Stdout => (
                 state.stdout_staging.as_mut(),
@@ -3921,7 +4206,15 @@ impl ToolArtifactCaptureSink {
         );
         let mut stdout_bytes = Vec::new();
         let mut stderr_bytes = Vec::new();
-        if let Some(mut file) = state.stdout_staging.take() {
+        if let Some(backend) = state.managed.take() {
+            let snapshot = backend.finish()?;
+            stdout_bytes = snapshot.stdout_bytes;
+            stderr_bytes = snapshot.stderr_bytes;
+            state.stdout_bytes = snapshot.stdout_observed_bytes;
+            state.stderr_bytes = snapshot.stderr_observed_bytes;
+            state.stdout_truncated = snapshot.stdout_truncated;
+            state.stderr_truncated = snapshot.stderr_truncated;
+        } else if let Some(mut file) = state.stdout_staging.take() {
             use std::io::{Read as _, Seek as _, SeekFrom};
             file.seek(SeekFrom::Start(0))?;
             file.read_to_end(&mut stdout_bytes)?;
@@ -4376,6 +4669,76 @@ fn read_line_page(path: &Path, start_line: u64, line_count: u32) -> Result<Selec
     })
 }
 
+fn read_line_page_from_bytes(
+    bytes: &[u8],
+    start_line: u64,
+    line_count: u32,
+) -> Result<SelectedArtifactBytes> {
+    let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+    let mut line = Vec::new();
+    let mut line_index = 0_u64;
+    let mut byte_offset = 0_u64;
+    let mut returned_lines = 0_u32;
+    let mut body = Vec::new();
+    loop {
+        line.clear();
+        let line_start = byte_offset;
+        let count = reader.read_until(b'\n', &mut line)?;
+        if count == 0 {
+            break;
+        }
+        byte_offset = byte_offset.saturating_add(count as u64);
+        if line_index < start_line {
+            line_index = line_index.saturating_add(1);
+            continue;
+        }
+        if returned_lines == line_count {
+            return Ok(SelectedArtifactBytes {
+                bytes: body,
+                eof: false,
+                match_count: 0,
+                next_selector: Some(ToolArtifactSelectorV1::LinePage {
+                    start_line: line_index,
+                    line_count,
+                }),
+            });
+        }
+        let remaining = TOOL_ARTIFACT_READ_MAX_BYTES as usize - body.len();
+        if line.len() > remaining {
+            if body.is_empty() {
+                body.extend_from_slice(&line[..remaining]);
+                return Ok(SelectedArtifactBytes {
+                    bytes: body,
+                    eof: false,
+                    match_count: 0,
+                    next_selector: Some(ToolArtifactSelectorV1::ByteSlice {
+                        offset: line_start.saturating_add(remaining as u64),
+                        limit: TOOL_ARTIFACT_READ_MAX_BYTES,
+                    }),
+                });
+            }
+            return Ok(SelectedArtifactBytes {
+                bytes: body,
+                eof: false,
+                match_count: 0,
+                next_selector: Some(ToolArtifactSelectorV1::LinePage {
+                    start_line: line_index,
+                    line_count,
+                }),
+            });
+        }
+        body.extend_from_slice(&line);
+        returned_lines = returned_lines.saturating_add(1);
+        line_index = line_index.saturating_add(1);
+    }
+    Ok(SelectedArtifactBytes {
+        bytes: body,
+        eof: true,
+        match_count: 0,
+        next_selector: None,
+    })
+}
+
 fn read_literal_search(
     path: &Path,
     query: &str,
@@ -4488,6 +4851,109 @@ fn read_literal_search(
         eof,
         query,
         cursor,
+        max_matches,
+        context_lines,
+    ))
+}
+
+fn read_literal_search_from_bytes(
+    bytes: &[u8],
+    query: &str,
+    start_offset: u64,
+    max_matches: u16,
+    context_lines: u16,
+) -> Result<SelectedArtifactBytes> {
+    let query_bytes = query.as_bytes();
+    let matcher = AhoCorasick::new([query_bytes])?;
+    let artifact_bytes = bytes.len() as u64;
+    let start = start_offset.min(artifact_bytes) as usize;
+    let mut cursor = start as u64;
+    if start > 0 {
+        let Some(relative_end) = bytes[start..].iter().position(|byte| *byte == b'\n') else {
+            return Ok(SelectedArtifactBytes {
+                bytes: Vec::new(),
+                eof: true,
+                match_count: 0,
+                next_selector: None,
+            });
+        };
+        cursor = cursor.saturating_add(relative_end as u64 + 1);
+    }
+    let mut prior = VecDeque::<Vec<u8>>::with_capacity(context_lines as usize);
+    let mut body = Vec::new();
+    let mut match_count = 0_u16;
+    let mut trailing_context = 0_u16;
+    let mut reached_match_limit = false;
+    let mut offset = cursor as usize;
+    let mut eof = true;
+    while offset < bytes.len() {
+        if reached_match_limit && trailing_context == 0 {
+            eof = false;
+            break;
+        }
+        let line_start = offset;
+        let line_end = bytes[offset..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |relative| offset + relative + 1);
+        let line = &bytes[line_start..line_end];
+        offset = line_end;
+        let occurrences = if reached_match_limit {
+            0
+        } else {
+            matcher
+                .find_overlapping_iter(line)
+                .take((max_matches - match_count) as usize)
+                .count() as u16
+        };
+        if occurrences > 0 {
+            let required = prior.iter().map(Vec::len).sum::<usize>() + line.len();
+            if body.len().saturating_add(required) > TOOL_ARTIFACT_READ_MAX_BYTES as usize {
+                return Ok(search_selection_with_next(
+                    body,
+                    match_count,
+                    false,
+                    query_bytes,
+                    line_start as u64,
+                    max_matches,
+                    context_lines,
+                ));
+            }
+            for prior_line in prior.drain(..) {
+                body.extend_from_slice(&prior_line);
+            }
+            body.extend_from_slice(line);
+            match_count = match_count.saturating_add(occurrences);
+            trailing_context = context_lines;
+            reached_match_limit = match_count == max_matches;
+        } else if trailing_context > 0 {
+            if body.len().saturating_add(line.len()) > TOOL_ARTIFACT_READ_MAX_BYTES as usize {
+                return Ok(search_selection_with_next(
+                    body,
+                    match_count,
+                    false,
+                    query_bytes,
+                    line_start as u64,
+                    max_matches,
+                    context_lines,
+                ));
+            }
+            body.extend_from_slice(line);
+            trailing_context -= 1;
+        } else if context_lines > 0 {
+            if prior.len() == context_lines as usize {
+                prior.pop_front();
+            }
+            prior.push_back(line.to_vec());
+        }
+    }
+    eof = eof || offset >= bytes.len();
+    Ok(search_selection_with_next(
+        body,
+        match_count,
+        eof,
+        query_bytes,
+        offset as u64,
         max_matches,
         context_lines,
     ))

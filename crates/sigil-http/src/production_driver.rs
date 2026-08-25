@@ -1624,15 +1624,15 @@ fn validate_projected_tool_artifact_descriptor(
 fn authority_artifact_store_for_session(
     services: &ApplicationRunServices,
     session: &crate::HttpSessionSnapshot,
-) -> Option<ToolArtifactStore> {
+) -> Option<AuthorityArtifactStoreLease> {
     let current_schema = services.cutover().is_some_and(|cutover| {
         cutover.manifest().selected_epoch
             == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
     });
     let Some(composition) = services.authority_composition() else {
-        return Some(ToolArtifactStore::for_session_path(Path::new(
-            &session.session_log_path,
-        )));
+        return Some(AuthorityArtifactStoreLease::legacy(
+            ToolArtifactStore::for_session_path(Path::new(&session.session_log_path)),
+        ));
     };
     let staging = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;
     let store = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore;
@@ -1640,26 +1640,50 @@ fn authority_artifact_store_for_session(
         || !composition.declared_channels.contains(&staging)
         || !composition.declared_channels.contains(&store)
     {
-        return Some(ToolArtifactStore::for_session_path(Path::new(
-            &session.session_log_path,
-        )));
+        return Some(AuthorityArtifactStoreLease::legacy(
+            ToolArtifactStore::for_session_path(Path::new(&session.session_log_path)),
+        ));
     }
     let key = Path::new(&session.session_log_path)
         .file_stem()
         .and_then(|value| value.to_str())?;
-    let store_root = composition
-        .storage_writer
-        .managed_named_leaf_path(store, key)
-        .ok()?;
-    let staging_root = composition
-        .storage_writer
-        .managed_named_leaf_path(staging, key)
-        .ok()?;
-    Some(ToolArtifactStore::for_session_path_with_roots(
-        Path::new(&session.session_log_path),
-        store_root,
-        staging_root,
-    ))
+    let lease = sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&composition.storage_writer),
+        key,
+        &session.durable_session_scope_id,
+        Path::new(&session.session_log_path).to_path_buf(),
+    )
+    .ok()?;
+    Some(AuthorityArtifactStoreLease::managed(lease))
+}
+
+struct AuthorityArtifactStoreLease {
+    managed: Option<sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
+    legacy: Option<ToolArtifactStore>,
+}
+
+impl AuthorityArtifactStoreLease {
+    fn managed(lease: sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1) -> Self {
+        Self {
+            managed: Some(lease),
+            legacy: None,
+        }
+    }
+
+    fn legacy(store: ToolArtifactStore) -> Self {
+        Self {
+            managed: None,
+            legacy: Some(store),
+        }
+    }
+
+    fn store(&self) -> ToolArtifactStore {
+        self.managed
+            .as_ref()
+            .map(sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::store)
+            .or_else(|| self.legacy.clone())
+            .expect("artifact store lease must contain a store")
+    }
 }
 
 impl HttpRunDriver for HttpProductionRunDriver {
@@ -2215,8 +2239,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     sigil_runtime::plan_handoff_workspace_snapshot_id(&config, &workspace_root).ok()
                 })
                 .flatten();
-        let artifact_store = authority_artifact_store_for_session(&self.services, session)
+        let artifact_lease = authority_artifact_store_for_session(&self.services, session)
             .ok_or(HttpConversationDisplayDriverError::Unavailable)?;
+        let artifact_store = artifact_lease.store();
         let page = conversation_display_page_with_artifact_store(
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
@@ -2269,8 +2294,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|_| HttpToolArtifactReadDriverError::InvalidSelector)?;
 
         let binding = self.projected_tool_artifact_binding(session, &artifact_ref)?;
-        let store = authority_artifact_store_for_session(&self.services, session)
+        let artifact_lease = authority_artifact_store_for_session(&self.services, session)
             .ok_or(HttpToolArtifactReadDriverError::Unavailable)?;
+        let store = artifact_lease.store();
         let descriptor = store
             .resolve(&artifact_ref)
             .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;

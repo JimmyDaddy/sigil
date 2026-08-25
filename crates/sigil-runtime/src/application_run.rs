@@ -1913,14 +1913,11 @@ impl Drop for ManagedApplicationSessionLogLease {
     }
 }
 
-/// Authority-admitted ArtifactStaging + ArtifactStore roots held for one foreground operation.
-/// Capture writes use the staging root; immutable blobs, refs and usage state use the published
-/// artifact-store root. Both namespaces are finalized together on every terminal/drop path.
+/// Authority-admitted ArtifactStaging + ArtifactStore namespaces held for one foreground
+/// operation. The kernel receives only the opaque backend facade; physical roots stay inside the
+/// runtime artifact owner.
 struct ManagedApplicationArtifactStoreLease {
-    writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
-    staging_lease: Option<crate::managed_storage_writer::ManagedStorageWriterLeaseV1>,
-    store_lease: Option<crate::managed_storage_writer::ManagedStorageWriterLeaseV1>,
-    artifact_store: ToolArtifactStore,
+    inner: crate::managed_artifact_store::ManagedArtifactStoreLeaseV1,
 }
 
 impl ManagedApplicationArtifactStoreLease {
@@ -1928,71 +1925,24 @@ impl ManagedApplicationArtifactStoreLease {
         writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
         key: &str,
         session_path: &Path,
+        session_scope_id: &str,
     ) -> Result<Self> {
-        let staging_lease = writer
-            .acquire_named(
-                crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
-                key,
-            )
-            .map_err(|error| {
-                anyhow!("managed artifact-staging namespace admission failed: {error}")
-            })?;
-        let store_lease = match writer.acquire_named(
-            crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
-            key,
-        ) {
-            Ok(lease) => lease,
-            Err(error) => {
-                let _ = writer.finalize(staging_lease);
-                return Err(anyhow!(
-                    "managed artifact-store namespace admission failed: {error}"
-                ));
-            }
-        };
-        let artifact_store = ToolArtifactStore::for_session_path_with_roots(
-            session_path,
-            store_lease.path().to_path_buf(),
-            staging_lease.path().to_path_buf(),
-        );
         Ok(Self {
-            writer,
-            staging_lease: Some(staging_lease),
-            store_lease: Some(store_lease),
-            artifact_store,
+            inner: crate::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+                writer,
+                key,
+                session_scope_id,
+                session_path.to_path_buf(),
+            )?,
         })
     }
 
     fn store(&self) -> ToolArtifactStore {
-        self.artifact_store.clone()
+        self.inner.store()
     }
 
-    fn finalize(mut self) -> Result<()> {
-        if let Some(lease) = self.store_lease.take() {
-            self.writer.finalize(lease).map_err(|error| {
-                anyhow!("managed artifact-store namespace finalize failed: {error}")
-            })?;
-        }
-        if let Some(lease) = self.staging_lease.take() {
-            self.writer.finalize(lease).map_err(|error| {
-                anyhow!("managed artifact-staging namespace finalize failed: {error}")
-            })?;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ManagedApplicationArtifactStoreLease {
-    fn drop(&mut self) {
-        if let Some(lease) = self.store_lease.take()
-            && let Err(error) = self.writer.finalize(lease)
-        {
-            tracing::error!(%error, "failed to finalize managed artifact-store namespace during cleanup");
-        }
-        if let Some(lease) = self.staging_lease.take()
-            && let Err(error) = self.writer.finalize(lease)
-        {
-            tracing::error!(%error, "failed to finalize managed artifact-staging namespace during cleanup");
-        }
+    fn finalize(self) -> Result<()> {
+        self.inner.finalize()
     }
 }
 
@@ -5682,8 +5632,13 @@ fn prepare_application_run_blocking_with_writer(
         managed_artifact_store_writer,
         managed_session_key.as_deref(),
     ) {
-        let lease = ManagedApplicationArtifactStoreLease::acquire(writer, key, &session_path)
-            .map_err(ApplicationRunPrepareError::execution)?;
+        let lease = ManagedApplicationArtifactStoreLease::acquire(
+            writer,
+            key,
+            &session_path,
+            session.session_scope_id(),
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
         session = session.with_tool_artifact_store_override(lease.store());
         Some(lease)
     } else {

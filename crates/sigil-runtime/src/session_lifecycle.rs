@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -907,7 +908,12 @@ impl LocalSessionLifecycleService {
         let before_hash = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
         let records = JsonlSessionStore::read_event_records(&source.path)?;
         let projection = project_records(&records)?;
-        let artifact_store = self.artifact_store_for_source_path(&source.path);
+        let source_session_id = projection
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow!("source session has no durable identity"))?;
+        let (artifact_store, _artifact_lease) =
+            self.artifact_store_for_source_path(&source.path, &source_session_id)?;
         let tool_artifacts = export_tool_artifacts(
             &artifact_store,
             &projection.tool_artifacts,
@@ -919,10 +925,6 @@ impl LocalSessionLifecycleService {
         if before_hash != after_hash {
             bail!("source session changed while export was being prepared");
         }
-        let source_session_id = projection
-            .session_id
-            .clone()
-            .ok_or_else(|| anyhow!("source session has no durable identity"))?;
         let messages = export_messages(&projection.messages, self.limits.max_export_messages)?;
         validate_export_provenance(&messages, &projection.external_provenance)?;
         let payload = SessionExportPayloadV1 {
@@ -1014,7 +1016,8 @@ impl LocalSessionLifecycleService {
         now_unix_ms: u64,
     ) -> Result<ToolArtifactGcReportV1> {
         let _maintenance = self.acquire_maintenance_lease()?;
-        let store = self.resolve_artifact_store_without_jsonl(session_ref, expected_session_id)?;
+        let (store, _artifact_lease) =
+            self.resolve_artifact_store_without_jsonl(session_ref, expected_session_id)?;
         let session_log_path = store.session_log_path().to_path_buf();
         if self.is_session_pinned(session_ref, expected_session_id)? {
             roots.explicit_holds.extend(
@@ -1622,7 +1625,10 @@ impl LocalSessionLifecycleService {
         &self,
         session_ref: &SessionRef,
         expected_session_id: &str,
-    ) -> Result<ToolArtifactStore> {
+    ) -> Result<(
+        ToolArtifactStore,
+        Option<crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
+    )> {
         let relative = session_ref.as_path();
         if relative.components().count() != 1
             || relative.extension().and_then(|value| value.to_str()) != Some("jsonl")
@@ -1666,28 +1672,48 @@ impl LocalSessionLifecycleService {
                 bail!("managed artifact GC source must be one session key below the root");
             }
         }
-        let store = self.artifact_store_for_source_path(&path);
+        let (store, lease) = self.artifact_store_for_source_path(&path, expected_session_id)?;
         if store.session_scope_id() != expected_session_id {
             bail!("artifact GC session identity changed");
         }
-        Ok(store)
+        Ok((store, lease))
     }
 
-    fn artifact_store_for_source_path(&self, source_path: &Path) -> ToolArtifactStore {
+    fn artifact_store_for_source_path(
+        &self,
+        source_path: &Path,
+        session_scope_id: &str,
+    ) -> Result<(
+        ToolArtifactStore,
+        Option<crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
+    )> {
+        if let Some(writer) = &self.managed_writer {
+            let key = source_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .context("managed artifact session key is unavailable")?;
+            let lease = crate::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+                Arc::clone(writer),
+                key,
+                session_scope_id,
+                source_path.to_path_buf(),
+            )?;
+            return Ok((lease.store(), Some(lease)));
+        }
         let Some(session_root) = self.managed_session_log_root.as_deref() else {
-            return ToolArtifactStore::for_session_path(source_path);
+            return Ok((ToolArtifactStore::for_session_path(source_path), None));
         };
         let Some(store_root) = self.managed_artifact_store_root.as_deref() else {
-            return ToolArtifactStore::for_session_path(source_path);
+            return Ok((ToolArtifactStore::for_session_path(source_path), None));
         };
         let Some(staging_root) = self.managed_artifact_staging_root.as_deref() else {
-            return ToolArtifactStore::for_session_path(source_path);
+            return Ok((ToolArtifactStore::for_session_path(source_path), None));
         };
         let Ok(session_root) = session_root.canonicalize() else {
-            return ToolArtifactStore::for_session_path(source_path);
+            return Ok((ToolArtifactStore::for_session_path(source_path), None));
         };
         let Ok(source_path) = source_path.canonicalize() else {
-            return ToolArtifactStore::for_session_path(source_path);
+            return Ok((ToolArtifactStore::for_session_path(source_path), None));
         };
         let Some(key) = source_path
             .parent()
@@ -1696,13 +1722,16 @@ impl LocalSessionLifecycleService {
             .and_then(Path::file_name)
             .and_then(|value| value.to_str())
         else {
-            return ToolArtifactStore::for_session_path(&source_path);
+            return Ok((ToolArtifactStore::for_session_path(&source_path), None));
         };
-        ToolArtifactStore::for_session_path_with_roots(
-            &source_path,
-            store_root.join(key),
-            staging_root.join(key),
-        )
+        Ok((
+            ToolArtifactStore::for_session_path_with_roots(
+                &source_path,
+                store_root.join(key),
+                staging_root.join(key),
+            ),
+            None,
+        ))
     }
 
     fn allocate_export_path(

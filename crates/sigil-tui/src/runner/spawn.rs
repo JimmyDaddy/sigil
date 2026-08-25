@@ -383,6 +383,10 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     ) => match super::ManagedTuiArtifactStoreLease::acquire(
                         Arc::clone(&composition.storage_writer),
                         &session_log_path,
+                        &sigil_kernel::stable_event_uuid(
+                            "sigil-session-path",
+                            &session_log_path.to_string_lossy(),
+                        ),
                     ) {
                         Ok(lease) => Some(lease),
                         Err(error) => {
