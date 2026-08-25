@@ -3,7 +3,7 @@
 > Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
 > no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
 
-> RFC-0071 implementation snapshot (2026-08-25): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. R71.6-R71.8 remain one unpublished candidate until the fixed cross-platform qualification evidence is complete.
+> RFC-0071 frozen implementation snapshot (2026-08-26): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. R71.6-R71.8 completed as one exact-SHA-qualified candidate; subsequent application/TUI boundary work must preserve this frozen authority, durable schema and recovery contract.
 
 ## 1. 背景
 

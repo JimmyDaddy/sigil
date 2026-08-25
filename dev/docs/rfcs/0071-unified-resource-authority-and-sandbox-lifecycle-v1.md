@@ -1,8 +1,8 @@
 # RFC-0071：Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1
 
-状态：qualification candidate（2026-08-26；implementation-completeness findings 已闭合，等待最终 clean exact-SHA local full 与 five-platform qualification）
+状态：Implemented / Frozen（2026-08-26；implementation-completeness findings、clean exact-SHA local full 与 fixed five-platform qualification 已闭合）
 
-> 当前审查覆盖与逐项回应见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十二轮已关闭 Terminal public-manager ownership、plugin Extension-purpose admission/control、artifact retire frontier/GC/prune、durable owner quota/replay、storage physical-frontier/recovery、task/parent/TUI verification 及 test-feature 污染等剩余 implementation findings；全 workspace、strict clippy、inventory 与 negative dependency gates 已通过。历史 R71.0–R71.8 qualification evidence 与所有复核轮次继续保留，但不得替代本次候选的 exact-SHA 证据；只有最终 clean/pushed SHA 的 local full 与五平台 workflow 全绿后，状态才可改为 `Implemented/Frozen`。
+> 当前审查覆盖、逐项回应与最终 exact-SHA evidence 见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十二轮关闭 Terminal public-manager ownership、plugin Extension-purpose admission/control、artifact retire frontier/GC/prune、durable owner quota/replay、storage physical-frontier/recovery、task/parent/TUI verification 及 test-feature 污染等剩余 implementation findings；后续 qualification closure 又修复 execution temp generation 缺失及 TUI artifact-GC gate 抖动。implementation candidate `e410172c410cc6e86d3403cdd0be3401eb94d125` 的 clean local full 与 GitHub fixed five-platform run `32883914430` 均通过；本状态所在的最终文档提交也由同一聚合器按 exact SHA 复验，最终 SHA 与证据摘要保存在 repo-local audit/handoff ledger。历史证据继续保留供追溯，但不替代最终提交本身的资格证明。
 
 创建日期：2026-08-23
 
@@ -10320,6 +10320,8 @@ Proposed 阶段只创建本 RFC，不更新 README、`dev/docs/index.md` 或 `.r
 8. `.repo-local-dev/rfcs/STATUS.md`：只有开始 R71 implementation ledger 后登记。
 
 R71.8 closure record：上述同步已完成。固定五 job workflow、exact candidate/base 校验、200 个 required fault cases、inventory/shipping/negative gates、四表面 contract checks 与三平台 sandbox qualification 的逐项证据由本地 execution ledger 和 handoff manifest 记录；R71.6–R71.8 仍作为同一未发布 release candidate 管理，RFC-0070 不在本闭环中提前启动。
+
+2026-08-26 final closure record：completeness review 后的 implementation candidate `e410172c410cc6e86d3403cdd0be3401eb94d125` 以 immutable base `44d043517d1893ff1043f5597aa71d31b527f16a` 通过 clean macOS full qualification，local evidence SHA-256 为 `1f8fdc92734a164d7f691d61721cd49d8186293e1d9c16aae83a1ccfd64879d4`；GitHub run `32883914430` 的 `macos-seatbelt`、`linux-bubblewrap`、`windows-restricted`、`docker-declared`、`toolchain-offline` 五个固定 job 全部 success，且五份 artifact 均经 candidate/base/manifest hash/result 复核。Linux full job 实际越过此前 rustdoc `TMPDIR` 子目录缺失故障并完成全部 full gate。状态修改所在的最终提交继续按同一 exact-SHA protocol 复验；repo-local audit ledger 是最终 SHA、二次 local evidence 与二次 hosted run 的闭合记录。RFC-0071 不再有 P1/P2 implementation 或 qualification blocker，post-R71 稳定基线可供 RFC-0070 按串行约束启动。
 
 ---
 
