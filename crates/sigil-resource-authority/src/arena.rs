@@ -6,9 +6,12 @@
 //! ExecutionTemp layout. Allocation is atomic: the leaf exists only after the arena + quota
 //! reservation are both durable, and generation names never collide.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-use sigil_kernel::resource::CanonicalHash;
+use sigil_kernel::{resource::CanonicalHash, secure_private_path_permissions};
 
 /// ExecutionTemp standard layout (logical relative names are fixed; host path varies).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +106,149 @@ pub enum ArenaErrorV1 {
     TempScratchAlias,
     #[error("host-private diagnostics may not live under a child-granted ExecutionTemp root")]
     DiagnosticsUnderGrant,
+    #[error("invalid execution attempt identity: {0}")]
+    InvalidAttemptId(String),
+    #[error("execution-temp filesystem operation failed: {0}")]
+    Filesystem(String),
+}
+
+/// Resource-authority owner for per-attempt `ExecutionTemp` generations.
+///
+/// The base is an authority bootstrap anchor. Consumers cannot select a physical generation:
+/// this owner derives the exact attempt/generation path, materializes the complete reserved-env
+/// layout, hardens every directory before returning it, and is the only cleanup entry point.
+#[derive(Debug, Clone)]
+pub struct ExecutionTempAuthorityV1 {
+    base: PathBuf,
+}
+
+impl ExecutionTempAuthorityV1 {
+    #[must_use]
+    pub fn new(base: impl Into<PathBuf>) -> Self {
+        Self { base: base.into() }
+    }
+
+    /// Provisions an exact generation. The returned binding is not cloneable and its root is
+    /// published only after all standard env directories exist and are owner-only.
+    pub fn provision(
+        &self,
+        attempt_id: &str,
+        generation: u64,
+    ) -> Result<ExecutionTempGenerationV1, ArenaErrorV1> {
+        validate_attempt_id(attempt_id)?;
+        ensure_private_directory(&self.base)?;
+        // Attempt ids contain purpose labels and may contain `:`. Keep the host directory
+        // portable and opaque by deriving a fixed ASCII component instead of using the id as a
+        // filename (notably, `:` is not a valid Windows path component).
+        let attempt_root = self.base.join(
+            arena_digest(format!("execution-temp-attempt-v1\0{attempt_id}").as_bytes()).to_hex(),
+        );
+        ensure_private_directory(&attempt_root)?;
+        let root = attempt_root.join(generation.to_string());
+        if fs::symlink_metadata(&root).is_ok() {
+            return Err(ArenaErrorV1::GenerationCollision(
+                root.display().to_string(),
+            ));
+        }
+        fs::create_dir(&root).map_err(arena_fs_error)?;
+        if let Err(error) = materialize_standard_layout(&root) {
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir(&attempt_root);
+            return Err(error);
+        }
+        Ok(ExecutionTempGenerationV1 {
+            root: ExecutionTempRootV1 {
+                attempt_id: attempt_id.to_owned(),
+                generation,
+                root,
+                layout_hash: arena_digest(b"execution-temp-layout-v1"),
+            },
+            attempt_root,
+        })
+    }
+}
+
+/// Non-clone physical generation binding. Callers must settle it explicitly after process
+/// settlement so receipts never claim `Released` before the owned tree has actually gone away.
+#[derive(Debug)]
+pub struct ExecutionTempGenerationV1 {
+    root: ExecutionTempRootV1,
+    attempt_root: PathBuf,
+}
+
+impl ExecutionTempGenerationV1 {
+    #[must_use]
+    pub fn binding(&self) -> &ExecutionTempRootV1 {
+        &self.root
+    }
+
+    pub fn finalize(self) -> Result<(), ArenaErrorV1> {
+        let metadata = fs::symlink_metadata(&self.root.root).map_err(arena_fs_error)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(ArenaErrorV1::NotPlainDirectory(
+                self.root.root.display().to_string(),
+            ));
+        }
+        // `remove_dir_all` does not follow directory symlinks. The owner-only anchor prevents a
+        // different OS user from replacing ancestors, while unconfined same-user execution is
+        // reported truthfully by the sandbox receipt rather than treated as confinement.
+        fs::remove_dir_all(&self.root.root).map_err(arena_fs_error)?;
+        match fs::remove_dir(&self.attempt_root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(arena_fs_error(error)),
+        }
+    }
+}
+
+fn validate_attempt_id(attempt_id: &str) -> Result<(), ArenaErrorV1> {
+    if attempt_id.is_empty()
+        || attempt_id == "."
+        || attempt_id == ".."
+        || attempt_id
+            .chars()
+            .any(|value| value == '/' || value == '\\' || value == '\0')
+    {
+        return Err(ArenaErrorV1::InvalidAttemptId(attempt_id.to_owned()));
+    }
+    Ok(())
+}
+
+fn materialize_standard_layout(root: &Path) -> Result<(), ArenaErrorV1> {
+    secure_private_path_permissions(root)
+        .map_err(|error| ArenaErrorV1::Filesystem(error.to_string()))?;
+    let layout = ExecutionTempLayoutV1::default();
+    for relative in [
+        layout.tmp,
+        layout.home,
+        layout.state,
+        layout.cache,
+        layout.sigil_state,
+        layout.sigil_cache,
+        layout.config,
+    ] {
+        ensure_private_directory(&root.join(relative))?;
+    }
+    Ok(())
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), ArenaErrorV1> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(ArenaErrorV1::NotPlainDirectory(path.display().to_string()));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(arena_fs_error)?;
+        }
+        Err(error) => return Err(arena_fs_error(error)),
+    }
+    secure_private_path_permissions(path)
+        .map_err(|error| ArenaErrorV1::Filesystem(error.to_string()))
+}
+
+fn arena_fs_error(error: std::io::Error) -> ArenaErrorV1 {
+    ArenaErrorV1::Filesystem(error.to_string())
 }
 
 /// `ExecutionTemp/<attempt-id>/<generation>/` physical scope.
@@ -197,5 +343,39 @@ mod tests {
             std::path::MAIN_SEPARATOR
         );
         assert!(root.ends_with(&expected));
+    }
+
+    #[test]
+    fn r71_execution_temp_authority_materializes_and_releases_complete_layout() {
+        let base = tempfile::tempdir().expect("base");
+        let authority = ExecutionTempAuthorityV1::new(base.path());
+        let generation = authority
+            .provision("attempt-1", 1)
+            .expect("provision execution temp");
+        let root = generation.binding().root.clone();
+        for relative in [
+            "tmp",
+            "home",
+            "state",
+            "cache",
+            "sigil-state",
+            "sigil-cache",
+            "config",
+        ] {
+            assert!(root.join(relative).is_dir(), "missing {relative}");
+        }
+        generation.finalize().expect("release generation");
+        assert!(!root.exists());
+        assert_eq!(std::fs::read_dir(base.path()).expect("base").count(), 0);
+    }
+
+    #[test]
+    fn r71_execution_temp_authority_rejects_path_traversal_identity() {
+        let base = tempfile::tempdir().expect("base");
+        let authority = ExecutionTempAuthorityV1::new(base.path());
+        let error = authority
+            .provision("../outside", 1)
+            .expect_err("path traversal must fail");
+        assert!(matches!(error, ArenaErrorV1::InvalidAttemptId(_)));
     }
 }

@@ -17,7 +17,8 @@ use sigil_kernel::capability_issuer::{KernelCapabilityIssuerV1, VerifiedExecutio
 use sigil_kernel::managed_execution::{
     BoundedProcessInputV1, CaptureModeV1, ExecutionCapturePolicy, ExecutionPurposeV1,
     ExecutionResourceLimits, ManagedExecutionPlanRequestV1, ManagedExecutionRequestV1,
-    ManagedExecutionServiceV1, ManagedProcessOutputChannelV1, ProcessCancelReasonV1,
+    ManagedExecutionServiceV1, ManagedProcessHandleV1, ManagedProcessOutputChannelV1,
+    ProcessCancelReasonV1,
 };
 use sigil_kernel::managed_file_access::ManagedFileAccessServiceV1;
 use sigil_kernel::managed_projection::ManagedProjectionServiceV1;
@@ -29,10 +30,12 @@ use sigil_kernel::resource::{
 };
 use sigil_kernel::{
     EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION, ExecutionBackendCapabilities, ExecutionBackendKind,
-    ExecutionCaptureOutcome, ExecutionNetworkReceipt, ExecutionOutputReceipt,
-    ExecutionOutputStream, ExecutionReceipt, ExecutionRequest, ExecutionResourceReceipt,
-    ExecutionStreamCapture, ExecutionTerminationCause, ToolOutputStreamV1,
+    ExecutionCaptureOutcome, ExecutionCleanupReceipt, ExecutionNetworkReceipt,
+    ExecutionOutputReceipt, ExecutionOutputStream, ExecutionReceipt, ExecutionRequest,
+    ExecutionResourceReceipt, ExecutionStreamCapture, ExecutionTerminationCause,
+    ToolOutputStreamV1,
 };
+use sigil_resource_authority::arena::{ExecutionTempAuthorityV1, ExecutionTempGenerationV1};
 use sigil_resource_authority::factory::ResourceAuthorityServiceBundleV1;
 use sigil_sandbox::managed::ManagedExtensionLaunchEnforcementV1;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -91,7 +94,7 @@ pub struct RuntimeManagedResourceServicesV1 {
 pub struct RuntimeManagedExtensionExecutionRouteV1 {
     planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1>,
     broker: Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
-    execution_temp_root: PathBuf,
+    execution_temp_authority: Arc<ExecutionTempAuthorityV1>,
     authority_generation: sigil_kernel::resource::AuthorityGeneration,
 }
 
@@ -99,7 +102,7 @@ impl std::fmt::Debug for RuntimeManagedExtensionExecutionRouteV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RuntimeManagedExtensionExecutionRouteV1")
-            .field("execution_temp_root", &"[hidden]")
+            .field("execution_temp_authority", &"[hidden]")
             .finish_non_exhaustive()
     }
 }
@@ -113,7 +116,7 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
         Self {
             planner,
             broker,
-            execution_temp_root,
+            execution_temp_authority: Arc::new(ExecutionTempAuthorityV1::new(execution_temp_root)),
             authority_generation: sigil_kernel::resource::AuthorityGeneration {
                 epoch: 1,
                 instance_hash: CanonicalHash::from_bytes([0x75; 32]),
@@ -269,6 +272,12 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
         let bundle = self.broker.issue_execution(proof).map_err(|_| {
             sigil_kernel::managed_execution::ManagedExecutionErrorV1::AdmissionMismatch
         })?;
+        let execution_temp = self
+            .execution_temp_authority
+            .provision(prepared.attempt_id.as_str(), 1)
+            .map_err(|_| {
+                sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable
+            })?;
         let launcher = Arc::new(
             sigil_sandbox::managed::CommandManagedExtensionLaunchServiceV1::new(
                 prepared.plan.program,
@@ -280,10 +289,13 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
         );
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
-            self.execution_temp_root.clone(),
+            execution_temp.binding().root.clone(),
         )
         .with_extension_launcher(launcher);
-        service.start_persistent(bundle, prepared.request).await
+        wrap_persistent_launch(
+            service.start_persistent(bundle, prepared.request).await,
+            execution_temp,
+        )
     }
 }
 
@@ -294,6 +306,143 @@ struct PreparedManagedExtensionLaunchV1 {
     request: ManagedExecutionRequestV1,
     attempt_id: PhysicalAttemptId,
     enforcement: ManagedExtensionLaunchEnforcementV1,
+}
+
+/// Keeps one authority-owned ExecutionTemp generation alive for exactly the persistent process
+/// lifetime and settles it before the terminal receipt becomes observable.
+struct RuntimeManagedProcessWithExecutionTempV1 {
+    inner: Box<dyn ManagedProcessHandleV1>,
+    execution_temp: ExecutionTempGenerationV1,
+}
+
+fn wrap_persistent_launch(
+    result: Result<
+        Box<dyn ManagedProcessHandleV1>,
+        sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+    >,
+    execution_temp: ExecutionTempGenerationV1,
+) -> Result<Box<dyn ManagedProcessHandleV1>, sigil_kernel::managed_execution::ManagedExecutionErrorV1>
+{
+    match result {
+        Ok(inner) => Ok(Box::new(RuntimeManagedProcessWithExecutionTempV1 {
+            inner,
+            execution_temp,
+        })),
+        Err(error) => {
+            let _ = execution_temp.finalize();
+            Err(error)
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ManagedProcessHandleV1 for RuntimeManagedProcessWithExecutionTempV1 {
+    fn process_ref(&self) -> sigil_kernel::resource::ReflectiveOpaqueProcessRef {
+        self.inner.process_ref()
+    }
+
+    fn physical_attempt_id(&self) -> PhysicalAttemptId {
+        self.inner.physical_attempt_id()
+    }
+
+    fn take_output_stream(
+        &mut self,
+    ) -> Result<
+        Box<dyn sigil_kernel::managed_execution::ManagedProcessOutputStreamV1>,
+        sigil_kernel::managed_execution::ManagedProcessControlErrorV1,
+    > {
+        self.inner.take_output_stream()
+    }
+
+    async fn write_stdin(
+        &mut self,
+        input: BoundedProcessInputV1,
+    ) -> Result<
+        sigil_kernel::managed_execution::ProcessControlReceiptV1,
+        sigil_kernel::managed_execution::ManagedProcessControlErrorV1,
+    > {
+        self.inner.write_stdin(input).await
+    }
+
+    async fn resize_pty(
+        &mut self,
+        size: sigil_kernel::managed_execution::BoundedPtySizeV1,
+    ) -> Result<
+        sigil_kernel::managed_execution::ProcessControlReceiptV1,
+        sigil_kernel::managed_execution::ManagedProcessControlErrorV1,
+    > {
+        self.inner.resize_pty(size).await
+    }
+
+    async fn close_stdin(
+        &mut self,
+    ) -> Result<
+        sigil_kernel::managed_execution::ProcessControlReceiptV1,
+        sigil_kernel::managed_execution::ManagedProcessControlErrorV1,
+    > {
+        self.inner.close_stdin().await
+    }
+
+    async fn cancel(
+        &mut self,
+        reason: ProcessCancelReasonV1,
+    ) -> Result<
+        sigil_kernel::managed_execution::ProcessControlReceiptV1,
+        sigil_kernel::managed_execution::ManagedProcessControlErrorV1,
+    > {
+        self.inner.cancel(reason).await
+    }
+
+    async fn wait_and_finalize(
+        self: Box<Self>,
+    ) -> Result<
+        sigil_kernel::managed_execution::ManagedExecutionReceiptV1,
+        sigil_kernel::managed_execution::ManagedExecutionErrorV1,
+    > {
+        let Self {
+            inner,
+            execution_temp,
+        } = *self;
+        match inner.wait_and_finalize().await {
+            Ok(mut receipt) => {
+                receipt.resources.cleanup_status = finalize_execution_temp(execution_temp);
+                Ok(receipt)
+            }
+            Err(error) => {
+                let _ = execution_temp.finalize();
+                Err(error)
+            }
+        }
+    }
+}
+
+fn finalize_execution_temp(
+    execution_temp: ExecutionTempGenerationV1,
+) -> sigil_kernel::resource::ResourceCleanupStatusV1 {
+    match execution_temp.finalize() {
+        Ok(()) => sigil_kernel::resource::ResourceCleanupStatusV1::Released,
+        Err(error) => sigil_kernel::resource::ResourceCleanupStatusV1::CleanupIncomplete {
+            evidence_digest: crate::r71_shadow_planner::canonical_digest(
+                error.to_string().as_bytes(),
+            ),
+        },
+    }
+}
+
+fn execution_cleanup_receipt(
+    status: &sigil_kernel::resource::ResourceCleanupStatusV1,
+) -> ExecutionCleanupReceipt {
+    match status {
+        sigil_kernel::resource::ResourceCleanupStatusV1::Released => {
+            ExecutionCleanupReceipt::completed("managed authority released ExecutionTemp")
+        }
+        sigil_kernel::resource::ResourceCleanupStatusV1::CleanupIncomplete { .. } => {
+            ExecutionCleanupReceipt::failed("managed authority could not release ExecutionTemp")
+        }
+        other => {
+            ExecutionCleanupReceipt::unknown(format!("managed authority cleanup status: {other:?}"))
+        }
+    }
 }
 
 /// Production plugin-hook route bound to Extension-purpose admission and one execution policy.
@@ -532,6 +681,7 @@ impl RuntimeManagedPluginHookExecutionRouteV1 {
         })?;
         Ok(persistent_execution_receipt(
             &managed_receipt.process,
+            &managed_receipt.resources.cleanup_status,
             backend,
             backend_capabilities,
             network,
@@ -720,14 +870,14 @@ impl crate::plugins::ManagedPluginHookExecutionPortV1 for RuntimeManagedPluginHo
 pub struct RuntimeManagedCommandExecutionRouteV1 {
     planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1>,
     broker: Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
-    execution_temp_root: PathBuf,
+    execution_temp_authority: Arc<ExecutionTempAuthorityV1>,
 }
 
 impl std::fmt::Debug for RuntimeManagedCommandExecutionRouteV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RuntimeManagedCommandExecutionRouteV1")
-            .field("execution_temp_root", &"[hidden]")
+            .field("execution_temp_authority", &"[hidden]")
             .finish_non_exhaustive()
     }
 }
@@ -742,7 +892,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         Self {
             planner,
             broker,
-            execution_temp_root,
+            execution_temp_authority: Arc::new(ExecutionTempAuthorityV1::new(execution_temp_root)),
         }
     }
 
@@ -795,18 +945,24 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             // closed command-toolchain baseline, not every ambient secret/debug variable.
             for name in [
                 "PATH",
-                "HOME",
                 "CARGO_HOME",
                 "RUSTUP_HOME",
-                "TMPDIR",
-                "TMP",
-                "TEMP",
                 "LANG",
                 "LC_ALL",
                 "LC_CTYPE",
             ] {
                 if let Some(value) = std::env::var_os(name) {
                     environment.insert(OsString::from(name), value);
+                }
+            }
+            // HOME itself is reserved for the fresh ExecutionTemp profile. Toolchain stores are
+            // borrowed, read-only inputs, so materialize their conventional locations as
+            // explicit bindings when the parent did not already name them.
+            if let Some(parent_home) = std::env::var_os("HOME") {
+                for (name, relative) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
+                    environment.entry(OsString::from(name)).or_insert_with(|| {
+                        PathBuf::from(&parent_home).join(relative).into_os_string()
+                    });
                 }
             }
         }
@@ -888,6 +1044,12 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         let bundle = self.broker.issue_execution(proof).map_err(|_| {
             sigil_kernel::managed_execution::ManagedExecutionErrorV1::AdmissionMismatch
         })?;
+        let execution_temp = self
+            .execution_temp_authority
+            .provision(attempt_id.as_str(), 1)
+            .map_err(|_| {
+                sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable
+            })?;
         let terminal_enforcement = terminal_enforcement(draft.environment_profile.profile_hash);
         let launcher = Arc::new(
             sigil_sandbox::managed::CommandManagedTerminalLaunchServiceV1::new(
@@ -900,10 +1062,13 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         );
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
-            self.execution_temp_root.clone(),
+            execution_temp.binding().root.clone(),
         )
         .with_terminal_launcher(launcher);
-        service.start_persistent(bundle, managed_request).await
+        wrap_persistent_launch(
+            service.start_persistent(bundle, managed_request).await,
+            execution_temp,
+        )
     }
 
     async fn start_managed_code_intel(
@@ -978,6 +1143,10 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             .broker
             .issue_execution(proof)
             .map_err(|error| anyhow!("managed code-intel admission failed: {error}"))?;
+        let execution_temp = self
+            .execution_temp_authority
+            .provision(attempt_id.as_str(), 1)
+            .map_err(|error| anyhow!("managed code-intel temp provisioning failed: {error}"))?;
         let enforcement = terminal_enforcement(draft.environment_profile.profile_hash);
         let launcher = Arc::new(
             sigil_sandbox::managed::CommandManagedExtensionLaunchServiceV1::new(
@@ -990,13 +1159,14 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         );
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
-            self.execution_temp_root.clone(),
+            execution_temp.binding().root.clone(),
         )
         .with_code_intel_launcher(launcher);
-        let mut process = service
-            .start_persistent(bundle, managed_request)
-            .await
-            .map_err(|error| anyhow!("managed code-intel launch failed: {error}"))?;
+        let mut process = wrap_persistent_launch(
+            service.start_persistent(bundle, managed_request).await,
+            execution_temp,
+        )
+        .map_err(|error| anyhow!("managed code-intel launch failed: {error}"))?;
         let mut output = process
             .take_output_stream()
             .map_err(|error| anyhow!("managed code-intel output unavailable: {error}"))?;
@@ -1117,6 +1287,10 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             .broker
             .issue_execution(proof)
             .map_err(|error| anyhow!("managed one-shot admission failed: {error}"))?;
+        let execution_temp = self
+            .execution_temp_authority
+            .provision(attempt_id.as_str(), 1)
+            .map_err(|error| anyhow!("managed one-shot temp provisioning failed: {error}"))?;
         let launcher = Arc::new(
             sigil_sandbox::managed::CommandManagedOneShotLaunchServiceV1::new(
                 request.cwd.clone(),
@@ -1125,13 +1299,18 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         );
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
-            self.execution_temp_root.clone(),
+            execution_temp.binding().root.clone(),
         )
         .with_one_shot_launcher(launcher);
-        let managed_receipt = service
-            .execute_once(bundle, managed_request)
-            .await
-            .map_err(|error| anyhow!("managed one-shot execution failed: {error}"))?;
+        let managed_result = service.execute_once(bundle, managed_request).await;
+        let mut managed_receipt = match managed_result {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = execution_temp.finalize();
+                return Err(anyhow!("managed one-shot execution failed: {error}"));
+            }
+        };
+        managed_receipt.resources.cleanup_status = finalize_execution_temp(execution_temp);
         let process = &managed_receipt.process;
         let output = ExecutionOutputReceipt {
             schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
@@ -1174,7 +1353,10 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             network: ExecutionNetworkReceipt::unknown(
                 "managed Local execution is explicitly unconfined and has no network enforcement",
             ),
-            resources: ExecutionResourceReceipt::default(),
+            resources: ExecutionResourceReceipt {
+                cleanup: execution_cleanup_receipt(&managed_receipt.resources.cleanup_status),
+                ..ExecutionResourceReceipt::default()
+            },
             environment_policy: request.environment_policy,
             exit_code,
             stdout: process.stdout_summary.retained_payload.clone(),
@@ -1271,6 +1453,7 @@ fn stream_capture(
 
 fn persistent_execution_receipt(
     process: &sigil_kernel::managed_execution::ProcessExecutionReceiptV1,
+    cleanup_status: &sigil_kernel::resource::ResourceCleanupStatusV1,
     backend: ExecutionBackendKind,
     capabilities: ExecutionBackendCapabilities,
     network: ExecutionNetworkReceipt,
@@ -1295,7 +1478,10 @@ fn persistent_execution_receipt(
         backend,
         capabilities,
         network,
-        resources: ExecutionResourceReceipt::default(),
+        resources: ExecutionResourceReceipt {
+            cleanup: execution_cleanup_receipt(cleanup_status),
+            ..ExecutionResourceReceipt::default()
+        },
         environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
         exit_code,
         stdout: process.stdout_summary.retained_payload.clone(),
@@ -1770,13 +1956,27 @@ mod tests {
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             execution_temp.path().to_path_buf(),
         );
+        let mut environment = std::collections::BTreeMap::new();
+        environment.insert("TMPDIR".to_owned(), "/ambient-override".to_owned());
+        environment.insert("HOME".to_owned(), "/ambient-home".to_owned());
         let receipt = route
             .execute_with_cancellation(
                 sigil_kernel::ExecutionRequest {
                     program: "/bin/sh".to_owned(),
-                    args: vec!["-c".to_owned(), "printf managed-route".to_owned()],
+                    args: vec![
+                        "-c".to_owned(),
+                        concat!(
+                            "test -d \"$TMPDIR\" && test -d \"$HOME\" && ",
+                            "test -d \"$XDG_STATE_HOME\" && test -d \"$XDG_CACHE_HOME\" && ",
+                            "test -d \"$SIGIL_STATE_HOME\" && test -d \"$SIGIL_CACHE_HOME\" && ",
+                            "test \"$TMPDIR\" != /ambient-override && ",
+                            "test \"$HOME\" != /ambient-home && ",
+                            "touch \"$TMPDIR/child-created\" && printf managed-route"
+                        )
+                        .to_owned(),
+                    ],
                     cwd: root.path().to_path_buf(),
-                    env: std::collections::BTreeMap::new(),
+                    env: environment,
                     environment_policy: sigil_kernel::ProcessEnvironmentPolicy::default(),
                     timeout_ms: Some(30_000),
                     timeout_secs: 30,
@@ -1792,6 +1992,17 @@ mod tests {
         assert_eq!(receipt.stdout, b"managed-route");
         assert_eq!(receipt.exit_code, Some(0));
         assert_eq!(receipt.backend, sigil_kernel::ExecutionBackendKind::Local);
+        assert_eq!(
+            receipt.resources.cleanup.status,
+            sigil_kernel::ExecutionCleanupStatus::Completed
+        );
+        assert_eq!(
+            std::fs::read_dir(execution_temp.path())
+                .expect("execution temp anchor")
+                .count(),
+            0,
+            "the exact per-attempt generation must be released"
+        );
     }
 
     #[tokio::test]
@@ -1825,6 +2036,13 @@ mod tests {
             .await
             .expect("managed code-intel output");
         assert_eq!(output, b"managed-code-intel");
+        assert_eq!(
+            std::fs::read_dir(execution_temp.path())
+                .expect("execution temp anchor")
+                .count(),
+            0,
+            "code-intel settlement must release the exact ExecutionTemp generation"
+        );
     }
 
     #[tokio::test]
@@ -1863,6 +2081,17 @@ mod tests {
             receipt.process.termination,
             sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code: 0 }
         ));
+        assert_eq!(
+            receipt.resources.cleanup_status,
+            sigil_kernel::resource::ResourceCleanupStatusV1::Released
+        );
+        assert_eq!(
+            std::fs::read_dir(execution_temp.path())
+                .expect("execution temp anchor")
+                .count(),
+            0,
+            "persistent settlement must release the exact ExecutionTemp generation"
+        );
     }
 
     #[tokio::test]

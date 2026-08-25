@@ -607,19 +607,17 @@ impl SandboxManagedExecutionServiceV1 {
             .map_err(|_| ManagedExecutionErrorV1::ExecutionPlanDrift)?;
 
         let standard = standard_reserved_environment(&self.execution_temp_root);
-        let mut candidate = standard.clone();
-        let (_override, mut env) =
-            apply_reserved_environment(&mut candidate, &standard, None, false);
-        // Agreed (planner-sealed) environment overlays the reserved baseline: same semantic
-        // writer contract as the terminal/extension launcher, never unverified values. The
-        // local reserved map is String-keyed, so config-granted UTF-8 env values apply exactly;
-        // non-UTF-8 env strings stay rejected (Local never serves extension launches).
+        let mut candidate = BTreeMap::new();
+        // Start with the planner-sealed request environment, then let the sandbox apply its
+        // reserved bindings last. A caller may request TMPDIR/HOME, but it can never redirect
+        // those names away from the authority-issued ExecutionTemp generation.
         for (key, value) in &request.environment {
-            env.insert(
+            candidate.insert(
                 key.to_string_lossy().into_owned(),
                 value.to_string_lossy().into_owned(),
             );
         }
+        let (_override, env) = apply_reserved_environment(&mut candidate, &standard, None, false);
         let environment_binding_hash = env_hash(&env);
 
         let requirement = draft
@@ -2138,6 +2136,38 @@ mod tests {
         request.environment = vec![(OsString::from("R71_ENV_SEAL"), OsString::from("yes"))];
         let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
             .expect("agreed environment must execute");
+        assert!(matches!(
+            receipt.process.termination,
+            ProcessTerminationV1::Exited { code: 0 }
+        ));
+    }
+
+    #[test]
+    fn r71_reserved_execution_temp_environment_cannot_be_redirected_by_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("tmp")).expect("managed tmp");
+        let expected_tmp = dir.path().join("tmp");
+        let svc = service(false, dir.path());
+        let mut request = exec_request(
+            &[
+                "/bin/sh",
+                "-c",
+                "test \"$TMPDIR\" = \"$EXPECTED_MANAGED_TMP\"",
+            ],
+            false,
+        );
+        request.environment = vec![
+            (
+                OsString::from("TMPDIR"),
+                OsString::from("/ambient-override"),
+            ),
+            (
+                OsString::from("EXPECTED_MANAGED_TMP"),
+                expected_tmp.into_os_string(),
+            ),
+        ];
+        let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+            .expect("reserved environment must execute");
         assert!(matches!(
             receipt.process.termination,
             ProcessTerminationV1::Exited { code: 0 }

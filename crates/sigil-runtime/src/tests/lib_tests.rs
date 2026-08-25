@@ -1392,6 +1392,10 @@ for line in sys.stdin:
     sys.stdout.flush()
 "#,
     )?;
+    let mut baseline_entries = std::fs::read_dir(temp.path())?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    baseline_entries.sort();
     let provider_capabilities =
         provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let route = Arc::new(
@@ -1433,6 +1437,14 @@ for line in sys.stdin:
     );
     let tools = registry.drain_by_name_prefix("");
     shutdown_registered_tools(&tools).await?;
+    let mut settled_entries = std::fs::read_dir(temp.path())?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    settled_entries.sort();
+    assert_eq!(
+        settled_entries, baseline_entries,
+        "managed MCP settlement must release its exact ExecutionTemp generation"
+    );
     Ok(())
 }
 
