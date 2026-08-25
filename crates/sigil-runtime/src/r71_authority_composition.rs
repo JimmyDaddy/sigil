@@ -297,10 +297,11 @@ pub enum BootAuthorityErrorV1 {
 
 /// Builds and publishes the current-schema authority composition for one valid boot surface.
 ///
-/// The readiness manifest is computed once against a provisional composition, then the
-/// composition is rebound to the resulting content hash so storage grants and the persisted
-/// cutover manifest carry the same source binding. The journal header itself is bound to the
-/// verified state anchor, so this two-pass publication does not create a second journal shard.
+/// The readiness manifest is computed once against an isolated provisional composition, then the
+/// production composition is rebound to the resulting content hash so storage grants and the
+/// persisted cutover manifest carry the same source binding. Probes perform real admission and
+/// settlement, so their provisional journal must not contaminate the production journal before
+/// the source binding is frozen.
 pub fn compose_current_boot_authority(
     config_path: &std::path::Path,
     state_anchor: &std::path::Path,
@@ -337,9 +338,14 @@ pub fn compose_current_boot_authority(
     let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
         crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
     ));
+    let provisional_root =
+        tempfile::tempdir().map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    let provisional_state_anchor = provisional_root.path().join("state");
+    std::fs::create_dir_all(provisional_state_anchor.join("cache"))
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     let provisional_hash = hash_path_binding("cutover-provisional-v1", config_path);
     let provisional = compose_runtime_authority_with_product_updater(
-        state_anchor,
+        &provisional_state_anchor,
         cache_root,
         execution_temp_root,
         config_path,
@@ -362,24 +368,20 @@ pub fn compose_current_boot_authority(
             error.clone(),
         ))
     })?;
-
-    let composition = if first.manifest().manifest_hash == provisional_hash {
-        provisional
-    } else {
-        let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-        ));
-        compose_runtime_authority_with_product_updater(
-            state_anchor,
-            cache_root,
-            execution_temp_root,
-            config_path,
-            first.manifest().manifest_hash,
-            planner,
-            &declared,
-        )
-        .map_err(BootAuthorityErrorV1::Composition)?
-    };
+    drop(provisional);
+    let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+        crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+    ));
+    let composition = compose_runtime_authority_with_product_updater(
+        state_anchor,
+        cache_root,
+        execution_temp_root,
+        config_path,
+        first.manifest().manifest_hash,
+        planner,
+        &declared,
+    )
+    .map_err(BootAuthorityErrorV1::Composition)?;
     let decision = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
         instance_id,
         1,

@@ -56,6 +56,23 @@ impl AuthorityStorageGrantTableV1 {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
+    fn advance_probe_sequence(&self, next: u64) {
+        let mut current = self
+            .probe_sequence
+            .load(std::sync::atomic::Ordering::SeqCst);
+        while current < next {
+            match self.probe_sequence.compare_exchange(
+                current,
+                next,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     /// Mark the namespace bound to `handle` finalized exactly once.
     fn record_finalized(
         &self,
@@ -329,8 +346,8 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                 grant_hash: grant.grant_hash,
                 handle_id: handle.handle_id.as_str().to_owned(),
                 namespace_hash,
-                grant: grant.clone(),
-                request: request.clone(),
+                grant: Box::new(grant.clone()),
+                request: Box::new(request.clone()),
             })?
             .map(|record| record.sequence)
             .unwrap_or(grant.journal_admission_sequence);
@@ -422,6 +439,13 @@ fn rehydrate_storage_state(
     settled_grants: &std::collections::BTreeSet<String>,
 ) -> Result<(), JournalErrorV1> {
     for admission in admissions {
+        if let Some(sequence) = admission
+            .handle_id
+            .strip_prefix("handle-probe-storage-")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            table.advance_probe_sequence(sequence.saturating_add(1));
+        }
         let grant_id = admission.grant.grant_id.as_str().to_owned();
         let Some(registered) = table.grants.get(&grant_id) else {
             return Err(JournalErrorV1::Corrupt(format!(
@@ -671,8 +695,8 @@ mod tests {
                         grant_hash: grant().grant_hash,
                         handle_id: "rehydrated-handle".to_owned(),
                         namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
-                        grant: grant(),
-                        request: storage_test_request(),
+                        grant: Box::new(grant()),
+                        request: Box::new(storage_test_request()),
                     },
                 )
                 .expect("admission");

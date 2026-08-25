@@ -57,8 +57,8 @@ pub enum ResourceJournalEventV1 {
         grant_hash: CanonicalHash,
         handle_id: String,
         namespace_hash: CanonicalHash,
-        grant: StorageAdmissionGrantV1,
-        request: ManagedStorageAdmissionRequestV1,
+        grant: Box<StorageAdmissionGrantV1>,
+        request: Box<ManagedStorageAdmissionRequestV1>,
     },
     GenerationReserved {
         resource_id: String,
@@ -366,8 +366,8 @@ impl ResourceJournalFileV1 {
                     grant_hash: *grant_hash,
                     handle_id: handle_id.clone(),
                     namespace_hash: *namespace_hash,
-                    grant: grant.clone(),
-                    request: request.clone(),
+                    grant: (**grant).clone(),
+                    request: (**request).clone(),
                 }),
                 ResourceJournalEventV1::GenerationSettled { grant_hash, .. } => {
                     settled.insert(grant_hash.to_hex());
@@ -678,8 +678,8 @@ mod tests {
                     grant_hash,
                     handle_id: "handle-1".to_owned(),
                     namespace_hash: journal_encode(b"namespace-1"),
-                    grant: sample_grant(),
-                    request: sample_request(),
+                    grant: Box::new(sample_grant()),
+                    request: Box::new(sample_request()),
                 })
                 .expect("append admission");
             assert_eq!(record.sequence, 2, "genesis is persisted before admissions");
