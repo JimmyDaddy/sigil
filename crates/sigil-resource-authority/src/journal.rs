@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use sigil_kernel::managed_storage::{ManagedStorageAdmissionRequestV1, StorageAdmissionGrantV1};
 use sigil_kernel::resource::{CanonicalHash, ResourceJournalScopeV1};
 
 /// Journal header (frozen per shard instance).
@@ -54,6 +55,10 @@ pub enum ResourceJournalEventV1 {
     },
     StorageNamespaceAdmitted {
         grant_hash: CanonicalHash,
+        handle_id: String,
+        namespace_hash: CanonicalHash,
+        grant: StorageAdmissionGrantV1,
+        request: ManagedStorageAdmissionRequestV1,
     },
     GenerationReserved {
         resource_id: String,
@@ -94,6 +99,8 @@ pub enum JournalErrorV1 {
     Filesystem(String),
     #[error("durable journal payload is corrupt: {0}")]
     Corrupt(String),
+    #[error("durable journal commit is uncertain after rename: {0}")]
+    DurabilityUncertain(String),
 }
 
 /// In-memory deterministic journal (testing of append protocol before durable file backing).
@@ -200,6 +207,16 @@ impl ResourceJournalMemoryV1 {
         self.records.insert(next_sequence, record.clone());
         Ok(record)
     }
+
+    fn rollback_tail(&mut self, record: &ResourceJournalRecordV1) {
+        if self
+            .records
+            .get(&record.sequence)
+            .is_some_and(|current| current == record)
+        {
+            self.records.remove(&record.sequence);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +241,7 @@ pub struct ResourceJournalFileV1 {
     path: PathBuf,
     journal: ResourceJournalMemoryV1,
     records: Vec<DurableJournalRecordV1>,
+    poisoned: bool,
 }
 
 impl std::fmt::Debug for ResourceJournalFileV1 {
@@ -270,6 +288,7 @@ impl ResourceJournalFileV1 {
                 path,
                 journal,
                 records,
+                poisoned: false,
             };
             if durable.records.is_empty() {
                 durable.append_event(ResourceJournalEventV1::BootstrapBound {
@@ -284,6 +303,7 @@ impl ResourceJournalFileV1 {
                 path,
                 journal,
                 records: Vec::new(),
+                poisoned: false,
             };
             durable.append_event(ResourceJournalEventV1::BootstrapBound {
                 bootstrap_manifest_hash: header.bootstrap_manifest_hash,
@@ -300,13 +320,18 @@ impl ResourceJournalFileV1 {
         self.journal.tail()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_path_for_test(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
     /// Returns grant identities with an admitted namespace that has no durable settlement yet.
     /// A restarted authority must not silently reuse such a physical namespace.
     pub fn unsettled_storage_grants(&self) -> std::collections::BTreeSet<String> {
         let mut pending = std::collections::BTreeSet::new();
         for durable in &self.records {
             match &durable.payload {
-                ResourceJournalEventV1::StorageNamespaceAdmitted { grant_hash } => {
+                ResourceJournalEventV1::StorageNamespaceAdmitted { grant_hash, .. } => {
                     let key = grant_hash.to_hex();
                     pending.insert(key);
                 }
@@ -319,11 +344,66 @@ impl ResourceJournalFileV1 {
         pending
     }
 
+    /// Replays every storage admission and its settlement frontier for authority startup.
+    pub fn storage_admission_state(
+        &self,
+    ) -> (
+        Vec<ResourceJournalStorageAdmissionV1>,
+        std::collections::BTreeSet<String>,
+    ) {
+        let mut admissions = Vec::new();
+        let mut settled = std::collections::BTreeSet::new();
+        for durable in &self.records {
+            match &durable.payload {
+                ResourceJournalEventV1::StorageNamespaceAdmitted {
+                    grant_hash,
+                    handle_id,
+                    namespace_hash,
+                    grant,
+                    request,
+                } => admissions.push(ResourceJournalStorageAdmissionV1 {
+                    admission_sequence: durable.record.sequence,
+                    grant_hash: *grant_hash,
+                    handle_id: handle_id.clone(),
+                    namespace_hash: *namespace_hash,
+                    grant: grant.clone(),
+                    request: request.clone(),
+                }),
+                ResourceJournalEventV1::GenerationSettled { grant_hash, .. } => {
+                    settled.insert(grant_hash.to_hex());
+                }
+                _ => {}
+            }
+        }
+        (admissions, settled)
+    }
+
+    pub fn settled_storage_record(
+        &self,
+        grant_hash: CanonicalHash,
+    ) -> Option<ResourceJournalRecordV1> {
+        self.records.iter().rev().find_map(|durable| {
+            matches!(
+                durable.payload,
+                ResourceJournalEventV1::GenerationSettled {
+                    grant_hash: settled_hash,
+                    ..
+                } if settled_hash == grant_hash
+            )
+            .then_some(durable.record.clone())
+        })
+    }
+
     /// Appends one event using the exact current tail as the precondition and persists it.
     pub fn append_event(
         &mut self,
         payload: ResourceJournalEventV1,
     ) -> Result<ResourceJournalRecordV1, JournalErrorV1> {
+        if self.poisoned {
+            return Err(JournalErrorV1::DurabilityUncertain(
+                "journal is poisoned after a prior post-rename durability failure".to_owned(),
+            ));
+        }
         let precondition = match self.journal.tail() {
             Some(tail) => ResourceJournalAppendPreconditionV1::Existing {
                 expected_sequence: tail.sequence,
@@ -351,7 +431,12 @@ impl ResourceJournalFileV1 {
             payload,
         });
         if let Err(error) = self.persist() {
-            self.records.pop();
+            if matches!(error, JournalErrorV1::DurabilityUncertain(_)) {
+                self.poisoned = true;
+            } else {
+                self.records.pop();
+                self.journal.rollback_tail(&record);
+            }
             return Err(error);
         }
         Ok(record)
@@ -377,8 +462,33 @@ impl ResourceJournalFileV1 {
         temporary
             .persist(&self.path)
             .map_err(|error| map_io(error.error))?;
+        sync_parent_directory(parent).map_err(|error| {
+            JournalErrorV1::DurabilityUncertain(format!(
+                "journal snapshot was renamed but parent directory sync failed: {error}"
+            ))
+        })?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceJournalStorageAdmissionV1 {
+    pub admission_sequence: u64,
+    pub grant_hash: CanonicalHash,
+    pub handle_id: String,
+    pub namespace_hash: CanonicalHash,
+    pub grant: StorageAdmissionGrantV1,
+    pub request: ManagedStorageAdmissionRequestV1,
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn replay_snapshot(
@@ -564,7 +674,13 @@ mod tests {
         {
             let mut journal = ResourceJournalFileV1::open(&path, h.clone()).expect("create");
             let record = journal
-                .append_event(ResourceJournalEventV1::StorageNamespaceAdmitted { grant_hash })
+                .append_event(ResourceJournalEventV1::StorageNamespaceAdmitted {
+                    grant_hash,
+                    handle_id: "handle-1".to_owned(),
+                    namespace_hash: journal_encode(b"namespace-1"),
+                    grant: sample_grant(),
+                    request: sample_request(),
+                })
                 .expect("append admission");
             assert_eq!(record.sequence, 2, "genesis is persisted before admissions");
         }
@@ -580,5 +696,94 @@ mod tests {
         std::fs::write(&path, b"truncated").expect("corrupt journal");
         let error = ResourceJournalFileV1::open(&path, h).expect_err("corruption fails closed");
         assert!(matches!(error, JournalErrorV1::Corrupt(_)));
+    }
+
+    fn sample_grant() -> StorageAdmissionGrantV1 {
+        StorageAdmissionGrantV1 {
+            grant_id: sigil_kernel::resource::OpaqueStorageGrantId::new("journal-grant".to_owned()),
+            admission_hash: journal_encode(b"admission"),
+            semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLog,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            purpose_hash: journal_encode(b"purpose"),
+            source_class:
+                sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
+            source_binding_hash: journal_encode(b"source"),
+            namespace_hash: journal_encode(b"namespace-1"),
+            journal_scope: ResourceJournalScopeV1::Application,
+            journal_scope_hash: journal_encode(b"scope"),
+            resource_ref: sigil_kernel::resource::ResourceRefV1 {
+                resource_id: sigil_kernel::resource::OpaqueResourceId::new("resource".to_owned()),
+                kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
+                owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
+                journal_scope: ResourceJournalScopeV1::Application,
+                generation: 1,
+            },
+            resource_binding_digest: journal_encode(b"resource-binding"),
+            physical_binding_hash: journal_encode(b"physical"),
+            resource_kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
+            owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
+            capability_family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::AppendLog,
+            retention_policy: sigil_kernel::resource::ResourceRetentionPolicyV1::SessionPolicy,
+            quota_profile: sigil_kernel::resource::ResourceQuotaProfileV1 {
+                class: sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
+                max_bytes: 1024,
+                max_entries: 8,
+                max_open_holders: 1,
+                max_age_ms: None,
+                hard_runtime_enforcement_required: true,
+                profile_hash: journal_encode(b"quota"),
+            },
+            semantic_schema: sigil_kernel::resource::OpaqueSemanticSchemaId::new(
+                "schema".to_owned(),
+            ),
+            authority_generation: sigil_kernel::resource::AuthorityGeneration {
+                epoch: 1,
+                instance_hash: journal_encode(b"authority"),
+            },
+            journal_admission_sequence: 1,
+            grant_hash: journal_encode(b"grant-hash"),
+        }
+    }
+
+    fn sample_request() -> ManagedStorageAdmissionRequestV1 {
+        ManagedStorageAdmissionRequestV1 {
+            semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLog,
+            capability_family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::AppendLog,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            source:
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash: journal_encode(b"source"),
+                    application_generation: 1,
+                },
+            owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
+            journal_scope: ResourceJournalScopeV1::Application,
+        }
+    }
+
+    #[test]
+    fn r71_durable_journal_rolls_back_memory_after_pre_rename_persist_failure() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority.journal.json");
+        let mut journal = ResourceJournalFileV1::open(path.clone(), header()).expect("create");
+        journal.path = directory.path().join("missing-parent").join("journal.json");
+        let error = journal
+            .append_event(ResourceJournalEventV1::GenerationReserved {
+                resource_id: "resource".to_owned(),
+                generation: 2,
+            })
+            .expect_err("persist failure");
+        assert!(matches!(error, JournalErrorV1::Filesystem(_)));
+        assert_eq!(journal.tail().expect("genesis").sequence, 1);
+        assert_eq!(journal.records.len(), 1);
+
+        journal.path = path.clone();
+        journal
+            .append_event(ResourceJournalEventV1::GenerationReserved {
+                resource_id: "resource".to_owned(),
+                generation: 3,
+            })
+            .expect("retry after rollback");
+        let reopened = ResourceJournalFileV1::open(path, header()).expect("reopen");
+        assert_eq!(reopened.tail().expect("tail").sequence, 2);
     }
 }
