@@ -27,6 +27,7 @@ use crate::journal::{
     JournalErrorV1, ResourceJournalEventV1, ResourceJournalFileV1, ResourceJournalRecordV1,
     ResourceJournalStorageAdmissionV1,
 };
+use crate::quota::{QuotaBookV1, QuotaErrorV1};
 
 /// Authority-private grant table: grant id -> durable admission grant + claim state.
 #[derive(Debug, Default)]
@@ -138,6 +139,7 @@ pub struct AuthorityManagedStorageServiceV1 {
     table: AuthorityStorageGrantTableV1,
     authority_generation: AuthorityGeneration,
     journal: Option<Mutex<ResourceJournalFileV1>>,
+    quota: Mutex<QuotaBookV1>,
     /// The journal parent is the authority-owned state anchor. It is used only by the
     /// authority's physical recovery verifier; no path crosses the kernel storage port.
     journal_root: Option<PathBuf>,
@@ -145,14 +147,16 @@ pub struct AuthorityManagedStorageServiceV1 {
 }
 
 impl AuthorityManagedStorageServiceV1 {
-    pub const fn new(
+    pub fn new(
         table: AuthorityStorageGrantTableV1,
         authority_generation: AuthorityGeneration,
     ) -> Self {
+        let quota_cap = quota_workspace_cap(&table);
         Self {
             table,
             authority_generation,
             journal: None,
+            quota: Mutex::new(QuotaBookV1::new(quota_cap)),
             journal_root: None,
             blocked_grants_after_restart: Mutex::new(BTreeMap::new()),
         }
@@ -184,12 +188,48 @@ impl AuthorityManagedStorageServiceV1 {
             .map(|key| (key, ()))
             .collect();
         let (admissions, settled_grants) = journal.storage_admission_state();
+        let all_admissions = admissions.clone();
         rehydrate_storage_state(&table, authority_generation, admissions, &settled_grants)?;
         let journal_root = journal_path.as_ref().parent().map(Path::to_path_buf);
+        let quota_path = journal_root
+            .as_ref()
+            .map(|root| root.join(".authority-quota").join("managed-storage.json"))
+            .ok_or_else(|| JournalErrorV1::Corrupt("resource journal has no parent".to_owned()))?;
+        let mut quota = QuotaBookV1::open(&quota_path, quota_workspace_cap(&table))
+            .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+        let admitted = table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| JournalErrorV1::Corrupt("admission registry poisoned".to_owned()))?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for record in admitted {
+            let owner_key = storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
+            if settled_grants.contains(&record.grant.grant_hash.to_hex()) {
+                quota
+                    .release_owner(&owner_key)
+                    .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+            } else if quota.reservation_for_owner(&owner_key).is_none() {
+                quota
+                    .reserve_owned(&owner_key, &record.grant.quota_profile, 0, 1)
+                    .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+            }
+        }
+        for admission in all_admissions {
+            if settled_grants.contains(&admission.grant_hash.to_hex()) {
+                let owner_key =
+                    storage_quota_owner_key(admission.grant_hash, admission.namespace_hash);
+                quota
+                    .release_owner(&owner_key)
+                    .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+            }
+        }
         Ok(Self {
             table,
             authority_generation,
             journal: Some(Mutex::new(journal)),
+            quota: Mutex::new(quota),
             journal_root,
             blocked_grants_after_restart: Mutex::new(blocked_grants_after_restart),
         })
@@ -816,6 +856,42 @@ impl AuthorityManagedStorageServiceV1 {
         }
     }
 
+    fn reserve_quota(
+        &self,
+        owner_key: &str,
+        profile: &sigil_kernel::resource::ResourceQuotaProfileV1,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        self.quota
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .reserve_owned(owner_key, profile, 0, 1)
+            .map(|_| ())
+            .map_err(storage_quota_error)
+    }
+
+    fn reconcile_quota(
+        &self,
+        owner_key: &str,
+        profile: &sigil_kernel::resource::ResourceQuotaProfileV1,
+        bytes: u64,
+        entries: u64,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        self.quota
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .reconcile_owned(owner_key, profile, bytes, entries)
+            .map(|_| ())
+            .map_err(storage_quota_error)
+    }
+
+    fn release_quota(&self, owner_key: &str) -> Result<(), ManagedStorageErrorV1> {
+        self.quota
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .release_owner(owner_key)
+            .map_err(storage_quota_error)
+    }
+
     /// Reconciles storage admissions recovered from a previous authority instance. The caller
     /// chooses the typed cleanup status; the journal remains the source of truth and the action
     /// is idempotent when a prior settlement record already exists.
@@ -897,6 +973,29 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             content_hash,
             reason,
         )
+    }
+
+    fn reconcile_namespace_quota(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+        bytes: u64,
+        entries: u64,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        let record = self
+            .table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .get(handle.handle_id.as_str())
+            .cloned()
+            .ok_or(ManagedStorageErrorV1::HandleFinalized)?;
+        if record.namespace_hash != handle.namespace_hash
+            || record.grant.capability_family != handle.capability_family
+        {
+            return Err(ManagedStorageErrorV1::CapabilityMismatch);
+        }
+        let owner_key = storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
+        self.reconcile_quota(&owner_key, &record.grant.quota_profile, bytes, entries)
     }
 
     fn admit_namespace(
@@ -995,16 +1094,28 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         if admitted.contains_key(handle.handle_id.as_str()) {
             return Err(ManagedStorageErrorV1::DuplicateClaim);
         }
-        let admission_sequence = self
-            .append_journal_event(ResourceJournalEventV1::StorageNamespaceAdmitted {
+        let quota_owner_key = storage_quota_owner_key(grant.grant_hash, namespace_hash);
+        if !probe {
+            self.reserve_quota(&quota_owner_key, &grant.quota_profile)?;
+        }
+        let admission_sequence =
+            match self.append_journal_event(ResourceJournalEventV1::StorageNamespaceAdmitted {
                 grant_hash: grant.grant_hash,
                 handle_id: handle.handle_id.as_str().to_owned(),
                 namespace_hash,
                 grant: Box::new(grant.clone()),
                 request: Box::new(request.clone()),
-            })?
-            .map(|record| record.sequence)
-            .unwrap_or(grant.journal_admission_sequence);
+            }) {
+                Ok(record) => record
+                    .map(|record| record.sequence)
+                    .unwrap_or(grant.journal_admission_sequence),
+                Err(error) => {
+                    if !probe {
+                        let _ = self.release_quota(&quota_owner_key);
+                    }
+                    return Err(error);
+                }
+            };
         admitted.insert(
             handle.handle_id.as_str().to_owned(),
             StorageAdmissionRecordV1 {
@@ -1052,11 +1163,27 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             if observations.len() != 1 {
                 return Err(ManagedStorageErrorV1::JournalUnavailable);
             }
-            let (observation_record, _, _, _, frontier_hash) = observations[0].clone();
-            Some((frontier_hash, observation_record.record_hash))
+            let (observation_record, byte_length, record_count, _, frontier_hash) =
+                observations[0].clone();
+            Some((
+                frontier_hash,
+                observation_record.record_hash,
+                byte_length,
+                record_count,
+            ))
         } else {
             None
         };
+        let quota_owner_key =
+            storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
+        if let Some((_, _, byte_length, record_count)) = physical_binding {
+            self.reconcile_quota(
+                &quota_owner_key,
+                &record.grant.quota_profile,
+                byte_length,
+                record_count,
+            )?;
+        }
         let operation_digest = hash_debug(&(&record.request, &reason, physical_binding));
         let settlement = match self.existing_settlement(record.grant.grant_hash)? {
             Some(existing) => Some(existing),
@@ -1065,11 +1192,16 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                 resource_id: record.grant.resource_ref.resource_id.as_str().to_owned(),
                 generation: record.grant.resource_ref.generation,
                 cleanup_status: reason,
-                physical_frontier_hash: physical_binding.map(|(frontier_hash, _)| frontier_hash),
+                physical_frontier_hash: physical_binding
+                    .map(|(frontier_hash, _, _, _)| frontier_hash),
                 physical_observation_record_hash: physical_binding
-                    .map(|(_, observation_record_hash)| observation_record_hash),
+                    .map(|(_, observation_record_hash, _, _)| observation_record_hash),
             })?,
         };
+        // Settlement is appended before quota release. If the release journal write fails, the
+        // admitted record remains retryable and the next authority restart can reconcile the
+        // settled grant against the still-active quota owner.
+        self.release_quota(&quota_owner_key)?;
         self.table.record_finalized(&handle.namespace_hash)?;
         admitted.remove(handle.handle_id.as_str());
         self.clear_restart_blocker(record.grant.grant_hash);
@@ -1106,9 +1238,9 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             ),
             committed_frontier_hash,
             receipt_hash,
-            physical_frontier_hash: physical_binding.map(|(frontier_hash, _)| frontier_hash),
+            physical_frontier_hash: physical_binding.map(|(frontier_hash, _, _, _)| frontier_hash),
             physical_observation_record_hash: physical_binding
-                .map(|(_, observation_record_hash)| observation_record_hash),
+                .map(|(_, observation_record_hash, _, _)| observation_record_hash),
         })
     }
 }
@@ -1183,6 +1315,30 @@ fn source_binding_hash(
         } => *cutover_manifest_hash,
         _ => hash_debug(source),
     }
+}
+
+fn quota_workspace_cap(table: &AuthorityStorageGrantTableV1) -> u64 {
+    table
+        .grants
+        .values()
+        .map(|grant| grant.quota_profile.max_bytes)
+        .fold(0u64, u64::saturating_add)
+        .max(1)
+}
+
+fn storage_quota_owner_key(grant_hash: CanonicalHash, namespace_hash: CanonicalHash) -> String {
+    format!(
+        "storage:{}:{}",
+        grant_hash.to_hex(),
+        namespace_hash.to_hex()
+    )
+}
+
+fn storage_quota_error(_error: QuotaErrorV1) -> ManagedStorageErrorV1 {
+    // Keep quota journal failures inside the authority's existing fail-closed storage error
+    // boundary; recovery can then classify the durable blocker without exposing filesystem
+    // details through the kernel storage port.
+    ManagedStorageErrorV1::JournalUnavailable
 }
 
 fn hash_debug(value: &impl std::fmt::Debug) -> CanonicalHash {
@@ -1624,6 +1780,71 @@ mod tests {
             std::fs::read(namespace.join("records.jsonl")).expect("retained records"),
             b"{\"seq\":1}\n"
         );
+    }
+
+    #[test]
+    fn r71_storage_quota_journal_reserves_reconciles_and_releases_owner() {
+        use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority-resources.journal.json");
+        let header = storage_test_header();
+        let grant = grant();
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant.clone()).expect("grant");
+        let service = AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            grant.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("service");
+        let broker = KernelCapabilityBrokerV1::new();
+        let capability = broker
+            .issue_storage_namespace_capability(
+                broker.seal_storage_namespace_proof(grant.capability_family, grant.namespace_hash),
+            )
+            .expect("capability");
+        let handle = service
+            .admit_namespace(storage_test_request(), capability)
+            .expect("admit");
+
+        let namespace = directory.path().join("managed/session-log");
+        std::fs::create_dir_all(&namespace).expect("managed root");
+        std::fs::write(
+            namespace.join("authority-admission.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "handle_id": handle.handle_id.as_str(),
+                "namespace_hash": handle.namespace_hash,
+            }))
+            .expect("marker json"),
+        )
+        .expect("marker");
+        let bytes = b"{}\n";
+        std::fs::write(namespace.join("records.jsonl"), bytes).expect("records");
+        let receipt = service
+            .finalize_namespace_with_physical_frontier(
+                handle,
+                bytes.len() as u64,
+                1,
+                hash_bytes(bytes),
+                "quota-test".to_owned(),
+            )
+            .expect("settle");
+        assert!(receipt.physical_frontier_hash.is_some());
+
+        let quota_bytes = std::fs::read(
+            directory
+                .path()
+                .join(".authority-quota")
+                .join("managed-storage.json"),
+        )
+        .expect("quota journal");
+        let quota_text = String::from_utf8(quota_bytes).expect("quota json");
+        assert!(quota_text.contains("storage:"));
+        assert!(quota_text.contains("Released"));
     }
 
     #[test]

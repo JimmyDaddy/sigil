@@ -132,6 +132,45 @@ impl ManagedArtifactStoreBackendV1 {
         }
     }
 
+    fn reconcile_quota(
+        &self,
+        staging_root: &Path,
+        store_root: &Path,
+        extra_staging_bytes: u64,
+        extra_store_bytes: u64,
+    ) -> Result<()> {
+        let staging_bytes = directory_file_bytes(&staging_root.join("staging"))?
+            .saturating_add(extra_staging_bytes);
+        let store_bytes =
+            directory_file_bytes(&store_root.join("blobs"))?.saturating_add(extra_store_bytes);
+        let staging_entries = directory_file_count(&staging_root.join("staging"))?.max(1);
+        let store_entries = directory_file_count(&store_root.join("blobs"))?.max(1);
+        let staging_guard = self
+            .staging_lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed artifact staging lease is poisoned"))?;
+        let staging = staging_guard
+            .as_ref()
+            .context("managed artifact staging lease is closed")?;
+        let store_guard = self
+            .store_lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed artifact store lease is poisoned"))?;
+        let store = store_guard
+            .as_ref()
+            .context("managed artifact store lease is closed")?;
+        self.writer
+            .reconcile_artifact_quota(
+                staging,
+                staging_bytes,
+                staging_entries,
+                store,
+                store_bytes,
+                store_entries,
+            )
+            .map_err(|error| anyhow::anyhow!("managed artifact quota reconcile failed: {error}"))
+    }
+
     fn live_roots(&self) -> Result<(PathBuf, PathBuf)> {
         let staging = self
             .staging_lease
@@ -284,16 +323,26 @@ impl ManagedArtifactStoreBackendV1 {
 impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
     fn publish_blob(&self, content_sha256: &str, bytes: &[u8]) -> Result<()> {
         let (_operation, staging, store) = self.with_mutation_lock()?;
-        Self::publish_blob_locked(&staging, &store, content_sha256, bytes)
+        let blob_path = blob_path(&store, content_sha256)?;
+        let extra_store_bytes = match fs::symlink_metadata(&blob_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => 0,
+            Ok(_) => bytes.len() as u64,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => bytes.len() as u64,
+            Err(error) => return Err(error.into()),
+        };
+        self.reconcile_quota(&staging, &store, 0, extra_store_bytes)?;
+        Self::publish_blob_locked(&staging, &store, content_sha256, bytes)?;
+        self.reconcile_quota(&staging, &store, 0, 0)
     }
 
     fn publish_descriptor_manifest(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()> {
-        let (_operation, _staging, store) = self.with_mutation_lock()?;
+        let (_operation, staging, store) = self.with_mutation_lock()?;
         let refs = store.join("refs");
         create_private_dir(&refs)?;
         let path = refs.join(format!("{}.json", descriptor.artifact_ref.artifact_id));
         let bytes = serde_json::to_vec(descriptor)?;
-        publish_noclobber(&refs, &path, &bytes)
+        publish_noclobber(&refs, &path, &bytes)?;
+        self.reconcile_quota(&staging, &store, 0, 0)
     }
 
     fn read_blob(&self, content_sha256: &str) -> Result<Vec<u8>> {
@@ -469,6 +518,7 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         }
         let tombstone_id = format!("tool-artifact-gc-{}", Uuid::new_v4().simple());
         if candidates.is_empty() {
+            self.reconcile_quota(&staging_root, &store_root, 0, 0)?;
             return Ok(ToolArtifactGcReportV1 {
                 tombstone_id,
                 scanned_manifests: inventory.len(),
@@ -588,6 +638,7 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         sync_parent(&trash_staging)?;
         sync_parent(&staging_trash_root)?;
         sync_parent(&trash_root)?;
+        self.reconcile_quota(&staging_root, &store_root, 0, 0)?;
         Ok(ToolArtifactGcReportV1 {
             tombstone_id,
             scanned_manifests: inventory.len(),
@@ -665,6 +716,7 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         }
         sync_parent(&store_root.join("trash"))?;
         sync_parent(&staging_root.join("trash"))?;
+        self.reconcile_quota(&staging_root, &store_root, 0, 0)?;
         Ok(ToolArtifactTrashPruneReportV1 {
             removed_tombstones: eligible
                 .iter()
@@ -769,6 +821,9 @@ impl ToolArtifactProcessCaptureBackendV1 for ManagedProcessCaptureBackend {
         } else {
             *truncated = true;
         }
+        let (staging_root, store_root) = self.owner.live_roots()?;
+        self.owner
+            .reconcile_quota(&staging_root, &store_root, 0, 0)?;
         Ok((*observed, *truncated))
     }
 
@@ -781,6 +836,11 @@ impl ToolArtifactProcessCaptureBackendV1 for ManagedProcessCaptureBackend {
         }
         let stdout = read_optional_file(&self.stdout_path)?;
         let stderr = read_optional_file(&self.stderr_path)?;
+        let _ = fs::remove_file(&self.stdout_path);
+        let _ = fs::remove_file(&self.stderr_path);
+        let (staging_root, store_root) = self.owner.live_roots()?;
+        self.owner
+            .reconcile_quota(&staging_root, &store_root, 0, 0)?;
         Ok(ToolArtifactProcessCaptureSnapshotV1 {
             stdout_bytes: stdout,
             stderr_bytes: stderr,
@@ -1090,6 +1150,33 @@ fn directory_file_bytes(root: &Path) -> Result<u64> {
                 pending.push(entry.path());
             } else if metadata.is_file() {
                 total = total.saturating_add(metadata.len());
+            } else {
+                bail!("managed artifact inventory contains a non-file entry");
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn directory_file_count(root: &Path) -> Result<u64> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total = 0_u64;
+    while let Some(path) = pending.pop() {
+        let entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_symlink() {
+                bail!("managed artifact inventory contains a symlink");
+            }
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(1);
             } else {
                 bail!("managed artifact inventory contains a non-file entry");
             }

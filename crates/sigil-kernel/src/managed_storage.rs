@@ -353,6 +353,18 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         handle: &ManagedStorageNamespaceHandleV1,
     ) -> Result<(), ManagedStorageErrorV1>;
 
+    /// Reconciles measured bytes/entries for a live storage namespace without exposing the
+    /// authority's quota book or physical path. Artifact adapters use this only while holding
+    /// their paired staging/store leases; the authority remains the sole quota owner.
+    fn reconcile_namespace_quota(
+        &self,
+        _handle: &ManagedStorageNamespaceHandleV1,
+        _bytes: u64,
+        _entries: u64,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    }
+
     fn finalize_namespace(
         &self,
         handle: ManagedStorageNamespaceHandleV1,

@@ -18,6 +18,8 @@ use std::time::SystemTime;
 use fs2::FileExt;
 use sigil_kernel::secure_private_path_permissions;
 
+use crate::quota::{QuotaBookV1, QuotaErrorV1};
+
 const SESSION_NAMESPACE_DIR: &str = "sessions";
 const LEASE_MARKER_DIR: &str = ".leases";
 const LEASE_LOCK_DIR: &str = ".lease-locks";
@@ -149,6 +151,7 @@ impl Drop for SessionScratchLeaseV1 {
 pub struct SessionScratchAuthorityV1 {
     root: PathBuf,
     leases: Arc<SessionScratchLeaseRegistryV1>,
+    quota: Arc<Mutex<Option<QuotaBookV1>>>,
 }
 
 impl SessionScratchAuthorityV1 {
@@ -157,6 +160,7 @@ impl SessionScratchAuthorityV1 {
         Self {
             root: root.into(),
             leases: Arc::new(SessionScratchLeaseRegistryV1::default()),
+            quota: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -221,6 +225,17 @@ impl SessionScratchAuthorityV1 {
                 limit: workspace_hard_bytes,
             });
         }
+        let profile = scratch_quota_profile(workspace_hard_bytes);
+        self.with_quota(Some(workspace_hard_bytes), |quota| {
+            quota
+                .reconcile_owned(
+                    format!("session-scratch:{key}"),
+                    &profile,
+                    usage.session_bytes,
+                    usage.session_entry_count as u64,
+                )
+                .map(|_| ())
+        })?;
         Ok(SessionScratchProvisionV1 { directory, usage })
     }
 
@@ -338,6 +353,7 @@ impl SessionScratchAuthorityV1 {
             }
             fs::remove_dir_all(&path).map_err(fs_error)?;
             drop(namespace_lock);
+            self.release_quota_for_key(key)?;
             report.deleted += 1;
             report.deleted_bytes = report.deleted_bytes.saturating_add(state.bytes);
         }
@@ -373,7 +389,55 @@ impl SessionScratchAuthorityV1 {
         }
         fs::remove_dir_all(&directory).map_err(fs_error)?;
         drop(namespace_lock);
+        self.release_quota_for_key(&key)?;
         Ok(SessionScratchDeleteOutcomeV1::Deleted)
+    }
+
+    fn quota_path(&self) -> PathBuf {
+        self.root
+            .join(".authority-quota")
+            .join("session-scratch.json")
+    }
+
+    fn with_quota<T>(
+        &self,
+        workspace_cap: Option<u64>,
+        operation: impl FnOnce(&mut QuotaBookV1) -> Result<T, QuotaErrorV1>,
+    ) -> Result<T, SessionScratchErrorV1> {
+        let mut quota = self
+            .quota
+            .lock()
+            .map_err(|_| SessionScratchErrorV1::LeaseRegistryUnavailable)?;
+        if quota.is_none() {
+            let path = self.quota_path();
+            let book = match workspace_cap {
+                Some(cap) => QuotaBookV1::open(path, cap),
+                None => QuotaBookV1::open_existing(path),
+            }
+            .map_err(quota_error)?;
+            *quota = Some(book);
+        }
+        operation(
+            quota
+                .as_mut()
+                .ok_or(SessionScratchErrorV1::LeaseRegistryUnavailable)?,
+        )
+        .map_err(quota_error)
+    }
+
+    fn release_quota_for_key(&self, key: &str) -> Result<(), SessionScratchErrorV1> {
+        let path = self.quota_path();
+        let quota_is_loaded = self
+            .quota
+            .lock()
+            .map_err(|_| SessionScratchErrorV1::LeaseRegistryUnavailable)?
+            .is_some();
+        if !path.exists() && !quota_is_loaded {
+            return Ok(());
+        }
+        self.with_quota(None, |quota| {
+            quota.release_owner(&format!("session-scratch:{key}"))
+        })
     }
 
     fn lock_namespace(&self, key: &str) -> Result<File, SessionScratchErrorV1> {
@@ -520,6 +584,45 @@ fn key_digest(key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn scratch_quota_profile(
+    workspace_hard_bytes: u64,
+) -> sigil_kernel::resource::ResourceQuotaProfileV1 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"session-scratch-quota-v1");
+    hasher.update(workspace_hard_bytes.to_be_bytes());
+    sigil_kernel::resource::ResourceQuotaProfileV1 {
+        class: sigil_kernel::resource::ResourceQuotaClassV1::SessionScratch,
+        max_bytes: workspace_hard_bytes,
+        max_entries: DEFAULT_MAX_ENTRIES as u64,
+        max_open_holders: 1,
+        max_age_ms: None,
+        hard_runtime_enforcement_required: true,
+        profile_hash: sigil_kernel::resource::CanonicalHash::from_bytes(hasher.finalize().into()),
+    }
+}
+
+fn quota_error(error: QuotaErrorV1) -> SessionScratchErrorV1 {
+    match error {
+        QuotaErrorV1::ReservationExceeded { reserved, max, .. }
+        | QuotaErrorV1::WorkspaceOvercommit {
+            used: reserved,
+            cap: max,
+            ..
+        } => SessionScratchErrorV1::QuotaExceeded {
+            scope: SessionScratchQuotaScopeV1::Workspace,
+            used: reserved,
+            limit: max,
+        },
+        QuotaErrorV1::EntryExceeded { reserved, max, .. } => SessionScratchErrorV1::QuotaExceeded {
+            scope: SessionScratchQuotaScopeV1::Session,
+            used: reserved,
+            limit: max,
+        },
+        other => SessionScratchErrorV1::Filesystem(other.to_string()),
+    }
+}
+
 fn is_plain_directory(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
@@ -642,6 +745,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn durable_scratch_quota_replays_across_authority_restart() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("scratch");
+        {
+            let authority = SessionScratchAuthorityV1::new(&root);
+            let provision = authority
+                .ensure(Some("session-a"), 100, 1000)
+                .expect("provision");
+            std::fs::write(provision.directory.join("data"), b"durable").expect("write");
+            authority
+                .ensure(Some("session-a"), 100, 1000)
+                .expect("record measured usage");
+        }
+
+        let restarted = SessionScratchAuthorityV1::new(&root);
+        restarted
+            .ensure(Some("session-a"), 100, 1000)
+            .expect("replay and reconcile active owner");
+        assert_eq!(
+            restarted.delete(Some("session-a")).expect("delete"),
+            SessionScratchDeleteOutcomeV1::Deleted
+        );
+        let reopened = SessionScratchAuthorityV1::new(&root);
+        reopened
+            .ensure(Some("session-a"), 100, 1000)
+            .expect("released quota is reusable");
     }
 
     #[cfg(unix)]

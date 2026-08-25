@@ -46,12 +46,15 @@ pub enum QuotaErrorV1 {
     WorkspaceOvercommit { used: u64, incoming: u64, cap: u64 },
     #[error("borrowed accounting profile claims hard runtime enforcement")]
     BorrowedClaimsEnforcement,
+    #[error("quota owner already has an active reservation")]
+    OwnerAlreadyReserved,
     #[error("durable quota journal failure: {0}")]
     Journal(String),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ActiveReservationV1 {
+    owner_key: String,
     class: ResourceQuotaClassV1,
     reserved_bytes: u64,
     reserved_entries: u64,
@@ -61,12 +64,16 @@ struct ActiveReservationV1 {
 enum QuotaJournalEventV1 {
     Reserved {
         reservation_epoch: u64,
+        #[serde(default)]
+        owner_key: String,
         profile: ResourceQuotaProfileV1,
         reserved_bytes: u64,
         reserved_entries: u64,
     },
     Released {
         reservation_epoch: u64,
+        #[serde(default)]
+        owner_key: String,
         class: ResourceQuotaClassV1,
         reserved_bytes: u64,
         reserved_entries: u64,
@@ -108,6 +115,7 @@ impl QuotaJournalV1 {
             .parent()
             .ok_or_else(|| QuotaErrorV1::Journal("journal has no parent directory".to_owned()))?;
         fs::create_dir_all(parent).map_err(quota_io_error)?;
+        secure_quota_path(parent)?;
         if path.exists() {
             let metadata = fs::symlink_metadata(&path).map_err(quota_io_error)?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -115,6 +123,7 @@ impl QuotaJournalV1 {
                     "journal path is not a regular file".to_owned(),
                 ));
             }
+            secure_quota_path(&path)?;
             let snapshot: QuotaJournalSnapshotV1 =
                 serde_json::from_slice(&fs::read(&path).map_err(quota_io_error)?)
                     .map_err(|error| QuotaErrorV1::Journal(format!("invalid journal: {error}")))?;
@@ -232,6 +241,11 @@ fn quota_io_error(error: std::io::Error) -> QuotaErrorV1 {
     QuotaErrorV1::Journal(error.to_string())
 }
 
+fn secure_quota_path(path: &std::path::Path) -> Result<(), QuotaErrorV1> {
+    sigil_kernel::secure_private_path_permissions(path)
+        .map_err(|error| QuotaErrorV1::Journal(error.to_string()))
+}
+
 fn quota_record_hash(
     sequence: u64,
     previous_hash: Option<CanonicalHash>,
@@ -276,22 +290,26 @@ fn verify_and_replay_records(
         match &record.event {
             QuotaJournalEventV1::Reserved {
                 reservation_epoch,
+                owner_key,
                 profile,
                 reserved_bytes,
                 reserved_entries,
             } => book.apply_replayed_reservation(
                 *reservation_epoch,
+                owner_key,
                 profile,
                 *reserved_bytes,
                 *reserved_entries,
             )?,
             QuotaJournalEventV1::Released {
                 reservation_epoch,
+                owner_key,
                 class,
                 reserved_bytes,
                 reserved_entries,
             } => book.apply_replayed_release(
                 *reservation_epoch,
+                owner_key,
                 *class,
                 *reserved_bytes,
                 *reserved_entries,
@@ -334,6 +352,22 @@ impl QuotaBookV1 {
         Ok(book)
     }
 
+    /// Reopens an existing journal using its bound workspace cap. Callers that accept a new
+    /// policy must still use [`Self::open`], which rejects cap drift explicitly.
+    pub fn open_existing(path: impl Into<PathBuf>) -> Result<Self, QuotaErrorV1> {
+        let path = path.into();
+        let metadata = fs::symlink_metadata(&path).map_err(quota_io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(QuotaErrorV1::Journal(
+                "journal path is not a regular file".to_owned(),
+            ));
+        }
+        let bytes = fs::read(&path).map_err(quota_io_error)?;
+        let snapshot: QuotaJournalSnapshotV1 = serde_json::from_slice(&bytes)
+            .map_err(|error| QuotaErrorV1::Journal(format!("invalid journal: {error}")))?;
+        Self::open(path, snapshot.workspace_cap)
+    }
+
     #[must_use]
     pub fn is_durable(&self) -> bool {
         self.journal.is_some()
@@ -346,6 +380,27 @@ impl QuotaBookV1 {
         bytes: u64,
         entries: u64,
     ) -> Result<QuotaReservationV1, QuotaErrorV1> {
+        self.reserve_owned("", profile, bytes, entries)
+    }
+
+    /// Reserves quota for one stable owner key. The owner key is journaled so replay can
+    /// reattach the reservation to the same physical owner after restart.
+    pub fn reserve_owned(
+        &mut self,
+        owner_key: impl Into<String>,
+        profile: &ResourceQuotaProfileV1,
+        bytes: u64,
+        entries: u64,
+    ) -> Result<QuotaReservationV1, QuotaErrorV1> {
+        let owner_key = owner_key.into();
+        if !owner_key.is_empty()
+            && self
+                .active_reservations
+                .values()
+                .any(|reservation| reservation.owner_key == owner_key)
+        {
+            return Err(QuotaErrorV1::OwnerAlreadyReserved);
+        }
         if profile.hard_runtime_enforcement_required
             && profile.class == ResourceQuotaClassV1::BorrowedAccountingOnly
         {
@@ -379,6 +434,7 @@ impl QuotaBookV1 {
         if let Some(journal) = self.journal.as_mut() {
             journal.append(QuotaJournalEventV1::Reserved {
                 reservation_epoch,
+                owner_key: owner_key.clone(),
                 profile: profile.clone(),
                 reserved_bytes: bytes,
                 reserved_entries: entries,
@@ -393,6 +449,7 @@ impl QuotaBookV1 {
         self.active_reservations.insert(
             reservation_epoch,
             ActiveReservationV1 {
+                owner_key,
                 class: profile.class,
                 reserved_bytes: bytes,
                 reserved_entries: entries,
@@ -405,6 +462,64 @@ impl QuotaBookV1 {
         })
     }
 
+    /// Reconciles one owner's current measured usage. A repeated call with identical facts is
+    /// idempotent; a changed measurement settles the prior reservation before reserving the new
+    /// frontier, and both events are durable when this book is journal-backed.
+    pub fn reconcile_owned(
+        &mut self,
+        owner_key: impl Into<String>,
+        profile: &ResourceQuotaProfileV1,
+        bytes: u64,
+        entries: u64,
+    ) -> Result<QuotaReservationV1, QuotaErrorV1> {
+        let owner_key = owner_key.into();
+        if let Some((epoch, active)) = self
+            .active_reservations
+            .iter()
+            .find(|(_, reservation)| reservation.owner_key == owner_key)
+            .map(|(epoch, reservation)| (*epoch, reservation.clone()))
+        {
+            if active.class == profile.class
+                && active.reserved_bytes == bytes
+                && active.reserved_entries == entries
+            {
+                return Ok(QuotaReservationV1 {
+                    reservation_epoch: epoch,
+                    reserved_bytes: bytes,
+                    reserved_entries: entries,
+                });
+            }
+            self.release_active(epoch, active)?;
+        }
+        self.reserve_owned(owner_key, profile, bytes, entries)
+    }
+
+    /// Returns the current replayed reservation for an owner, if any.
+    #[must_use]
+    pub fn reservation_for_owner(&self, owner_key: &str) -> Option<QuotaReservationV1> {
+        self.active_reservations
+            .iter()
+            .find(|(_, reservation)| reservation.owner_key == owner_key)
+            .map(|(epoch, reservation)| QuotaReservationV1 {
+                reservation_epoch: *epoch,
+                reserved_bytes: reservation.reserved_bytes,
+                reserved_entries: reservation.reserved_entries,
+            })
+    }
+
+    /// Settles the active reservation for one owner. Unknown owners are idempotent.
+    pub fn release_owner(&mut self, owner_key: &str) -> Result<(), QuotaErrorV1> {
+        let Some((epoch, active)) = self
+            .active_reservations
+            .iter()
+            .find(|(_, reservation)| reservation.owner_key == owner_key)
+            .map(|(epoch, reservation)| (*epoch, reservation.clone()))
+        else {
+            return Ok(());
+        };
+        self.release_active(epoch, active)
+    }
+
     /// Releases a reservation (settlement). Idempotent on unknown or mismatched epochs.
     pub fn release(
         &mut self,
@@ -414,7 +529,7 @@ impl QuotaBookV1 {
         let Some(active) = self
             .active_reservations
             .get(&reservation.reservation_epoch)
-            .copied()
+            .cloned()
         else {
             return Ok(());
         };
@@ -424,21 +539,7 @@ impl QuotaBookV1 {
         {
             return Ok(());
         }
-        if let Some(journal) = self.journal.as_mut() {
-            journal.append(QuotaJournalEventV1::Released {
-                reservation_epoch: reservation.reservation_epoch,
-                class: active.class,
-                reserved_bytes: active.reserved_bytes,
-                reserved_entries: active.reserved_entries,
-            })?;
-        }
-        self.apply_release(
-            reservation.reservation_epoch,
-            active.class,
-            active.reserved_bytes,
-            active.reserved_entries,
-        );
-        Ok(())
+        self.release_active(reservation.reservation_epoch, active)
     }
 
     pub fn workspace_used_bytes(&self) -> u64 {
@@ -448,6 +549,7 @@ impl QuotaBookV1 {
     fn apply_replayed_reservation(
         &mut self,
         reservation_epoch: u64,
+        owner_key: &str,
         profile: &ResourceQuotaProfileV1,
         bytes: u64,
         entries: u64,
@@ -489,6 +591,7 @@ impl QuotaBookV1 {
         self.active_reservations.insert(
             reservation_epoch,
             ActiveReservationV1 {
+                owner_key: owner_key.to_owned(),
                 class: profile.class,
                 reserved_bytes: bytes,
                 reserved_entries: entries,
@@ -500,16 +603,18 @@ impl QuotaBookV1 {
     fn apply_replayed_release(
         &mut self,
         reservation_epoch: u64,
+        owner_key: &str,
         class: ResourceQuotaClassV1,
         bytes: u64,
         entries: u64,
     ) -> Result<(), QuotaErrorV1> {
-        let Some(active) = self.active_reservations.get(&reservation_epoch).copied() else {
+        let Some(active) = self.active_reservations.get(&reservation_epoch).cloned() else {
             return Err(QuotaErrorV1::Journal(
                 "quota journal releases an unknown reservation".to_owned(),
             ));
         };
         if active.class != class
+            || active.owner_key != owner_key
             || active.reserved_bytes != bytes
             || active.reserved_entries != entries
         {
@@ -518,6 +623,29 @@ impl QuotaBookV1 {
             ));
         }
         self.apply_release(reservation_epoch, class, bytes, entries);
+        Ok(())
+    }
+
+    fn release_active(
+        &mut self,
+        reservation_epoch: u64,
+        active: ActiveReservationV1,
+    ) -> Result<(), QuotaErrorV1> {
+        if let Some(journal) = self.journal.as_mut() {
+            journal.append(QuotaJournalEventV1::Released {
+                reservation_epoch,
+                owner_key: active.owner_key.clone(),
+                class: active.class,
+                reserved_bytes: active.reserved_bytes,
+                reserved_entries: active.reserved_entries,
+            })?;
+        }
+        self.apply_release(
+            reservation_epoch,
+            active.class,
+            active.reserved_bytes,
+            active.reserved_entries,
+        );
         Ok(())
     }
 
@@ -640,6 +768,38 @@ mod tests {
         std::fs::write(&path, bytes).expect("tamper journal");
         let error = QuotaBookV1::open(&path, 200).expect_err("tampered journal must fail closed");
         assert!(matches!(error, QuotaErrorV1::Journal(_)));
+    }
+
+    #[test]
+    fn r71_quota_owner_reconcile_replays_and_settles() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("quota.json");
+        let prof = profile(100, 100);
+        {
+            let mut book = QuotaBookV1::open(&path, 200).expect("open durable book");
+            book.reserve_owned("session-a", &prof, 20, 2)
+                .expect("reserve owner");
+        }
+
+        let mut reopened = QuotaBookV1::open(&path, 200).expect("replay owner");
+        assert_eq!(
+            reopened
+                .reservation_for_owner("session-a")
+                .expect("active owner")
+                .reserved_bytes,
+            20
+        );
+        reopened
+            .reconcile_owned("session-a", &prof, 30, 3)
+            .expect("reconcile owner");
+        assert_eq!(reopened.workspace_used_bytes(), 30);
+        reopened.release_owner("session-a").expect("settle owner");
+        assert_eq!(reopened.workspace_used_bytes(), 0);
+        drop(reopened);
+
+        let reopened_again = QuotaBookV1::open(&path, 200).expect("replay settlement");
+        assert!(reopened_again.reservation_for_owner("session-a").is_none());
+        assert_eq!(reopened_again.workspace_used_bytes(), 0);
     }
 
     #[test]

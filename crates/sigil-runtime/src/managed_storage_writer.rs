@@ -705,6 +705,24 @@ impl ManagedStorageWriterAdapterV1 {
             .validate_namespace_write(&lease.handle)
             .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
     }
+
+    pub(crate) fn reconcile_artifact_quota(
+        &self,
+        staging: &ManagedStorageWriterLeaseV1,
+        staging_bytes: u64,
+        staging_entries: u64,
+        store: &ManagedStorageWriterLeaseV1,
+        store_bytes: u64,
+        store_entries: u64,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        self.service
+            .reconcile_namespace_quota(&staging.handle, staging_bytes, staging_entries)
+            .and_then(|_| {
+                self.service
+                    .reconcile_namespace_quota(&store.handle, store_bytes, store_entries)
+            })
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
 }
 
 fn content_hash(bytes: &[u8]) -> CanonicalHash {
@@ -981,6 +999,26 @@ fn grant_for_owner(
     use sigil_kernel::resource::{OpaqueStorageGrantId, ResourceOwnerScopeV1};
     let (_, capability_family, leaf) = channel.mapping();
     let namespace_hash = writer_namespace_hash(leaf);
+    let (quota_class, quota_max_bytes, quota_max_entries, quota_max_holders) = match channel {
+        StorageWriterChannelV1::ArtifactStaging => (
+            sigil_kernel::resource::ResourceQuotaClassV1::ArtifactStaging,
+            sigil_kernel::session::TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
+            100_000,
+            1_024,
+        ),
+        StorageWriterChannelV1::ArtifactStore => (
+            sigil_kernel::resource::ResourceQuotaClassV1::ArtifactStore,
+            sigil_kernel::session::TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
+            100_000,
+            1_024,
+        ),
+        _ => (
+            sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
+            1024 * 1024,
+            1024,
+            1,
+        ),
+    };
     sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
         grant_id: OpaqueStorageGrantId::new(format!("grant-writer-{leaf}")),
         admission_hash: CanonicalHash::from_bytes([0x21 ^ seed; 32]),
@@ -1006,10 +1044,10 @@ fn grant_for_owner(
         capability_family,
         retention_policy: sigil_kernel::resource::ResourceRetentionPolicyV1::SessionPolicy,
         quota_profile: sigil_kernel::resource::ResourceQuotaProfileV1 {
-            class: sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
-            max_bytes: 1024 * 1024,
-            max_entries: 1024,
-            max_open_holders: 1,
+            class: quota_class,
+            max_bytes: quota_max_bytes,
+            max_entries: quota_max_entries,
+            max_open_holders: quota_max_holders,
             max_age_ms: None,
             hard_runtime_enforcement_required: true,
             profile_hash: CanonicalHash::from_bytes([0x27; 32]),
