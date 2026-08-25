@@ -2,7 +2,7 @@
 
 状态：gated（2026-08-25 implementation-completeness review；R71.0–R71.8 的历史 candidate/qualification evidence 保留，但当前 release decision 受新增 implementation findings 约束）
 
-> 当前审查覆盖与逐项回应见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。截至 `409a141a`，builtin normal-build Terminal registration 已强制使用 managed terminal port，未组合 authority 时 PTY/非 PTY 均以 typed `ProviderUnavailable` fail closed；plugin hook normal-build 已改为 managed command port；negative gate 已增加 registration ownership invariant。历史 R71.0–R71.8 qualification evidence 与所有复核轮次仍保留，但 artifact/quota recovery qualification、最终 clean exact-SHA full/five-platform evidence 仍未闭合，因此当前状态继续为 `gated / partial / not frozen`，不得标记 `Implemented/Frozen`。
+> 当前审查覆盖与逐项回应见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。截至最新 review slice，builtin normal-build Terminal registration 已强制使用 managed terminal port，未组合 authority 时 PTY/非 PTY 均以 typed `ProviderUnavailable` fail closed；plugin hook normal-build 已改为 managed command port；negative gate 已增加 registration ownership invariant；authority journal replay 已修复 settled 历史 admission 在 source-bound grant 轮换时的 false corruption，但 pending admission 仍严格要求 exact binding 并进入 recovery。历史 R71.0–R71.8 qualification evidence 与所有复核轮次仍保留，但 artifact/quota recovery qualification、最终 clean exact-SHA full/five-platform evidence 仍未闭合，因此当前状态继续为 `gated / partial / not frozen`，不得标记 `Implemented/Frozen`。
 
 创建日期：2026-08-23
 

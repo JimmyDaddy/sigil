@@ -1260,6 +1260,25 @@ fn rehydrate_storage_state(
             table.advance_probe_sequence(sequence.saturating_add(1));
         }
         let grant_id = admission.grant.grant_id.as_str().to_owned();
+        // A settled admission is historical evidence only. It no longer authorizes a new
+        // namespace, so a later authority composition may legitimately have a different
+        // source-bound grant (for example after a cutover manifest changes). Requiring the
+        // current registration to byte-match an already terminal historical grant would turn
+        // a normal authority upgrade into false journal corruption. The embedded grant hash is
+        // still checked below so a tampered event payload remains corrupt.
+        if admission.grant_hash != admission.grant.grant_hash {
+            return Err(JournalErrorV1::Corrupt(format!(
+                "journal admission grant payload hash mismatch for {grant_id}"
+            )));
+        }
+        if settled_grants.contains(&admission.grant_hash.to_hex()) {
+            table
+                .finalized_namespaces
+                .lock()
+                .map_err(|_| JournalErrorV1::Corrupt("finalized registry poisoned".to_owned()))?
+                .insert(admission.namespace_hash.to_hex(), ());
+            continue;
+        }
         let Some(registered) = table.grants.get(&grant_id) else {
             return Err(JournalErrorV1::Corrupt(format!(
                 "journal admission references unregistered grant {grant_id}"
@@ -1273,33 +1292,25 @@ fn rehydrate_storage_state(
                 "journal admission grant binding mismatch for {grant_id}"
             )));
         }
-        if settled_grants.contains(&admission.grant_hash.to_hex()) {
-            table
-                .finalized_namespaces
-                .lock()
-                .map_err(|_| JournalErrorV1::Corrupt("finalized registry poisoned".to_owned()))?
-                .insert(admission.namespace_hash.to_hex(), ());
-        } else {
-            let previous = table
-                .admitted_namespaces
-                .lock()
-                .map_err(|_| JournalErrorV1::Corrupt("admission registry poisoned".to_owned()))?
-                .insert(
-                    admission.handle_id.clone(),
-                    StorageAdmissionRecordV1 {
-                        handle_id: admission.handle_id.clone(),
-                        grant: admission.grant,
-                        request: admission.request,
-                        namespace_hash: admission.namespace_hash,
-                        admission_sequence: admission.admission_sequence,
-                    },
-                );
-            if previous.is_some() {
-                return Err(JournalErrorV1::Corrupt(format!(
-                    "duplicate journal admission handle {}",
-                    admission.handle_id
-                )));
-            }
+        let previous = table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| JournalErrorV1::Corrupt("admission registry poisoned".to_owned()))?
+            .insert(
+                admission.handle_id.clone(),
+                StorageAdmissionRecordV1 {
+                    handle_id: admission.handle_id.clone(),
+                    grant: admission.grant,
+                    request: admission.request,
+                    namespace_hash: admission.namespace_hash,
+                    admission_sequence: admission.admission_sequence,
+                },
+            );
+        if previous.is_some() {
+            return Err(JournalErrorV1::Corrupt(format!(
+                "duplicate journal admission handle {}",
+                admission.handle_id
+            )));
         }
     }
     Ok(())
@@ -1716,6 +1727,49 @@ mod tests {
             reopened.reconcile_unsettled_storage_grants("already-settled"),
             Err(ManagedStorageErrorV1::JournalUnavailable)
         ));
+    }
+
+    #[test]
+    fn r71_storage_rehydrates_pending_grant_binding_mismatch_fail_closed() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority-resources.journal.json");
+        let header = storage_test_header();
+        let historical = grant();
+        {
+            let mut journal = crate::journal::ResourceJournalFileV1::open(&path, header.clone())
+                .expect("journal");
+            journal
+                .append_event(
+                    crate::journal::ResourceJournalEventV1::StorageNamespaceAdmitted {
+                        grant_hash: historical.grant_hash,
+                        handle_id: "pending-binding-mismatch".to_owned(),
+                        namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
+                        grant: Box::new(historical.clone()),
+                        request: Box::new(storage_test_request()),
+                    },
+                )
+                .expect("admission");
+        }
+
+        let mut current = historical.clone();
+        current.source_binding_hash = CanonicalHash::from_bytes([0xabu8; 32]);
+        current.grant_hash = CanonicalHash::from_bytes([0xacu8; 32]);
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(current).expect("current grant");
+        let result = AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            historical.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        );
+        let error = match result {
+            Ok(_) => panic!("pending grant binding drift must remain blocked"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, JournalErrorV1::Corrupt(message) if message.contains("binding mismatch"))
+        );
     }
 
     #[test]

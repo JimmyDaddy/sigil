@@ -706,4 +706,78 @@ mod tests {
             compose_current_boot_authority(&config, &state, &cache, &exec).expect("replay");
         assert_eq!(first.manifest(), second.manifest());
     }
+
+    #[test]
+    fn r71_reopen_ignores_settled_admission_after_source_bound_grant_rollover() {
+        use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let exec = dir.path().join("exec");
+        std::fs::create_dir_all(state.join("cache")).expect("cache dir");
+        std::fs::create_dir_all(&exec).expect("exec dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+                .expect("state mode");
+            std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700))
+                .expect("exec mode");
+        }
+
+        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ));
+        let first = compose_runtime_authority(
+            &state,
+            &exec,
+            CanonicalHash::from_bytes([0x55; 32]),
+            planner,
+            &[Ch::SessionLog],
+        )
+        .expect("first composition");
+        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let first_probes = probe_mandatory_adapters(
+            &first.services,
+            &recovery,
+            CanonicalHash::from_bytes([0x55; 32]),
+            1,
+        );
+        assert!(
+            first_probes
+                .iter()
+                .find(|probe| probe.adapter == MandatoryAdapterKindV1::StorageSessionLog)
+                .is_some_and(|probe| probe.passed)
+        );
+        drop(first);
+
+        // A new cutover manifest rolls the source-bound grants. The old startup admission is
+        // already terminal and must remain historical evidence, not make the journal look
+        // corrupt during the next authority composition.
+        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ));
+        let second = compose_runtime_authority(
+            &state,
+            &exec,
+            CanonicalHash::from_bytes([0x56; 32]),
+            planner,
+            &[Ch::SessionLog],
+        )
+        .expect("settled historical admission must not block grant rollover");
+        let second_probes = probe_mandatory_adapters(
+            &second.services,
+            &recovery,
+            CanonicalHash::from_bytes([0x56; 32]),
+            1,
+        );
+        assert!(
+            second_probes
+                .iter()
+                .find(|probe| probe.adapter == MandatoryAdapterKindV1::StorageSessionLog)
+                .is_some_and(|probe| probe.passed)
+        );
+    }
 }
