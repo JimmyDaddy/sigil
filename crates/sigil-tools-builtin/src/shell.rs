@@ -375,7 +375,12 @@ impl Tool for BashTool {
                 ));
             }
         };
-        let _scratch_lease = self.scratch_namespaces.acquire(&session_key);
+        let _scratch_lease = self
+            .scratch_namespaces
+            .acquire(&session_key)
+            .map_err(|error| {
+                anyhow::anyhow!("session scratch lease could not be durably established: {error}")
+            })?;
         // RFC-0062 8.1: create the harness-owned capture plan and staging sink BEFORE spawn so
         // stdout/stderr chunks are tee'd as they arrive instead of being reconstructed from the
         // bounded post-execution content.

@@ -5224,7 +5224,7 @@ fn registration_shares_external_scratch_control_across_surfaces() -> Result<()> 
         &external.tasks,
         &handles.scratch.tasks
     ));
-    let lease = handles.scratch.namespaces.acquire("shared-session");
+    let lease = handles.scratch.namespaces.acquire("shared-session")?;
     assert!(external.namespaces.is_leased("shared-session"));
     drop(lease);
     assert!(!external.namespaces.is_leased("shared-session"));

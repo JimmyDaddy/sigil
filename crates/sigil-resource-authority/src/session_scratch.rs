@@ -6,8 +6,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    collections::BTreeSet,
-    fs,
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -15,10 +15,12 @@ use std::{
 #[cfg(not(unix))]
 use std::time::SystemTime;
 
+use fs2::FileExt;
 use sigil_kernel::secure_private_path_permissions;
 
 const SESSION_NAMESPACE_DIR: &str = "sessions";
 const LEASE_MARKER_DIR: &str = ".leases";
+const LEASE_LOCK_DIR: &str = ".lease-locks";
 const QUARANTINE_DIR: &str = ".quarantine";
 const MAX_QUARANTINE_ENTRIES: usize = 4_096;
 const DEFAULT_MAX_ENTRIES: usize = 250_000;
@@ -44,6 +46,8 @@ pub enum SessionScratchErrorV1 {
     Filesystem(String),
     #[error("session scratch lease registry is unavailable")]
     LeaseRegistryUnavailable,
+    #[error("session scratch lease lock is unavailable: {0}")]
+    LeaseUnavailable(String),
     #[error("invalid session scratch namespace could not be quarantined: {path}: {reason}")]
     QuarantineFailed { path: String, reason: String },
 }
@@ -114,24 +118,30 @@ pub enum SessionScratchDeleteOutcomeV1 {
 
 #[derive(Debug, Default)]
 struct SessionScratchLeaseRegistryV1 {
-    keys: Mutex<BTreeSet<String>>,
+    keys: Mutex<BTreeMap<String, usize>>,
 }
 
 #[derive(Debug)]
 pub struct SessionScratchLeaseV1 {
     registry: Arc<SessionScratchLeaseRegistryV1>,
     key: String,
-    marker: Option<PathBuf>,
+    marker: PathBuf,
+    marker_file: File,
 }
 
 impl Drop for SessionScratchLeaseV1 {
     fn drop(&mut self) {
-        if let Ok(mut keys) = self.registry.keys.lock() {
-            keys.remove(&self.key);
+        if let Ok(mut keys) = self.registry.keys.lock()
+            && let Some(count) = keys.get_mut(&self.key)
+        {
+            if *count <= 1 {
+                keys.remove(&self.key);
+            } else {
+                *count -= 1;
+            }
         }
-        if let Some(marker) = &self.marker {
-            let _ = fs::remove_file(marker);
-        }
+        let _ = self.marker_file.unlock();
+        let _ = fs::remove_file(&self.marker);
     }
 }
 
@@ -162,17 +172,26 @@ impl SessionScratchAuthorityV1 {
             .join(session_scope_key(session_scope_id))
     }
 
-    pub fn acquire(&self, session_scope_id: Option<&str>) -> SessionScratchLeaseV1 {
+    pub fn acquire(
+        &self,
+        session_scope_id: Option<&str>,
+    ) -> Result<SessionScratchLeaseV1, SessionScratchErrorV1> {
         let key = session_scope_key(session_scope_id);
-        if let Ok(mut keys) = self.leases.keys.lock() {
-            keys.insert(key.clone());
-        }
-        let marker = self.create_lease_marker(&key).ok();
-        SessionScratchLeaseV1 {
+        let namespace_lock = self.lock_namespace(&key)?;
+        let (marker, marker_file) = self.create_lease_marker(&key)?;
+        let mut keys = self
+            .leases
+            .keys
+            .lock()
+            .map_err(|_| SessionScratchErrorV1::LeaseRegistryUnavailable)?;
+        *keys.entry(key.clone()).or_default() += 1;
+        drop(namespace_lock);
+        Ok(SessionScratchLeaseV1 {
             registry: Arc::clone(&self.leases),
             key,
             marker,
-        }
+            marker_file,
+        })
     }
 
     pub fn ensure(
@@ -292,23 +311,33 @@ impl SessionScratchAuthorityV1 {
                 report.skipped_leased += 1;
                 continue;
             }
+            let namespace_lock = self.lock_namespace(key)?;
+            if self.is_leased(key)? {
+                report.skipped_leased += 1;
+                drop(namespace_lock);
+                continue;
+            }
             let state = match walk(&path, config.max_entries) {
                 Ok(state) => state,
                 Err(error) => {
                     self.quarantine_invalid(&path, &mut report, error.to_string())?;
+                    drop(namespace_lock);
                     continue;
                 }
             };
             report.workspace_usage_bytes = report.workspace_usage_bytes.saturating_add(state.bytes);
             if now_ms.saturating_sub(state.newest_ms) < config.ttl_ms {
                 report.skipped_recent += 1;
+                drop(namespace_lock);
                 continue;
             }
             if self.is_leased(key)? {
                 report.skipped_leased += 1;
+                drop(namespace_lock);
                 continue;
             }
             fs::remove_dir_all(&path).map_err(fs_error)?;
+            drop(namespace_lock);
             report.deleted += 1;
             report.deleted_bytes = report.deleted_bytes.saturating_add(state.bytes);
         }
@@ -321,12 +350,12 @@ impl SessionScratchAuthorityV1 {
     ) -> Result<SessionScratchDeleteOutcomeV1, SessionScratchErrorV1> {
         let key = session_scope_key(session_scope_id);
         let directory = self.session_directory(session_scope_id);
-        let keys = self
-            .leases
-            .keys
-            .lock()
-            .map_err(|_| SessionScratchErrorV1::LeaseRegistryUnavailable)?;
-        if keys.contains(&key) || self.lease_marker_exists(&key)? {
+        if self.is_leased(&key)? {
+            return Ok(SessionScratchDeleteOutcomeV1::SkippedLeased);
+        }
+        let namespace_lock = self.lock_namespace(&key)?;
+        if self.is_leased(&key)? {
+            drop(namespace_lock);
             return Ok(SessionScratchDeleteOutcomeV1::SkippedLeased);
         }
         let metadata = match fs::symlink_metadata(&directory) {
@@ -337,15 +366,35 @@ impl SessionScratchAuthorityV1 {
             Err(error) => return Err(fs_error(error)),
         };
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            drop(namespace_lock);
             return Err(SessionScratchErrorV1::NotPlainDirectory {
                 path: directory.display().to_string(),
             });
         }
         fs::remove_dir_all(&directory).map_err(fs_error)?;
+        drop(namespace_lock);
         Ok(SessionScratchDeleteOutcomeV1::Deleted)
     }
 
-    fn create_lease_marker(&self, key: &str) -> Result<PathBuf, SessionScratchErrorV1> {
+    fn lock_namespace(&self, key: &str) -> Result<File, SessionScratchErrorV1> {
+        let directory = self.root.join(LEASE_LOCK_DIR);
+        ensure_directory(&directory)?;
+        let path = directory.join(format!("{}.lock", key_digest(key)));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(fs_error)?;
+        secure_private_path_permissions(&path)
+            .map_err(|error| SessionScratchErrorV1::Filesystem(error.to_string()))?;
+        file.lock_exclusive()
+            .map_err(|error| SessionScratchErrorV1::LeaseUnavailable(error.to_string()))?;
+        Ok(file)
+    }
+
+    fn create_lease_marker(&self, key: &str) -> Result<(PathBuf, File), SessionScratchErrorV1> {
         let directory = self.root.join(LEASE_MARKER_DIR);
         ensure_directory(&directory)?;
         let marker = directory.join(format!(
@@ -354,14 +403,21 @@ impl SessionScratchAuthorityV1 {
             std::process::id(),
             LEASE_SEQUENCE.fetch_add(1, Ordering::SeqCst)
         ));
-        fs::OpenOptions::new()
+        let marker_file = fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&marker)
             .map_err(fs_error)?;
-        secure_private_path_permissions(&marker)
-            .map_err(|error| SessionScratchErrorV1::Filesystem(error.to_string()))?;
-        Ok(marker)
+        if let Err(error) = secure_private_path_permissions(&marker) {
+            let _ = fs::remove_file(&marker);
+            return Err(SessionScratchErrorV1::Filesystem(error.to_string()));
+        }
+        if let Err(error) = marker_file.lock_exclusive() {
+            let _ = fs::remove_file(&marker);
+            return Err(SessionScratchErrorV1::LeaseUnavailable(error.to_string()));
+        }
+        Ok((marker, marker_file))
     }
 
     fn lease_marker_exists(&self, key: &str) -> Result<bool, SessionScratchErrorV1> {
@@ -385,7 +441,25 @@ impl SessionScratchAuthorityV1 {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with(&prefix))
             {
-                return Ok(true);
+                let marker = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(fs_error)?;
+                match marker.try_lock_exclusive() {
+                    Ok(()) => {
+                        marker.unlock().map_err(|error| {
+                            SessionScratchErrorV1::LeaseUnavailable(error.to_string())
+                        })?;
+                        fs::remove_file(&path).map_err(fs_error)?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        return Ok(true);
+                    }
+                    Err(error) => {
+                        return Err(SessionScratchErrorV1::LeaseUnavailable(error.to_string()));
+                    }
+                }
             }
         }
         Ok(false)
@@ -397,7 +471,7 @@ impl SessionScratchAuthorityV1 {
             .keys
             .lock()
             .map_err(|_| SessionScratchErrorV1::LeaseRegistryUnavailable)?
-            .contains(key);
+            .contains_key(key);
         Ok(local || self.lease_marker_exists(key)?)
     }
 
@@ -595,11 +669,20 @@ mod tests {
         authority
             .ensure(Some("session-a"), 100, 1000)
             .expect("provision");
-        let _lease = authority.acquire(Some("session-a"));
+        let _lease = authority.acquire(Some("session-a")).expect("lease");
         assert_eq!(
             authority.delete(Some("session-a")).expect("delete"),
             SessionScratchDeleteOutcomeV1::SkippedLeased
         );
+    }
+
+    #[test]
+    fn lease_marker_creation_failure_is_fail_closed() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("scratch");
+        std::fs::write(&root, b"not a directory").expect("root file");
+        let authority = SessionScratchAuthorityV1::new(root);
+        assert!(authority.acquire(Some("session-a")).is_err());
     }
 
     #[test]
@@ -610,7 +693,7 @@ mod tests {
         authority
             .ensure(Some("session-a"), 100, 1000)
             .expect("provision");
-        let lease = authority.acquire(Some("session-a"));
+        let lease = authority.acquire(Some("session-a")).expect("lease");
 
         let restarted = SessionScratchAuthorityV1::new(&root);
         let report = restarted

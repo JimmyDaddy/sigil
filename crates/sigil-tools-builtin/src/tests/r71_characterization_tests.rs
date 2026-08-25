@@ -135,30 +135,24 @@ fn r71_gc_permanently_skips_invalid_namespace_without_quarantine() -> Result<()>
     Ok(())
 }
 
-/// Causal edge: two concurrent leases on the same session namespace. The current registry is a
-/// BTreeSet keyed by session key -- the entry is removed when the first guard is dropped, so a
-/// still-live second holder silently loses its lease (early release).
-///
-/// This locks the observed defect. RFC-0071 R71.6 must flip the middle assertion once the
-/// registry becomes reference-counted per holder.
+/// Causal edge: two concurrent leases on the same session namespace. Each holder must retain the
+/// shared namespace lease until the final guard is dropped.
 #[test]
-fn r71_same_session_double_lease_releases_early() -> Result<()> {
+fn r71_same_session_double_lease_keeps_namespace_until_last_release() -> Result<()> {
     let control = ScratchNamespaceControl::new();
     let key = session_scratch_key(Some("r71-double-lease-0000-0000-0000-000000000005"));
 
-    let first = control.namespaces.acquire(&key);
-    let second = control.namespaces.acquire(&key);
+    let first = control.namespaces.acquire(&key)?;
+    let second = control.namespaces.acquire(&key)?;
     assert!(
         control.namespaces.is_leased(&key),
         "both holders are live, namespace must stay leased"
     );
 
-    // Observed defect: the set-based registry releases on the first drop even though the second
-    // holder is still live. R71.6 replaces the registry with per-holder reference counts.
     drop(first);
     assert!(
-        !control.namespaces.is_leased(&key),
-        "observed early release: a live second holder must not lose its lease (fixed in R71.6)"
+        control.namespaces.is_leased(&key),
+        "a live second holder must keep the namespace leased"
     );
     drop(second);
     assert!(!control.namespaces.is_leased(&key));
@@ -208,8 +202,8 @@ fn r71_two_terminal_tasks_on_same_session_keep_namespace_leased() -> Result<()> 
     let key = session_scratch_key(Some(session));
 
     let tasks = Arc::new(ScratchTaskLeaseRegistry::new());
-    tasks.register("task-a", &key, &control.namespaces);
-    tasks.register("task-b", &key, &control.namespaces);
+    tasks.register("task-a", &key, &control.namespaces)?;
+    tasks.register("task-b", &key, &control.namespaces)?;
 
     let report = gc_scratch_namespaces(
         &scratch_root,
@@ -222,8 +216,6 @@ fn r71_two_terminal_tasks_on_same_session_keep_namespace_leased() -> Result<()> 
         "both tasks live: namespace stays leased"
     );
 
-    // Observed defect: releasing task-a drops the shared set entry, so the namespace is no
-    // longer protected while task-b is still live. R71.6 must keep it leased.
     tasks.release("task-a");
     let report = gc_scratch_namespaces(
         &scratch_root,
@@ -232,18 +224,18 @@ fn r71_two_terminal_tasks_on_same_session_keep_namespace_leased() -> Result<()> 
         unix_now_ms() + 20_000,
     )?;
     assert_eq!(
-        report.skipped_leased, 0,
-        "observed early release: task-b still live must keep the namespace leased (fixed in R71.6)"
+        report.skipped_leased, 1,
+        "task-b still live must keep the namespace leased"
     );
     assert_eq!(
-        report.deleted, 1,
-        "observed early release consequence: GC deletes the namespace while task-b is still live"
+        report.deleted, 0,
+        "GC must not delete the namespace while task-b is still live"
     );
     assert!(
-        !session_scratch_dir(&scratch_root, Some(session)).exists(),
-        "namespace was reclaimed while a live task holder exists (observed defect)"
+        session_scratch_dir(&scratch_root, Some(session)).exists(),
+        "namespace must remain while a live task holder exists"
     );
-
     tasks.release("task-b");
+
     Ok(())
 }

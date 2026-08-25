@@ -17,7 +17,7 @@
 //! Desktop/application runtime share exactly one derivation rule.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -161,7 +161,7 @@ pub struct SessionScratchProvision {
 /// isolated tests. Consumers use this seam instead of deriving roots or performing filesystem
 /// lifecycle operations themselves.
 pub trait ScratchNamespaceProvider: Send + Sync + std::fmt::Debug {
-    fn acquire(&self, session_key: &str) -> Box<dyn ScratchNamespaceProviderLease>;
+    fn acquire(&self, session_key: &str) -> Result<Box<dyn ScratchNamespaceProviderLease>>;
     fn session_scratch_dir(&self, session_scope_id: Option<&str>) -> PathBuf;
     fn ensure_session_scratch(
         &self,
@@ -185,9 +185,11 @@ pub trait ScratchNamespaceProvider: Send + Sync + std::fmt::Debug {
 /// Provider-owned lease held for the lifetime of one tool or terminal task.
 pub trait ScratchNamespaceProviderLease: Send + Sync + std::fmt::Debug {}
 
+#[cfg(test)]
 #[derive(Debug)]
 struct NoopScratchNamespaceProviderLease;
 
+#[cfg(test)]
 impl ScratchNamespaceProviderLease for NoopScratchNamespaceProviderLease {}
 
 #[cfg(not(test))]
@@ -196,8 +198,8 @@ struct UnavailableScratchNamespaceProvider;
 
 #[cfg(not(test))]
 impl ScratchNamespaceProvider for UnavailableScratchNamespaceProvider {
-    fn acquire(&self, _session_key: &str) -> Box<dyn ScratchNamespaceProviderLease> {
-        Box::new(NoopScratchNamespaceProviderLease)
+    fn acquire(&self, _session_key: &str) -> Result<Box<dyn ScratchNamespaceProviderLease>> {
+        Err(anyhow!("SessionScratch authority provider is not attached"))
     }
 
     fn session_scratch_dir(&self, _session_scope_id: Option<&str>) -> PathBuf {
@@ -249,7 +251,7 @@ struct WalkState {
 /// namespace between a tool's lease acquisition and its registration.
 #[derive(Debug)]
 pub struct ScratchNamespaceLeaseRegistry {
-    inner: Mutex<BTreeSet<String>>,
+    inner: Mutex<BTreeMap<String, usize>>,
     provider: Option<Arc<dyn ScratchNamespaceProvider>>,
 }
 
@@ -263,8 +265,14 @@ pub struct ScratchNamespaceLease {
 
 impl Drop for ScratchNamespaceLease {
     fn drop(&mut self) {
-        if let Ok(mut inner) = self.registry.inner.lock() {
-            inner.remove(&self.key);
+        if let Ok(mut inner) = self.registry.inner.lock()
+            && let Some(count) = inner.get_mut(&self.key)
+        {
+            if *count <= 1 {
+                inner.remove(&self.key);
+            } else {
+                *count -= 1;
+            }
         }
     }
 }
@@ -273,7 +281,7 @@ impl ScratchNamespaceLeaseRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(BTreeSet::new()),
+            inner: Mutex::new(BTreeMap::new()),
             provider: None,
         }
     }
@@ -281,33 +289,35 @@ impl ScratchNamespaceLeaseRegistry {
     #[must_use]
     pub fn with_provider(provider: Arc<dyn ScratchNamespaceProvider>) -> Self {
         Self {
-            inner: Mutex::new(BTreeSet::new()),
+            inner: Mutex::new(BTreeMap::new()),
             provider: Some(provider),
         }
     }
 
     /// Acquires an exclusive-in-process lease for one session namespace.
-    #[must_use]
-    pub fn acquire(self: &Arc<Self>, session_key: &str) -> ScratchNamespaceLease {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.insert(session_key.to_owned());
-        }
+    pub fn acquire(self: &Arc<Self>, session_key: &str) -> Result<ScratchNamespaceLease> {
         let provider_lease = self
             .provider
             .as_ref()
-            .map(|provider| provider.acquire(session_key));
-        ScratchNamespaceLease {
+            .map(|provider| provider.acquire(session_key))
+            .transpose()?;
+        if let Ok(mut inner) = self.inner.lock() {
+            *inner.entry(session_key.to_owned()).or_default() += 1;
+        } else {
+            return Err(anyhow::anyhow!("scratch lease registry lock poisoned"));
+        }
+        Ok(ScratchNamespaceLease {
             registry: Arc::clone(self),
             key: session_key.to_owned(),
             _provider_lease: provider_lease,
-        }
+        })
     }
 
     #[must_use]
     pub fn is_leased(&self, session_key: &str) -> bool {
         self.inner
             .lock()
-            .map(|inner| inner.contains(session_key))
+            .map(|inner| inner.contains_key(session_key))
             .unwrap_or(true)
     }
 
@@ -325,7 +335,7 @@ impl ScratchNamespaceLeaseRegistry {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("scratch lease registry lock poisoned"))?;
-        if inner.contains(session_key) {
+        if inner.contains_key(session_key) {
             return Ok(false);
         }
         delete()?;
@@ -358,10 +368,13 @@ impl ScratchTaskLeaseRegistry {
         task_id: &str,
         session_key: &str,
         namespaces: &Arc<ScratchNamespaceLeaseRegistry>,
-    ) {
-        let lease = namespaces.acquire(session_key);
+    ) -> Result<()> {
+        let lease = namespaces.acquire(session_key)?;
         if let Ok(mut inner) = self.inner.lock() {
             inner.insert(task_id.to_owned(), (session_key.to_owned(), lease));
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("scratch task lease registry lock poisoned"))
         }
     }
 
@@ -398,8 +411,8 @@ struct LocalScratchNamespaceProvider {
 
 #[cfg(test)]
 impl ScratchNamespaceProvider for LocalScratchNamespaceProvider {
-    fn acquire(&self, _session_key: &str) -> Box<dyn ScratchNamespaceProviderLease> {
-        Box::new(NoopScratchNamespaceProviderLease)
+    fn acquire(&self, _session_key: &str) -> Result<Box<dyn ScratchNamespaceProviderLease>> {
+        Ok(Box::new(NoopScratchNamespaceProviderLease))
     }
 
     fn session_scratch_dir(&self, session_scope_id: Option<&str>) -> PathBuf {
@@ -841,6 +854,7 @@ pub struct ScratchGcReport {
     pub skipped_leased: usize,
     pub skipped_recent: usize,
     pub skipped_invalid: usize,
+    pub quarantined: usize,
     pub deleted_bytes: u64,
     pub workspace_usage_bytes: u64,
     /// Bounded diagnostics for namespaces that could not be measured or deleted.

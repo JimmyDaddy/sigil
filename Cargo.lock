@@ -5768,6 +5768,7 @@ dependencies = [
 name = "sigil-resource-authority"
 version = "0.0.1-beta.4"
 dependencies = [
+ "fs2",
  "serde",
  "serde_json",
  "sha2 0.10.9",

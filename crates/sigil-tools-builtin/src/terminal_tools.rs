@@ -617,6 +617,11 @@ impl Tool for TerminalStartTool {
         let scratch_control = self.scratch.clone();
         let provision_scope = ctx.session_scope_id().map(str::to_owned);
         let provision_quota = self.scratch_quota;
+        let scratch_lease = self
+            .scratch
+            .namespaces
+            .acquire(&session_scratch_key(provision_scope.as_deref()))
+            .map_err(|error| anyhow::anyhow!("session scratch lease unavailable: {error}"))?;
         let provision = tokio::task::spawn_blocking(move || {
             scratch_control.ensure_session_scratch(provision_scope.as_deref(), &provision_quota)
         })
@@ -626,6 +631,7 @@ impl Tool for TerminalStartTool {
         match provision {
             Ok(_provision) => {}
             Err(error) => {
+                drop(scratch_lease);
                 return Ok(scratch_provision_error_result(
                     call_id,
                     self.spec().name,
@@ -735,9 +741,11 @@ impl Tool for TerminalStartTool {
         if !snapshot.entry.status.is_terminal() {
             // RFC-0062 14.1: hold a task-scoped scratch lease while the terminal task is alive
             // so TTL GC never deletes the namespace under a live child process.
-            self.scratch
-                .tasks
-                .register(task_id.as_str(), &session_key, &self.scratch.namespaces);
+            self.scratch.tasks.register(
+                task_id.as_str(),
+                &session_key,
+                &self.scratch.namespaces,
+            )?;
         }
         Ok(terminal_start_result(
             call_id,

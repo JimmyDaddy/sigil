@@ -34,8 +34,8 @@ impl sigil_tools_builtin::ScratchNamespaceProvider for TestScratchProvider {
     fn acquire(
         &self,
         _session_key: &str,
-    ) -> Box<dyn sigil_tools_builtin::ScratchNamespaceProviderLease> {
-        Box::new(TestScratchLease)
+    ) -> Result<Box<dyn sigil_tools_builtin::ScratchNamespaceProviderLease>> {
+        Ok(Box::new(TestScratchLease))
     }
 
     fn session_scratch_dir(&self, session_scope_id: Option<&str>) -> PathBuf {
