@@ -46,6 +46,8 @@ pub struct RuntimeAuthorityCompositionV1 {
     borrowed_workspace_registry: std::sync::Arc<
         std::sync::Mutex<sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1>,
     >,
+    file_access_impl:
+        std::sync::Arc<sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1>,
 }
 
 impl RuntimeAuthorityCompositionV1 {
@@ -88,7 +90,8 @@ impl RuntimeAuthorityCompositionV1 {
     {
         let workspace_id =
             sigil_kernel::stable_workspace_id(workspace_root).map_err(|error| error.to_string())?;
-        self.borrowed_workspace_registry
+        let capsule = self
+            .borrowed_workspace_registry
             .lock()
             .map_err(|_| "borrowed workspace registry is poisoned".to_owned())?
             .activate_workspace(
@@ -97,7 +100,11 @@ impl RuntimeAuthorityCompositionV1 {
                 workspace_root,
                 self.authority_generation,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.file_access_impl
+            .reconcile_file_delete_journal()
+            .map_err(|error| error.to_string())?;
+        Ok(capsule)
     }
 }
 
@@ -126,35 +133,64 @@ pub enum RuntimeAuthorityCompositionErrorV1 {
 
 /// Validated, immutable configuration input for one authority composition.
 ///
-/// The surface that owns boot parsing creates this snapshot once and passes it through every
-/// authority constructor. In particular, the workspace root and execution policy are derived
-/// from the same parsed value, so an atomic config replacement cannot split storage resolution
-/// from workspace registration during one boot.
+/// The only public acquisition path is [`Self::load`]. The parsed config, captured launch cwd,
+/// effective workspace identity, source-file identity, and every authority storage root are
+/// frozen together; callers cannot inject a second workspace root after validation.
 #[derive(Clone)]
 pub struct ValidatedAuthorityConfigSnapshotV1 {
     config_path: PathBuf,
     config: sigil_kernel::RootConfig,
     workspace_root: PathBuf,
+    launch_cwd: PathBuf,
+    resolved_paths: crate::paths::SigilPaths,
+    config_path_identity: CanonicalHash,
+    workspace_identity: CanonicalHash,
     config_hash: CanonicalHash,
 }
 
 impl ValidatedAuthorityConfigSnapshotV1 {
     /// Builds a snapshot from a config value that the caller has already loaded and validated.
-    pub fn from_loaded(
+    pub(crate) fn from_loaded(
         config_path: &Path,
         config: sigil_kernel::RootConfig,
-        workspace_root: PathBuf,
+        launch_cwd: &Path,
     ) -> Result<Self, BootAuthorityErrorV1> {
+        let launch_cwd = std::fs::canonicalize(launch_cwd)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        let workspace_root =
+            sigil_kernel::resolve_workspace_root(config_path, &launch_cwd, &config.workspace.root);
+        let workspace_root = std::fs::canonicalize(workspace_root)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        let resolved_paths =
+            crate::resolve_sigil_paths(&config.storage, &config.session, &workspace_root);
+        let config_path_identity =
+            sigil_resource_authority::identity::canonical_identity(config_path)
+                .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
+                .digest;
+        let workspace_identity =
+            sigil_resource_authority::identity::canonical_identity(&workspace_root)
+                .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
+                .digest;
         let encoded = serde_json::to_vec(&config)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-        use sha2::Digest;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(encoded);
+        let config_hash = snapshot_binding_hash(
+            &encoded,
+            config_path,
+            &launch_cwd,
+            &workspace_root,
+            config_path_identity,
+            workspace_identity,
+            &resolved_paths,
+        );
         Ok(Self {
             config_path: config_path.to_path_buf(),
             config,
             workspace_root,
-            config_hash: CanonicalHash::from_bytes(hasher.finalize().into()),
+            launch_cwd,
+            resolved_paths,
+            config_path_identity,
+            workspace_identity,
+            config_hash,
         })
     }
 
@@ -176,29 +212,32 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             Ok(config) => config,
             Err(_) => return Ok(None),
         };
-        let workspace_root =
-            sigil_kernel::resolve_workspace_root(config_path, launch_cwd, &config.workspace.root);
-        Self::from_loaded(config_path, config, workspace_root).map(Some)
+        Self::from_loaded(config_path, config, launch_cwd).map(Some)
     }
 
     #[must_use]
-    pub fn config(&self) -> &sigil_kernel::RootConfig {
+    pub(crate) fn config(&self) -> &sigil_kernel::RootConfig {
         &self.config
     }
 
     #[must_use]
-    pub fn config_path(&self) -> &Path {
+    pub(crate) fn config_path(&self) -> &Path {
         &self.config_path
     }
 
     #[must_use]
-    pub fn workspace_root(&self) -> &Path {
+    pub(crate) fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
 
     #[must_use]
-    pub fn config_hash(&self) -> CanonicalHash {
+    pub(crate) fn config_hash(&self) -> CanonicalHash {
         self.config_hash
+    }
+
+    #[must_use]
+    pub(crate) fn resolved_paths(&self) -> &crate::paths::SigilPaths {
+        &self.resolved_paths
     }
 }
 
@@ -208,6 +247,9 @@ impl std::fmt::Debug for ValidatedAuthorityConfigSnapshotV1 {
             .debug_struct("ValidatedAuthorityConfigSnapshotV1")
             .field("config_path", &self.config_path)
             .field("workspace_root", &self.workspace_root)
+            .field("launch_cwd", &self.launch_cwd)
+            .field("config_path_identity", &self.config_path_identity)
+            .field("workspace_identity", &self.workspace_identity)
             .field("config_hash", &self.config_hash)
             .finish_non_exhaustive()
     }
@@ -244,7 +286,7 @@ pub fn compose_runtime_authority(
 /// its owner explicit here lets the cutover probe verify the real writer attachment without
 /// granting the updater an agent/session capability.
 #[allow(clippy::too_many_arguments)]
-pub fn compose_runtime_authority_with_product_updater(
+pub(crate) fn compose_runtime_authority_with_product_updater(
     state_anchor: &Path,
     cache_root: &Path,
     execution_temp_root: &Path,
@@ -375,9 +417,16 @@ fn compose_runtime_authority_inner(
         sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
     ));
     let file_access_impl = Arc::new(
-        sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new(
+        sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new_with_journal(
             Arc::clone(&registry),
-        ),
+            state_anchor.join("file-delete-quarantine"),
+            state_anchor.join("file-delete.journal.json"),
+            bootstrap_manifest_hash,
+            journal_instance_hash,
+        )
+        .map_err(|error| {
+            RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
+        })?,
     );
     let file_access: Arc<dyn ManagedFileAccessServiceV1> = file_access_impl.clone();
     let borrowed_native_save: Arc<
@@ -483,6 +532,7 @@ fn compose_runtime_authority_inner(
         command_execution,
         authority_generation: authority,
         borrowed_workspace_registry: registry,
+        file_access_impl,
     })
 }
 
@@ -491,6 +541,51 @@ fn hash_path_binding(label: &str, state_anchor: &Path) -> CanonicalHash {
     let mut hasher = Sha256::new();
     hasher.update(label.as_bytes());
     hasher.update(state_anchor.as_os_str().to_string_lossy().as_bytes());
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn ensure_authority_anchors(paths: &crate::paths::SigilPaths) -> Result<(), BootAuthorityErrorV1> {
+    for anchor in [&paths.state_root, &paths.scratch_root] {
+        std::fs::create_dir_all(anchor)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        sigil_kernel::secure_private_path_permissions(anchor)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    }
+    std::fs::create_dir_all(paths.state_root.join("cache"))
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    sigil_kernel::secure_private_path_permissions(&paths.state_root.join("cache"))
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    Ok(())
+}
+
+fn snapshot_binding_hash(
+    encoded_config: &[u8],
+    config_path: &Path,
+    launch_cwd: &Path,
+    workspace_root: &Path,
+    config_path_identity: CanonicalHash,
+    workspace_identity: CanonicalHash,
+    paths: &crate::paths::SigilPaths,
+) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"validated-authority-config-snapshot-v2");
+    hasher.update(encoded_config);
+    for path in [
+        config_path,
+        launch_cwd,
+        workspace_root,
+        &paths.state_root,
+        &paths.cache_root,
+        &paths.workspace_state_root,
+        &paths.workspace_cache_root,
+        &paths.scratch_root,
+    ] {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update([0]);
+    }
+    hasher.update(config_path_identity.as_bytes());
+    hasher.update(workspace_identity.as_bytes());
     CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
@@ -528,6 +623,16 @@ pub fn compose_current_boot_authority(
     ),
     BootAuthorityErrorV1,
 > {
+    let paths = config_snapshot.resolved_paths();
+    ensure_authority_anchors(paths)?;
+    if state_anchor != paths.state_root
+        || cache_root != paths.cache_root
+        || execution_temp_root != paths.scratch_root
+    {
+        return Err(BootAuthorityErrorV1::Config(
+            "authority anchors do not match the frozen configuration snapshot".to_owned(),
+        ));
+    }
     use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
     let instance_id = format!(
         "sigil:{}:{}",
@@ -662,32 +767,7 @@ pub fn attach_boot_authority_to_services(
         return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
             .map_err(BootAuthorityErrorV1::Cutover);
     };
-    let paths = crate::resolve_sigil_paths(
-        &config_snapshot.config().storage,
-        &config_snapshot.config().session,
-        config_snapshot.workspace_root(),
-    );
-    for anchor in [&paths.state_root, &paths.scratch_root] {
-        std::fs::create_dir_all(anchor)
-            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(anchor, std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-        }
-    }
-    std::fs::create_dir_all(paths.state_root.join("cache"))
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            paths.state_root.join("cache"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-    }
+    let paths = config_snapshot.resolved_paths().clone();
     let (cutover, composition) = compose_current_boot_authority(
         &config_snapshot,
         &paths.state_root,
@@ -860,15 +940,17 @@ mod tests {
         .expect("config");
         let state = dir.path().join("state");
         let cache = state.join("cache");
-        let exec = dir.path().join("exec");
         std::fs::create_dir_all(&cache).expect("cache");
-        std::fs::create_dir_all(&exec).expect("exec");
+        let _state_env = crate::test_env::EnvScope::set(crate::SIGIL_STATE_HOME_ENV, &state);
+        let _cache_env = crate::test_env::EnvScope::set(crate::SIGIL_CACHE_HOME_ENV, &cache);
         let config_snapshot = ValidatedAuthorityConfigSnapshotV1::from_loaded(
             &config,
             sigil_kernel::RootConfig::load(&config).expect("load config"),
-            dir.path().to_path_buf(),
+            dir.path(),
         )
         .expect("snapshot");
+        let exec = config_snapshot.resolved_paths().scratch_root.clone();
+        std::fs::create_dir_all(&exec).expect("exec");
         let (first, _composition) =
             compose_current_boot_authority(&config_snapshot, &state, &cache, &exec)
                 .expect("current boot");
@@ -895,6 +977,11 @@ mod tests {
         let config = dir.path().join("sigil.toml");
         let config_a = "config_version = 2\n[workspace]\nroot = \"workspace-a\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n";
         let config_b = config_a.replace("workspace-a", "workspace-b");
+        let state = dir.path().join("state");
+        let cache = state.join("cache");
+        std::fs::create_dir_all(&cache).expect("cache");
+        let _state_env = crate::test_env::EnvScope::set(crate::SIGIL_STATE_HOME_ENV, &state);
+        let _cache_env = crate::test_env::EnvScope::set(crate::SIGIL_CACHE_HOME_ENV, &cache);
         std::fs::write(&config, config_a).expect("config a");
         let snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
             .expect("load snapshot")
@@ -902,19 +989,22 @@ mod tests {
         let original_hash = snapshot.config_hash();
         std::fs::write(&config, config_b).expect("config b");
 
-        assert_eq!(snapshot.workspace_root(), workspace_a.as_path());
+        assert_eq!(
+            snapshot.workspace_root(),
+            workspace_a
+                .canonicalize()
+                .expect("canonical workspace a")
+                .as_path()
+        );
         assert_eq!(snapshot.config_hash(), original_hash);
         let live = sigil_kernel::RootConfig::load(&config).expect("live config");
         let live_snapshot =
-            ValidatedAuthorityConfigSnapshotV1::from_loaded(&config, live, workspace_b.clone())
+            ValidatedAuthorityConfigSnapshotV1::from_loaded(&config, live, dir.path())
                 .expect("live snapshot");
         assert_ne!(snapshot.config_hash(), live_snapshot.config_hash());
-
-        let state = dir.path().join("state");
-        let cache = state.join("cache");
-        let exec = dir.path().join("exec");
-        std::fs::create_dir_all(&cache).expect("cache");
+        let exec = snapshot.resolved_paths().scratch_root.clone();
         std::fs::create_dir_all(&exec).expect("exec");
+
         let (_cutover, composition) =
             compose_current_boot_authority(&snapshot, &state, &cache, &exec)
                 .expect("compose from frozen snapshot");
@@ -928,6 +1018,31 @@ mod tests {
         .digest;
         assert_eq!(capsule.root_identity_hash, workspace_identity);
         assert_ne!(capsule.root_identity_hash, snapshot.config_hash());
+    }
+
+    #[test]
+    fn r71_snapshot_binding_changes_with_launch_cwd_for_default_workspace() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace_a = dir.path().join("workspace-a");
+        let workspace_b = dir.path().join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).expect("workspace a");
+        std::fs::create_dir_all(&workspace_b).expect("workspace b");
+        let config = dir.path().join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let snapshot_a = ValidatedAuthorityConfigSnapshotV1::load(&config, &workspace_a)
+            .expect("load a")
+            .expect("snapshot a");
+        let snapshot_b = ValidatedAuthorityConfigSnapshotV1::load(&config, &workspace_b)
+            .expect("load b")
+            .expect("snapshot b");
+        assert_ne!(snapshot_a.workspace_root(), snapshot_b.workspace_root());
+        assert_ne!(snapshot_a.config_hash(), snapshot_b.config_hash());
+        assert_ne!(snapshot_a.resolved_paths(), snapshot_b.resolved_paths());
     }
 
     #[test]

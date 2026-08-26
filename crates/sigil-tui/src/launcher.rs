@@ -804,13 +804,12 @@ where
                     )
                     .map_err(anyhow::Error::new)?;
                 }
-                let config_snapshot =
-                    sigil_runtime::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::from_loaded(
-                        &config_path,
-                        root_config.clone(),
-                        app.workspace_root.clone(),
-                    )
-                    .map_err(anyhow::Error::new)?;
+                let config_snapshot = sigil_runtime::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::load(
+                    &config_path,
+                    &cwd,
+                )
+                .map_err(anyhow::Error::new)?
+                .ok_or_else(|| anyhow::anyhow!("authority config snapshot is unavailable"))?;
                 let (boot_cutover, composition) =
                     sigil_runtime::r71_authority_composition::compose_current_boot_authority(
                         &config_snapshot,

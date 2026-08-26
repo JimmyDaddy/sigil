@@ -4,10 +4,10 @@
 //! Workspace / ExternalUserPath identity lease. This service adjudicates the post-decision
 //! Tool admission: token binding vs request, one-shot adjudication claim, observed borrowed
 //! identity (identity_before in the receipt), SystemTemp deny/read-boundary, and closed
-//! operation classification. It never performs file I/O itself and never claims ownership of
-//! borrowed content. SessionExport / SessionExportReconcile tokens have their own
-//! kernel-verified export path (session_export.rs) and are refused here until the storage
-//! writer slice wires them through explicitly.
+//! operation classification. It performs approved relative descriptor/handle I/O itself, but
+//! never claims ownership of borrowed content. SessionExport / SessionExportReconcile tokens
+//! have their own kernel-verified export path (session_export.rs) and are refused here until the
+//! storage writer slice wires them through explicitly.
 
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -43,8 +43,13 @@ use sigil_kernel::managed_file_access::{
 use sigil_kernel::resource::{
     AuthorityGeneration, CanonicalHash, OpaquePermissionSubjectRef, ResourceAccessV1,
 };
+#[cfg(unix)]
+use sigil_kernel::secure_private_path_permissions;
 
 use crate::borrowed::{BorrowedSubjectClassV1, BorrowedSubjectRegistryV1};
+#[cfg(unix)]
+use crate::journal::{ResourceJournalEventV1, ResourceJournalFileIdentityV1};
+use crate::journal::{ResourceJournalFileV1, ResourceJournalHeaderV1};
 
 /// Closed access class for a closed file operation.
 pub fn access_class_for(operation: ManagedFileOperationV1) -> ResourceAccessV1 {
@@ -79,6 +84,17 @@ pub struct AuthorityManagedFileAccessServiceV1 {
     registry: Arc<Mutex<BorrowedSubjectRegistryV1>>,
     consumed: Mutex<BTreeSet<String>>,
     plans: Mutex<BTreeMap<String, PlannedFileAccessV1>>,
+    file_delete: Option<Arc<FileDeleteAuthorityStateV1>>,
+}
+
+/// Authority-private state for the Unix delete protocol. The arena is rooted below the
+/// authority's owner-only state anchor, never below the user-writable workspace. Its pathname is
+/// not included in any child request or sandbox binding; recovery uses only the journal's opaque
+/// operation id and the authority-provided arena root.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct FileDeleteAuthorityStateV1 {
+    arena_root: PathBuf,
+    journal: Mutex<ResourceJournalFileV1>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +122,72 @@ impl AuthorityManagedFileAccessServiceV1 {
             registry,
             consumed: Mutex::new(BTreeSet::new()),
             plans: Mutex::new(BTreeMap::new()),
+            file_delete: None,
         }
+    }
+
+    /// Creates the production delete owner. The arena and journal are both under an authority
+    /// state anchor, and the constructor refuses a corrupt/mismatched journal before the service
+    /// can be published to any tool surface.
+    pub fn new_with_journal(
+        registry: Arc<Mutex<BorrowedSubjectRegistryV1>>,
+        arena_root: PathBuf,
+        journal_path: PathBuf,
+        bootstrap_manifest_hash: CanonicalHash,
+        journal_instance_hash: CanonicalHash,
+    ) -> Result<Self, ManagedFileAccessErrorV1> {
+        let header = ResourceJournalHeaderV1 {
+            schema_version: 1,
+            shard_name: "file-delete".to_owned(),
+            bootstrap_manifest_hash,
+            journal_instance_hash,
+            header_hash: file_delete_header_hash(&arena_root, &journal_path),
+        };
+        let journal = ResourceJournalFileV1::open(journal_path, header).map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                "file-delete journal open failed: {error}"
+            ))
+        })?;
+        Ok(Self {
+            registry,
+            consumed: Mutex::new(BTreeSet::new()),
+            plans: Mutex::new(BTreeMap::new()),
+            file_delete: Some(Arc::new(FileDeleteAuthorityStateV1 {
+                arena_root,
+                journal: Mutex::new(journal),
+            })),
+        })
+    }
+
+    /// Reconciles every non-terminal delete prefix after workspace activation. A pending rename
+    /// is never guessed away: the authority either observes the expected object and completes
+    /// the already-authorized deletion, restores it without replacement, or leaves a typed
+    /// reconciliation blocker.
+    pub fn reconcile_file_delete_journal(&self) -> Result<(), ManagedFileAccessErrorV1> {
+        #[cfg(unix)]
+        {
+            let Some(state) = self.file_delete.as_ref() else {
+                return Ok(());
+            };
+            reconcile_file_delete_journal(state, &self.registry)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_journal(
+        registry: Arc<Mutex<BorrowedSubjectRegistryV1>>,
+        arena_root: PathBuf,
+        journal_path: PathBuf,
+    ) -> Self {
+        Self::new_with_journal(
+            registry,
+            arena_root,
+            journal_path,
+            CanonicalHash::from_bytes([0x71; 32]),
+            CanonicalHash::from_bytes([0x72; 32]),
+        )
+        .expect("test file-delete journal")
     }
 
     fn claim_key(token: &ManagedFileAccessAdmissionTokenV1) -> String {
@@ -539,7 +620,7 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
             returned_lines,
             total_lines,
             truncated,
-        } = execute_physical(&plan, request.input)?;
+        } = execute_physical(&plan, request.input, self.file_delete.as_deref())?;
         let result_digest =
             Self::hash_parts(&[payload.as_bytes(), result.result_digest.as_bytes()]);
         Ok(ManagedFileExecutionOutcomeV1 {
@@ -716,14 +797,22 @@ fn open_relative_path_with_mode(
 
 #[cfg(unix)]
 fn open_relative_parent(plan: &PlannedFileAccessV1) -> std::io::Result<(std::fs::File, CString)> {
-    let components = relative_components(&plan.logical_path);
+    open_relative_parent_from_root(&plan.root_handle, &plan.logical_path)
+}
+
+#[cfg(unix)]
+fn open_relative_parent_from_root(
+    root_handle: &std::fs::File,
+    logical_path: &str,
+) -> std::io::Result<(std::fs::File, CString)> {
+    let components = relative_components(logical_path);
     let Some(leaf) = components.last() else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "workspace root is not a file leaf",
         ));
     };
-    let mut parent = plan.root_handle.try_clone()?;
+    let mut parent = root_handle.try_clone()?;
     for component in &components[..components.len() - 1] {
         parent = open_at(
             &parent,
@@ -738,28 +827,18 @@ fn open_relative_parent(plan: &PlannedFileAccessV1) -> std::io::Result<(std::fs:
 }
 
 #[cfg(unix)]
-fn same_unix_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    left.dev() == right.dev()
-        && left.ino() == right.ino()
-        && left.nlink() == right.nlink()
-        && left.len() == right.len()
-        && (left.mode() & libc::S_IFMT as u32) == (right.mode() & libc::S_IFMT as u32)
-}
-
-#[cfg(unix)]
 fn rename_noreplace_at(
-    directory: &std::fs::File,
+    source_directory: &std::fs::File,
     source: &CStr,
+    destination_directory: &std::fs::File,
     destination: &CStr,
 ) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     let status = unsafe {
         libc::renameat2(
-            directory.as_raw_fd(),
+            source_directory.as_raw_fd(),
             source.as_ptr(),
-            directory.as_raw_fd(),
+            destination_directory.as_raw_fd(),
             destination.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
@@ -768,9 +847,9 @@ fn rename_noreplace_at(
     #[cfg(target_os = "macos")]
     let status = unsafe {
         libc::renameatx_np(
-            directory.as_raw_fd(),
+            source_directory.as_raw_fd(),
             source.as_ptr(),
-            directory.as_raw_fd(),
+            destination_directory.as_raw_fd(),
             destination.as_ptr(),
             libc::RENAME_EXCL,
         )
@@ -778,10 +857,10 @@ fn rename_noreplace_at(
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let status = {
-        let _ = (directory, source, destination);
+        let _ = (source_directory, source, destination_directory, destination);
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "managed delete quarantine is unsupported on this Unix target",
+            "managed delete quarantine arena is unsupported on this Unix target",
         ));
     };
 
@@ -795,94 +874,630 @@ fn rename_noreplace_at(
 #[cfg(unix)]
 static DELETE_QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn file_delete_header_hash(arena_root: &Path, journal_path: &Path) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"file-delete-journal-header-v1");
+    hasher.update(arena_root.to_string_lossy().as_bytes());
+    hasher.update(journal_path.to_string_lossy().as_bytes());
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+#[cfg(unix)]
+fn journal_file_identity(metadata: &std::fs::Metadata) -> ResourceJournalFileIdentityV1 {
+    use std::os::unix::fs::MetadataExt;
+    ResourceJournalFileIdentityV1 {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        link_count: metadata.nlink(),
+        size: metadata.len(),
+        file_type: metadata.mode() & libc::S_IFMT as u32,
+    }
+}
+
+#[cfg(unix)]
+fn same_journal_file_identity(
+    expected: &ResourceJournalFileIdentityV1,
+    observed: &ResourceJournalFileIdentityV1,
+) -> bool {
+    expected == observed
+}
+
+#[cfg(unix)]
+fn append_file_delete_event(
+    state: &FileDeleteAuthorityStateV1,
+    event: ResourceJournalEventV1,
+) -> Result<(), String> {
+    state
+        .journal
+        .lock()
+        .map_err(|_| "file-delete journal mutex is poisoned".to_owned())?
+        .append_event(event)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn reconciliation_error(
+    operation_id: &str,
+    binding_hash: CanonicalHash,
+) -> ManagedFileAccessErrorV1 {
+    ManagedFileAccessErrorV1::ReconciliationRequired {
+        operation_id: operation_id.to_owned(),
+        binding_hash,
+    }
+}
+
+#[cfg(unix)]
+fn orphan_file_delete_binding(name: &str) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"file-delete-orphan-v1");
+    hasher.update(name.as_bytes());
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+#[cfg(unix)]
+fn open_file_delete_arena(
+    state: &FileDeleteAuthorityStateV1,
+    parent: &std::fs::File,
+) -> Result<std::fs::File, ManagedFileAccessErrorV1> {
+    std::fs::create_dir_all(&state.arena_root).map_err(|error| {
+        ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+            "file-delete arena creation failed: {error}"
+        ))
+    })?;
+    let metadata = std::fs::symlink_metadata(&state.arena_root).map_err(|error| {
+        ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+            "file-delete arena observation failed: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ManagedFileAccessErrorV1::AliasCollision);
+    }
+    secure_private_path_permissions(&state.arena_root).map_err(|error| {
+        ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+            "file-delete arena hardening failed: {error}"
+        ))
+    })?;
+    use std::os::unix::fs::MetadataExt;
+    let parent_metadata = parent.metadata().map_err(relative_io_error)?;
+    if metadata.dev() != parent_metadata.dev() {
+        return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+            "file-delete arena is not on the workspace filesystem".to_owned(),
+        ));
+    }
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&state.arena_root)
+        .map_err(relative_io_error)
+}
+
 #[cfg(unix)]
 fn delete_via_quarantine(
+    state: &FileDeleteAuthorityStateV1,
+    plan: &PlannedFileAccessV1,
     parent: &std::fs::File,
     leaf: &CStr,
     approved: &std::fs::Metadata,
-    plan_hash: CanonicalHash,
 ) -> Result<(), ManagedFileAccessErrorV1> {
+    let arena = open_file_delete_arena(state, parent)?;
     let sequence = DELETE_QUARANTINE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let operation_id = format!("file-delete-{sequence}-{}", plan.plan_hash.to_hex());
     let quarantine = CString::new(format!(
-        ".sigil-delete-quarantine-{}-{}-{}",
+        "q-{}-{}-{}",
         std::process::id(),
         sequence,
-        plan_hash.to_hex()
+        plan.plan_hash.to_hex()
     ))
     .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
-
-    // The rename is the linearization point: it moves whichever object is currently bound to the
-    // approved leaf into an authority-generated private name without replacing a pre-existing
-    // entry. The identity is checked only after that move, so a pathname replacement cannot be
-    // deleted merely because it passed an earlier fstatat check.
-    rename_noreplace_at(parent, leaf, &quarantine).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            ManagedFileAccessErrorV1::PlanStale
-        } else {
-            ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                "managed delete quarantine rename failed: {error}"
-            ))
-        }
-    })?;
-
     let quarantine_name = quarantine
         .to_str()
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+        .to_owned();
+    let expected_identity = journal_file_identity(approved);
+    append_file_delete_event(
+        state,
+        ResourceJournalEventV1::FileDeletePrepared {
+            operation_id: operation_id.clone(),
+            subject_ref: plan.subject_ref.as_str().to_owned(),
+            logical_path: plan.logical_path.clone(),
+            plan_hash: plan.plan_hash,
+            binding_hash: plan.plan_hash,
+            quarantine_name: quarantine_name.clone(),
+            expected_identity: expected_identity.clone(),
+        },
+    )
+    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+
+    // The rename is the linearization point. Crucially, its destination is an owner-only
+    // authority arena outside the user-writable workspace, so no workspace writer can replace
+    // the quarantine pathname between identity observation and unlinkat.
+    if let Err(error) = rename_noreplace_at(parent, leaf, &arena, &quarantine) {
+        let terminal = if error.kind() == std::io::ErrorKind::NotFound {
+            "rename-source-missing"
+        } else {
+            "rename-failed-before-effect"
+        };
+        return match append_file_delete_event(
+            state,
+            ResourceJournalEventV1::FileDeleteRestored {
+                operation_id: operation_id.clone(),
+                reason: terminal.to_owned(),
+            },
+        ) {
+            Ok(()) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(ManagedFileAccessErrorV1::PlanStale)
+            }
+            Ok(()) => Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                "managed delete quarantine rename failed: {error}"
+            ))),
+            Err(_) => Err(reconciliation_error(&operation_id, plan.plan_hash)),
+        };
+    }
+    if let Err(_error) = append_file_delete_event(
+        state,
+        ResourceJournalEventV1::FileDeleteRenamed {
+            operation_id: operation_id.clone(),
+            quarantine_identity: expected_identity.clone(),
+        },
+    ) {
+        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
+        if restore.is_ok() {
+            let _ = append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteRestored {
+                    operation_id: operation_id.clone(),
+                    reason: "renamed-event-append-failed".to_owned(),
+                },
+            );
+        }
+        return Err(reconciliation_error(&operation_id, plan.plan_hash));
+    }
+
     let quarantined = match open_at(
-        parent,
-        quarantine_name,
+        &arena,
+        &quarantine_name,
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         0,
     ) {
         Ok(file) => file,
         Err(error) => {
-            let restore = rename_noreplace_at(parent, &quarantine, leaf);
-            return Err(match restore {
-                Ok(()) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+            let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
+            if restore.is_ok() {
+                let _ = append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteRestored {
+                        operation_id: operation_id.clone(),
+                        reason: "quarantine-open-failed".to_owned(),
+                    },
+                );
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
                     "managed delete quarantine identity could not be opened: {error}"
-                )),
-                Err(restore_error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                    "managed delete quarantine requires reconciliation: open failed: {error}; restore failed: {restore_error}"
-                )),
-            });
+                )));
+            }
+            let _ = append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                    operation_id: operation_id.clone(),
+                    binding_hash: plan.plan_hash,
+                    reason: format!("open failed: {error}"),
+                },
+            );
+            return Err(reconciliation_error(&operation_id, plan.plan_hash));
         }
     };
     let observed = match quarantined.metadata() {
         Ok(metadata) => metadata,
         Err(error) => {
-            let restore = rename_noreplace_at(parent, &quarantine, leaf);
-            return Err(match restore {
-                Ok(()) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+            let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
+            if restore.is_ok() {
+                let _ = append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteRestored {
+                        operation_id: operation_id.clone(),
+                        reason: "identity-observation-failed".to_owned(),
+                    },
+                );
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
                     "managed delete quarantine identity observation failed: {error}"
-                )),
-                Err(restore_error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                    "managed delete quarantine requires reconciliation: identity observation failed: {error}; restore failed: {restore_error}"
-                )),
-            });
+                )));
+            }
+            let _ = append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                    operation_id: operation_id.clone(),
+                    binding_hash: plan.plan_hash,
+                    reason: format!("identity observation failed: {error}"),
+                },
+            );
+            return Err(reconciliation_error(&operation_id, plan.plan_hash));
         }
     };
-    if !same_unix_identity(approved, &observed) {
-        let restore = rename_noreplace_at(parent, &quarantine, leaf);
-        return Err(match restore {
-            Ok(()) => ManagedFileAccessErrorV1::PlanStale,
-            Err(error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                "managed delete quarantine identity mismatch requires reconciliation: restore failed: {error}"
-            )),
-        });
+    let observed_identity = journal_file_identity(&observed);
+    let matches = same_journal_file_identity(&expected_identity, &observed_identity);
+    if let Err(error) = append_file_delete_event(
+        state,
+        ResourceJournalEventV1::FileDeleteIdentityObserved {
+            operation_id: operation_id.clone(),
+            observed_identity: observed_identity.clone(),
+            matches,
+        },
+    ) {
+        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
+        if restore.is_ok() {
+            let _ = append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteRestored {
+                    operation_id: operation_id.clone(),
+                    reason: "identity-event-append-failed".to_owned(),
+                },
+            );
+        }
+        let _ = error;
+        return Err(reconciliation_error(&operation_id, plan.plan_hash));
+    }
+    if !matches {
+        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
+        return match restore {
+            Ok(()) => {
+                append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteRestored {
+                        operation_id: operation_id.clone(),
+                        reason: "identity-mismatch".to_owned(),
+                    },
+                )
+                .map_err(|_| reconciliation_error(&operation_id, plan.plan_hash))?;
+                Err(ManagedFileAccessErrorV1::PlanStale)
+            }
+            Err(error) => {
+                let _ = append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                        operation_id: operation_id.clone(),
+                        binding_hash: plan.plan_hash,
+                        reason: format!("identity mismatch restore failed: {error}"),
+                    },
+                );
+                Err(reconciliation_error(&operation_id, plan.plan_hash))
+            }
+        };
     }
 
-    let status = unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), 0) };
+    let status = unsafe { libc::unlinkat(arena.as_raw_fd(), quarantine.as_ptr(), 0) };
     if status < 0 {
         let error = std::io::Error::last_os_error();
-        let restore = rename_noreplace_at(parent, &quarantine, leaf);
-        return Err(match restore {
-            Ok(()) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                "managed file delete failed after quarantine: {error}"
-            )),
-            Err(restore_error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                "managed delete quarantine requires reconciliation: delete failed: {error}; restore failed: {restore_error}"
-            )),
-        });
+        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
+        return match restore {
+            Ok(()) => {
+                let _ = append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteRestored {
+                        operation_id,
+                        reason: format!("delete failed: {error}"),
+                    },
+                );
+                Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                    "managed file delete failed after quarantine: {error}"
+                )))
+            }
+            Err(restore_error) => {
+                let _ = append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                        operation_id: operation_id.clone(),
+                        binding_hash: plan.plan_hash,
+                        reason: format!("delete failed: {error}; restore failed: {restore_error}"),
+                    },
+                );
+                Err(reconciliation_error(&operation_id, plan.plan_hash))
+            }
+        };
+    }
+    if append_file_delete_event(
+        state,
+        ResourceJournalEventV1::FileDeleteDeleted {
+            operation_id: operation_id.clone(),
+        },
+    )
+    .is_err()
+    {
+        return Err(reconciliation_error(&operation_id, plan.plan_hash));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct PendingFileDeleteV1 {
+    prepared: Option<(
+        String,
+        String,
+        String,
+        CanonicalHash,
+        CanonicalHash,
+        String,
+        ResourceJournalFileIdentityV1,
+    )>,
+    renamed: bool,
+    identity_observed: bool,
+    terminal: bool,
+}
+
+#[cfg(unix)]
+fn reconcile_file_delete_journal(
+    state: &FileDeleteAuthorityStateV1,
+    registry: &Arc<Mutex<BorrowedSubjectRegistryV1>>,
+) -> Result<(), ManagedFileAccessErrorV1> {
+    let records = state
+        .journal
+        .lock()
+        .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?
+        .file_delete_records();
+    let mut pending = BTreeMap::<String, PendingFileDeleteV1>::new();
+    for (_, event) in records {
+        match event {
+            ResourceJournalEventV1::FileDeletePrepared {
+                operation_id,
+                subject_ref,
+                logical_path,
+                plan_hash,
+                binding_hash,
+                quarantine_name,
+                expected_identity,
+            } => {
+                pending.entry(operation_id).or_default().prepared = Some((
+                    subject_ref,
+                    logical_path,
+                    operation_id.clone(),
+                    plan_hash,
+                    binding_hash,
+                    quarantine_name,
+                    expected_identity,
+                ));
+            }
+            ResourceJournalEventV1::FileDeleteRenamed { operation_id, .. } => {
+                pending.entry(operation_id).or_default().renamed = true;
+            }
+            ResourceJournalEventV1::FileDeleteIdentityObserved { operation_id, .. } => {
+                pending.entry(operation_id).or_default().identity_observed = true;
+            }
+            ResourceJournalEventV1::FileDeleteRestored { operation_id, .. }
+            | ResourceJournalEventV1::FileDeleteDeleted { operation_id } => {
+                pending.entry(operation_id).or_default().terminal = true;
+            }
+            ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                operation_id,
+                binding_hash,
+                ..
+            } => return Err(reconciliation_error(&operation_id, binding_hash)),
+            _ => {}
+        }
+    }
+
+    let (subject_ref, root, _, _) = {
+        let registry = registry
+            .lock()
+            .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?;
+        let subject_ref = registry
+            .sole_workspace_subject()
+            .ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?;
+        let root = registry
+            .workspace_root_for(&subject_ref)
+            .ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?
+            .to_path_buf();
+        let capsule = registry
+            .workspace_capsule_for(&subject_ref)
+            .ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?;
+        (
+            subject_ref,
+            root,
+            capsule.authority_generation,
+            capsule.root_identity_hash,
+        )
+    };
+    let root_handle = AuthorityManagedFileAccessServiceV1::open_workspace_root(&root)?;
+    let (parent_for_arena, _) =
+        open_relative_parent_from_root(&root_handle, "recovery-leaf").map_err(relative_io_error)?;
+    let arena = open_file_delete_arena(state, &parent_for_arena)?;
+    let known_quarantines = pending
+        .values()
+        .filter(|state_for_operation| !state_for_operation.terminal)
+        .filter_map(|state_for_operation| {
+            state_for_operation
+                .prepared
+                .as_ref()
+                .map(|prepared| prepared.5.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    for entry in std::fs::read_dir(&state.arena_root)
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+    {
+        let entry = entry.map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !known_quarantines.contains(&name) {
+            let operation_id = format!("file-delete-orphan-{name}");
+            let binding_hash = orphan_file_delete_binding(&name);
+            let _ = append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                    operation_id: operation_id.clone(),
+                    binding_hash,
+                    reason: "arena entry has no matching unfinished journal binding".to_owned(),
+                },
+            );
+            return Err(reconciliation_error(&operation_id, binding_hash));
+        }
+    }
+
+    for (operation_id, state_for_operation) in pending {
+        if state_for_operation.terminal {
+            continue;
+        }
+        let Some((
+            event_subject,
+            logical_path,
+            _,
+            plan_hash,
+            binding_hash,
+            quarantine_name,
+            expected,
+        )) = state_for_operation.prepared
+        else {
+            return Err(reconciliation_error(
+                &operation_id,
+                CanonicalHash::from_bytes([0; 32]),
+            ));
+        };
+        if event_subject != subject_ref.as_str() {
+            return Err(reconciliation_error(&operation_id, binding_hash));
+        }
+        let (parent, leaf) = open_relative_parent_from_root(&root_handle, &logical_path)
+            .map_err(relative_io_error)?;
+        let quarantine = CString::new(quarantine_name.clone()).map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+
+        if !state_for_operation.renamed {
+            let current = open_at(
+                &parent,
+                leaf.to_str().unwrap_or_default(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0,
+            )
+            .ok()
+            .and_then(|file| file.metadata().ok())
+            .map(|metadata| journal_file_identity(&metadata));
+            if current.as_ref() == Some(&expected) {
+                append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteRestored {
+                        operation_id,
+                        reason: "crash-before-rename".to_owned(),
+                    },
+                )
+                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                continue;
+            }
+            append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                    operation_id: operation_id.clone(),
+                    binding_hash,
+                    reason: "prepared prefix has no safely identifiable leaf".to_owned(),
+                },
+            )
+            .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+            return Err(reconciliation_error(&operation_id, binding_hash));
+        }
+
+        let quarantined = match open_at(
+            &arena,
+            &quarantine_name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        ) {
+            Ok(file) => file,
+            Err(error) => {
+                let leaf_restored = open_at(
+                    &parent,
+                    leaf.to_str().unwrap_or_default(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0,
+                )
+                .ok()
+                .and_then(|file| file.metadata().ok())
+                .map(|metadata| journal_file_identity(&metadata))
+                .is_some_and(|identity| identity == expected);
+                if leaf_restored {
+                    append_file_delete_event(
+                        state,
+                        ResourceJournalEventV1::FileDeleteRestored {
+                            operation_id,
+                            reason: "restart-quarantine-missing-leaf-restored".to_owned(),
+                        },
+                    )
+                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                    continue;
+                }
+                append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                        operation_id: operation_id.clone(),
+                        binding_hash,
+                        reason: format!("quarantine entry missing after restart: {error}"),
+                    },
+                )
+                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                return Err(reconciliation_error(&operation_id, binding_hash));
+            }
+        };
+        let observed = quarantined
+            .metadata()
+            .map(|metadata| journal_file_identity(&metadata))
+            .map_err(relative_io_error)?;
+        let matches = same_journal_file_identity(&expected, &observed);
+        if !state_for_operation.identity_observed {
+            append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteIdentityObserved {
+                    operation_id: operation_id.clone(),
+                    observed_identity: observed,
+                    matches,
+                },
+            )
+            .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+        }
+        if matches {
+            let status = unsafe { libc::unlinkat(arena.as_raw_fd(), quarantine.as_ptr(), 0) };
+            if status < 0 {
+                let error = std::io::Error::last_os_error();
+                append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                        operation_id: operation_id.clone(),
+                        binding_hash,
+                        reason: format!("restart delete failed: {error}"),
+                    },
+                )
+                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                return Err(reconciliation_error(&operation_id, binding_hash));
+            }
+            append_file_delete_event(
+                state,
+                ResourceJournalEventV1::FileDeleteDeleted { operation_id },
+            )
+            .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+        } else {
+            let restore = rename_noreplace_at(&arena, &quarantine, &parent, &leaf);
+            match restore {
+                Ok(()) => append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteRestored {
+                        operation_id,
+                        reason: "restart-identity-mismatch".to_owned(),
+                    },
+                )
+                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?,
+                Err(error) => {
+                    append_file_delete_event(
+                        state,
+                        ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                            operation_id: operation_id.clone(),
+                            binding_hash,
+                            reason: format!("restart restore collision: {error}"),
+                        },
+                    )
+                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                    return Err(reconciliation_error(&operation_id, binding_hash));
+                }
+            }
+        }
+        let _ = plan_hash;
     }
     Ok(())
 }
@@ -939,6 +1554,7 @@ struct PhysicalExecutionOutcomeV1 {
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
+    file_delete: Option<&FileDeleteAuthorityStateV1>,
 ) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
     match (plan.operation, input) {
         (
@@ -1167,7 +1783,9 @@ fn execute_physical(
             let leaf_guard = open_relative_path(plan, libc::O_RDONLY)?;
             let (parent, leaf) = open_relative_parent(plan).map_err(relative_io_error)?;
             let approved = leaf_guard.metadata().map_err(relative_io_error)?;
-            delete_via_quarantine(&parent, &leaf, &approved, plan.plan_hash)?;
+            let state =
+                file_delete.ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?;
+            delete_via_quarantine(state, plan, &parent, &leaf, &approved)?;
             Ok(PhysicalExecutionOutcomeV1 {
                 payload: "managed file delete applied".to_owned(),
                 observed_bytes: 0,
@@ -1739,6 +2357,7 @@ fn windows_delete_handle(file: &std::fs::File) -> Result<(), ManagedFileAccessEr
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
+    _file_delete: Option<&FileDeleteAuthorityStateV1>,
 ) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
     match (plan.operation, input) {
         (
@@ -1983,6 +2602,7 @@ fn execute_physical(
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
+    _file_delete: Option<&FileDeleteAuthorityStateV1>,
 ) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
     match (plan.operation, input) {
         (
@@ -2589,7 +3209,15 @@ mod tests {
                 },
             )
             .expect("activate");
-        let service = AuthorityManagedFileAccessServiceV1::new(registry);
+        let service = if operation == ManagedFileOperationV1::Delete {
+            AuthorityManagedFileAccessServiceV1::new_for_test_with_journal(
+                Arc::clone(&registry),
+                workspace.path().join(".test-file-delete-arena"),
+                workspace.path().join(".test-file-delete.journal.json"),
+            )
+        } else {
+            AuthorityManagedFileAccessServiceV1::new(registry)
+        };
         let plan = service
             .plan(ManagedFileAccessPlanRequestV1 {
                 logical_path: ManagedFileLogicalPathV1::new("notes.txt").expect("logical"),
@@ -3025,7 +3653,8 @@ mod tests {
         .expect("move approved leaf");
         std::fs::write(workspace.path().join("notes.txt"), "replacement").expect("replacement");
 
-        let error = delete_via_quarantine(&parent, &leaf, &approved, plan.plan_hash)
+        let state = service.file_delete.as_ref().expect("delete test state");
+        let error = delete_via_quarantine(state, &planned, &parent, &leaf, &approved)
             .expect_err("replacement must not be deleted");
         assert!(matches!(error, ManagedFileAccessErrorV1::PlanStale));
         assert_eq!(
@@ -3057,6 +3686,233 @@ mod tests {
         let outcome = service.execute(request, token).expect("delete");
         assert_eq!(outcome.payload, "managed file delete applied");
         assert!(!workspace.path().join("notes.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_restart_reconciles_renamed_arena_entry() {
+        let (workspace, service, plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let registry = Arc::clone(&service.registry);
+        let state = service.file_delete.as_ref().expect("delete state");
+        let arena_root = state.arena_root.clone();
+        let planned = service
+            .plans
+            .lock()
+            .expect("plans")
+            .get(&plan.plan_hash.to_hex())
+            .cloned()
+            .expect("planned file");
+        let (parent, leaf) = open_relative_parent(&planned).expect("parent");
+        let arena = open_file_delete_arena(state, &parent).expect("arena");
+        let approved = std::fs::symlink_metadata(workspace.path().join("notes.txt"))
+            .expect("approved metadata");
+        let operation_id = format!("restart-{0}", plan.plan_hash.to_hex());
+        let quarantine_name = format!("restart-{}", plan.plan_hash.to_hex());
+        let quarantine = CString::new(quarantine_name.clone()).expect("quarantine name");
+        append_file_delete_event(
+            state,
+            ResourceJournalEventV1::FileDeletePrepared {
+                operation_id: operation_id.clone(),
+                subject_ref: planned.subject_ref.as_str().to_owned(),
+                logical_path: planned.logical_path.clone(),
+                plan_hash: plan.plan_hash,
+                binding_hash: plan.plan_hash,
+                quarantine_name: quarantine_name.clone(),
+                expected_identity: journal_file_identity(&approved),
+            },
+        )
+        .expect("prepared");
+        rename_noreplace_at(&parent, &leaf, &arena, &quarantine).expect("rename");
+        append_file_delete_event(
+            state,
+            ResourceJournalEventV1::FileDeleteRenamed {
+                operation_id: operation_id.clone(),
+                quarantine_identity: journal_file_identity(&approved),
+            },
+        )
+        .expect("renamed");
+        drop(service);
+
+        let restarted = AuthorityManagedFileAccessServiceV1::new_for_test_with_journal(
+            registry,
+            workspace.path().join(".test-file-delete-arena"),
+            workspace.path().join(".test-file-delete.journal.json"),
+        );
+        restarted
+            .reconcile_file_delete_journal()
+            .expect("restart reconciliation");
+        assert!(!workspace.path().join("notes.txt").exists());
+        assert_eq!(
+            std::fs::read_dir(arena_root)
+                .expect("arena entries")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_restart_closes_prepared_before_rename_prefix() {
+        let (workspace, service, plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let registry = Arc::clone(&service.registry);
+        let state = service.file_delete.as_ref().expect("delete state");
+        let arena_root = state.arena_root.clone();
+        let planned = service
+            .plans
+            .lock()
+            .expect("plans")
+            .get(&plan.plan_hash.to_hex())
+            .cloned()
+            .expect("planned file");
+        let approved = std::fs::symlink_metadata(workspace.path().join("notes.txt"))
+            .expect("approved metadata");
+        let operation_id = format!("prepared-{0}", plan.plan_hash.to_hex());
+        append_file_delete_event(
+            state,
+            ResourceJournalEventV1::FileDeletePrepared {
+                operation_id: operation_id.clone(),
+                subject_ref: planned.subject_ref.as_str().to_owned(),
+                logical_path: planned.logical_path.clone(),
+                plan_hash: plan.plan_hash,
+                binding_hash: plan.plan_hash,
+                quarantine_name: format!("prepared-{}", plan.plan_hash.to_hex()),
+                expected_identity: journal_file_identity(&approved),
+            },
+        )
+        .expect("prepared");
+        drop(service);
+
+        let restarted = AuthorityManagedFileAccessServiceV1::new_for_test_with_journal(
+            registry,
+            arena_root,
+            workspace.path().join(".test-file-delete.journal.json"),
+        );
+        restarted
+            .reconcile_file_delete_journal()
+            .expect("prepared-prefix reconciliation");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("notes.txt")).expect("leaf"),
+            "approved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_restart_restore_collision_is_typed_and_retained() {
+        let (workspace, service, plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let registry = Arc::clone(&service.registry);
+        let state = service.file_delete.as_ref().expect("delete state");
+        let arena_root = state.arena_root.clone();
+        let planned = service
+            .plans
+            .lock()
+            .expect("plans")
+            .get(&plan.plan_hash.to_hex())
+            .cloned()
+            .expect("planned file");
+        let (parent, leaf) = open_relative_parent(&planned).expect("parent");
+        let arena = open_file_delete_arena(state, &parent).expect("arena");
+        let approved = std::fs::symlink_metadata(workspace.path().join("notes.txt"))
+            .expect("approved metadata");
+        let operation_id = format!("restore-collision-{0}", plan.plan_hash.to_hex());
+        let quarantine_name = format!("restore-collision-{}", plan.plan_hash.to_hex());
+        let quarantine = CString::new(quarantine_name.clone()).expect("quarantine name");
+        append_file_delete_event(
+            state,
+            ResourceJournalEventV1::FileDeletePrepared {
+                operation_id: operation_id.clone(),
+                subject_ref: planned.subject_ref.as_str().to_owned(),
+                logical_path: planned.logical_path.clone(),
+                plan_hash: plan.plan_hash,
+                binding_hash: plan.plan_hash,
+                quarantine_name: quarantine_name.clone(),
+                expected_identity: journal_file_identity(&approved),
+            },
+        )
+        .expect("prepared");
+        std::fs::rename(
+            workspace.path().join("notes.txt"),
+            workspace.path().join("notes.original"),
+        )
+        .expect("move approved");
+        std::fs::write(workspace.path().join("notes.txt"), "replacement").expect("replacement");
+        rename_noreplace_at(&parent, &leaf, &arena, &quarantine).expect("quarantine replacement");
+        std::fs::write(workspace.path().join("notes.txt"), "restore collision").expect("collision");
+        append_file_delete_event(
+            state,
+            ResourceJournalEventV1::FileDeleteRenamed {
+                operation_id,
+                quarantine_identity: journal_file_identity(
+                    &std::fs::symlink_metadata(arena_root.join(&quarantine_name))
+                        .expect("quarantine metadata"),
+                ),
+            },
+        )
+        .expect("renamed");
+        drop(service);
+
+        let restarted = AuthorityManagedFileAccessServiceV1::new_for_test_with_journal(
+            registry,
+            workspace.path().join(".test-file-delete-arena"),
+            workspace.path().join(".test-file-delete.journal.json"),
+        );
+        let error = restarted
+            .reconcile_file_delete_journal()
+            .expect_err("restore collision must block");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+        assert!(arena_root.join(&quarantine_name).exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("notes.txt")).expect("collision"),
+            "restore collision"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_orphan_arena_entry_is_a_typed_startup_blocker() {
+        let (workspace, service, _plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let registry = Arc::clone(&service.registry);
+        let state = service.file_delete.as_ref().expect("delete state");
+        let arena_root = state.arena_root.clone();
+        let journal_path = workspace.path().join(".test-file-delete.journal.json");
+        let root_handle =
+            AuthorityManagedFileAccessServiceV1::open_workspace_root(workspace.path())
+                .expect("workspace root");
+        let (parent, _) =
+            open_relative_parent_from_root(&root_handle, "recovery-leaf").expect("parent");
+        let arena = open_file_delete_arena(state, &parent).expect("arena");
+        std::fs::write(state.arena_root.join("orphan-entry"), "orphan").expect("orphan");
+
+        let error = service
+            .reconcile_file_delete_journal()
+            .expect_err("unknown arena entry must block startup");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+        assert!(arena.metadata().expect("arena metadata").is_dir());
+        assert!(state.arena_root.join("orphan-entry").exists());
+
+        drop(service);
+        let restarted = AuthorityManagedFileAccessServiceV1::new_for_test_with_journal(
+            registry,
+            arena_root,
+            journal_path,
+        );
+        let restart_error = restarted
+            .reconcile_file_delete_journal()
+            .expect_err("durable orphan blocker must survive restart");
+        assert!(matches!(
+            restart_error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
     }
 
     #[cfg(windows)]

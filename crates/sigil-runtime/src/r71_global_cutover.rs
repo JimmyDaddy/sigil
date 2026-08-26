@@ -1327,7 +1327,7 @@ mod tests {
             crate::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::from_loaded(
                 &config_path,
                 sigil_kernel::RootConfig::load(&config_path).expect("load config"),
-                dir.path().to_path_buf(),
+                dir.path(),
             )
             .expect("config snapshot");
         let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =

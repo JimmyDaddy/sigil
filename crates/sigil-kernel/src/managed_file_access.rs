@@ -432,6 +432,11 @@ pub enum ManagedFileAccessErrorV1 {
     TokenReplay,
     #[error("managed file plan is stale or belongs to another authority generation")]
     PlanStale,
+    #[error("managed file delete requires durable reconciliation: {operation_id}")]
+    ReconciliationRequired {
+        operation_id: String,
+        binding_hash: CanonicalHash,
+    },
     #[error("managed file physical execution failed: {0}")]
     PhysicalExecutionFailed(String),
 }

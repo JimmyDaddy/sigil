@@ -10660,3 +10660,14 @@ R71.9d 已形成独立 slice commit，包含真实 product-composition E2E、FIL
 3. authority boot composition 新增 `ValidatedAuthorityConfigSnapshotV1`，一次冻结 validated `RootConfig`、workspace root、execution policy、config path 与 config hash；CLI/HTTP 删除 surface-side authority workspace 重解析，composition、storage path、workspace activation 和 cutover instance binding 使用同一 snapshot。
 
 本 slice 的 file-access `25/25`、runtime composition `6/6`、targeted crate check、strict clippy、Windows GNU cross-check、fmt/diff check 均通过。Windows 实机 nested-directory、new exact-SHA local full 与 five-platform hosted qualification 尚未执行；RFC-0071 继续 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停。
+
+### R71.9h Unix delete arena / durable reconciliation / sealed config snapshot（2026-08-26）
+
+R71.9h 关闭了上一轮复核中仍成立的两个 implementation blocker，但不关闭 release qualification：
+
+1. Unix delete 的 quarantine 已从 workspace parent 移到 authority state anchor 下的 owner-only same-filesystem arena。source leaf 通过跨目录 no-replace rename 进入 arena，rename 后从 arena handle 观察 identity，再在 arena fd 上删除；journal durable 记录 `Prepared`、`Renamed`、`IdentityObserved`、`Restored`、`Deleted` 或 `ReconciliationRequired`。workspace activation 会执行未完成 prefix reconciliation；恢复不确定性返回 kernel typed `ReconciliationRequired`，不会再伪装成普通 physical failure。
+2. `ValidatedAuthorityConfigSnapshotV1` 的任意 workspace-root 构造入口已收紧：`from_loaded` 为 runtime crate-private，外部 surface 只能通过 `load(config_path, launch_cwd)` 取得 opaque snapshot。snapshot binding 现在覆盖 config serialization、config path identity、launch cwd、effective workspace identity 与 resolved storage roots；composition 拒绝与 snapshot 不一致的 anchors，TUI 使用 shared loader。
+
+补充说明：R71.9h 的 recovery arena 在 replay 前执行 authority-owned inventory，任何没有对应未完成 journal binding 的 entry 都返回带 opaque binding 的 typed `ReconciliationRequired`，不会被隐式 GC、删除或猜测归属。新增 orphan regression 后 file-access 为 `29/29`；exact-SHA local/five-platform qualification 仍待执行，RFC 状态不变。
+
+本 slice 的 file-access `28/28`、runtime composition `7/7`、串行 runtime full `1197 passed / 4 ignored`、targeted check、strict clippy、negative dependency、Windows GNU cross-check、fmt/diff 均通过。一次默认并行 runtime full 的 `StorageMemory` readiness transient failure 已隔离复跑，未记为 green。新 exact-SHA local full wrapper、five-platform hosted qualification、push/dispatch 尚未执行，因此 RFC-0071 继续 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停。

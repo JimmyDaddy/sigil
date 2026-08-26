@@ -2795,3 +2795,11 @@ R71.9f 补齐了真实产品路径审计暴露的四项实现缺口：borrowed f
 ### R71.9g delete quarantine, Windows arbitrary-leaf handles, and authority config snapshot
 
 R71.9g closes three implementation findings from the cross-surface review. Unix delete now uses a same-parent no-replace quarantine rename, validates the object after the rename, and restores on identity mismatch or failed deletion without overwriting a replacement path. Windows inspection enumeration uses an `Any` relative handle that omits `FILE_NON_DIRECTORY_FILE`, so directory entries can be inspected before the handle identity determines recursive traversal. Boot authority composition now consumes one validated configuration snapshot containing the parsed config, resolved workspace, execution policy, source path, and config hash; CLI/HTTP no longer independently resolve the authority workspace. Targeted tests, strict clippy, Windows GNU cross-check, and format/diff checks pass. Windows real-host execution and final exact-SHA/five-platform qualification remain pending, so the RFC stays `Gated / Partial / Not Frozen` and RFC-0070 remains paused.
+
+### R71.9h delete recovery arena and snapshot binding
+
+R71.9h 将 Unix delete 的中间态纳入 authority-owned recovery：quarantine 位于 state anchor 下的 owner-only same-filesystem arena，跨目录 no-replace rename 是 source leaf 的线性化点，journal 持久化 `Prepared`、`Renamed`、`IdentityObserved`、`Restored`、`Deleted` 与 `ReconciliationRequired`，workspace activation 负责重启 replay。恢复不确定性使用 kernel typed `ReconciliationRequired` 和 opaque operation/binding，而不是普通 physical error。
+
+R71.9h 同时收紧 validated authority snapshot：外部只能从 config path + launch cwd 取得 snapshot；effective workspace、config-file identity、workspace identity、launch cwd 与 resolved storage roots 与 config serialization 一起形成 binding，composition 会拒绝不一致的 anchor 参数。file-access `28/28`、runtime composition `7/7`、串行 runtime full `1197/4`、strict clippy、negative dependency、Windows GNU cross-check 与 fmt/diff 已通过；exact-SHA local full/five-platform hosted qualification 仍待执行，RFC-0071 保持 `Gated / Partial / Not Frozen`。
+
+R71.9h 的 recovery arena 还执行 authority-owned inventory：启动 replay 前枚举 state-anchor 下的 arena，任何没有对应未完成 journal binding 的 entry 都返回带 opaque binding 的 typed `ReconciliationRequired`，不会被隐式 GC、删除或猜测归属。补充 orphan regression 后 file-access 为 `29/29`；这仍不改变 exact-SHA local/five-platform qualification 未完成的边界。

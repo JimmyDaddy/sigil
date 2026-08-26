@@ -149,11 +149,11 @@ fn test_authority_composition(
         sigil_kernel::config::secure_private_path_permissions(anchor)?;
     }
     let config_snapshot =
-        sigil_runtime::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::from_loaded(
+        sigil_runtime::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::load(
             &config_path,
-            root_config.clone(),
-            root.to_path_buf(),
-        )?;
+            root,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("authority config snapshot is unavailable"))?;
     let (_cutover, composition) =
         sigil_runtime::r71_authority_composition::compose_current_boot_authority(
             &config_snapshot,

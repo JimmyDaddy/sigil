@@ -47,6 +47,18 @@ pub struct ResourceJournalRecordV1 {
     pub committed_frontier_hash: CanonicalHash,
 }
 
+/// Platform-neutral physical identity fields retained for authority-private file-delete
+/// recovery. The Unix executor populates device/inode/mode; other platforms may leave those
+/// fields at zero and use their handle-specific identity in the effect path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceJournalFileIdentityV1 {
+    pub device: u64,
+    pub inode: u64,
+    pub link_count: u64,
+    pub size: u64,
+    pub file_type: u32,
+}
+
 /// Bounded journal event set (closed variants; first sequence is 1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceJournalEventV1 {
@@ -157,6 +169,42 @@ pub enum ResourceJournalEventV1 {
         projected_event_ids_hash: CanonicalHash,
         final_frontier_hash: CanonicalHash,
         projected_event: Vec<u8>,
+    },
+    /// RFC-0071 R71.9h: authority-private delete quarantine prepared before the source rename.
+    FileDeletePrepared {
+        operation_id: String,
+        subject_ref: String,
+        logical_path: String,
+        plan_hash: CanonicalHash,
+        binding_hash: CanonicalHash,
+        quarantine_name: String,
+        expected_identity: ResourceJournalFileIdentityV1,
+    },
+    /// The approved leaf was atomically moved into the authority-owned arena.
+    FileDeleteRenamed {
+        operation_id: String,
+        quarantine_identity: ResourceJournalFileIdentityV1,
+    },
+    /// Identity was observed through the arena handle before any destructive effect.
+    FileDeleteIdentityObserved {
+        operation_id: String,
+        observed_identity: ResourceJournalFileIdentityV1,
+        matches: bool,
+    },
+    /// The operation restored the quarantined object to the approved leaf, or safely determined
+    /// that no rename had happened before the crash.
+    FileDeleteRestored {
+        operation_id: String,
+        reason: String,
+    },
+    /// The approved object was removed from the authority-owned arena.
+    FileDeleteDeleted { operation_id: String },
+    /// No safe terminal fact could be established. The binding is opaque to product surfaces and
+    /// must remain a startup blocker until an authority reconciliation owner resolves it.
+    FileDeleteReconciliationRequired {
+        operation_id: String,
+        binding_hash: CanonicalHash,
+        reason: String,
     },
 }
 
@@ -399,6 +447,25 @@ impl ResourceJournalFileV1 {
 
     pub fn tail(&self) -> Option<&ResourceJournalRecordV1> {
         self.journal.tail()
+    }
+
+    /// Returns authority-private file-delete records for restart reconciliation.
+    pub fn file_delete_records(&self) -> Vec<(ResourceJournalRecordV1, ResourceJournalEventV1)> {
+        self.records
+            .iter()
+            .filter(|durable| {
+                matches!(
+                    durable.payload,
+                    ResourceJournalEventV1::FileDeletePrepared { .. }
+                        | ResourceJournalEventV1::FileDeleteRenamed { .. }
+                        | ResourceJournalEventV1::FileDeleteIdentityObserved { .. }
+                        | ResourceJournalEventV1::FileDeleteRestored { .. }
+                        | ResourceJournalEventV1::FileDeleteDeleted { .. }
+                        | ResourceJournalEventV1::FileDeleteReconciliationRequired { .. }
+                )
+            })
+            .map(|durable| (durable.record.clone(), durable.payload.clone()))
+            .collect()
     }
 
     #[cfg(test)]
