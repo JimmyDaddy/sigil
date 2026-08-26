@@ -74,6 +74,22 @@ impl AppState {
         self.config_snapshot.as_ref()
     }
 
+    pub(crate) fn persisted_config_snapshot(&self) -> Option<&RootConfig> {
+        self.config_snapshot.as_ref()
+    }
+
+    pub(crate) fn session_runtime_config_snapshot(&self) -> Option<&RootConfig> {
+        self.session_runtime_config.as_ref()
+    }
+
+    pub(crate) fn current_session_route(&self) -> Option<sigil_kernel::ResolvedModelRoute> {
+        self.runtime.model_route.clone()
+    }
+
+    pub(crate) fn apply_session_runtime_config(&mut self, root_config: &RootConfig) {
+        self.session_runtime_config = Some(root_config.clone());
+    }
+
     pub(crate) fn pending_session_route_recovery_binding(&self) -> Option<&str> {
         self.runtime
             .pending_session_route_recovery_binding
@@ -154,17 +170,29 @@ impl AppState {
 
     pub(crate) fn runtime_config_for_current_session(
         &self,
-        mut saved_config: RootConfig,
+        saved_config: RootConfig,
     ) -> anyhow::Result<Option<RootConfig>> {
         let Some(route) = self.runtime.model_route.as_ref() else {
             return Ok(None);
         };
-        sigil_runtime::provider_connections::validate_persisted_model_route(&saved_config, route)
-            .map_err(anyhow::Error::new)?;
-        saved_config.agent.runtime_provider.clear();
-        saved_config.agent.connection = Some(route.model_ref.connection_id.clone());
-        saved_config.agent.model = route.model_ref.model_id.clone();
-        Ok(Some(saved_config))
+        self.runtime_config_for_session_route(saved_config, route)
+            .map(Some)
+    }
+
+    pub(crate) fn runtime_config_for_session_route(
+        &self,
+        mut persisted_config: RootConfig,
+        route: &sigil_kernel::ResolvedModelRoute,
+    ) -> anyhow::Result<RootConfig> {
+        sigil_runtime::provider_connections::validate_persisted_model_route(
+            &persisted_config,
+            route,
+        )
+        .map_err(anyhow::Error::new)?;
+        persisted_config.agent.runtime_provider.clear();
+        persisted_config.agent.connection = Some(route.model_ref.connection_id.clone());
+        persisted_config.agent.model = route.model_ref.model_id.clone();
+        Ok(persisted_config)
     }
 
     pub(crate) fn record_started_model_route(&mut self) {
@@ -203,7 +231,13 @@ impl AppState {
         let default = sigil_runtime::provider_connections::load_provider_connections(&root_config)
             .default_model;
         self.schedule_connection_inventory_refresh(&root_config);
-        self.config_snapshot = Some(root_config);
+        self.config_snapshot = Some(root_config.clone());
+        let session_config = self
+            .runtime_config_for_current_session(root_config.clone())
+            .ok()
+            .flatten()
+            .unwrap_or(root_config);
+        self.apply_session_runtime_config(&session_config);
         if let Some(default) = default {
             let notice = format!(
                 "saved default -> {}/{}; current session unchanged",

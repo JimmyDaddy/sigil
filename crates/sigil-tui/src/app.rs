@@ -590,7 +590,11 @@ pub struct AppState {
     info_rail_visible: bool,
     info_rail_detail: bool,
     review: ReviewState,
+    /// Persisted configuration used for authority/config CAS and product configuration UI.
     config_snapshot: Option<RootConfig>,
+    /// Session-effective worker configuration. This may contain a narrow route overlay (for
+    /// example `/model`) but must never be used as an authority composition input.
+    session_runtime_config: Option<RootConfig>,
     recent_model_refs: Vec<sigil_kernel::ModelRef>,
     terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
@@ -868,6 +872,11 @@ pub enum AppAction {
     },
     RuntimeConfigUpdated {
         root_config: Box<RootConfig>,
+    },
+    /// Session-scoped provider route update. It changes only the worker's effective route; the
+    /// persisted configuration and authority composition remain unchanged.
+    SessionRuntimeRouteUpdated {
+        route: sigil_kernel::ResolvedModelRoute,
     },
     /// Runtime permission-mode switch for the active run (and persisted default); does not
     /// restart the worker.
@@ -1166,6 +1175,7 @@ impl AppState {
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: Some(root_config.clone()),
+            session_runtime_config: Some(root_config.clone()),
             recent_model_refs,
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
@@ -1304,6 +1314,7 @@ impl AppState {
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: None,
+            session_runtime_config: None,
             recent_model_refs: Vec::new(),
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: SecretRedactor::default(),

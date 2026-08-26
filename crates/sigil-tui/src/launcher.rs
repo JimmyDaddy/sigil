@@ -859,37 +859,51 @@ where
 pub fn install_current_boot_transaction(
     app: &mut AppState,
     config_path: &Path,
-    config: RootConfig,
+    session_route: Option<sigil_kernel::ResolvedModelRoute>,
     launch_cwd: &Path,
 ) -> Result<RootConfig> {
-    // The surface owns this already validated config. The authority boot owner observes only the
-    // persisted source identity and composes against this value, so transient session overrides
-    // (notably `/model`) survive the worker restart without being written to the default config.
-    let transaction = sigil_runtime::r71_authority_composition::boot_current_schema_with_config(
-        config_path,
-        launch_cwd,
-        config,
-    )
-    .map_err(anyhow::Error::new)?;
-    let (config, workspace_root, paths, boot_cutover, composition, _registration) =
+    // Authority composition always loads and validates the persisted configuration itself. The
+    // optional route is a narrow session overlay used only to derive the worker configuration;
+    // it can never select workspace/storage/execution authority roots.
+    let transaction =
+        sigil_runtime::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
+            .map_err(anyhow::Error::new)?;
+    let persisted_config = transaction.config().clone();
+    let session_config = session_route
+        .as_ref()
+        .map(|route| app.runtime_config_for_session_route(persisted_config.clone(), route))
+        .transpose()?
+        .unwrap_or_else(|| persisted_config.clone());
+    let (persisted_config, workspace_root, paths, boot_cutover, composition, _registration) =
         transaction.into_published_parts();
     app.set_frozen_boot_paths(workspace_root, paths);
     app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
     app.set_authority_composition(std::sync::Arc::new(composition));
-    app.apply_runtime_config_snapshot(&config);
-    Ok(config)
+    app.apply_persisted_config_snapshot(&persisted_config);
+    app.apply_session_runtime_config(&session_config);
+    Ok(session_config)
 }
 
 #[cfg(test)]
 fn install_current_boot_transaction(
-    _app: &mut AppState,
+    app: &mut AppState,
     _config_path: &Path,
-    config: RootConfig,
+    session_route: Option<sigil_kernel::ResolvedModelRoute>,
     _launch_cwd: &Path,
 ) -> Result<RootConfig> {
     // Unit action tests inject a worker factory and intentionally exercise only action ordering;
     // the shipping launcher uses the production implementation above.
-    Ok(config)
+    let persisted_config = app
+        .persisted_config_snapshot()
+        .cloned()
+        .context("test boot requires persisted config")?;
+    let session_config = session_route
+        .as_ref()
+        .map(|route| app.runtime_config_for_session_route(persisted_config.clone(), route))
+        .transpose()?
+        .unwrap_or_else(|| persisted_config.clone());
+    app.apply_session_runtime_config(&session_config);
+    Ok(session_config)
 }
 
 fn restore_initial_session_from_disk(
@@ -947,7 +961,7 @@ where
             let root_config = match install_current_boot_transaction(
                 app,
                 &config_path,
-                root_config,
+                app.current_session_route(),
                 &std::env::current_dir()?,
             ) {
                 Ok(root_config) => root_config,
@@ -979,7 +993,7 @@ where
                 return Ok(());
             }
             shutdown_and_join_worker(worker);
-            let Some(root_config) = app.root_config_snapshot().cloned() else {
+            let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
                 report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
                 return Ok(());
             };
@@ -991,21 +1005,19 @@ where
                 )?,
             }
         }
-        AppAction::ConfigSaved { root_config }
-        | AppAction::RuntimeConfigUpdated { root_config } => {
-            let Some(runtime_config) = app.runtime_config_for_current_session(*root_config)? else {
+        AppAction::ConfigSaved { .. } | AppAction::RuntimeConfigUpdated { .. } => {
+            let Some(session_route) = app.current_session_route() else {
                 return Ok(());
             };
             let config_path = app.config_path.clone();
             let launch_cwd = std::env::current_dir()?;
-            let transaction_config = runtime_config.clone();
             shutdown_and_join_worker(worker);
             #[cfg(not(test))]
             app.clear_boot_authority();
             let runtime_config = match install_current_boot_transaction(
                 app,
                 &config_path,
-                transaction_config,
+                Some(session_route),
                 &launch_cwd,
             ) {
                 Ok(config) => config,
@@ -1022,6 +1034,22 @@ where
                 Err(error) => report_worker_unavailable(
                     app,
                     &format!("configuration saved; agent runtime remains unavailable: {error:#}"),
+                )?,
+            }
+        }
+        AppAction::SessionRuntimeRouteUpdated { route } => {
+            let persisted_config = app
+                .persisted_config_snapshot()
+                .cloned()
+                .context("session route update requires the persisted runtime config")?;
+            let runtime_config = app.runtime_config_for_session_route(persisted_config, &route)?;
+            app.apply_session_runtime_config(&runtime_config);
+            shutdown_and_join_worker(worker);
+            match spawn_worker_fn(runtime_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => report_worker_unavailable(
+                    app,
+                    &format!("model route changed; agent runtime remains unavailable: {error:#}"),
                 )?,
             }
         }
@@ -1051,7 +1079,7 @@ where
                 return Ok(());
             }
             let root_config = app
-                .root_config_snapshot()
+                .session_runtime_config_snapshot()
                 .cloned()
                 .context("new session requires the current runtime config")?;
             let preparation = (|| -> Result<_> {
@@ -1128,7 +1156,7 @@ where
                 return Ok(());
             }
             let root_config = app
-                .root_config_snapshot()
+                .session_runtime_config_snapshot()
                 .cloned()
                 .context("session switch requires the current runtime config")?;
             let preparation = (|| -> Result<_> {
@@ -1519,7 +1547,7 @@ where
         return Ok(false);
     }
     shutdown_and_join_worker(worker);
-    let Some(root_config) = app.root_config_snapshot().cloned() else {
+    let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
         report_worker_unavailable(
             app,
             "session changed but the runtime config is unavailable; no prompt was sent",
@@ -1599,7 +1627,7 @@ where
         command
     };
 
-    let Some(root_config) = app.root_config_snapshot().cloned() else {
+    let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
         app.enqueue_worker_command(command);
         report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
         return Ok(());

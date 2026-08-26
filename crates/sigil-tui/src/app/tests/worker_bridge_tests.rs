@@ -1117,7 +1117,7 @@ fn schedule_balance_refresh_handles_missing_config_and_auth() {
     assert_eq!(app.runtime.balance_snapshot.status, "n/a");
     assert!(app.runtime.active_balance_refresh_id.is_none());
 
-    app.apply_runtime_config_snapshot(&test_config());
+    app.apply_persisted_config_snapshot(&test_config());
     app.schedule_balance_refresh();
     assert_eq!(app.runtime.balance_snapshot.status, "missing auth");
     assert!(app.runtime.active_balance_refresh_id.is_none());

@@ -1391,11 +1391,11 @@ mod tests {
             std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700)).expect("mode");
         }
         let config_snapshot =
-            crate::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::from_loaded(
+            crate::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::load(
                 &config_path,
-                sigil_kernel::RootConfig::load(&config_path).expect("load config"),
                 dir.path(),
             )
+            .expect("load config snapshot")
             .expect("config snapshot");
         let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
             Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(

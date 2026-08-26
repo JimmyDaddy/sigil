@@ -27,6 +27,59 @@ fn assert_stored_credential_without_plaintext(config: &RootConfig, secret: &str)
 }
 
 #[test]
+fn session_model_route_does_not_pollute_persisted_config_cas() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let mut persisted = test_config();
+    persisted.agent.model = "persisted-model".to_owned();
+    persisted.save(&config_path)?;
+
+    let mut app = AppState::from_root_config(&config_path, &persisted);
+    app.runtime
+        .connection_inventory
+        .as_mut()
+        .expect("offline inventory")
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id.as_str() == "deepseek-default")
+        .expect("default connection inventory row")
+        .readiness = sigil_runtime::provider_connections::ConnectionReadiness::Ready;
+    let action = app
+        .set_runtime_model_from_command("session-model")?
+        .expect("model switch should produce an action");
+    let AppAction::SessionRuntimeRouteUpdated { route } = action else {
+        panic!("model switch should update the session route");
+    };
+    let session_config = app.runtime_config_for_session_route(persisted.clone(), &route)?;
+    app.apply_session_runtime_config(&session_config);
+
+    let action = app
+        .toggle_runtime_permission_mode()?
+        .expect("permission toggle should produce an action");
+
+    assert!(matches!(action, AppAction::RuntimeConfigUpdated { .. }));
+    assert_eq!(
+        app.persisted_config_snapshot()
+            .expect("persisted config snapshot")
+            .agent
+            .model,
+        "persisted-model"
+    );
+    assert_eq!(
+        app.session_runtime_config_snapshot()
+            .expect("session runtime config")
+            .agent
+            .model,
+        "session-model"
+    );
+    assert_eq!(
+        RootConfig::load(&config_path)?.agent.model,
+        "persisted-model"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_storage_section_shows_resolved_paths_readonly() {
     let temp = tempfile::tempdir().expect("tempdir should create");
     let mut config = config_for_workspace(temp.path());

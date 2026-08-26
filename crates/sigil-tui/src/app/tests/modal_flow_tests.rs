@@ -214,7 +214,7 @@ fn runtime_config_update_invalidates_connection_model_views() -> Result<()> {
     apply_available_connection_models(&mut app, &["deepseek-v4-flash"])?;
     assert!(!app.runtime.connection_model_catalog_views.is_empty());
 
-    app.apply_runtime_config_snapshot(&config);
+    app.apply_persisted_config_snapshot(&config);
 
     assert!(app.runtime.connection_model_catalog_views.is_empty());
     app.modal_state = None;

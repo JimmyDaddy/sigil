@@ -8,9 +8,11 @@
 //! because their production construction belongs to kernel/boot owners).
 
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use fs2::FileExt;
 use sigil_kernel::capability_issuer::KernelCapabilityIssuerV1;
 use sigil_kernel::managed_execution::ManagedExecutionPlannerV1;
 use sigil_kernel::managed_file_access::ManagedFileAccessServiceV1;
@@ -299,30 +301,18 @@ fn load_config_payload_with_identity(
 }
 
 impl ValidatedAuthorityConfigSnapshotV1 {
-    /// Builds a snapshot from a config value that the caller has already loaded and validated.
-    #[cfg(test)]
-    pub(crate) fn from_loaded(
-        config_path: &Path,
-        config: sigil_kernel::RootConfig,
-        launch_cwd: &Path,
-    ) -> Result<Self, BootAuthorityErrorV1> {
-        let config_path_identity =
-            sigil_resource_authority::identity::canonical_identity(config_path)
-                .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
-                .digest;
-        Self::from_loaded_with_identity(config_path, config, launch_cwd, config_path_identity)
-    }
-
     fn from_loaded_with_identity(
         config_path: &Path,
         config: sigil_kernel::RootConfig,
         launch_cwd: &Path,
         config_path_identity: CanonicalHash,
     ) -> Result<Self, BootAuthorityErrorV1> {
+        let config_path = std::fs::canonicalize(config_path)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let launch_cwd = std::fs::canonicalize(launch_cwd)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let workspace_root =
-            sigil_kernel::resolve_workspace_root(config_path, &launch_cwd, &config.workspace.root);
+            sigil_kernel::resolve_workspace_root(&config_path, &launch_cwd, &config.workspace.root);
         let workspace_root = std::fs::canonicalize(workspace_root)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let resolved_paths =
@@ -335,7 +325,7 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let config_hash = snapshot_binding_hash(
             &encoded,
-            config_path,
+            &config_path,
             &launch_cwd,
             &workspace_root,
             config_path_identity,
@@ -343,7 +333,7 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             &resolved_paths,
         );
         Ok(Self {
-            config_path: config_path.to_path_buf(),
+            config_path,
             config,
             workspace_root,
             launch_cwd,
@@ -371,24 +361,6 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         Self::from_loaded_with_identity(config_path, config, launch_cwd, config_path_identity)
             .map(Some)
-    }
-
-    /// Builds one snapshot from a configuration value that has already been validated by the
-    /// owning surface. The config path is still observed for its current private-file identity,
-    /// but its bytes are deliberately not parsed again. This is the replacement path used for
-    /// transient session runtime configuration such as `/model`.
-    pub fn from_validated_config(
-        config_path: &Path,
-        config: sigil_kernel::RootConfig,
-        launch_cwd: &Path,
-    ) -> Result<Self, BootAuthorityErrorV1> {
-        let Some((_, config_path_identity)) = load_config_payload_with_identity(config_path)?
-        else {
-            return Err(BootAuthorityErrorV1::Config(
-                "current-schema authority config is unavailable".to_owned(),
-            ));
-        };
-        Self::from_loaded_with_identity(config_path, config, launch_cwd, config_path_identity)
     }
 
     #[must_use]
@@ -765,6 +737,97 @@ fn snapshot_binding_hash(
     CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
+const AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct AuthorityConfigGenerationRecordV1 {
+    schema_version: u32,
+    config_hash: CanonicalHash,
+    generation: u64,
+}
+
+fn host_application_instance_id(config_path: &Path) -> String {
+    format!(
+        "sigil:{}",
+        sigil_kernel::external::sha256_hex(config_path.to_string_lossy().as_bytes())
+    )
+}
+
+fn authority_config_generation_path(state_anchor: &Path) -> PathBuf {
+    state_anchor.join("authority-config-generation.json")
+}
+
+fn authority_config_generation_lock_path(state_anchor: &Path) -> PathBuf {
+    state_anchor.join("authority-config-generation.lock")
+}
+
+fn load_authority_config_generation(
+    state_anchor: &Path,
+) -> Result<Option<AuthorityConfigGenerationRecordV1>, BootAuthorityErrorV1> {
+    let path = authority_config_generation_path(state_anchor);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(BootAuthorityErrorV1::Config(error.to_string())),
+    };
+    let record: AuthorityConfigGenerationRecordV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    if record.schema_version != AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION || record.generation == 0
+    {
+        return Err(BootAuthorityErrorV1::Config(
+            "authority config generation record is invalid".to_owned(),
+        ));
+    }
+    Ok(Some(record))
+}
+
+fn load_or_advance_authority_config_generation(
+    generation_anchor: &Path,
+    config_hash: CanonicalHash,
+) -> Result<u64, BootAuthorityErrorV1> {
+    let lock_path = authority_config_generation_lock_path(generation_anchor);
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    sigil_kernel::secure_private_path_permissions(&lock_path)
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    lock.lock_exclusive()
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+
+    let current = load_authority_config_generation(generation_anchor)?;
+    let generation = match current.as_ref() {
+        Some(record) if record.config_hash == config_hash => record.generation,
+        Some(record) => record.generation.checked_add(1).ok_or_else(|| {
+            BootAuthorityErrorV1::Config("authority config generation overflow".to_owned())
+        })?,
+        None => 1,
+    };
+    if current
+        .as_ref()
+        .is_none_or(|record| record.config_hash != config_hash || record.generation != generation)
+    {
+        let record = AuthorityConfigGenerationRecordV1 {
+            schema_version: AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION,
+            config_hash,
+            generation,
+        };
+        let bytes = serde_json::to_vec(&record)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        sigil_kernel::atomic_publish_private_file(
+            &authority_config_generation_path(generation_anchor),
+            &bytes,
+        )
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    }
+    lock.unlock()
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    Ok(generation)
+}
+
 /// Convenience: authoritative resource journal scope for the composition (application-level).
 pub fn composition_journal_scope() -> ResourceJournalScopeV1 {
     ResourceJournalScopeV1::Application
@@ -826,21 +889,6 @@ pub fn boot_current_schema(
     build_current_boot_transaction(snapshot)
 }
 
-/// Boots the current-schema authority transaction from an already validated runtime config.
-/// Unlike [`boot_current_schema`], this does not reload or replace the config value from disk;
-/// it only observes the config file identity so authority paths remain bound to the same source
-/// file. This is required for session-scoped runtime overrides that must survive a worker
-/// restart without mutating the persisted default configuration.
-pub fn boot_current_schema_with_config(
-    config_path: &Path,
-    launch_cwd: &Path,
-    config: sigil_kernel::RootConfig,
-) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
-    let snapshot =
-        ValidatedAuthorityConfigSnapshotV1::from_validated_config(config_path, config, launch_cwd)?;
-    build_current_boot_transaction(snapshot)
-}
-
 /// Builds the current-schema authority composition for one valid boot surface. Publication of the
 /// cutover manifest belongs to [`build_current_boot_transaction`], after workspace activation and
 /// journal reconciliation have completed.
@@ -873,13 +921,14 @@ pub fn compose_current_boot_authority(
         ));
     }
     use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
-    let instance_id = format!(
-        "sigil:{}:{}",
-        sigil_kernel::external::sha256_hex(
-            config_snapshot.config_path().to_string_lossy().as_bytes()
-        ),
-        config_snapshot.config_hash().to_hex()
-    );
+    let instance_id = host_application_instance_id(config_snapshot.config_path());
+    let application_generation = load_or_advance_authority_config_generation(
+        config_snapshot
+            .config_path()
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
+        config_snapshot.config_hash(),
+    )?;
     let authority = sigil_kernel::resource::AuthorityGeneration {
         epoch: 1,
         instance_hash: CanonicalHash::from_bytes([0x75; 32]),
@@ -920,7 +969,7 @@ pub fn compose_current_boot_authority(
     let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
     let first = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate_current_schema(
         instance_id.clone(),
-        1,
+        application_generation,
         authority,
         &provisional.services,
         &recovery,
@@ -946,7 +995,7 @@ pub fn compose_current_boot_authority(
     .map_err(BootAuthorityErrorV1::Composition)?;
     let decision = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate_current_schema(
         instance_id,
-        1,
+        application_generation,
         authority,
         &composition.services,
         &recovery,
@@ -980,16 +1029,16 @@ fn publish_current_boot_manifest(
         if existing == *decision.manifest() {
             return Ok(());
         }
-        if existing.selected_epoch
-            != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
-            || decision.manifest().selected_epoch
-                != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
-            || existing.application_instance_id == decision.manifest().application_instance_id
-        {
-            // A fixed application instance is fixed-forward: a changed manifest is a drift or a
-            // legacy-to-current upgrade attempt, and neither may silently rewrite the durable
-            // decision. A different current-schema instance is a validated config reboot and is
-            // allowed to replace the current pointer below.
+        let is_current_generation_advance = existing.selected_epoch
+            == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+            && decision.manifest().selected_epoch
+                == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+            && existing.application_instance_id == decision.manifest().application_instance_id
+            && decision.manifest().application_generation > existing.application_generation;
+        if !is_current_generation_advance {
+            // The application identity is host-owned and stable. A changed manifest for the
+            // same generation, a generation rollback, a different owner, or a legacy decision is
+            // fixed-forward and cannot replace the current pointer.
             return Err(BootAuthorityErrorV1::Cutover(
                 crate::r71_global_cutover::CutoverBootErrorV1::Guard(
                     sigil_kernel::cutover_manifest::CutoverErrorV1::AlreadyPublished,
@@ -1185,12 +1234,9 @@ mod tests {
         std::fs::create_dir_all(&cache).expect("cache");
         let _state_env = crate::test_env::EnvScope::set(crate::SIGIL_STATE_HOME_ENV, &state);
         let _cache_env = crate::test_env::EnvScope::set(crate::SIGIL_CACHE_HOME_ENV, &cache);
-        let config_snapshot = ValidatedAuthorityConfigSnapshotV1::from_loaded(
-            &config,
-            sigil_kernel::RootConfig::load(&config).expect("load config"),
-            dir.path(),
-        )
-        .expect("snapshot");
+        let config_snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+            .expect("load snapshot")
+            .expect("snapshot");
         let exec = config_snapshot.resolved_paths().scratch_root.clone();
         std::fs::create_dir_all(&exec).expect("exec");
         let (first, _composition) =
@@ -1209,39 +1255,56 @@ mod tests {
     }
 
     #[test]
-    fn r71_current_boot_replaces_manifest_for_a_new_config_instance() {
+    fn r71_current_boot_advances_manifest_for_a_new_persisted_config_generation() {
         let _environment_guard = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
-        let state = dir.path().join("state");
-        let cache = state.join("cache");
-        std::fs::create_dir_all(&cache).expect("cache");
-        let _state_env = crate::test_env::EnvScope::set(crate::SIGIL_STATE_HOME_ENV, &state);
-        let _cache_env = crate::test_env::EnvScope::set(crate::SIGIL_CACHE_HOME_ENV, &cache);
-        std::fs::write(
-            &config,
-            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"old-model\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
-        )
-        .expect("config");
+        let state_a = dir.path().join("state-a");
+        let cache_a = state_a.join("cache");
+        let state_b = dir.path().join("state-b");
+        let cache_b = state_b.join("cache");
+        std::fs::create_dir_all(&cache_a).expect("cache a");
+        std::fs::create_dir_all(&cache_b).expect("cache b");
+        let config_a = format!(
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"old-model\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
+            state_a.display(),
+            cache_a.display(),
+        );
+        std::fs::write(&config, config_a).expect("config");
 
         let first = boot_current_schema(&config, dir.path()).expect("first boot");
         let first_instance = first.cutover().manifest().application_instance_id.clone();
-        let mut runtime_config = sigil_kernel::RootConfig::load(&config).expect("load config");
-        runtime_config.agent.model = "session-model".to_owned();
-        let second = boot_current_schema_with_config(&config, dir.path(), runtime_config)
-            .expect("session runtime config boot");
+        let first_generation = first.cutover().manifest().application_generation;
+        let updated = std::fs::read_to_string(&config)
+            .expect("read config")
+            .replace("old-model", "new-model")
+            .replace(
+                &state_a.display().to_string(),
+                &state_b.display().to_string(),
+            )
+            .replace(
+                &cache_a.display().to_string(),
+                &cache_b.display().to_string(),
+            );
+        std::fs::write(&config, updated).expect("update config");
+        let second = boot_current_schema(&config, dir.path()).expect("updated config boot");
 
-        assert_ne!(
+        assert_eq!(
             first_instance,
             second.cutover().manifest().application_instance_id
         );
-        assert_eq!(second.config().agent.model, "session-model");
+        assert_eq!(second.config().agent.model, "new-model");
+        assert_eq!(second.resolved_paths().state_root, state_b);
+        assert_eq!(
+            second.cutover().manifest().application_generation,
+            first_generation + 1
+        );
         assert_eq!(
             sigil_kernel::RootConfig::load(&config)
                 .expect("reload persisted config")
                 .agent
                 .model,
-            "old-model"
+            "new-model"
         );
         let published = RuntimeGlobalCutoverV1::load_and_validate_manifest(
             &config
@@ -1284,10 +1347,9 @@ mod tests {
                 .as_path()
         );
         assert_eq!(snapshot.config_hash(), original_hash);
-        let live = sigil_kernel::RootConfig::load(&config).expect("live config");
-        let live_snapshot =
-            ValidatedAuthorityConfigSnapshotV1::from_loaded(&config, live, dir.path())
-                .expect("live snapshot");
+        let live_snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+            .expect("load live snapshot")
+            .expect("live snapshot");
         assert_ne!(snapshot.config_hash(), live_snapshot.config_hash());
         let exec = snapshot.resolved_paths().scratch_root.clone();
         std::fs::create_dir_all(&exec).expect("exec");

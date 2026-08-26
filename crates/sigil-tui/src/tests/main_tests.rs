@@ -1076,7 +1076,7 @@ fn config_save_restarts_worker_on_active_session_route() -> Result<()> {
     let mut saved_config = v2_test_config("secondary");
     saved_config.agent.model = "secondary-model".to_owned();
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &current_config);
-    app.apply_runtime_config_snapshot(&saved_config);
+    app.apply_persisted_config_snapshot(&saved_config);
     let (old_runtime, old_commands) = fake_worker_runtime();
     let mut worker = Some(old_runtime);
     let mut spawned_config = None;
