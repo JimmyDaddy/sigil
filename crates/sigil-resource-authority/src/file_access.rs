@@ -1862,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn r71_f_fil_013_alias_replacement_cannot_redirect_a_planned_read() {
+    fn managed_file_alias_replacement_cannot_redirect_a_planned_read() {
         #[cfg(unix)]
         {
             let (workspace, service, plan) = registered_read_plan(Some("inside"));
