@@ -322,6 +322,7 @@ impl HttpApplicationRunExecution {
 pub struct HttpProductionRunDriver {
     options: HttpProductionRunDriverOptions,
     services: ApplicationRunServices,
+    authority_ready: bool,
     preparer: Arc<dyn HttpApplicationRunPreparer>,
     event_bus: Arc<HttpLiveEventBus>,
     runtime: Handle,
@@ -822,13 +823,21 @@ impl HttpProductionRunDriver {
         ))
         .with_scratch_control(options.scratch_control.clone());
         // RFC-0071 R71.6: the server surface runs the one-call boot attach (epoch + authority
-        // composition, shared with CLI/TUI) and fails closed before serving.
-        let services = sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
-            services,
-            &options.config_path,
-            &options.launch_cwd,
-        )
-        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        // composition, shared with CLI/TUI). A missing/invalid config may still expose the
+        // bounded provider-setup recovery surface, but it never receives a runnable authority
+        // route; every run/session mutation below checks `authority_ready` before proceeding.
+        let (services, authority_ready) =
+            match sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
+                services.clone(),
+                &options.config_path,
+                &options.launch_cwd,
+            ) {
+                Ok(services) => (services, true),
+                Err(sigil_runtime::r71_authority_composition::BootAuthorityErrorV1::Config(_)) => {
+                    (services, false)
+                }
+                Err(error) => return Err(HttpRunDriverError::new(error.to_string())),
+            };
         let mut options = options;
         let current_schema = services.cutover().is_some_and(|cutover| {
             cutover.manifest().selected_epoch
@@ -885,6 +894,7 @@ impl HttpProductionRunDriver {
         Ok(Self {
             options,
             services,
+            authority_ready,
             preparer,
             event_bus,
             runtime,
@@ -898,6 +908,21 @@ impl HttpProductionRunDriver {
             session_projection_stores: Mutex::new(HttpSessionProjectionStoreCache::default()),
             reconciled_terminal_sessions: Mutex::new(BTreeSet::new()),
         })
+    }
+
+    fn require_current_schema_authority(&self) -> Result<(), HttpRunDriverError> {
+        if self.authority_ready {
+            Ok(())
+        } else {
+            Err(HttpRunDriverError::new(
+                "current-schema authority is unavailable; recovery setup only",
+            ))
+        }
+    }
+
+    fn require_current_schema_admission(&self) -> Result<(), HttpRunAdmissionError> {
+        self.require_current_schema_authority()
+            .map_err(|_| HttpRunAdmissionError::Unavailable)
     }
 
     fn reconcile_terminal_session_once(
@@ -1716,6 +1741,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         session_id: &str,
         model_ref: Option<&crate::HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         let connection_id = model_ref
             .map(|model_ref| sigil_kernel::ConnectionId::new(model_ref.connection_id.clone()))
             .transpose()
@@ -1766,6 +1792,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
         expected_session_id: &str,
         recovery_binding: Option<&str>,
     ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
+        self.require_current_schema_authority()
+            .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
         let lifecycle = self
             .options
             .session_lifecycle
@@ -1901,6 +1929,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         session: &crate::HttpSessionSnapshot,
         request: &HttpRunStartRequest,
     ) -> Result<(), HttpRunAdmissionError> {
+        self.require_current_schema_admission()?;
         self.acquire_session_attachment(session)?;
         let context = self
             .run_context_view(session)
@@ -1995,6 +2024,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         self.start_supervised_run(start, None, None)
     }
 
@@ -2101,6 +2131,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn submit_approval(&self, approval: HttpRunDriverApproval) -> Result<(), HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         if approval.call_id != approval.decision.call_id
             || approval.run_id != approval.decision.run_id
         {
@@ -3181,6 +3212,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn start_queued_run(&self, start: HttpQueuedRunDriverStart) -> Result<(), HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         self.acquire_session_attachment(&start.session)
             .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let (start, queued) = self.queued_supervisor_start(start)?;
