@@ -678,8 +678,7 @@ pub struct ApplicationRunServices {
     /// Production adapters cannot set this crate-private evidence override.
     model_eval_route_qualified: bool,
     /// RFC-0071 R71.6: the one application-global cutover decision. The boot owner selects the
-    /// epoch exactly once; a NewCurrentSchema manifest failing the mandatory readiness gate
-    /// prevents `require_cutover_or_fail` from returning Ok at all.
+    /// epoch exactly once; an unattached decision is unavailable and cannot start a run.
     cutover: Option<Arc<crate::r71_global_cutover::RuntimeGlobalCutoverV1>>,
     /// RFC-0071 R71.6: the boot authority composition (services + writer adapter + broker)
     /// shared by this surface's run paths; None before boot attach.
@@ -875,15 +874,36 @@ impl ApplicationRunServices {
         self.authority_composition.as_deref()
     }
 
+    /// Requires the complete current-schema authority surface before a run can be prepared.
+    /// Keeping this check beside the service container prevents a caller from attaching only a
+    /// cutover manifest while leaving the actual writer/tool authority absent.
+    pub fn require_current_schema_authority(
+        &self,
+    ) -> Result<(), sigil_kernel::cutover_manifest::CutoverErrorV1> {
+        let cutover = self
+            .cutover
+            .as_deref()
+            .ok_or(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable)?;
+        if cutover.manifest().selected_epoch
+            != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+        {
+            return Err(sigil_kernel::cutover_manifest::CutoverErrorV1::LegacySessionUnavailable);
+        }
+        if self.authority_composition.is_none() {
+            return Err(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable);
+        }
+        cutover.gate().map_err(Clone::clone)
+    }
+
     /// Mandatory readiness check: the boot owner calls this after selecting the epoch. A
     /// NewCurrentSchema manifest with any failing adapter probe returns Err and the application
-    /// must not start partially. No attached decision (legacy boot path) is a valid Ok because
-    /// the epoch has not been published yet.
+    /// must not start partially. No attached decision is also an error: there is no legacy
+    /// runtime fallback.
     pub fn require_cutover_or_fail(
         &self,
     ) -> Result<(), sigil_kernel::cutover_manifest::CutoverErrorV1> {
         match self.cutover.as_deref() {
-            None => Ok(()),
+            None => Err(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable),
             Some(decision) => decision.gate().map_err(|error| error.clone()),
         }
     }
@@ -898,7 +918,7 @@ impl ApplicationRunServices {
             .cutover
             .as_ref()
             .map(|decision| decision.manifest().selected_epoch)
-            .unwrap_or(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy);
+            .ok_or(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable)?;
         sigil_kernel::cutover_manifest::admit_session_open(
             sigil_kernel::cutover_manifest::SessionOpenAttemptV1 {
                 session_epoch,
@@ -3609,6 +3629,12 @@ pub async fn prepare_application_run(
     request: ApplicationRunRequest,
     services: &ApplicationRunServices,
 ) -> std::result::Result<PreparedApplicationRun, ApplicationRunPrepareError> {
+    #[cfg(not(test))]
+    services
+        .require_current_schema_authority()
+        .map_err(|error| ApplicationRunPrepareError::Configuration {
+            source: anyhow!(error),
+        })?;
     let (prepared, frozen_request) =
         prepare_application_run_internal(request, services, None).await?;
     debug_assert!(frozen_request.is_none());
@@ -3624,6 +3650,12 @@ pub(crate) async fn prepare_application_run_with_exact_first_request(
     (PreparedApplicationRun, ApplicationExactFirstRequestAssembly),
     ApplicationRunPrepareError,
 > {
+    #[cfg(not(test))]
+    services
+        .require_current_schema_authority()
+        .map_err(|error| ApplicationRunPrepareError::Configuration {
+            source: anyhow!(error),
+        })?;
     if exact_prompt.expose_secret().trim().is_empty() || durable_user_message_id.trim().is_empty() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "queued exact prompt and durable user message id must not be empty".to_owned(),

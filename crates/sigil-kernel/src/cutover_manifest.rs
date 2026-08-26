@@ -1,9 +1,8 @@
 //! RFC-0071 section 18 R71.6: startup cutover manifest and mandatory adapter readiness.
 //!
-//! Application startup selects the legacy epoch or the new epoch exactly once. After the new
-//! epoch is published, this binary only creates/reads current-schema sessions. There is no
-//! per-consumer flag, no V2/V3 dual write, no legacy allocator fallback, and no active-process
-//! provider switch. If any mandatory adapter/readiness probe fails the application fails
+//! Application startup selects the current epoch exactly once. `Legacy` remains a wire-level
+//! historical value so old persisted records can be decoded and reported, but it is not a
+//! runnable boot mode. If any mandatory adapter/readiness probe fails the application fails
 //! closed and does not start partially.
 
 use serde::{Deserialize, Serialize};
@@ -80,14 +79,15 @@ pub enum CutoverErrorV1 {
     ManifestHashMismatch,
     #[error("old-schema session is explicitly unavailable in a current-schema binary")]
     LegacySessionUnavailable,
+    #[error("current-schema authority composition is unavailable")]
+    AuthorityUnavailable,
 }
 
 /// Schema version for the renderer-neutral cutover status shared by all product surfaces.
 pub const CUTOVER_SURFACE_SCHEMA_VERSION: u16 = 1;
 
-/// Epoch displayed by a surface. `Unavailable` is deliberately distinct from `Legacy`: a
-/// legacy epoch is a truthful, usable boot mode, while unavailable means the persisted
-/// authority decision cannot be trusted.
+/// Epoch displayed by a surface. `Legacy` is retained only for historical DTO compatibility;
+/// a legacy manifest is projected as unavailable with an explicit unsupported-data blocker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutoverSurfaceEpochV1 {
@@ -137,6 +137,7 @@ pub enum CutoverBlockerCodeV1 {
     ManifestCorrupt,
     MissingReadinessProbe,
     AdapterNotReady,
+    UnsupportedLegacyData,
 }
 
 /// One bounded current-schema blocker projection.
@@ -160,12 +161,7 @@ pub struct CutoverSurfaceStatusV1 {
 
 impl Default for CutoverSurfaceStatusV1 {
     fn default() -> Self {
-        Self {
-            schema_version: CUTOVER_SURFACE_SCHEMA_VERSION,
-            epoch: CutoverSurfaceEpochV1::Legacy,
-            authority: CutoverAuthorityStateV1::Legacy,
-            blockers: Vec::new(),
-        }
+        Self::unavailable()
     }
 }
 
@@ -176,7 +172,12 @@ impl CutoverSurfaceStatusV1 {
             StartupEpochV1::Legacy => CutoverSurfaceEpochV1::Legacy,
             StartupEpochV1::NewCurrentSchema => CutoverSurfaceEpochV1::NewCurrentSchema,
         };
-        let blockers = if manifest.selected_epoch == StartupEpochV1::NewCurrentSchema {
+        let blockers = if manifest.selected_epoch == StartupEpochV1::Legacy {
+            vec![CutoverBlockerV1 {
+                code: CutoverBlockerCodeV1::UnsupportedLegacyData,
+                adapter: None,
+            }]
+        } else if manifest.selected_epoch == StartupEpochV1::NewCurrentSchema {
             mandatory_adapter_kinds_v1()
                 .iter()
                 .filter_map(|adapter| {
@@ -201,7 +202,7 @@ impl CutoverSurfaceStatusV1 {
             Vec::new()
         };
         let authority = match epoch {
-            CutoverSurfaceEpochV1::Legacy => CutoverAuthorityStateV1::Legacy,
+            CutoverSurfaceEpochV1::Legacy => CutoverAuthorityStateV1::Unavailable,
             CutoverSurfaceEpochV1::NewCurrentSchema if blockers.is_empty() => {
                 CutoverAuthorityStateV1::Ready
             }
@@ -224,6 +225,19 @@ impl CutoverSurfaceStatusV1 {
             authority: CutoverAuthorityStateV1::Unavailable,
             blockers: vec![CutoverBlockerV1 {
                 code: CutoverBlockerCodeV1::ManifestCorrupt,
+                adapter: None,
+            }],
+        }
+    }
+
+    #[must_use]
+    pub fn unsupported_legacy_data() -> Self {
+        Self {
+            schema_version: CUTOVER_SURFACE_SCHEMA_VERSION,
+            epoch: CutoverSurfaceEpochV1::Legacy,
+            authority: CutoverAuthorityStateV1::Unavailable,
+            blockers: vec![CutoverBlockerV1 {
+                code: CutoverBlockerCodeV1::UnsupportedLegacyData,
                 adapter: None,
             }],
         }
@@ -278,8 +292,10 @@ pub fn admit_session_open(attempt: SessionOpenAttemptV1) -> Result<(), CutoverEr
         (StartupEpochV1::NewCurrentSchema, StartupEpochV1::Legacy) => {
             Err(CutoverErrorV1::LegacyBinaryRejected)
         }
-        (StartupEpochV1::Legacy, StartupEpochV1::Legacy)
-        | (StartupEpochV1::NewCurrentSchema, StartupEpochV1::NewCurrentSchema) => Ok(()),
+        (StartupEpochV1::Legacy, StartupEpochV1::Legacy) => {
+            Err(CutoverErrorV1::LegacySessionUnavailable)
+        }
+        (StartupEpochV1::NewCurrentSchema, StartupEpochV1::NewCurrentSchema) => Ok(()),
     }
 }
 
@@ -458,15 +474,21 @@ mod tests {
     }
 
     #[test]
-    fn r71_surface_status_keeps_legacy_distinct_from_unavailable() {
+    fn r71_surface_status_marks_legacy_as_unsupported_data() {
         let mut legacy = ready_manifest();
         legacy.selected_epoch = StartupEpochV1::Legacy;
         legacy.mandatory_readiness.clear();
         legacy.manifest_hash = compute_manifest_hash(&legacy);
         let legacy_status = CutoverSurfaceStatusV1::from_manifest(&legacy);
         assert_eq!(legacy_status.epoch, CutoverSurfaceEpochV1::Legacy);
-        assert_eq!(legacy_status.authority, CutoverAuthorityStateV1::Legacy);
-        assert!(legacy_status.blockers.is_empty());
+        assert_eq!(
+            legacy_status.authority,
+            CutoverAuthorityStateV1::Unavailable
+        );
+        assert_eq!(
+            legacy_status.blockers[0].code,
+            CutoverBlockerCodeV1::UnsupportedLegacyData
+        );
 
         let unavailable = CutoverSurfaceStatusV1::unavailable();
         assert_eq!(unavailable.epoch, CutoverSurfaceEpochV1::Unavailable);
@@ -556,7 +578,7 @@ mod tests {
             session_epoch: StartupEpochV1::Legacy,
             binary_epoch: StartupEpochV1::Legacy,
         })
-        .expect("legacy on legacy");
+        .expect_err("legacy data is not runnable");
         admit_session_open(SessionOpenAttemptV1 {
             session_epoch: StartupEpochV1::NewCurrentSchema,
             binary_epoch: StartupEpochV1::NewCurrentSchema,

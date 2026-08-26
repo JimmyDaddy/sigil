@@ -44,9 +44,8 @@ pub enum RuntimeExecutionSeamV1 {
 /// extension route the composition does not hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeExecutionExtensionSeamV1 {
-    /// Extension processes still launch through the legacy configured backend path; probe
-    /// fails closed until the managed execution route is composed.
-    LegacyLauncher,
+    /// No managed extension launch route is attached; the readiness probe fails closed.
+    Unavailable,
     /// Extension processes launch through the composed managed execution service; probe passes.
     ManagedExecutionBacked,
 }
@@ -56,7 +55,8 @@ pub enum RuntimeExecutionExtensionSeamV1 {
 /// because its contract has been declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeProductStateSeamV1 {
-    LegacyDirectWriter,
+    /// No product or borrowed-host writer is attached; the readiness probe fails closed.
+    Unavailable,
     /// A trusted product-plane owner performs the bounded atomic lifecycle itself.
     ProductOwnerAtomicBacked,
     /// A borrowed-host writer is attached through the authority registration route.
@@ -432,6 +432,7 @@ impl RuntimeGlobalCutoverV1 {
     /// Legacy-epoch decision for boot paths that have not yet cut over: by contract the legacy
     /// epoch requires no readiness probes. The manifest is content-addressed and persisted by
     /// the boot owner; the session-open guard still applies (legacy sessions only).
+    #[cfg(test)]
     pub fn legacy_decision(
         instance_id: impl Into<String>,
         application_generation: u64,
@@ -538,10 +539,11 @@ pub enum CutoverBootErrorV1 {
     Guard(CutoverErrorV1),
 }
 
-/// Legacy boot decision: selects the legacy epoch exactly once per stable instance id
+/// Historical test-only boot decision: selects the legacy epoch exactly once per stable instance id
 /// derived from the config seed, persists the content-addressed manifest next to it and
 /// replays an existing manifest instead of overwriting (tamper -> fail closed; valid but
 /// drifting generation -> AlreadyPublished). Shared by every boot surface.
+#[cfg(test)]
 pub fn legacy_boot_decision(
     seed: &std::path::Path,
 ) -> Result<RuntimeGlobalCutoverV1, CutoverBootErrorV1> {
@@ -584,6 +586,7 @@ pub fn legacy_boot_decision(
 /// Rehydrates the published current-schema decision for a worker after the launcher has
 /// completed the composition gate. A legacy manifest is never upgraded implicitly: fixed-forward
 /// epoch semantics require an explicit current-schema publication first.
+#[cfg(test)]
 pub fn current_boot_decision(
     seed: &std::path::Path,
 ) -> Result<RuntimeGlobalCutoverV1, CutoverBootErrorV1> {
@@ -599,10 +602,9 @@ pub fn current_boot_decision(
     RuntimeGlobalCutoverV1::from_validated_manifest(manifest).map_err(CutoverBootErrorV1::Guard)
 }
 
-/// Shared boot attachment for ApplicationRunServices surfaces (CLI headless/machine, HTTP
-/// serve, desktop launcher): selects the epoch via [legacy_boot_decision], attaches the
-/// decision and runs the mandatory readiness guard (fail closed) plus the legacy session-open
-/// guard. A failure aborts startup before any run is prepared.
+/// Historical test-only boot attachment retained for compatibility fixtures. Shipping surfaces
+/// use the runtime-owned current-schema boot transaction and cannot attach a legacy decision.
+#[cfg(test)]
 pub fn attach_legacy_boot_cutover(
     services: crate::application_run::ApplicationRunServices,
     seed: &std::path::Path,
@@ -1182,28 +1184,26 @@ mod tests {
         assert_eq!(a.manifest().selected_epoch, StartupEpochV1::Legacy);
     }
     #[test]
-    fn resource_global_cutover_boot_attach_selects_legacy_once() {
+    fn resource_global_cutover_boot_attach_rejects_legacy_runtime() {
         use crate::application_run::ApplicationRunServices;
         let dir = tempfile::tempdir().expect("tempdir");
         let seed = dir.path().join("config.toml");
         std::fs::write(&seed, b"[core]\n").expect("seed");
         let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        let attached = attach_legacy_boot_cutover(services, &seed).expect("attach");
-        let decision = attached.cutover().expect("decision");
-        assert!(decision.gate().is_ok());
-        assert_eq!(decision.manifest().selected_epoch, StartupEpochV1::Legacy);
-        assert_eq!(decision.manifest().mandatory_readiness.len(), 0);
+        let error = attach_legacy_boot_cutover(services, &seed).expect_err("legacy rejected");
+        assert!(matches!(
+            error,
+            CutoverBootErrorV1::Guard(CutoverErrorV1::LegacySessionUnavailable)
+        ));
         let manifest_path = dir.path().join(".sigil-cutover-manifest.json");
         assert!(manifest_path.exists());
-        // Reboot with the same seed: identical manifest replay is accepted.
+        // Reboot with the same seed remains rejected; historical data is not a runnable mode.
         let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        attach_legacy_boot_cutover(services, &seed).expect("idempotent reboot");
-        // Legacy session open stays allowed; a new-epoch binary would reject it (kernel guard).
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        let attached = attach_legacy_boot_cutover(services, &seed).expect("attach again");
-        attached
-            .admit_session_open(StartupEpochV1::Legacy)
-            .expect("legacy open");
+        let error = attach_legacy_boot_cutover(services, &seed).expect_err("legacy rejected again");
+        assert!(matches!(
+            error,
+            CutoverBootErrorV1::Guard(CutoverErrorV1::LegacySessionUnavailable)
+        ));
     }
 
     #[test]
@@ -1212,8 +1212,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let seed = dir.path().join("config.toml");
         std::fs::write(&seed, b"[core]\n").expect("seed");
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        attach_legacy_boot_cutover(services, &seed).expect("attach");
+        let _services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
+        legacy_boot_decision(&seed).expect("write historical manifest");
         let manifest_path = dir.path().join(".sigil-cutover-manifest.json");
         // A valid-but-different manifest (drifting generation) is refused, never overwritten.
         let mut manifest =
@@ -1249,10 +1249,11 @@ mod tests {
         let decision = legacy_boot_decision(&seed).expect("decision");
         assert!(decision.gate().is_ok());
         assert_eq!(decision.manifest().selected_epoch, StartupEpochV1::Legacy);
-        // The decision itself enforces the session-open boundary (surface independent).
-        decision
+        // Historical decisions are inspectable but cannot open a session.
+        let error = decision
             .admit_session_open(StartupEpochV1::Legacy)
-            .expect("legacy open");
+            .expect_err("legacy data is unavailable");
+        assert!(matches!(error, CutoverErrorV1::LegacySessionUnavailable));
         let error = decision
             .admit_session_open(StartupEpochV1::NewCurrentSchema)
             .expect_err("legacy binary rejects new session");
@@ -1262,11 +1263,14 @@ mod tests {
     fn resource_global_cutover_guarded_session_open_end_to_end() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        // Legacy epoch binary: legacy open is admitted.
+        // Historical epoch data is not admitted by the current binary.
         let legacy = RuntimeGlobalCutoverV1::legacy_decision("inst-guarded", 1, authority());
-        let store = guarded_session_open(&session_path, &legacy, StartupEpochV1::Legacy)
-            .expect("legacy open");
-        drop(store);
+        let error = guarded_session_open(&session_path, &legacy, StartupEpochV1::Legacy)
+            .expect_err("legacy data unavailable");
+        assert!(matches!(
+            error,
+            CutoverSessionOpenErrorV1::Guard(CutoverErrorV1::LegacySessionUnavailable)
+        ));
         // A new-epoch binary opening the same legacy session is refused before any store open.
         let services = shadow_services(mock_issuer());
         let recovery = RuntimeResourceRecoveryFacadeV1::new();

@@ -1700,7 +1700,7 @@ impl RuntimeManagedResourceServicesV1 {
             capability_issuer,
             execution_seam: crate::r71_global_cutover::RuntimeExecutionSeamV1::ShadowPlaceholder,
             extension_execution_seam:
-                crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::LegacyLauncher,
+                crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::Unavailable,
             file_access_seam: crate::r71_global_cutover::RuntimeFileAccessSeamV1::ShadowPlaceholder,
             projection_backed: false,
             extension_execution: None,
@@ -1709,16 +1709,16 @@ impl RuntimeManagedResourceServicesV1 {
             borrowed_configuration: None,
             borrowed_release_output: None,
             product_state_updater_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable,
             borrowed_native_save_seam: if bundle.borrowed_native_save.is_some() {
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
             } else {
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
             },
             borrowed_configuration_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable,
             borrowed_release_output_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable,
         }
     }
 
@@ -1743,7 +1743,7 @@ impl RuntimeManagedResourceServicesV1 {
             // Extension processes keep the legacy launcher until the managed route is
             // composed for them (the cutover probe stays honestly red).
             extension_execution_seam:
-                crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::LegacyLauncher,
+                crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::Unavailable,
             file_access_seam,
             projection_backed: true,
             extension_execution: None,
@@ -1752,16 +1752,16 @@ impl RuntimeManagedResourceServicesV1 {
             borrowed_configuration: None,
             borrowed_release_output: None,
             product_state_updater_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable,
             borrowed_native_save_seam: if bundle.borrowed_native_save.is_some() {
                 crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
             } else {
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
             },
             borrowed_configuration_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable,
             borrowed_release_output_seam:
-                crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter,
+                crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable,
         }
     }
 
@@ -1811,7 +1811,7 @@ impl RuntimeManagedResourceServicesV1 {
         self.borrowed_native_save_seam = if borrowed_native_save.is_some() {
             crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
         } else {
-            crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
         };
         self.borrowed_native_save = borrowed_native_save;
         self
@@ -1828,7 +1828,7 @@ impl RuntimeManagedResourceServicesV1 {
         self.borrowed_configuration_seam = if borrowed_configuration.is_some() {
             crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
         } else {
-            crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
         };
         self.borrowed_configuration = borrowed_configuration;
         self
@@ -1845,7 +1845,7 @@ impl RuntimeManagedResourceServicesV1 {
         self.borrowed_release_output_seam = if borrowed_release_output.is_some() {
             crate::r71_global_cutover::RuntimeProductStateSeamV1::AuthorityRegistrationBacked
         } else {
-            crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
         };
         self.borrowed_release_output = borrowed_release_output;
         self
@@ -1860,7 +1860,7 @@ impl RuntimeManagedResourceServicesV1 {
         self.product_state_updater_seam = if product_updater.is_some() {
             crate::r71_global_cutover::RuntimeProductStateSeamV1::ProductOwnerAtomicBacked
         } else {
-            crate::r71_global_cutover::RuntimeProductStateSeamV1::LegacyDirectWriter
+            crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
         };
         self.product_updater = product_updater;
         self

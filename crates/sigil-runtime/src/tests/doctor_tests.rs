@@ -1947,14 +1947,14 @@ impl Drop for EnvScope {
 #[test]
 fn doctor_reports_cutover_epoch_state_without_side_effects() -> Result<()> {
     let temp = tempdir()?;
-    // No manifest yet: the shared doctor reports the unpublised legacy state, read-only.
+    // No manifest yet: the shared doctor reports unavailable current-schema authority, read-only.
     let missing = build_doctor_report(&temp.path().join("config-missing.toml"), temp.path());
     let epoch = missing
         .checks
         .iter()
         .find(|check| check.name == "cutover:epoch")
         .expect("cutover:epoch check");
-    assert_eq!(epoch.status, DoctorStatus::Ok);
+    assert_eq!(epoch.status, DoctorStatus::Error);
     assert!(
         !missing
             .checks

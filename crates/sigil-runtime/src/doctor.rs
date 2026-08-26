@@ -219,6 +219,10 @@ pub(crate) fn check_cutover(
                     "mandatory adapter readiness probe failed",
                     "repair the reported adapter before starting current-schema boot",
                 ),
+                CutoverBlockerCodeV1::UnsupportedLegacyData => (
+                    "persisted legacy data is unsupported for current-schema boot",
+                    "migrate or create a current-schema session before starting a run",
+                ),
             };
             report.push_with_remediation(
                 DoctorStatus::Error,

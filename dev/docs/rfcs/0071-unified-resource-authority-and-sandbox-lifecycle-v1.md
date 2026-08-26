@@ -10671,3 +10671,11 @@ R71.9h 关闭了上一轮复核中仍成立的两个 implementation blocker，�
 补充说明：R71.9h 的 recovery arena 在 replay 前执行 authority-owned inventory，任何没有对应未完成 journal binding 的 entry 都返回带 opaque binding 的 typed `ReconciliationRequired`，不会被隐式 GC、删除或猜测归属。新增 orphan regression 后 file-access 为 `29/29`；exact-SHA local/five-platform qualification 仍待执行，RFC 状态不变。
 
 本 slice 的 file-access `28/28`、runtime composition `7/7`、串行 runtime full `1197 passed / 4 ignored`、targeted check、strict clippy、negative dependency、Windows GNU cross-check、fmt/diff 均通过。一次默认并行 runtime full 的 `StorageMemory` readiness transient failure 已隔离复跑，未记为 green。新 exact-SHA local full wrapper、five-platform hosted qualification、push/dispatch 尚未执行，因此 RFC-0071 继续 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停。
+
+### R71.9i shipping Legacy removal and fail-closed authority (2026-08-26)
+
+R71.9i supersedes any earlier wording that described Legacy as a runnable compatibility boot mode. `StartupEpochV1::Legacy` remains decodable only for historical wire data; its surface projection is unavailable with the stable `unsupported_legacy_data` blocker, and a Legacy session cannot be opened by the shipping binary. Missing cutover, authority composition, current-schema readiness, or managed route is now a typed unavailable/startup failure; TUI may show Setup/Recovery but does not start a worker, while CLI/HTTP/Desktop abort their production run preparation.
+
+The production `LegacyLauncher` and `LegacyDirectWriter` semantics were removed. Historical boot helpers remain only in test fixtures. `ApplicationRunServices::require_current_schema_authority` makes the composition requirement explicit at the production prepare boundary. Kernel cutover tests (`14`), runtime cutover tests (`16 passed / 1 ignored`), TUI launcher tests (`46`), negative dependency, process/producer inventory, shipping-targets and formatting passed.
+
+This is an implementation slice, not release qualification: R71.9j boot transaction, R71.9k strict delete reducer and R71.9l shipping/fault expansion plus clean exact-SHA local/five-platform qualification remain required. RFC-0071 stays `Gated / Partial / Not Frozen`; RFC-0070 remains paused.
