@@ -58,6 +58,34 @@ fn fixture_root(id: &str) -> std::path::PathBuf {
         .join(id)
 }
 
+#[test]
+fn r71_9a_incident_golden_preserves_the_authority_failure_chain() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dev/evals/plan-fixtures/r71-9a-authority-readiness/golden.json");
+    let golden: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("read R71.9a incident golden"))
+            .expect("parse R71.9a incident golden");
+    assert_eq!(golden["schema_version"], 1);
+    assert_eq!(golden["fixture_id"], "r71-9a-authority-readiness");
+    assert_eq!(golden["event_chain"].as_array().map(Vec::len), Some(5));
+    assert_eq!(
+        golden["event_chain"][2]["error_class"],
+        "resource_precondition_unavailable"
+    );
+    assert_eq!(
+        golden["event_chain"][3]["reason"],
+        "session has no durable artifact store"
+    );
+    assert_eq!(
+        golden["regression_contract"]["permission_allow_is_not_resource_readiness"],
+        true
+    );
+    assert_eq!(
+        golden["regression_contract"]["explicit_plan_acceptance_is_preserved"],
+        true
+    );
+}
+
 fn orchestration_fixture_roots() -> Vec<std::path::PathBuf> {
     let root = fixture_root("orchestration-v1");
     let mut fixtures = Vec::new();
@@ -818,7 +846,11 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
                 orchestration_route_contract: None,
                 repetitions: 2,
                 max_cost_microusd: 500_000,
-                campaign_timeout: Duration::from_secs(10),
+                // Current-schema authority boot performs durable admission and workspace
+                // registration for each isolated repetition; keep this integration budget
+                // independent from host disk/journal latency while still exercising the
+                // campaign deadline path in the dedicated timeout tests below.
+                campaign_timeout: Duration::from_secs(30),
                 output_dir: temp.path().join("campaign"),
                 release_output_owner: None,
             },

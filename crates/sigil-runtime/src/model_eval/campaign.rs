@@ -664,6 +664,28 @@ async fn execute_model_eval_run(
     services: &ApplicationRunServices,
 ) -> ModelEvalRunExecution {
     let started = Instant::now();
+    // Model-eval is a production application-run driver, so it must perform the same authority
+    // boot and exact workspace registration as the shipping CLI/HTTP/TUI surfaces before a
+    // managed file tool can plan or execute. The isolated run root gives this repetition its
+    // own durable authority journal and state namespace.
+    let services = match crate::r71_authority_composition::attach_boot_authority_to_services(
+        services.clone(),
+        &isolated.config_path,
+        &fixture.workspace_root,
+    ) {
+        Ok(services) => services,
+        Err(_) => {
+            return base_execution(
+                fixture,
+                repetition,
+                run_id,
+                isolated,
+                ModelEvalRunExecutionStatus::PreparationFailed,
+                started.elapsed(),
+                Some("model eval authority boot failed before provider dispatch".to_owned()),
+            );
+        }
+    };
     let mut request = ApplicationRunRequest::non_interactive(
         &isolated.config_path,
         &fixture.workspace_root,
@@ -676,7 +698,7 @@ async fn execute_model_eval_run(
         max_output_tokens: fixture.max_output_tokens,
         tool_scope: fixture.tool_scope.clone(),
     });
-    let prepared = match prepare_application_run(request, services).await {
+    let prepared = match prepare_application_run(request, &services).await {
         Ok(prepared) => prepared,
         Err(_) => {
             return base_execution(
@@ -690,6 +712,10 @@ async fn execute_model_eval_run(
             );
         }
     };
+    // Current-schema boot may redirect the requested session path to an authority-managed leaf;
+    // carry the admitted physical session path into verification and reporting instead of
+    // reopening the pre-admission request path.
+    let session_path = prepared.session_log_path().to_path_buf();
     let (execution, control) = prepared.into_parts();
     let mut events = ModelEvalEventRecorder::default();
     let mut approvals = AutoApproveHandler;
@@ -747,7 +773,7 @@ async fn execute_model_eval_run(
             super::verify_model_eval_run(
                 fixture,
                 &isolated.config_path,
-                &isolated.session_path,
+                &session_path,
                 &isolated.provider,
                 &isolated.model,
                 &run_id,
@@ -783,7 +809,7 @@ async fn execute_model_eval_run(
         config_path: isolated.config_path,
         config_digest: isolated.config_digest,
         isolated_config_digest: isolated.isolated_config_digest,
-        session_path: isolated.session_path,
+        session_path,
         manifest_digest: fixture.manifest_digest.clone(),
         tree_digest: fixture.tree_digest.clone(),
         provider: isolated.provider,

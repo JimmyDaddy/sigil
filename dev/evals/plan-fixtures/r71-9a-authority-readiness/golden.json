@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "fixture_id": "r71-9a-authority-readiness",
+  "source": "session-70c1896d-02a8-4c62-b273-3e43aeeb95aa",
+  "redaction": "identities-and-workspace-paths-replaced-with-stable-labels",
+  "event_chain": [
+    {
+      "stage": "parent_plan_review",
+      "tool": "request_plan_review",
+      "policy_access": "allow",
+      "status": "accepted",
+      "approval_boundary": "explicit_decision_required"
+    },
+    {
+      "stage": "child_file_research",
+      "tools": ["ls", "grep", "read_file"],
+      "policy_access": "allow",
+      "external_directory_required": false
+    },
+    {
+      "stage": "child_file_adjudication",
+      "tool": "ls",
+      "status": "failed",
+      "error_class": "resource_precondition_unavailable",
+      "error": "file access adjudication failed: operation not permitted for this binding"
+    },
+    {
+      "stage": "child_artifact_capture",
+      "tools": ["ls", "grep", "read_file"],
+      "availability": "unavailable",
+      "reason": "session has no durable artifact store"
+    },
+    {
+      "stage": "child_plan_finalization",
+      "tool": "submit_plan_draft",
+      "status": "draft_ready",
+      "provider_request_count_after_missing_authority": 0
+    }
+  ],
+  "regression_contract": {
+    "permission_allow_is_not_resource_readiness": true,
+    "missing_workspace_registration_fails_closed": true,
+    "missing_child_artifact_store_is_not_success": true,
+    "explicit_plan_acceptance_is_preserved": true
+  }
+}
