@@ -145,9 +145,12 @@ credential = { source = "none" }
     .await;
     assert_eq!(status, 200);
     assert_eq!(doctor["version"], "0.0.1-test");
-    assert_eq!(doctor["cutover"]["epoch"], "legacy");
-    assert_eq!(doctor["cutover"]["authority"], "legacy");
-    assert_eq!(doctor["cutover"]["blockers"], json!([]));
+    assert_eq!(doctor["cutover"]["epoch"], "unavailable");
+    assert_eq!(doctor["cutover"]["authority"], "unavailable");
+    assert_eq!(
+        doctor["cutover"]["blockers"],
+        json!([{ "code": "manifest_corrupt", "adapter": null }])
+    );
     assert!(doctor["checks"].is_array());
     assert!(
         !doctor
