@@ -78,10 +78,10 @@ def validate_git_identity(root: Path, candidate_sha: str, base_sha: str) -> dict
 def load_conformance_manifest(path: Path = CONFORMANCE_MANIFEST) -> dict[str, Any]:
     document = tomllib.loads(path.read_text(encoding="utf-8"))
     cases = document.get("cases")
-    if document.get("schema_version") != 2 or document.get("manifest_hash") != "r71-conformance-v3-220":
+    if document.get("schema_version") != 2 or document.get("manifest_hash") != "r71-conformance-v4-228":
         raise ValueError("R71 conformance manifest schema/hash drifted")
-    if not isinstance(cases, list) or len(cases) != 220:
-        raise ValueError(f"R71 conformance manifest must contain 220 cases, found {len(cases or [])}")
+    if not isinstance(cases, list) or len(cases) != 228:
+        raise ValueError(f"R71 conformance manifest must contain 228 cases, found {len(cases or [])}")
     ids = [case.get("case_id") for case in cases]
     if any(not isinstance(case, dict) for case in cases) or len(ids) != len(set(ids)):
         raise ValueError("R71 conformance manifest contains duplicate or malformed case ids")

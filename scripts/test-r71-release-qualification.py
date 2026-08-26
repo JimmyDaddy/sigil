@@ -14,7 +14,7 @@ import r71_qualification_common as common
 class QualificationContractTests(unittest.TestCase):
     def test_frozen_manifests_have_exact_required_sets(self) -> None:
         conformance = common.load_conformance_manifest()
-        self.assertEqual(len(conformance["cases"]), 200)
+        self.assertEqual(len(conformance["cases"]), 228)
         platform = common.load_platform_manifest()
         self.assertEqual(
             {job["job_id"] for job in platform["jobs"]}, common.REQUIRED_PLATFORM_JOBS

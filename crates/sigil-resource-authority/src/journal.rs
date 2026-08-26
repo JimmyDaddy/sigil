@@ -449,6 +449,25 @@ impl ResourceJournalFileV1 {
         self.journal.tail()
     }
 
+    /// Returns the next durable sequence under the journal mutex owner. Callers that derive an
+    /// operation id from this value must append the corresponding Prepared event while retaining
+    /// their own journal lock, so two processes cannot reuse the same frontier.
+    pub fn next_sequence(&self) -> Result<u64, JournalErrorV1> {
+        Ok(self
+            .journal
+            .tail()
+            .map_or(1, |record| record.sequence.saturating_add(1)))
+    }
+
+    /// Returns the immutable instance binding used to distinguish restart/new-instance
+    /// operation ids even when a process-local counter is reset.
+    pub fn journal_instance_hash(&self) -> Result<CanonicalHash, JournalErrorV1> {
+        self.journal
+            .header()
+            .map(|header| header.journal_instance_hash)
+            .ok_or(JournalErrorV1::InstanceMismatch)
+    }
+
     /// Returns authority-private file-delete records for restart reconciliation.
     pub fn file_delete_records(&self) -> Vec<(ResourceJournalRecordV1, ResourceJournalEventV1)> {
         self.records

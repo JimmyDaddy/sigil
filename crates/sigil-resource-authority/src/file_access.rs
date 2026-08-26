@@ -22,9 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
-
-#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -49,7 +46,7 @@ use sigil_kernel::secure_private_path_permissions;
 use crate::borrowed::{BorrowedSubjectClassV1, BorrowedSubjectRegistryV1};
 #[cfg(unix)]
 use crate::journal::{ResourceJournalEventV1, ResourceJournalFileIdentityV1};
-use crate::journal::{ResourceJournalFileV1, ResourceJournalHeaderV1};
+use crate::journal::{ResourceJournalFileV1, ResourceJournalHeaderV1, ResourceJournalRecordV1};
 
 /// Closed access class for a closed file operation.
 pub fn access_class_for(operation: ManagedFileOperationV1) -> ResourceAccessV1 {
@@ -871,9 +868,6 @@ fn rename_noreplace_at(
     }
 }
 
-#[cfg(unix)]
-static DELETE_QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 fn file_delete_header_hash(arena_root: &Path, journal_path: &Path) -> CanonicalHash {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -915,6 +909,45 @@ fn append_file_delete_event(
         .append_event(event)
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn prepare_file_delete(
+    state: &FileDeleteAuthorityStateV1,
+    plan: &PlannedFileAccessV1,
+    expected_identity: ResourceJournalFileIdentityV1,
+) -> Result<(String, String), ManagedFileAccessErrorV1> {
+    let mut journal = state
+        .journal
+        .lock()
+        .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?;
+    // The operation id is bound to the durable journal instance and the exact sequence occupied
+    // by Prepared. Reading the frontier and appending Prepared under one mutex closes the old
+    // process-local-counter/restart collision.
+    let sequence = journal
+        .next_sequence()
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+    let instance = journal
+        .journal_instance_hash()
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+        .to_hex();
+    let operation_id = format!(
+        "file-delete-{instance}-{sequence}-{}",
+        plan.plan_hash.to_hex()
+    );
+    let quarantine_name = format!("q-{instance}-{sequence}-{}", plan.plan_hash.to_hex());
+    journal
+        .append_event(ResourceJournalEventV1::FileDeletePrepared {
+            operation_id: operation_id.clone(),
+            subject_ref: plan.subject_ref.as_str().to_owned(),
+            logical_path: plan.logical_path.clone(),
+            plan_hash: plan.plan_hash,
+            binding_hash: plan.plan_hash,
+            quarantine_name: quarantine_name.clone(),
+            expected_identity,
+        })
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+    Ok((operation_id, quarantine_name))
 }
 
 #[cfg(unix)]
@@ -983,33 +1016,11 @@ fn delete_via_quarantine(
     approved: &std::fs::Metadata,
 ) -> Result<(), ManagedFileAccessErrorV1> {
     let arena = open_file_delete_arena(state, parent)?;
-    let sequence = DELETE_QUARANTINE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let operation_id = format!("file-delete-{sequence}-{}", plan.plan_hash.to_hex());
-    let quarantine = CString::new(format!(
-        "q-{}-{}-{}",
-        std::process::id(),
-        sequence,
-        plan.plan_hash.to_hex()
-    ))
-    .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
-    let quarantine_name = quarantine
-        .to_str()
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
-        .to_owned();
     let expected_identity = journal_file_identity(approved);
-    append_file_delete_event(
-        state,
-        ResourceJournalEventV1::FileDeletePrepared {
-            operation_id: operation_id.clone(),
-            subject_ref: plan.subject_ref.as_str().to_owned(),
-            logical_path: plan.logical_path.clone(),
-            plan_hash: plan.plan_hash,
-            binding_hash: plan.plan_hash,
-            quarantine_name: quarantine_name.clone(),
-            expected_identity: expected_identity.clone(),
-        },
-    )
-    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+    let (operation_id, quarantine_name) =
+        prepare_file_delete(state, plan, expected_identity.clone())?;
+    let quarantine = CString::new(quarantine_name.clone())
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
 
     // The rename is the linearization point. Crucially, its destination is an owner-only
     // authority arena outside the user-writable workspace, so no workspace writer can replace
@@ -1210,32 +1221,29 @@ fn delete_via_quarantine(
 }
 
 #[cfg(unix)]
-#[derive(Default)]
+#[derive(Debug)]
+struct PreparedFileDeleteV1 {
+    subject_ref: String,
+    logical_path: String,
+    plan_hash: CanonicalHash,
+    binding_hash: CanonicalHash,
+    quarantine_name: String,
+    expected_identity: ResourceJournalFileIdentityV1,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Default)]
 struct PendingFileDeleteV1 {
-    prepared: Option<(
-        String,
-        String,
-        String,
-        CanonicalHash,
-        CanonicalHash,
-        String,
-        ResourceJournalFileIdentityV1,
-    )>,
-    renamed: bool,
-    identity_observed: bool,
+    prepared: Option<PreparedFileDeleteV1>,
+    renamed: Option<ResourceJournalFileIdentityV1>,
+    identity_observed: Option<(ResourceJournalFileIdentityV1, bool)>,
     terminal: bool,
 }
 
 #[cfg(unix)]
-fn reconcile_file_delete_journal(
-    state: &FileDeleteAuthorityStateV1,
-    registry: &Arc<Mutex<BorrowedSubjectRegistryV1>>,
-) -> Result<(), ManagedFileAccessErrorV1> {
-    let records = state
-        .journal
-        .lock()
-        .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?
-        .file_delete_records();
+fn reduce_file_delete_journal(
+    records: Vec<(ResourceJournalRecordV1, ResourceJournalEventV1)>,
+) -> Result<BTreeMap<String, PendingFileDeleteV1>, ManagedFileAccessErrorV1> {
     let mut pending = BTreeMap::<String, PendingFileDeleteV1>::new();
     for (_, event) in records {
         match event {
@@ -1248,34 +1256,126 @@ fn reconcile_file_delete_journal(
                 quarantine_name,
                 expected_identity,
             } => {
-                pending.entry(operation_id).or_default().prepared = Some((
-                    subject_ref,
-                    logical_path,
-                    operation_id.clone(),
-                    plan_hash,
-                    binding_hash,
-                    quarantine_name,
-                    expected_identity,
-                ));
+                if pending.contains_key(&operation_id) {
+                    return Err(reconciliation_error(&operation_id, binding_hash));
+                }
+                pending.insert(
+                    operation_id,
+                    PendingFileDeleteV1 {
+                        prepared: Some(PreparedFileDeleteV1 {
+                            subject_ref,
+                            logical_path,
+                            plan_hash,
+                            binding_hash,
+                            quarantine_name,
+                            expected_identity,
+                        }),
+                        ..PendingFileDeleteV1::default()
+                    },
+                );
             }
-            ResourceJournalEventV1::FileDeleteRenamed { operation_id, .. } => {
-                pending.entry(operation_id).or_default().renamed = true;
+            ResourceJournalEventV1::FileDeleteRenamed {
+                operation_id,
+                quarantine_identity,
+            } => {
+                let state = pending.get_mut(&operation_id).ok_or_else(|| {
+                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
+                })?;
+                let prepared = state.prepared.as_ref().ok_or_else(|| {
+                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
+                })?;
+                if state.renamed.is_some() || state.identity_observed.is_some() || state.terminal {
+                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
+                }
+                if prepared.expected_identity != quarantine_identity {
+                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
+                }
+                state.renamed = Some(quarantine_identity);
             }
-            ResourceJournalEventV1::FileDeleteIdentityObserved { operation_id, .. } => {
-                pending.entry(operation_id).or_default().identity_observed = true;
+            ResourceJournalEventV1::FileDeleteIdentityObserved {
+                operation_id,
+                observed_identity,
+                matches,
+            } => {
+                let state = pending.get_mut(&operation_id).ok_or_else(|| {
+                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
+                })?;
+                let prepared = state.prepared.as_ref().ok_or_else(|| {
+                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
+                })?;
+                if state.renamed.is_none() || state.identity_observed.is_some() || state.terminal {
+                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
+                }
+                if matches != (prepared.expected_identity == observed_identity) {
+                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
+                }
+                state.identity_observed = Some((observed_identity, matches));
             }
-            ResourceJournalEventV1::FileDeleteRestored { operation_id, .. }
-            | ResourceJournalEventV1::FileDeleteDeleted { operation_id } => {
-                pending.entry(operation_id).or_default().terminal = true;
+            ResourceJournalEventV1::FileDeleteRestored { operation_id, .. } => {
+                let state = pending.get_mut(&operation_id).ok_or_else(|| {
+                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
+                })?;
+                let binding_hash = state
+                    .prepared
+                    .as_ref()
+                    .map_or(CanonicalHash::from_bytes([0; 32]), |prepared| {
+                        prepared.binding_hash
+                    });
+                if state.terminal {
+                    return Err(reconciliation_error(&operation_id, binding_hash));
+                }
+                state.terminal = true;
+            }
+            ResourceJournalEventV1::FileDeleteDeleted { operation_id } => {
+                let state = pending.get_mut(&operation_id).ok_or_else(|| {
+                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
+                })?;
+                let prepared = state.prepared.as_ref().ok_or_else(|| {
+                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
+                })?;
+                if state.renamed.is_none()
+                    || state
+                        .identity_observed
+                        .as_ref()
+                        .is_none_or(|(_, matches)| !*matches)
+                    || state.terminal
+                {
+                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
+                }
+                state.terminal = true;
             }
             ResourceJournalEventV1::FileDeleteReconciliationRequired {
                 operation_id,
                 binding_hash,
                 ..
-            } => return Err(reconciliation_error(&operation_id, binding_hash)),
+            } => {
+                if let Some(state) = pending.get(&operation_id)
+                    && state
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|prepared| prepared.binding_hash != binding_hash)
+                {
+                    return Err(reconciliation_error(&operation_id, binding_hash));
+                }
+                return Err(reconciliation_error(&operation_id, binding_hash));
+            }
             _ => {}
         }
     }
+    Ok(pending)
+}
+
+#[cfg(unix)]
+fn reconcile_file_delete_journal(
+    state: &FileDeleteAuthorityStateV1,
+    registry: &Arc<Mutex<BorrowedSubjectRegistryV1>>,
+) -> Result<(), ManagedFileAccessErrorV1> {
+    let records = state
+        .journal
+        .lock()
+        .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?
+        .file_delete_records();
+    let pending = reduce_file_delete_journal(records)?;
 
     let (subject_ref, root, _, _) = {
         let registry = registry
@@ -1309,7 +1409,7 @@ fn reconcile_file_delete_journal(
             state_for_operation
                 .prepared
                 .as_ref()
-                .map(|prepared| prepared.5.clone())
+                .map(|prepared| prepared.quarantine_name.clone())
         })
         .collect::<BTreeSet<_>>();
     for entry in std::fs::read_dir(&state.arena_root)
@@ -1338,21 +1438,18 @@ fn reconcile_file_delete_journal(
         if state_for_operation.terminal {
             continue;
         }
-        let Some((
-            event_subject,
-            logical_path,
-            _,
-            plan_hash,
-            binding_hash,
-            quarantine_name,
-            expected,
-        )) = state_for_operation.prepared
-        else {
+        let Some(prepared) = state_for_operation.prepared else {
             return Err(reconciliation_error(
                 &operation_id,
                 CanonicalHash::from_bytes([0; 32]),
             ));
         };
+        let event_subject = prepared.subject_ref;
+        let logical_path = prepared.logical_path;
+        let plan_hash = prepared.plan_hash;
+        let binding_hash = prepared.binding_hash;
+        let quarantine_name = prepared.quarantine_name;
+        let expected = prepared.expected_identity;
         if event_subject != subject_ref.as_str() {
             return Err(reconciliation_error(&operation_id, binding_hash));
         }
@@ -1362,7 +1459,16 @@ fn reconcile_file_delete_journal(
             ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
         })?;
 
-        if !state_for_operation.renamed {
+        if state_for_operation.renamed.is_none() {
+            let quarantine_current = open_at(
+                &arena,
+                &quarantine_name,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0,
+            )
+            .ok()
+            .and_then(|file| file.metadata().ok())
+            .map(|metadata| journal_file_identity(&metadata));
             let current = open_at(
                 &parent,
                 leaf.to_str().unwrap_or_default(),
@@ -1372,6 +1478,58 @@ fn reconcile_file_delete_journal(
             .ok()
             .and_then(|file| file.metadata().ok())
             .map(|metadata| journal_file_identity(&metadata));
+            if quarantine_current.is_some() {
+                if current.is_some() || quarantine_current.as_ref() != Some(&expected) {
+                    append_file_delete_event(
+                        state,
+                        ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                            operation_id: operation_id.clone(),
+                            binding_hash,
+                            reason: "prepared prefix has ambiguous quarantine/leaf state"
+                                .to_owned(),
+                        },
+                    )
+                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                    return Err(reconciliation_error(&operation_id, binding_hash));
+                }
+                append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteRenamed {
+                        operation_id: operation_id.clone(),
+                        quarantine_identity: expected.clone(),
+                    },
+                )
+                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteIdentityObserved {
+                        operation_id: operation_id.clone(),
+                        observed_identity: expected.clone(),
+                        matches: true,
+                    },
+                )
+                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                let status = unsafe { libc::unlinkat(arena.as_raw_fd(), quarantine.as_ptr(), 0) };
+                if status < 0 {
+                    let error = std::io::Error::last_os_error();
+                    append_file_delete_event(
+                        state,
+                        ResourceJournalEventV1::FileDeleteReconciliationRequired {
+                            operation_id: operation_id.clone(),
+                            binding_hash,
+                            reason: format!("fixed-forward delete failed: {error}"),
+                        },
+                    )
+                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                    return Err(reconciliation_error(&operation_id, binding_hash));
+                }
+                append_file_delete_event(
+                    state,
+                    ResourceJournalEventV1::FileDeleteDeleted { operation_id },
+                )
+                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
+                continue;
+            }
             if current.as_ref() == Some(&expected) {
                 append_file_delete_event(
                     state,
@@ -1441,7 +1599,7 @@ fn reconcile_file_delete_journal(
             .map(|metadata| journal_file_identity(&metadata))
             .map_err(relative_io_error)?;
         let matches = same_journal_file_identity(&expected, &observed);
-        if !state_for_operation.identity_observed {
+        if state_for_operation.identity_observed.is_none() {
             append_file_delete_event(
                 state,
                 ResourceJournalEventV1::FileDeleteIdentityObserved {
@@ -3796,6 +3954,393 @@ mod tests {
             std::fs::read_to_string(workspace.path().join("notes.txt")).expect("leaf"),
             "approved"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_restart_fixed_forwards_rename_without_renamed_record() {
+        let (workspace, service, plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let registry = Arc::clone(&service.registry);
+        let state = service.file_delete.as_ref().expect("delete state");
+        let arena_root = state.arena_root.clone();
+        let planned = service
+            .plans
+            .lock()
+            .expect("plans")
+            .get(&plan.plan_hash.to_hex())
+            .cloned()
+            .expect("planned file");
+        let (parent, leaf) = open_relative_parent(&planned).expect("parent");
+        let arena = open_file_delete_arena(state, &parent).expect("arena");
+        let approved = std::fs::symlink_metadata(workspace.path().join("notes.txt"))
+            .expect("approved metadata");
+        let operation_id = format!("prepared-renamed-{}", plan.plan_hash.to_hex());
+        let quarantine_name = format!("prepared-renamed-{}", plan.plan_hash.to_hex());
+        let quarantine = CString::new(quarantine_name.clone()).expect("quarantine name");
+        append_file_delete_event(
+            state,
+            ResourceJournalEventV1::FileDeletePrepared {
+                operation_id,
+                subject_ref: planned.subject_ref.as_str().to_owned(),
+                logical_path: planned.logical_path.clone(),
+                plan_hash: plan.plan_hash,
+                binding_hash: plan.plan_hash,
+                quarantine_name,
+                expected_identity: journal_file_identity(&approved),
+            },
+        )
+        .expect("prepared");
+        rename_noreplace_at(&parent, &leaf, &arena, &quarantine).expect("rename before journal");
+        drop(service);
+
+        let restarted = AuthorityManagedFileAccessServiceV1::new_for_test_with_journal(
+            registry,
+            arena_root,
+            workspace.path().join(".test-file-delete.journal.json"),
+        );
+        restarted
+            .reconcile_file_delete_journal()
+            .expect("fixed-forward reconciliation");
+        assert!(!workspace.path().join("notes.txt").exists());
+        assert_eq!(
+            std::fs::read_dir(workspace.path().join(".test-file-delete-arena"))
+                .expect("arena")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    fn reducer_record() -> ResourceJournalRecordV1 {
+        ResourceJournalRecordV1 {
+            sequence: 1,
+            previous_record_hash: hash(1),
+            payload_hash: hash(2),
+            record_hash: hash(3),
+            committed_frontier_hash: hash(4),
+        }
+    }
+
+    #[cfg(unix)]
+    fn reducer_prepared(operation_id: &str) -> ResourceJournalEventV1 {
+        ResourceJournalEventV1::FileDeletePrepared {
+            operation_id: operation_id.to_owned(),
+            subject_ref: "subject".to_owned(),
+            logical_path: "notes.txt".to_owned(),
+            plan_hash: hash(10),
+            binding_hash: hash(11),
+            quarantine_name: "q-op".to_owned(),
+            expected_identity: ResourceJournalFileIdentityV1 {
+                device: 1,
+                inode: 2,
+                link_count: 1,
+                size: 3,
+                file_type: 4,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    fn reducer_identity(device: u64, inode: u64) -> ResourceJournalFileIdentityV1 {
+        ResourceJournalFileIdentityV1 {
+            device,
+            inode,
+            link_count: 1,
+            size: 3,
+            file_type: 4,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_001_uses_durable_journal_frontier_for_operation_identity() {
+        let (_workspace, service, plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let planned = service
+            .plans
+            .lock()
+            .expect("plans")
+            .get(&plan.plan_hash.to_hex())
+            .cloned()
+            .expect("planned file");
+        let approved = std::fs::symlink_metadata(&planned.physical_path).expect("approved");
+        let state = service.file_delete.as_ref().expect("delete state");
+        let (operation_id, quarantine_name) =
+            prepare_file_delete(state, &planned, journal_file_identity(&approved))
+                .expect("durable preparation");
+        assert!(operation_id.starts_with("file-delete-"));
+        assert!(operation_id.contains(&plan.plan_hash.to_hex()));
+        assert!(quarantine_name.starts_with("q-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_002_reducer_accepts_one_complete_delete_phase_chain() {
+        let expected = reducer_identity(1, 2);
+        let records = vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRenamed {
+                    operation_id: "op".to_owned(),
+                    quarantine_identity: expected.clone(),
+                },
+            ),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteIdentityObserved {
+                    operation_id: "op".to_owned(),
+                    observed_identity: expected,
+                    matches: true,
+                },
+            ),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteDeleted {
+                    operation_id: "op".to_owned(),
+                },
+            ),
+        ];
+        assert!(
+            reduce_file_delete_journal(records)
+                .expect("complete chain")
+                .get("op")
+                .is_some_and(|state| state.terminal)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_003_reducer_rejects_duplicate_renamed_phase() {
+        let expected = reducer_identity(1, 2);
+        let error = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRenamed {
+                    operation_id: "op".to_owned(),
+                    quarantine_identity: expected.clone(),
+                },
+            ),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRenamed {
+                    operation_id: "op".to_owned(),
+                    quarantine_identity: expected,
+                },
+            ),
+        ])
+        .expect_err("duplicate renamed phase");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_004_reducer_rejects_identity_observation_before_rename() {
+        let error = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteIdentityObserved {
+                    operation_id: "op".to_owned(),
+                    observed_identity: reducer_identity(1, 2),
+                    matches: true,
+                },
+            ),
+        ])
+        .expect_err("early identity observation");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_005_reducer_rejects_true_match_claim_for_wrong_identity() {
+        let error = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRenamed {
+                    operation_id: "op".to_owned(),
+                    quarantine_identity: reducer_identity(1, 2),
+                },
+            ),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteIdentityObserved {
+                    operation_id: "op".to_owned(),
+                    observed_identity: reducer_identity(1, 99),
+                    matches: true,
+                },
+            ),
+        ])
+        .expect_err("wrong identity match claim");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_006_reducer_rejects_duplicate_identity_observation() {
+        let expected = reducer_identity(1, 2);
+        let error = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRenamed {
+                    operation_id: "op".to_owned(),
+                    quarantine_identity: expected.clone(),
+                },
+            ),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteIdentityObserved {
+                    operation_id: "op".to_owned(),
+                    observed_identity: expected.clone(),
+                    matches: true,
+                },
+            ),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteIdentityObserved {
+                    operation_id: "op".to_owned(),
+                    observed_identity: expected,
+                    matches: true,
+                },
+            ),
+        ])
+        .expect_err("duplicate identity observation");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_007_reducer_rejects_delete_after_restore_terminal_phase() {
+        let error = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRestored {
+                    operation_id: "op".to_owned(),
+                    reason: "restore".to_owned(),
+                },
+            ),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteDeleted {
+                    operation_id: "op".to_owned(),
+                },
+            ),
+        ])
+        .expect_err("delete after restore");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_f_del_008_reducer_rejects_unknown_operation_event() {
+        let error = reduce_file_delete_journal(vec![(
+            reducer_record(),
+            ResourceJournalEventV1::FileDeleteDeleted {
+                operation_id: "unknown".to_owned(),
+            },
+        )])
+        .expect_err("unknown operation");
+        assert!(matches!(
+            error,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_reducer_rejects_duplicate_prepared_and_phase_reversal() {
+        let duplicate = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (reducer_record(), reducer_prepared("op")),
+        ])
+        .expect_err("duplicate Prepared must block");
+        assert!(matches!(
+            duplicate,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+
+        let reversal = reduce_file_delete_journal(vec![
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRenamed {
+                    operation_id: "op".to_owned(),
+                    quarantine_identity: ResourceJournalFileIdentityV1 {
+                        device: 1,
+                        inode: 2,
+                        link_count: 1,
+                        size: 3,
+                        file_type: 4,
+                    },
+                },
+            ),
+            (reducer_record(), reducer_prepared("op")),
+        ])
+        .expect_err("phase reversal must block");
+        assert!(matches!(
+            reversal,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_reducer_rejects_wrong_identity_and_early_delete() {
+        let wrong_identity = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteRenamed {
+                    operation_id: "op".to_owned(),
+                    quarantine_identity: ResourceJournalFileIdentityV1 {
+                        device: 99,
+                        inode: 2,
+                        link_count: 1,
+                        size: 3,
+                        file_type: 4,
+                    },
+                },
+            ),
+        ])
+        .expect_err("wrong identity must block");
+        assert!(matches!(
+            wrong_identity,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
+
+        let early_delete = reduce_file_delete_journal(vec![
+            (reducer_record(), reducer_prepared("op")),
+            (
+                reducer_record(),
+                ResourceJournalEventV1::FileDeleteDeleted {
+                    operation_id: "op".to_owned(),
+                },
+            ),
+        ])
+        .expect_err("delete before identity observation must block");
+        assert!(matches!(
+            early_delete,
+            ManagedFileAccessErrorV1::ReconciliationRequired { .. }
+        ));
     }
 
     #[cfg(unix)]

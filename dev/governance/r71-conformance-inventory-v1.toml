@@ -1,13 +1,61 @@
-# RFC-0071 R71.9d frozen conformance inventory: all 220 required fault cases.
+# RFC-0071 R71.9l frozen conformance inventory: all 228 required fault cases.
 # Each case id maps exactly one injected frontier with a non-zero expected assertion count.
 # A runner implementing only part of a range, folding multiple frontiers into one case, or
 # filling holes with ignored/skipped cases fails.
 schema_version = 2
-manifest_hash = "r71-conformance-v3-220"
+manifest_hash = "r71-conformance-v4-228"
 
 [[cases]]
 case_id = "R71-F-EXP-001"
 case_name = "fault_EXP_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-001"
+case_name = "fault_DEL_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-002"
+case_name = "fault_DEL_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-003"
+case_name = "fault_DEL_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-004"
+case_name = "fault_DEL_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-005"
+case_name = "fault_DEL_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-006"
+case_name = "fault_DEL_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-007"
+case_name = "fault_DEL_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-008"
+case_name = "fault_DEL_008"
 fixture_class = "fault-campaign"
 expected_assertion_count = 1
 required = true

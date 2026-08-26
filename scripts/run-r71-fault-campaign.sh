@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Verify the frozen 220-case manifest before running any fixture and bind every manifest row to
+# Verify the frozen 228-case manifest before running any fixture and bind every manifest row to
 # exactly one discovered Rust test. The family-level cargo filters below are only accepted after
 # this bijection has been proven; a missing, skipped, duplicated, or extra fault test fails here.
 python3 - "$ROOT/dev/governance/r71-conformance-inventory-v1.toml" <<'MANIFEST_CHECK'
@@ -28,8 +28,8 @@ import re, subprocess, sys, tomllib
 from pathlib import Path
 doc = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 cases = doc.get("cases", [])
-if len(cases) != 220:
-    print(f"FAIL: manifest must contain exactly 220 required fault cases, found {len(cases)}", file=sys.stderr)
+if len(cases) != 228:
+    print(f"FAIL: manifest must contain exactly 228 required fault cases, found {len(cases)}", file=sys.stderr)
     sys.exit(1)
 ids = [c.get("case_id") for c in cases]
 if len(ids) != len(set(ids)):
@@ -133,6 +133,7 @@ run_suite() {
 
 run_suite recovery-gate - cargo test -p sigil-kernel --lib resource_recovery -- --format terse
 run_suite fault-jrn 8 cargo test -p sigil-resource-authority --lib r71_f_jrn -- --format terse
+run_suite fault-del 8 cargo test -p sigil-resource-authority --lib r71_f_del -- --format terse
 run_suite fault-boot 10 cargo test -p sigil-resource-authority --lib r71_f_boot -- --format terse
 run_suite fault-rec 10 cargo test -p sigil-resource-authority --lib r71_f_rec -- --format terse
 run_suite fault-abr 8 cargo test -p sigil-resource-authority --lib r71_f_abr -- --format terse
