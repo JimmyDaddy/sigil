@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -4191,6 +4192,11 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace should create");
+    std::fs::write(
+        workspace.join("README.md"),
+        "coordinator migration fixture\n",
+    )
+    .expect("fixture workspace file should create");
     let sessions = temp.path().join("sessions");
     std::fs::create_dir(&sessions).expect("session directory should create");
     let state_root = temp.path().join("state").to_string_lossy().into_owned();
@@ -4231,7 +4237,7 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
                     )
                 } else {
                     concat!(
-                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-list-call\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\",\\\"limit\\\":20}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-list-call\",\"type\":\"function\",\"function\":{\"name\":\"ls\",\"arguments\":\"{\\\"path\\\":\\\".\\\",\\\"limit\\\":20}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                         "data: [DONE]\n\n"
                     )
                 };
@@ -4344,10 +4350,11 @@ credential = {{ source = "none" }}
     let answer_registry = Arc::clone(&registry);
     let answer_session_id = session.id.clone();
     let answer_request_id = guidance.identity.request_id.as_str().to_owned();
+    let answer_request_id_for_command = answer_request_id.clone();
     let answer_receipt = tokio::task::spawn_blocking(move || {
         answer_registry.user_input_decision_command(
             &answer_session_id,
-            &answer_request_id,
+            &answer_request_id_for_command,
             HttpCommandEnvelope::new(
                 "revision-guidance-answer-1",
                 "client-1",
@@ -4443,9 +4450,87 @@ credential = {{ source = "none" }}
             .values()
             .any(|draft| draft.summary == "Revised coordinator migration")
     );
+    let revision_request_id = sigil_kernel::UserInputRequestId::new(answer_request_id.clone())
+        .expect("revision guidance request id should remain valid");
+    let attempt_id = sigil_kernel::plan_review_attempt_id_for_revision_ordinal(
+        &review_id,
+        &revision_request_id,
+        1,
+    );
+    let child_key = format!("pr-{}-research-0", attempt_id.as_str());
+    let child_scope_id = format!("{}-research", revision_run_id);
+    let child_session_log_path = temp
+        .path()
+        .join("state/managed/session-log")
+        .join(&child_key)
+        .join("records.jsonl");
+    let child_entries = JsonlSessionStore::read_entries(&child_session_log_path)
+        .expect("the production child durable log should remain readable after settlement");
+    assert!(
+        !child_entries.is_empty(),
+        "the production child durable log must contain the supervised tool results"
+    );
+    let mut durable_tool_names = BTreeSet::new();
+    let mut readable_tool_names = BTreeSet::new();
+    for entry in &child_entries {
+        let SessionLogEntry::ToolResultV3(result) = entry else {
+            continue;
+        };
+        let descriptor = result
+            .artifact
+            .descriptor()
+            .expect("every current-schema Revise tool result must publish a durable artifact");
+        descriptor
+            .validate()
+            .expect("Revise artifact descriptor must validate");
+        durable_tool_names.insert(result.tool_name.clone());
+        let page = driver
+            .read_managed_plan_review_child_artifact(
+                &child_key,
+                &child_scope_id,
+                &child_session_log_path,
+                &descriptor.artifact_ref,
+                sigil_kernel::session::ToolArtifactSelectorV1::ByteSlice {
+                    offset: 0,
+                    limit: descriptor.persisted_bytes.clamp(1, 1024) as u32,
+                },
+            )
+            .expect("Revise artifact descriptor must be readable through HTTP authority");
+        assert_eq!(page.artifact_ref, descriptor.artifact_ref);
+        assert_eq!(
+            result.facts.status, "ok",
+            "child durable result must prove the tool completed successfully: tool={} error={:?} details={:?}",
+            result.tool_name, result.facts.error, result.facts.tool_specific
+        );
+        if matches!(result.tool_name.as_str(), "ls" | "grep" | "read_file") {
+            let receipt = result
+                .facts
+                .tool_specific
+                .get("managed_access_receipt")
+                .and_then(serde_json::Value::as_object)
+                .expect("managed file result must persist its authority access receipt");
+            assert!(
+                receipt
+                    .get("receipt_hash")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|hash| !hash.is_empty()),
+                "managed access receipt must have a durable receipt hash"
+            );
+            readable_tool_names.insert(result.tool_name.clone());
+        }
+    }
+    assert_eq!(
+        readable_tool_names,
+        BTreeSet::from(["grep".to_owned(), "ls".to_owned(), "read_file".to_owned(),]),
+        "the three current-schema inspection tools must all succeed and publish artifacts; durable={durable_tool_names:?}"
+    );
+    assert!(
+        durable_tool_names.contains("submit_plan_draft"),
+        "submit_plan_draft must also leave a durable artifact-backed tool result"
+    );
     assert!(
         provider_call.load(Ordering::SeqCst) >= 4,
-        "revision must execute list_files, grep, read_file, and submit_plan_draft"
+        "revision must execute ls, grep, read_file, and submit_plan_draft"
     );
 
     // Ownership is released: the run leaves active_runs and the foreground slot is free.

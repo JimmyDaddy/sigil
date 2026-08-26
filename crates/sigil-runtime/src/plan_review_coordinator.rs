@@ -278,8 +278,24 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
             &key,
             &scope_id,
             session_log_path.clone(),
-        )
-        .map_err(|error| anyhow!("plan-review child artifact admission failed: {error}"))?;
+        );
+        let artifact_lease = match artifact_lease {
+            Ok(lease) => lease,
+            Err(error) => {
+                // The bundle is not constructed yet, so its explicit finish method cannot run.
+                // Settle the already-admitted session-log namespace here and surface both errors
+                // instead of relying on Drop to silently leave a pending admission behind.
+                let session_settlement = session_log_lease.finish();
+                return match session_settlement {
+                    Ok(()) => Err(anyhow!(
+                        "plan-review child artifact admission failed: {error}"
+                    )),
+                    Err(settlement) => Err(anyhow!(
+                        "plan-review child artifact admission failed: {error}; session-log settlement also failed: {settlement:#}"
+                    )),
+                };
+            }
+        };
         Ok(CurrentSchemaPlanReviewChildResourceBundleV1 {
             session_log_path,
             scope_id,

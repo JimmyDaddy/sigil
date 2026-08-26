@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use anyhow::Context;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -821,10 +823,19 @@ impl HttpProductionRunDriver {
         .with_scratch_control(options.scratch_control.clone());
         // RFC-0071 R71.6: the server surface runs the one-call boot attach (epoch + authority
         // composition, shared with CLI/TUI) and fails closed before serving.
+        let authority_workspace_root = sigil_kernel::RootConfig::load(&options.config_path)
+            .map(|config| {
+                sigil_kernel::resolve_workspace_root(
+                    &options.config_path,
+                    &options.launch_cwd,
+                    &config.workspace.root,
+                )
+            })
+            .unwrap_or_else(|_| options.launch_cwd.clone());
         let services = sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
             services,
             &options.config_path,
-            &options.launch_cwd,
+            &authority_workspace_root,
         )
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let mut options = options;
@@ -962,6 +973,30 @@ impl HttpProductionRunDriver {
             .lock()
             .map(|runs| runs.len())
             .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_managed_plan_review_child_artifact(
+        &self,
+        key: &str,
+        scope_id: &str,
+        session_log_path: &Path,
+        artifact_ref: &ToolArtifactRefV1,
+        selector: sigil_kernel::session::ToolArtifactSelectorV1,
+    ) -> Result<sigil_kernel::session::ToolArtifactPageV1> {
+        let composition = self
+            .services
+            .authority_composition()
+            .context("current-schema authority composition is unavailable")?;
+        let lease = sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+            Arc::clone(&composition.storage_writer),
+            key,
+            scope_id,
+            session_log_path.to_path_buf(),
+        )?;
+        let page = lease.store().read_page(artifact_ref, selector)?;
+        lease.finalize()?;
+        Ok(page)
     }
 
     fn attached_registry(&self) -> Result<Arc<HttpSessionRunRegistry>, HttpRunDriverError> {

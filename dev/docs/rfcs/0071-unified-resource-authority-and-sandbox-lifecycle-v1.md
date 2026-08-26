@@ -10639,3 +10639,14 @@ R71.9a–R71.9c 已分别提交为 `f9a60e53`、`61861bfc`、`4e9a14c0`：真实
 R71.9d 已形成独立 slice commit，包含真实 product-composition E2E、FIL 12 与 CSR 8 fault cases、220-case manifest/test bijection、durable journal admission binding/recovery/quarantine、跨 composer snapshot CAS、durable quota replay 与 TUI current-schema path-boundary 修复。staged full touched gate（26 个变更文件）已通过：整仓 cargo test、全部 doc tests、`cargo clippy --all-targets -- -D warnings`；TUI `1704 passed / 3 ignored`、runtime `1194 passed / 4 ignored`、tools `286 passed / 1 ignored`。
 
 这只证明 R71.9 implementation slice 与本地 engineering gate 已闭合，不等同于 §19.5 release qualification。最终 clean exact-SHA local release wrapper、固定五平台 hosted qualification 与 candidate/base/manifest evidence 尚未完成，因此 RFC 仍保持 **Gated / Partial / Not Frozen**，RFC-0070 仍不得开始。
+
+### R71.9f implementation update（2026-08-26）
+
+本轮关闭四项补充 implementation finding，但不改变 RFC 状态：
+
+- `PlannedFileAccessV1` 绑定批准时的 leaf physical identity；Unix effect 使用 root-FD、`openat`/no-follow、create-new 与 delete 前 `fstatat` 重验，并覆盖 inode replacement、hard-link、absent→present。
+- Windows executor 使用 `NtCreateFile(RootDirectory=...)` 的 handle-relative component traversal，拒绝 reparse point，以 `GetFileInformationByHandle` 的 volume/file ID 绑定对象，并在 mutation 前重新比较 identity。当前只完成 Windows GNU cross-compile，实机 qualification 仍待执行。
+- HTTP Revise regression 消费真实 `ls/grep/read_file/submit_plan_draft` 工具序列，从 child durable log 验证 `status=ok`、artifact descriptor/page 与 managed access receipt；同时修复 configured workspace root 被错误注册为 launch cwd 的 boot 接线。
+- child bundle 在第二阶段 Artifact admission 失败时显式 settlement 已取得的 SessionLog lease；normal/typed-error path 的 reprovision regression 通过，crash/kill 仍由 durable recovery qualification 证明。
+
+本轮 targeted gates、negative dependency/inventory、220-case fault campaign、fmt/diff 与 Windows authority cross-compile 已通过；新 candidate 尚未取得 clean exact-SHA local full 与 five-platform evidence，因此 RFC 继续 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停。

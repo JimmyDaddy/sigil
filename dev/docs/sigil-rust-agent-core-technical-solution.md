@@ -2785,3 +2785,9 @@ R71.9 已将真实 current-schema product path 的三个边界落到代码：wor
 当前仍是 `Gated / Partial / Not Frozen`。R71.9a–R71.9c 的提交为 `f9a60e53`、`61861bfc`、`4e9a14c0`；R71.9d 已在工作树中完成真实 E2E、FIL/CSR 20 个 required cases、220-case fault campaign 与 structural gates，但最终 clean exact-SHA full/five-platform qualification 尚未完成。RFC-0070 在此之前不得开始。
 
 R71.9d 随后已形成独立 slice commit，并通过 staged full touched gate：真实 TUI runner E2E、FIL 12、CSR 8、220-case manifest/test bijection、journal recovery/quarantine、durable quota replay、整仓测试、doc tests 与 strict clippy 均通过。该记录仍不改变 qualification boundary：最终 clean exact-SHA local release wrapper 与五平台 hosted evidence 尚未取得，故当前仍为 `Gated / Partial / Not Frozen`，RFC-0070 不得开始。
+
+### R71.9f file identity and cross-surface regression update（2026-08-26）
+
+R71.9f 补齐了真实产品路径审计暴露的四项实现缺口：borrowed file plan 现在绑定 expected leaf identity；Unix 使用 descriptor-relative `openat` 与 effect 前 identity revalidation；Windows 使用 `NtCreateFile` 的 parent-handle traversal、reparse 拒绝与 file-ID identity binding；HTTP Revise 测试从 child durable log 验证真实 `ls/grep/read_file` 成功、artifact page 与 access receipt；child bundle 的 partial admission 明确 settlement 已取得的 SessionLog lease。
+
+这些是 implementation/targeted gate 结果，不是 release qualification。Windows 仅完成 cross-compile，新的 tracked candidate 尚未运行 clean exact-SHA local full 或 five-platform hosted qualification；因此 RFC-0071 继续 `Gated / Partial / Not Frozen`，RFC-0070 继续暂停。

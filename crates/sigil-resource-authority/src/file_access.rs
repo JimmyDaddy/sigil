@@ -12,10 +12,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::fs::OpenOptions;
 #[cfg(unix)]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::SeekFrom;
+#[cfg(any(unix, windows))]
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -23,13 +25,17 @@ use std::sync::{Arc, Mutex};
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 use sigil_kernel::managed_execution::BorrowedResourceAccessReceiptV1;
+#[cfg(unix)]
+use sigil_kernel::managed_file_access::ManagedFileExecutionInputV1;
 use sigil_kernel::managed_file_access::{
     ManagedFileAccessAdmissionTokenV1, ManagedFileAccessErrorV1, ManagedFileAccessPlanRequestV1,
     ManagedFileAccessRequestV1, ManagedFileAccessResultV1, ManagedFileAccessServiceV1,
-    ManagedFileAdmissionBindingV1, ManagedFileExecutionInputV1, ManagedFileExecutionOutcomeV1,
-    ManagedFileExecutionRequestV1, ManagedFileOperationV1,
+    ManagedFileAdmissionBindingV1, ManagedFileExecutionOutcomeV1, ManagedFileExecutionRequestV1,
+    ManagedFileOperationV1,
 };
 use sigil_kernel::resource::{
     AuthorityGeneration, CanonicalHash, OpaquePermissionSubjectRef, ResourceAccessV1,
@@ -78,10 +84,10 @@ struct PlannedFileAccessV1 {
     #[cfg(not(unix))]
     root: PathBuf,
     logical_path: String,
-    #[cfg(not(unix))]
     physical_path: PathBuf,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     root_handle: Arc<std::fs::File>,
+    expected_physical_identity: Option<CanonicalHash>,
     operation: ManagedFileOperationV1,
     operation_digest: CanonicalHash,
     authority_generation: AuthorityGeneration,
@@ -161,14 +167,44 @@ impl AuthorityManagedFileAccessServiceV1 {
         Ok(candidate)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn open_workspace_root(root: &Path) -> Result<Arc<std::fs::File>, ManagedFileAccessErrorV1> {
-        OpenOptions::new()
+        #[cfg(unix)]
+        let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(root)
-            .map(Arc::new)
-            .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))
+            .open(root);
+        #[cfg(windows)]
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+            )
+            .custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS
+                    | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+            .open(root);
+        let file = file.map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+        #[cfg(windows)]
+        let identity =
+            crate::identity::canonical_identity_from_handle(root, &file).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+        #[cfg(not(windows))]
+        let identity = crate::identity::canonical_identity_from_metadata(
+            root,
+            &file.metadata().map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?,
+        );
+        if identity.is_symlink || !identity.is_directory {
+            return Err(ManagedFileAccessErrorV1::AliasCollision);
+        }
+        Ok(Arc::new(file))
     }
 
     fn hash_parts(parts: &[&[u8]]) -> CanonicalHash {
@@ -181,10 +217,85 @@ impl AuthorityManagedFileAccessServiceV1 {
         CanonicalHash::from_bytes(hasher.finalize().into())
     }
 
-    fn physical_identity(path: &Path, logical_path: &str) -> CanonicalHash {
-        crate::identity::canonical_identity(path)
-            .map(|identity| identity.digest)
-            .unwrap_or_else(|_| Self::hash_parts(&[logical_path.as_bytes()]))
+    fn expected_physical_identity(
+        path: &Path,
+        logical_path: &str,
+    ) -> Result<Option<CanonicalHash>, ManagedFileAccessErrorV1> {
+        let path_metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    error.to_string(),
+                ));
+            }
+        };
+        #[cfg(windows)]
+        let _path_metadata = path_metadata;
+        #[cfg(not(windows))]
+        let metadata = path_metadata;
+        #[cfg(windows)]
+        let identity = Self::windows_identity_for_path(path)?;
+        #[cfg(not(windows))]
+        let identity = crate::identity::canonical_identity_from_metadata(path, &metadata);
+        if identity.is_symlink || (identity.is_regular_file && identity.link_count > 1) {
+            return Err(ManagedFileAccessErrorV1::AliasCollision);
+        }
+        let _ = logical_path;
+        Ok(Some(identity.digest))
+    }
+
+    #[cfg(windows)]
+    fn windows_identity_for_path(
+        path: &Path,
+    ) -> Result<crate::identity::CanonicalLocalIdentity, ManagedFileAccessErrorV1> {
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+        let kind = if metadata.is_dir() {
+            WindowsOpenKind::Directory
+        } else {
+            WindowsOpenKind::Read
+        };
+        let file = windows_open_component(path, kind, false).map_err(relative_io_error)?;
+        crate::identity::canonical_identity_from_handle(path, &file)
+            .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))
+    }
+
+    fn current_physical_identity(
+        path: &Path,
+    ) -> Result<Option<CanonicalHash>, ManagedFileAccessErrorV1> {
+        let path_metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    error.to_string(),
+                ));
+            }
+        };
+        #[cfg(windows)]
+        let _path_metadata = path_metadata;
+        #[cfg(not(windows))]
+        let metadata = path_metadata;
+        #[cfg(windows)]
+        let identity = Self::windows_identity_for_path(path)?;
+        #[cfg(not(windows))]
+        let identity = crate::identity::canonical_identity_from_metadata(path, &metadata);
+        if identity.is_symlink || (identity.is_regular_file && identity.link_count > 1) {
+            return Err(ManagedFileAccessErrorV1::AliasCollision);
+        }
+        Ok(Some(identity.digest))
+    }
+
+    fn verify_planned_physical_identity(
+        plan: &PlannedFileAccessV1,
+    ) -> Result<(), ManagedFileAccessErrorV1> {
+        if Self::current_physical_identity(&plan.physical_path)? != plan.expected_physical_identity
+        {
+            return Err(ManagedFileAccessErrorV1::PlanStale);
+        }
+        Ok(())
     }
 
     fn current_root_identity(
@@ -236,7 +347,9 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         let (subject_ref, root, authority_generation, root_identity) = self.sole_workspace()?;
         let logical_path = request.logical_path.as_str().to_owned();
         let physical_path = Self::resolve_plan_path(&root, &logical_path)?;
-        #[cfg(unix)]
+        let expected_physical_identity =
+            Self::expected_physical_identity(&physical_path, &logical_path)?;
+        #[cfg(any(unix, windows))]
         let root_handle = Self::open_workspace_root(&root)?;
         let subject_binding_hash = Self::hash_parts(&[
             subject_ref.as_str().as_bytes(),
@@ -252,7 +365,9 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         let resolver_proof_digest = Self::hash_parts(&[
             root_identity.as_bytes(),
             physical_path.to_string_lossy().as_bytes(),
-            Self::physical_identity(&physical_path, &logical_path).as_bytes(),
+            expected_physical_identity
+                .unwrap_or_else(|| Self::hash_parts(&[b"missing-target", logical_path.as_bytes()]))
+                .as_bytes(),
         ]);
         let epoch_bytes = authority_generation.epoch.to_be_bytes();
         let plan_hash = Self::hash_parts(&[
@@ -284,10 +399,10 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
                     #[cfg(not(unix))]
                     root,
                     logical_path,
-                    #[cfg(not(unix))]
                     physical_path,
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     root_handle,
+                    expected_physical_identity,
                     operation: request.operation,
                     operation_digest,
                     authority_generation,
@@ -401,13 +516,18 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         {
             return Err(ManagedFileAccessErrorV1::AdmissionMismatch);
         }
-        // Validate the pathless plan before consuming the one-shot admission. A stale or
-        // cross-plan request must not burn a valid approval token.
-        let result = self.access(request.access.clone(), token)?;
+        // Revalidate both the borrowed root and the approved leaf before consuming the one-shot
+        // token. Root drift takes precedence because the leaf path is no longer meaningful when
+        // its authority boundary has been replaced. A replacement inode, absent-to-present
+        // transition, or hard-link alias must not reach an effectful open/truncate/unlink.
         let current_root = self.current_root_identity(&plan.subject_ref)?;
         if current_root != plan.root_identity {
             return Err(ManagedFileAccessErrorV1::SubjectIdentityDrift);
         }
+        Self::verify_planned_physical_identity(&plan)?;
+        // Validate the pathless plan before consuming the one-shot admission. A stale or
+        // cross-plan request must not burn a valid approval token.
+        let result = self.access(request.access.clone(), token)?;
         let PhysicalExecutionOutcomeV1 {
             payload,
             observed_bytes,
@@ -450,15 +570,12 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         if plan.plan_hash != request.plan_hash || plan.operation != request.operation {
             return Err(ManagedFileAccessErrorV1::AdmissionMismatch);
         }
+        Self::verify_planned_physical_identity(&plan)?;
         let current_root = self.current_root_identity(&plan.subject_ref)?;
         if current_root != plan.root_identity {
             return Err(ManagedFileAccessErrorV1::SubjectIdentityDrift);
         }
-        let raw = match read_relative_text(&plan) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(relative_io_error(error)),
-        };
+        let raw = read_relative_text(&plan)?;
         let safe = sigil_kernel::safe_persistence_text(&raw);
         let truncated = safe.len() > request.max_bytes;
         let payload = if truncated {
@@ -489,9 +606,19 @@ fn relative_io_error(error: std::io::Error) -> ManagedFileAccessErrorV1 {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn relative_io_error(error: std::io::Error) -> ManagedFileAccessErrorV1 {
     ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+}
+
+#[cfg(windows)]
+fn relative_io_error(error: std::io::Error) -> ManagedFileAccessErrorV1 {
+    use windows_sys::Win32::Foundation::ERROR_CANT_ACCESS_FILE;
+    if error.raw_os_error() == Some(ERROR_CANT_ACCESS_FILE as i32) {
+        ManagedFileAccessErrorV1::AliasCollision
+    } else {
+        ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+    }
 }
 
 #[cfg(unix)]
@@ -520,7 +647,7 @@ fn open_at(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn relative_components(logical_path: &str) -> Vec<&str> {
     logical_path
         .split('/')
@@ -532,26 +659,56 @@ fn relative_components(logical_path: &str) -> Vec<&str> {
 fn open_relative_path(
     plan: &PlannedFileAccessV1,
     flags: libc::c_int,
-) -> std::io::Result<std::fs::File> {
+) -> Result<std::fs::File, ManagedFileAccessErrorV1> {
+    open_relative_path_with_mode(plan, flags, false)
+}
+
+#[cfg(unix)]
+fn open_relative_path_for_write(
+    plan: &PlannedFileAccessV1,
+    flags: libc::c_int,
+) -> Result<std::fs::File, ManagedFileAccessErrorV1> {
+    open_relative_path_with_mode(plan, flags, true)
+}
+
+#[cfg(unix)]
+fn open_relative_path_with_mode(
+    plan: &PlannedFileAccessV1,
+    flags: libc::c_int,
+    allow_create_for_absent_plan: bool,
+) -> Result<std::fs::File, ManagedFileAccessErrorV1> {
     let components = relative_components(&plan.logical_path);
     if components.is_empty() {
-        return plan.root_handle.try_clone();
+        return plan.root_handle.try_clone().map_err(relative_io_error);
     }
-    let mut parent = plan.root_handle.try_clone()?;
+    let mut parent = plan.root_handle.try_clone().map_err(relative_io_error)?;
     for component in &components[..components.len() - 1] {
         parent = open_at(
             &parent,
             component,
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0,
-        )?;
+        )
+        .map_err(relative_io_error)?;
     }
-    open_at(
-        &parent,
-        components[components.len() - 1],
-        flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        0o600,
-    )
+    let mut leaf_flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    if allow_create_for_absent_plan && plan.expected_physical_identity.is_none() {
+        leaf_flags |= libc::O_CREAT | libc::O_EXCL;
+    }
+    let file = open_at(&parent, components[components.len() - 1], leaf_flags, 0o600)
+        .map_err(relative_io_error)?;
+    let identity = crate::identity::canonical_identity_from_metadata(
+        &plan.physical_path,
+        &file.metadata().map_err(relative_io_error)?,
+    );
+    if identity.is_symlink || (identity.is_regular_file && identity.link_count > 1) {
+        return Err(ManagedFileAccessErrorV1::AliasCollision);
+    }
+    match plan.expected_physical_identity {
+        Some(expected) if identity.digest != expected => Err(ManagedFileAccessErrorV1::PlanStale),
+        None if !allow_create_for_absent_plan => Err(ManagedFileAccessErrorV1::PlanStale),
+        _ => Ok(file),
+    }
 }
 
 #[cfg(unix)]
@@ -578,16 +735,28 @@ fn open_relative_parent(plan: &PlannedFileAccessV1) -> std::io::Result<(std::fs:
 }
 
 #[cfg(unix)]
-fn read_relative_text(plan: &PlannedFileAccessV1) -> std::io::Result<String> {
+fn read_relative_text(plan: &PlannedFileAccessV1) -> Result<String, ManagedFileAccessErrorV1> {
     let mut file = open_relative_path(plan, libc::O_RDONLY)?;
     let mut raw = String::new();
-    std::io::Read::read_to_string(&mut file, &mut raw)?;
+    std::io::Read::read_to_string(&mut file, &mut raw)
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
     Ok(raw)
 }
 
-#[cfg(not(unix))]
-fn read_relative_text(plan: &PlannedFileAccessV1) -> std::io::Result<String> {
+#[cfg(windows)]
+fn read_relative_text(plan: &PlannedFileAccessV1) -> Result<String, ManagedFileAccessErrorV1> {
+    let handle = windows_open_plan(plan, WindowsOpenKind::Read, false)?;
+    let mut file = handle.file;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+    Ok(raw)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_relative_text(plan: &PlannedFileAccessV1) -> Result<String, ManagedFileAccessErrorV1> {
     std::fs::read_to_string(&plan.physical_path)
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))
 }
 
 fn operation_tag(operation: ManagedFileOperationV1) -> &'static [u8] {
@@ -627,7 +796,7 @@ fn execute_physical(
                 max_bytes,
             },
         ) => {
-            let raw = read_relative_text(plan).map_err(relative_io_error)?;
+            let raw = read_relative_text(plan)?;
             let lines: Vec<&str> = raw.lines().collect();
             let selected = lines
                 .iter()
@@ -663,8 +832,7 @@ fn execute_physical(
                 max_depth,
             },
         ) => {
-            let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)
-                .map_err(relative_io_error)?;
+            let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)?;
             let mut entries = Vec::new();
             collect_entries_relative(&directory, "", recursive, max_depth, 0, &mut entries)?;
             entries.sort();
@@ -695,7 +863,7 @@ fn execute_physical(
             let regex = regex::Regex::new(&pattern).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
             })?;
-            let target = open_relative_path(plan, libc::O_RDONLY).map_err(relative_io_error)?;
+            let target = open_relative_path(plan, libc::O_RDONLY)?;
             let mut matches = Vec::new();
             let mut observed_bytes = 0u64;
             let display_path = if plan.logical_path == "." {
@@ -762,8 +930,7 @@ fn execute_physical(
             let matcher = regex::Regex::new(&wildcard).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
             })?;
-            let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)
-                .map_err(relative_io_error)?;
+            let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)?;
             let mut entries = Vec::new();
             collect_entries_relative(&directory, "", true, usize::MAX, 0, &mut entries)?;
             entries.retain(|entry| matcher.is_match(entry));
@@ -785,8 +952,10 @@ fn execute_physical(
             })
         }
         (ManagedFileOperationV1::Write, ManagedFileExecutionInputV1::Write { content }) => {
-            let mut file = open_relative_path(plan, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC)
-                .map_err(relative_io_error)?;
+            let mut file = open_relative_path_for_write(plan, libc::O_WRONLY)?;
+            file.set_len(0).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
             file.write_all(content.as_bytes()).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
             })?;
@@ -804,7 +973,7 @@ fn execute_physical(
             ManagedFileOperationV1::Edit,
             ManagedFileExecutionInputV1::Edit { old_text, new_text },
         ) => {
-            let mut file = open_relative_path(plan, libc::O_RDWR).map_err(relative_io_error)?;
+            let mut file = open_relative_path(plan, libc::O_RDWR)?;
             let mut current = String::new();
             file.read_to_string(&mut current).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
@@ -835,7 +1004,40 @@ fn execute_physical(
             })
         }
         (ManagedFileOperationV1::Delete, ManagedFileExecutionInputV1::Delete) => {
+            if plan.expected_physical_identity.is_none() {
+                return Err(ManagedFileAccessErrorV1::PlanStale);
+            }
+            // Pin and revalidate the approved leaf immediately before unlink. The no-follow
+            // open rejects symlink leaves and compares the opened inode/file identity; the
+            // parent fd then keeps the unlink rooted in the authority-owned directory.
+            let leaf_guard = open_relative_path(plan, libc::O_RDONLY)?;
             let (parent, leaf) = open_relative_parent(plan).map_err(relative_io_error)?;
+            let mut current = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: `current` is writable storage and `parent`/`leaf` are authority-bound.
+            let stat_status = unsafe {
+                libc::fstatat(
+                    parent.as_raw_fd(),
+                    leaf.as_ptr(),
+                    current.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if stat_status < 0 {
+                return Err(relative_io_error(std::io::Error::last_os_error()));
+            }
+            // SAFETY: fstatat initialized `current` on success.
+            let current = unsafe { current.assume_init() };
+            use std::os::unix::fs::MetadataExt;
+            let approved = leaf_guard.metadata().map_err(relative_io_error)?;
+            let same_identity = current.st_dev as u64 == approved.dev()
+                && current.st_ino == approved.ino()
+                && current.st_nlink as u64 == approved.nlink()
+                && current.st_size as i128 == approved.size() as i128
+                && (current.st_mode as u32 & libc::S_IFMT as u32)
+                    == (approved.mode() & libc::S_IFMT as u32);
+            if !same_identity {
+                return Err(ManagedFileAccessErrorV1::PlanStale);
+            }
             // SAFETY: `parent` is an authority-owned directory fd and `leaf` is a single
             // validated component; unlinkat never follows a symlink in the leaf position.
             let status = unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), 0) };
@@ -1017,7 +1219,641 @@ fn collect_grep_relative(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsRelativeHandle {
+    file: std::fs::File,
+    // Keeping ancestor handles open with FILE_SHARE_DELETE omitted pins the traversed directory
+    // chain while the final handle is used. Windows has no openat equivalent in std, so each
+    // component is opened and verified as a handle before the next component is resolved.
+    _ancestors: Vec<std::fs::File>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum WindowsOpenKind {
+    Read,
+    ReadWrite,
+    Write,
+    Delete,
+    Directory,
+}
+
+#[cfg(windows)]
+fn windows_open_component(
+    path: &Path,
+    kind: WindowsOpenKind,
+    create_new: bool,
+) -> std::io::Result<std::fs::File> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let mut options = OpenOptions::new();
+    match kind {
+        WindowsOpenKind::Read | WindowsOpenKind::Directory => {
+            options.read(true);
+        }
+        WindowsOpenKind::ReadWrite => {
+            options.read(true).write(true);
+        }
+        WindowsOpenKind::Write => {
+            options.write(true);
+        }
+        WindowsOpenKind::Delete => {
+            options.read(true).write(true);
+            options.access_mode(
+                windows_sys::Win32::Storage::FileSystem::DELETE
+                    | windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
+            );
+        }
+    }
+    options
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    if create_new {
+        options.create_new(true);
+    }
+    let file = options.open(path)?;
+    let identity = crate::identity::canonical_identity_from_handle(path, &file)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if identity.is_symlink || (identity.is_regular_file && identity.link_count > 1) {
+        return Err(std::io::Error::from_raw_os_error(
+            windows_sys::Win32::Foundation::ERROR_CANT_ACCESS_FILE as i32,
+        ));
+    }
+    if matches!(kind, WindowsOpenKind::Directory) && !identity.is_directory {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "managed file path component is not a directory",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn windows_open_relative_component(
+    directory: &std::fs::File,
+    component: &str,
+    kind: WindowsOpenKind,
+    create_new: bool,
+) -> std::io::Result<std::fs::File> {
+    use std::mem::size_of;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT,
+        FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, RtlNtStatusToDosError, STATUS_SUCCESS, SetLastError,
+        UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let name: Vec<u16> = component.encode_utf16().collect();
+    let byte_length = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path component too long")
+        })?;
+    let mut unicode_name = UNICODE_STRING {
+        Length: byte_length,
+        MaximumLength: byte_length,
+        Buffer: name.as_ptr() as *mut u16,
+    };
+    let desired_access = match kind {
+        WindowsOpenKind::Read | WindowsOpenKind::Directory => GENERIC_READ,
+        WindowsOpenKind::ReadWrite => GENERIC_READ | GENERIC_WRITE,
+        WindowsOpenKind::Write => GENERIC_WRITE,
+        WindowsOpenKind::Delete => DELETE | GENERIC_READ | FILE_READ_ATTRIBUTES,
+    } | SYNCHRONIZE
+        | FILE_READ_ATTRIBUTES;
+    let create_options = FILE_SYNCHRONOUS_IO_NONALERT
+        | FILE_OPEN_REPARSE_POINT
+        | match kind {
+            WindowsOpenKind::Directory => FILE_OPEN_FOR_BACKUP_INTENT,
+            WindowsOpenKind::Read
+            | WindowsOpenKind::ReadWrite
+            | WindowsOpenKind::Write
+            | WindowsOpenKind::Delete => FILE_NON_DIRECTORY_FILE,
+        };
+    let object_attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: directory.as_raw_handle() as _,
+        ObjectName: &mut unicode_name,
+        Attributes: 0,
+        SecurityDescriptor: std::ptr::null_mut(),
+        SecurityQualityOfService: std::ptr::null_mut(),
+    };
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let mut handle = std::ptr::null_mut();
+    // SAFETY: all pointers refer to live stack values for the duration of the syscall; the
+    // returned handle is transferred into File only after NtCreateFile reports success.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &object_attributes,
+            &mut io_status,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            if create_new { FILE_CREATE } else { FILE_OPEN },
+            create_options,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        unsafe { SetLastError(RtlNtStatusToDosError(status)) };
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: NtCreateFile returned an owned, valid handle on STATUS_SUCCESS.
+    let file = unsafe { std::fs::File::from_raw_handle(handle as _) };
+    let identity = crate::identity::canonical_identity_from_handle(Path::new(component), &file)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if identity.is_symlink || (identity.is_regular_file && identity.link_count > 1) {
+        return Err(std::io::Error::from_raw_os_error(
+            windows_sys::Win32::Foundation::ERROR_CANT_ACCESS_FILE as i32,
+        ));
+    }
+    if matches!(kind, WindowsOpenKind::Directory) && !identity.is_directory {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "managed file path component is not a directory",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn windows_open_relative_root(
+    root: &Path,
+    logical_path: &str,
+    kind: WindowsOpenKind,
+    create_new: bool,
+    root_guard: Option<&std::fs::File>,
+) -> Result<WindowsRelativeHandle, ManagedFileAccessErrorV1> {
+    let components = relative_components(logical_path);
+    if components.is_empty() {
+        let root_handle = match root_guard {
+            Some(root_guard) => root_guard.try_clone().map_err(relative_io_error)?,
+            None => windows_open_component(root, WindowsOpenKind::Directory, false)
+                .map_err(relative_io_error)?,
+        };
+        return Ok(WindowsRelativeHandle {
+            file: root_handle,
+            _ancestors: Vec::new(),
+        });
+    }
+    let mut parent = match root_guard {
+        Some(root_guard) => root_guard.try_clone().map_err(relative_io_error)?,
+        None => windows_open_component(root, WindowsOpenKind::Directory, false)
+            .map_err(relative_io_error)?,
+    };
+    let mut ancestors = Vec::new();
+    for component in &components[..components.len() - 1] {
+        let directory =
+            windows_open_relative_component(&parent, component, WindowsOpenKind::Directory, false)
+                .map_err(relative_io_error)?;
+        ancestors.push(parent);
+        parent = directory;
+    }
+    let file = windows_open_relative_component(
+        &parent,
+        components[components.len() - 1],
+        kind,
+        create_new,
+    )
+    .map_err(relative_io_error)?;
+    ancestors.push(parent);
+    Ok(WindowsRelativeHandle {
+        file,
+        _ancestors: ancestors,
+    })
+}
+
+#[cfg(windows)]
+fn windows_open_plan(
+    plan: &PlannedFileAccessV1,
+    kind: WindowsOpenKind,
+    allow_create_for_absent_plan: bool,
+) -> Result<WindowsRelativeHandle, ManagedFileAccessErrorV1> {
+    let create_new = allow_create_for_absent_plan && plan.expected_physical_identity.is_none();
+    let handle = windows_open_relative_root(
+        &plan.root,
+        &plan.logical_path,
+        kind,
+        create_new,
+        Some(plan.root_handle.as_ref()),
+    )?;
+    let identity =
+        crate::identity::canonical_identity_from_handle(&plan.physical_path, &handle.file)
+            .map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+    if identity.is_symlink || (identity.is_regular_file && identity.link_count > 1) {
+        return Err(ManagedFileAccessErrorV1::AliasCollision);
+    }
+    match plan.expected_physical_identity {
+        Some(expected) if identity.digest != expected => Err(ManagedFileAccessErrorV1::PlanStale),
+        None if !allow_create_for_absent_plan => Err(ManagedFileAccessErrorV1::PlanStale),
+        _ => Ok(handle),
+    }
+}
+
+#[cfg(windows)]
+fn windows_child_path(base: &str, name: &str) -> String {
+    if base == "." || base.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{base}/{name}")
+    }
+}
+
+#[cfg(windows)]
+fn windows_collect_entries(
+    root: &Path,
+    base: &str,
+    recursive: bool,
+    max_depth: usize,
+    depth: usize,
+    entries: &mut Vec<String>,
+    root_guard: Option<&std::fs::File>,
+) -> Result<(), ManagedFileAccessErrorV1> {
+    let directory =
+        windows_open_relative_root(root, base, WindowsOpenKind::Directory, false, root_guard)?;
+    let directory_path = if base == "." || base.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(base.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
+    };
+    for entry in std::fs::read_dir(&directory_path).map_err(relative_io_error)? {
+        let entry = entry.map_err(relative_io_error)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let relative = windows_child_path(base, &name);
+        let child =
+            windows_open_relative_root(root, &relative, WindowsOpenKind::Read, false, root_guard)?;
+        let is_directory = crate::identity::canonical_identity_from_handle(
+            &directory_path.join(&name),
+            &child.file,
+        )
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+        .is_directory;
+        entries.push(relative.clone());
+        if recursive && is_directory && depth < max_depth {
+            windows_collect_entries(
+                root,
+                &relative,
+                recursive,
+                max_depth,
+                depth + 1,
+                entries,
+                root_guard,
+            )?;
+        }
+    }
+    drop(directory);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_collect_grep(
+    root: &Path,
+    base: &str,
+    regex: &regex::Regex,
+    matches: &mut Vec<String>,
+    observed_bytes: &mut u64,
+    root_guard: Option<&std::fs::File>,
+) -> Result<(), ManagedFileAccessErrorV1> {
+    let handle = windows_open_relative_root(root, base, WindowsOpenKind::Read, false, root_guard)?;
+    let identity = crate::identity::canonical_identity_from_handle(
+        &if base == "." || base.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(base.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
+        },
+        &handle.file,
+    )
+    .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+    if identity.is_directory {
+        let directory_path = if base == "." || base.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(base.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
+        };
+        for entry in std::fs::read_dir(directory_path).map_err(relative_io_error)? {
+            let name = entry
+                .map_err(relative_io_error)?
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
+            windows_collect_grep(
+                root,
+                &windows_child_path(base, &name),
+                regex,
+                matches,
+                observed_bytes,
+                root_guard,
+            )?;
+        }
+        return Ok(());
+    }
+    let mut file = handle.file;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw).map_err(|_| {
+        ManagedFileAccessErrorV1::PhysicalExecutionFailed("non-UTF-8 or unreadable file".to_owned())
+    })?;
+    *observed_bytes = observed_bytes.saturating_add(raw.len() as u64);
+    for (index, line) in raw.lines().enumerate() {
+        if regex.is_match(line) {
+            matches.push(format!(
+                "{base}:{}:{}",
+                index + 1,
+                sigil_kernel::safe_persistence_text(line)
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_delete_handle(file: &std::fs::File) -> Result<(), ManagedFileAccessErrorV1> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        FILE_DISPOSITION_INFO_EX, FileDispositionInfoEx, SetFileInformationByHandle,
+    };
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    // SAFETY: the handle is live and the disposition struct is a valid input buffer.
+    let status = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as _,
+            FileDispositionInfoEx,
+            &disposition as *const _ as *const std::ffi::c_void,
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if status == 0 {
+        return Err(relative_io_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn execute_physical(
+    plan: &PlannedFileAccessV1,
+    input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
+) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
+    match (plan.operation, input) {
+        (
+            ManagedFileOperationV1::Read,
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Read {
+                offset,
+                limit,
+                max_bytes,
+            },
+        ) => {
+            let handle = windows_open_plan(plan, WindowsOpenKind::Read, false)?;
+            let mut file = handle.file;
+            let mut raw = String::new();
+            file.read_to_string(&mut raw).map_err(|_| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    "non-UTF-8 or unreadable file".to_owned(),
+                )
+            })?;
+            let lines: Vec<&str> = raw.lines().collect();
+            let selected = lines
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .copied()
+                .collect::<Vec<_>>();
+            let mut payload = selected
+                .iter()
+                .map(|line| sigil_kernel::safe_persistence_text(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let truncated =
+                offset.saturating_add(selected.len()) < lines.len() || payload.len() > max_bytes;
+            payload.truncate(payload.len().min(max_bytes));
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes: raw.len() as u64,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: selected.len() as u64,
+                total_lines: lines.len() as u64,
+                truncated,
+            })
+        }
+        (
+            ManagedFileOperationV1::List,
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::List {
+                recursive,
+                limit,
+                max_depth,
+            },
+        ) => {
+            let _ = windows_open_plan(plan, WindowsOpenKind::Directory, false)?;
+            let mut entries = Vec::new();
+            windows_collect_entries(
+                &plan.root,
+                &plan.logical_path,
+                recursive,
+                max_depth,
+                0,
+                &mut entries,
+                Some(plan.root_handle.as_ref()),
+            )?;
+            entries.sort();
+            let total = entries.len();
+            let truncated = total > limit;
+            entries.truncate(limit);
+            let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes: 0,
+                returned_entries: entries.len() as u64,
+                total_entries: total as u64,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated,
+            })
+        }
+        (
+            ManagedFileOperationV1::Grep,
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Grep {
+                pattern,
+                limit,
+                max_bytes,
+            },
+        ) => {
+            let regex = regex::Regex::new(&pattern).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            let mut matches = Vec::new();
+            let mut observed_bytes = 0;
+            windows_collect_grep(
+                &plan.root,
+                &plan.logical_path,
+                &regex,
+                &mut matches,
+                &mut observed_bytes,
+                Some(plan.root_handle.as_ref()),
+            )?;
+            let total = matches.len();
+            let truncated = total > limit;
+            matches.truncate(limit);
+            let mut payload = matches.join("\n");
+            let byte_truncated = payload.len() > max_bytes;
+            payload.truncate(payload.len().min(max_bytes));
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes,
+                returned_entries: 0,
+                total_entries: total as u64,
+                returned_lines: matches.len() as u64,
+                total_lines: 0,
+                truncated: truncated || byte_truncated,
+            })
+        }
+        (
+            ManagedFileOperationV1::Glob,
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Glob { pattern, limit },
+        ) => {
+            let wildcard = format!(
+                "^{}$",
+                pattern
+                    .split('*')
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join(".*")
+            );
+            let matcher = regex::Regex::new(&wildcard).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            let _ = windows_open_plan(plan, WindowsOpenKind::Directory, false)?;
+            let mut entries = Vec::new();
+            windows_collect_entries(
+                &plan.root,
+                &plan.logical_path,
+                true,
+                usize::MAX,
+                0,
+                &mut entries,
+                Some(plan.root_handle.as_ref()),
+            )?;
+            entries.retain(|entry| matcher.is_match(entry));
+            entries.sort();
+            let total = entries.len();
+            let truncated = total > limit;
+            entries.truncate(limit);
+            let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes: 0,
+                returned_entries: entries.len() as u64,
+                total_entries: total as u64,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated,
+            })
+        }
+        (
+            ManagedFileOperationV1::Write,
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Write { content },
+        ) => {
+            let handle = windows_open_plan(plan, WindowsOpenKind::Write, true)?;
+            let mut file = handle.file;
+            file.set_len(0).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            file.write_all(content.as_bytes()).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload: "managed file write applied".to_owned(),
+                observed_bytes: content.len() as u64,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated: false,
+            })
+        }
+        (
+            ManagedFileOperationV1::Edit,
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Edit {
+                old_text,
+                new_text,
+            },
+        ) => {
+            let handle = windows_open_plan(plan, WindowsOpenKind::ReadWrite, false)?;
+            let mut file = handle.file;
+            let mut current = String::new();
+            file.read_to_string(&mut current).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            if !current.contains(&old_text) {
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    "edit target text was not found".to_owned(),
+                ));
+            }
+            let updated = current.replacen(&old_text, &new_text, 1);
+            file.set_len(0).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            file.rewind().map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            file.write_all(updated.as_bytes()).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload: "managed file edit applied".to_owned(),
+                observed_bytes: updated.len() as u64,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated: false,
+            })
+        }
+        (
+            ManagedFileOperationV1::Delete,
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Delete,
+        ) => {
+            let handle = windows_open_plan(plan, WindowsOpenKind::Delete, false)?;
+            windows_delete_handle(&handle.file)?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload: "managed file delete applied".to_owned(),
+                observed_bytes: 0,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated: false,
+            })
+        }
+        _ => Err(ManagedFileAccessErrorV1::AdmissionMismatch),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
@@ -1240,7 +2076,7 @@ fn execute_physical(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn collect_entries(
     root: &Path,
     current: &Path,
@@ -1277,7 +2113,7 @@ fn collect_entries(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn collect_grep(
     root: &Path,
     current: &Path,
@@ -1900,6 +2736,85 @@ mod tests {
             true,
             "handle-relative alias replacement is covered by Unix authority tests"
         );
+    }
+
+    #[test]
+    fn managed_file_regular_inode_replacement_is_plan_stale() {
+        let (workspace, service, plan) = registered_read_plan(Some("inside"));
+        std::fs::rename(
+            workspace.path().join("notes.txt"),
+            workspace.path().join("notes.original"),
+        )
+        .expect("move planned leaf");
+        std::fs::write(workspace.path().join("notes.txt"), "replacement")
+            .expect("replace with a regular file");
+        let (request, token) = execution_request_for_plan(
+            &plan,
+            ManagedFileExecutionInputV1::Read {
+                offset: 0,
+                limit: 1,
+                max_bytes: 64,
+            },
+        );
+        assert!(matches!(
+            service.execute(request, token),
+            Err(ManagedFileAccessErrorV1::PlanStale)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("notes.txt")).expect("replacement"),
+            "replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_hard_link_replacement_is_alias_collision() {
+        let (workspace, service, plan) = registered_read_plan(Some("inside"));
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "outside-secret").expect("outside file");
+        std::fs::rename(
+            workspace.path().join("notes.txt"),
+            workspace.path().join("notes.original"),
+        )
+        .expect("move planned leaf");
+        std::fs::hard_link(&outside_file, workspace.path().join("notes.txt"))
+            .expect("replace with a hard link");
+        let (request, token) = execution_request_for_plan(
+            &plan,
+            ManagedFileExecutionInputV1::Read {
+                offset: 0,
+                limit: 1,
+                max_bytes: 64,
+            },
+        );
+        assert!(matches!(
+            service.execute(request, token),
+            Err(ManagedFileAccessErrorV1::AliasCollision)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside_file).expect("outside secret"),
+            "outside-secret"
+        );
+    }
+
+    #[test]
+    fn managed_file_absent_to_present_transition_is_plan_stale() {
+        let (workspace, service, plan) = registered_read_plan(None);
+        std::fs::write(workspace.path().join("notes.txt"), "created-after-plan")
+            .expect("create planned leaf after approval");
+        let (request, token) = execution_request_for_plan(
+            &plan,
+            ManagedFileExecutionInputV1::Read {
+                offset: 0,
+                limit: 1,
+                max_bytes: 64,
+            },
+        );
+        assert!(matches!(
+            service.execute(request, token),
+            Err(ManagedFileAccessErrorV1::PlanStale)
+        ));
     }
 
     #[test]

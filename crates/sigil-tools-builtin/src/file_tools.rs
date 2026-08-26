@@ -67,6 +67,14 @@ pub(crate) struct ListTool;
 pub(crate) struct GlobTool;
 pub(crate) struct GrepTool;
 
+#[cfg(not(test))]
+fn managed_access_receipt_value(
+    outcome: &sigil_kernel::managed_file_access::ManagedFileExecutionOutcomeV1,
+) -> Result<Value> {
+    serde_json::to_value(&outcome.access_receipt)
+        .map_err(|error| anyhow::anyhow!("failed to encode managed file access receipt: {error}"))
+}
+
 #[cfg(test)]
 enum ReadFileLoad {
     File {
@@ -106,6 +114,7 @@ async fn execute_managed_grep(
             },
         )
         .map_err(|error| anyhow::anyhow!("managed file access refused: {error}"))?;
+    let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     let payload = outcome.payload;
     let bytes = payload.len() as u64;
     Ok(ToolResult::ok(
@@ -119,6 +128,9 @@ async fn execute_managed_grep(
             returned_bytes: Some(bytes),
             returned_matches: Some(outcome.returned_lines),
             total_matches: Some(outcome.total_entries),
+            details: json!({
+                "managed_access_receipt": managed_access_receipt,
+            }),
             ..ToolResultMeta::default()
         },
     ))
@@ -227,6 +239,10 @@ async fn execute_managed_read(
     if let Some(language) = read_file_language(&path) {
         details.insert("language".to_owned(), json!(language));
     }
+    details.insert(
+        "managed_access_receipt".to_owned(),
+        managed_access_receipt_value(&outcome)?,
+    );
     let payload = outcome.payload;
     Ok(ToolResult::ok(
         call_id,
@@ -667,13 +683,17 @@ async fn execute_managed_write(
             sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Write { content },
         )
         .map_err(|error| anyhow::anyhow!("managed file write refused: {error}"))?;
+    let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
         tool.spec().name,
         outcome.payload,
         ToolResultMeta {
             bytes: Some(outcome.observed_bytes),
-            details: json!({"path": path}),
+            details: json!({
+                "path": path,
+                "managed_access_receipt": managed_access_receipt,
+            }),
             ..ToolResultMeta::default()
         },
     ))
@@ -859,13 +879,17 @@ async fn execute_managed_edit(
             },
         )
         .map_err(|error| anyhow::anyhow!("managed file edit refused: {error}"))?;
+    let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
         tool.spec().name,
         outcome.payload,
         ToolResultMeta {
             bytes: Some(outcome.observed_bytes),
-            details: json!({"path": path}),
+            details: json!({
+                "path": path,
+                "managed_access_receipt": managed_access_receipt,
+            }),
             ..ToolResultMeta::default()
         },
     ))
@@ -1012,12 +1036,16 @@ async fn execute_managed_delete(
             sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Delete,
         )
         .map_err(|error| anyhow::anyhow!("managed file delete refused: {error}"))?;
+    let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
         tool.spec().name,
         outcome.payload,
         ToolResultMeta {
-            details: json!({"path": path}),
+            details: json!({
+                "path": path,
+                "managed_access_receipt": managed_access_receipt,
+            }),
             ..ToolResultMeta::default()
         },
     ))
@@ -1116,6 +1144,7 @@ async fn execute_managed_list(
             },
         )
         .map_err(|error| anyhow::anyhow!("managed file access refused: {error}"))?;
+    let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
         tool.spec().name,
@@ -1125,6 +1154,9 @@ async fn execute_managed_list(
             limit_lines: Some(limit as u64),
             returned_entries: Some(outcome.returned_entries),
             total_entries: Some(outcome.total_entries),
+            details: json!({
+                "managed_access_receipt": managed_access_receipt,
+            }),
             ..ToolResultMeta::default()
         },
     ))
@@ -1210,6 +1242,7 @@ async fn execute_managed_glob(
             sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Glob { pattern, limit },
         )
         .map_err(|error| anyhow::anyhow!("managed file access refused: {error}"))?;
+    let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
         tool.spec().name,
@@ -1219,6 +1252,9 @@ async fn execute_managed_glob(
             limit_lines: Some(limit as u64),
             returned_entries: Some(outcome.returned_entries),
             total_entries: Some(outcome.total_entries),
+            details: json!({
+                "managed_access_receipt": managed_access_receipt,
+            }),
             ..ToolResultMeta::default()
         },
     ))

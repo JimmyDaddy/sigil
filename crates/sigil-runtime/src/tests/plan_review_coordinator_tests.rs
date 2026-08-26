@@ -219,6 +219,54 @@ fn r71_f_csr_007_missing_artifact_authority_fails_before_child_bundle() -> Resul
 }
 
 #[test]
+fn managed_child_partial_artifact_admission_settles_session_log() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let execution_temp = temp.path().join("execution-temp");
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&execution_temp)?;
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        &[
+            Channel::SessionLog,
+            Channel::ArtifactStaging,
+            Channel::ArtifactStore,
+        ],
+    )?;
+    let (_, request) = session_with_route_decision()?;
+    let key = format!("pr-{}-research-0", request.attempt_id.as_str(),);
+    let staging_path = composition
+        .storage_writer
+        .managed_named_leaf_path(Channel::ArtifactStaging, &key)?;
+    std::fs::create_dir_all(staging_path.parent().context("staging parent")?)?;
+    // Force the second-stage artifact admission to fail after SessionLog was admitted. A regular
+    // file is portable across Unix/Windows and is rejected before the authority can mutate it.
+    std::fs::write(&staging_path, b"not-a-directory")?;
+
+    let provisioner = composition.plan_review_child_resource_provisioner();
+    let error = provisioner
+        .provision(&request, PlanReviewChildResourceKindV1::Research, 0)
+        .expect_err("artifact admission should fail on the occupied staging leaf");
+    assert!(error.to_string().contains("artifact"));
+
+    // If the partial bundle path relied on Drop, this exact retry would still be blocked by the
+    // first SessionLog admission. Successful re-admission proves the explicit settlement ran.
+    let session_lease = composition
+        .storage_writer
+        .acquire_named(Channel::SessionLog, &key)?;
+    composition.storage_writer.finalize(session_lease)?;
+    Ok(())
+}
+
+#[test]
 fn r71_f_csr_008_child_scope_is_retry_stable_and_kind_bound() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
     use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
