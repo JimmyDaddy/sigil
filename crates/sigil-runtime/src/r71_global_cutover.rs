@@ -347,37 +347,32 @@ pub struct RuntimeGlobalCutoverV1 {
 }
 
 impl RuntimeGlobalCutoverV1 {
-    /// Builds the cutover decision for a surface. The manifest is content-addressed and the
-    /// gate is evaluated immediately; the decision is immutable. Seam kinds are read from the
-    /// composed surface (a probe can never claim a seam the composition does not hold).
-    pub fn evaluate(
+    /// Builds the current-schema cutover decision for a surface. The manifest is
+    /// content-addressed and the gate is evaluated immediately; the decision is immutable. Seam
+    /// kinds are read from the composed surface (a probe can never claim a seam the composition
+    /// does not hold).
+    pub fn evaluate_current_schema(
         instance_id: impl Into<String>,
         application_generation: u64,
         authority_generation: AuthorityGeneration,
         services: &RuntimeManagedResourceServicesV1,
         recovery: &RuntimeResourceRecoveryFacadeV1,
-        selected_epoch: StartupEpochV1,
     ) -> Self {
         let mut manifest = CutoverManifestV1 {
             schema_version: 1,
             application_instance_id: instance_id.into(),
-            selected_epoch,
+            selected_epoch: StartupEpochV1::NewCurrentSchema,
             application_generation,
             authority_generation_digest: authority_generation.instance_hash,
             mandatory_readiness: Vec::new(),
             manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
         };
-        match selected_epoch {
-            StartupEpochV1::Legacy => {}
-            StartupEpochV1::NewCurrentSchema => {
-                manifest.mandatory_readiness = probe_mandatory_adapters(
-                    services,
-                    recovery,
-                    probe_source::probe(application_generation),
-                    application_generation,
-                );
-            }
-        }
+        manifest.mandatory_readiness = probe_mandatory_adapters(
+            services,
+            recovery,
+            probe_source::probe(application_generation),
+            application_generation,
+        );
         manifest.manifest_hash = compute_manifest_hash(&manifest);
         let gate_error = validate_cutover_manifest(&manifest).err();
         Self {
@@ -385,6 +380,61 @@ impl RuntimeGlobalCutoverV1 {
             gate_ok: gate_error.is_none(),
             gate_error,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evaluate_for_test(
+        instance_id: impl Into<String>,
+        application_generation: u64,
+        authority_generation: AuthorityGeneration,
+        services: &RuntimeManagedResourceServicesV1,
+        recovery: &RuntimeResourceRecoveryFacadeV1,
+        selected_epoch: StartupEpochV1,
+    ) -> Self {
+        if selected_epoch == StartupEpochV1::NewCurrentSchema {
+            return Self::evaluate_current_schema(
+                instance_id,
+                application_generation,
+                authority_generation,
+                services,
+                recovery,
+            );
+        }
+        let instance_id = instance_id.into();
+        let mut manifest = CutoverManifestV1 {
+            schema_version: 1,
+            application_instance_id: instance_id,
+            selected_epoch,
+            application_generation,
+            authority_generation_digest: authority_generation.instance_hash,
+            mandatory_readiness: Vec::new(),
+            manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
+        };
+        manifest.manifest_hash = compute_manifest_hash(&manifest);
+        Self {
+            manifest,
+            gate_ok: true,
+            gate_error: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evaluate(
+        instance_id: impl Into<String>,
+        application_generation: u64,
+        authority_generation: AuthorityGeneration,
+        services: &RuntimeManagedResourceServicesV1,
+        recovery: &RuntimeResourceRecoveryFacadeV1,
+        selected_epoch: StartupEpochV1,
+    ) -> Self {
+        Self::evaluate_for_test(
+            instance_id,
+            application_generation,
+            authority_generation,
+            services,
+            recovery,
+            selected_epoch,
+        )
     }
 
     /// The immutable, content-addressed cutover manifest.
@@ -414,10 +464,16 @@ impl RuntimeGlobalCutoverV1 {
         sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1::from_manifest(&self.manifest)
     }
 
-    /// Rehydrates an already validated manifest into the immutable runtime decision used by a
-    /// worker or a later product surface. The manifest is validated again at the boundary so a
-    /// caller cannot manufacture a green current-schema decision from an unchecked DTO.
-    pub fn from_validated_manifest(manifest: CutoverManifestV1) -> Result<Self, CutoverErrorV1> {
+    /// Rehydrates an already validated current-schema manifest into the immutable runtime
+    /// decision used by a worker or a later product surface. Historical legacy manifests remain
+    /// inspectable as DTOs, but cannot be reintroduced as a runtime authority decision.
+    #[cfg(test)]
+    pub(crate) fn from_validated_manifest(
+        manifest: CutoverManifestV1,
+    ) -> Result<Self, CutoverErrorV1> {
+        if manifest.selected_epoch != StartupEpochV1::NewCurrentSchema {
+            return Err(CutoverErrorV1::AuthorityUnavailable);
+        }
         validate_cutover_manifest(&manifest)?;
         let gate_error = validate_cutover_manifest(&manifest).err();
         Ok(Self {
@@ -484,13 +540,12 @@ pub enum CutoverPersistenceErrorV1 {
 
 impl RuntimeGlobalCutoverV1 {
     /// Persists the content-addressed manifest as a private (0600) regular file. The boot owner
-    /// writes it once per generation; the next boot replays it against the registry.
+    /// atomically publishes the current-instance pointer; the decision bytes remain immutable
+    /// once published for that application instance.
     pub fn save_manifest(&self, path: &std::path::Path) -> Result<(), CutoverPersistenceErrorV1> {
         let bytes = serde_json::to_vec(self.manifest())
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
-        std::fs::write(path, bytes)
-            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
-        sigil_kernel::config::secure_private_path_permissions(path)
+        sigil_kernel::atomic_publish_private_file(path, &bytes)
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
         Ok(())
     }
@@ -794,6 +849,14 @@ mod tests {
         );
         assert!(cutover.gate().is_ok());
         assert_eq!(cutover.manifest().mandatory_readiness.len(), 0);
+    }
+
+    #[test]
+    fn resource_global_cutover_production_rehydration_rejects_legacy_manifest() {
+        let legacy = RuntimeGlobalCutoverV1::legacy_decision("inst-legacy", 1, authority());
+        let error = RuntimeGlobalCutoverV1::from_validated_manifest(legacy.manifest().clone())
+            .expect_err("legacy must remain diagnostic-only");
+        assert_eq!(error, CutoverErrorV1::AuthorityUnavailable);
     }
 
     #[test]

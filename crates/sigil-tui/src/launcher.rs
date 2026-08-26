@@ -855,17 +855,22 @@ where
 }
 
 #[cfg(not(test))]
-fn install_current_boot_transaction(
+#[doc(hidden)]
+pub fn install_current_boot_transaction(
     app: &mut AppState,
     config_path: &Path,
-    _config: RootConfig,
+    config: RootConfig,
     launch_cwd: &Path,
 ) -> Result<RootConfig> {
-    // Re-read the persisted bytes through the runtime authority loader after the atomic save.
-    // This binds the replacement transaction to the exact file identity it will use.
-    let transaction =
-        sigil_runtime::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
-            .map_err(anyhow::Error::new)?;
+    // The surface owns this already validated config. The authority boot owner observes only the
+    // persisted source identity and composes against this value, so transient session overrides
+    // (notably `/model`) survive the worker restart without being written to the default config.
+    let transaction = sigil_runtime::r71_authority_composition::boot_current_schema_with_config(
+        config_path,
+        launch_cwd,
+        config,
+    )
+    .map_err(anyhow::Error::new)?;
     let (config, workspace_root, paths, boot_cutover, composition, _registration) =
         transaction.into_published_parts();
     app.set_frozen_boot_paths(workspace_root, paths);

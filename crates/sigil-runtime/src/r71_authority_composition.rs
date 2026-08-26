@@ -373,6 +373,24 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             .map(Some)
     }
 
+    /// Builds one snapshot from a configuration value that has already been validated by the
+    /// owning surface. The config path is still observed for its current private-file identity,
+    /// but its bytes are deliberately not parsed again. This is the replacement path used for
+    /// transient session runtime configuration such as `/model`.
+    pub fn from_validated_config(
+        config_path: &Path,
+        config: sigil_kernel::RootConfig,
+        launch_cwd: &Path,
+    ) -> Result<Self, BootAuthorityErrorV1> {
+        let Some((_, config_path_identity)) = load_config_payload_with_identity(config_path)?
+        else {
+            return Err(BootAuthorityErrorV1::Config(
+                "current-schema authority config is unavailable".to_owned(),
+            ));
+        };
+        Self::from_loaded_with_identity(config_path, config, launch_cwd, config_path_identity)
+    }
+
     #[must_use]
     pub(crate) fn config(&self) -> &sigil_kernel::RootConfig {
         &self.config
@@ -808,6 +826,21 @@ pub fn boot_current_schema(
     build_current_boot_transaction(snapshot)
 }
 
+/// Boots the current-schema authority transaction from an already validated runtime config.
+/// Unlike [`boot_current_schema`], this does not reload or replace the config value from disk;
+/// it only observes the config file identity so authority paths remain bound to the same source
+/// file. This is required for session-scoped runtime overrides that must survive a worker
+/// restart without mutating the persisted default configuration.
+pub fn boot_current_schema_with_config(
+    config_path: &Path,
+    launch_cwd: &Path,
+    config: sigil_kernel::RootConfig,
+) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
+    let snapshot =
+        ValidatedAuthorityConfigSnapshotV1::from_validated_config(config_path, config, launch_cwd)?;
+    build_current_boot_transaction(snapshot)
+}
+
 /// Builds the current-schema authority composition for one valid boot surface. Publication of the
 /// cutover manifest belongs to [`build_current_boot_transaction`], after workspace activation and
 /// journal reconciliation have completed.
@@ -885,13 +918,12 @@ pub fn compose_current_boot_authority(
     )
     .map_err(BootAuthorityErrorV1::Composition)?;
     let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
-    let first = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
+    let first = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate_current_schema(
         instance_id.clone(),
         1,
         authority,
         &provisional.services,
         &recovery,
-        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema,
     );
     first.gate().map_err(|error| {
         BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
@@ -912,13 +944,12 @@ pub fn compose_current_boot_authority(
         &declared,
     )
     .map_err(BootAuthorityErrorV1::Composition)?;
-    let decision = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
+    let decision = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate_current_schema(
         instance_id,
         1,
         authority,
         &composition.services,
         &recovery,
-        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema,
     );
     decision.gate().map_err(|error| {
         BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
@@ -946,20 +977,33 @@ fn publish_current_boot_manifest(
                     crate::r71_global_cutover::CutoverBootErrorV1::Persistence(error),
                 )
             })?;
-        if existing != *decision.manifest() {
+        if existing == *decision.manifest() {
+            return Ok(());
+        }
+        if existing.selected_epoch
+            != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+            || decision.manifest().selected_epoch
+                != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+            || existing.application_instance_id == decision.manifest().application_instance_id
+        {
+            // A fixed application instance is fixed-forward: a changed manifest is a drift or a
+            // legacy-to-current upgrade attempt, and neither may silently rewrite the durable
+            // decision. A different current-schema instance is a validated config reboot and is
+            // allowed to replace the current pointer below.
             return Err(BootAuthorityErrorV1::Cutover(
                 crate::r71_global_cutover::CutoverBootErrorV1::Guard(
                     sigil_kernel::cutover_manifest::CutoverErrorV1::AlreadyPublished,
                 ),
             ));
         }
-    } else {
-        decision.save_manifest(&manifest_path).map_err(|error| {
-            BootAuthorityErrorV1::Cutover(
-                crate::r71_global_cutover::CutoverBootErrorV1::Persistence(error),
-            )
-        })?;
     }
+    // The file is a current-instance pointer. The decision itself remains content-addressed and
+    // immutable; a validated reboot atomically publishes the new instance's decision.
+    decision.save_manifest(&manifest_path).map_err(|error| {
+        BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Persistence(
+            error,
+        ))
+    })?;
     Ok(())
 }
 
@@ -992,7 +1036,8 @@ pub fn attach_boot_authority_to_services(
 mod tests {
     use super::*;
     use crate::r71_global_cutover::{
-        RuntimeExecutionSeamV1, RuntimeFileAccessSeamV1, probe_mandatory_adapters,
+        RuntimeExecutionSeamV1, RuntimeFileAccessSeamV1, RuntimeGlobalCutoverV1,
+        probe_mandatory_adapters,
     };
     use crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1;
     use sigil_kernel::cutover_manifest::MandatoryAdapterKindV1;
@@ -1161,6 +1206,51 @@ mod tests {
             compose_current_boot_authority(&config_snapshot, &state, &cache, &exec)
                 .expect("replay");
         assert_eq!(first.manifest(), second.manifest());
+    }
+
+    #[test]
+    fn r71_current_boot_replaces_manifest_for_a_new_config_instance() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        let state = dir.path().join("state");
+        let cache = state.join("cache");
+        std::fs::create_dir_all(&cache).expect("cache");
+        let _state_env = crate::test_env::EnvScope::set(crate::SIGIL_STATE_HOME_ENV, &state);
+        let _cache_env = crate::test_env::EnvScope::set(crate::SIGIL_CACHE_HOME_ENV, &cache);
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"old-model\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+
+        let first = boot_current_schema(&config, dir.path()).expect("first boot");
+        let first_instance = first.cutover().manifest().application_instance_id.clone();
+        let mut runtime_config = sigil_kernel::RootConfig::load(&config).expect("load config");
+        runtime_config.agent.model = "session-model".to_owned();
+        let second = boot_current_schema_with_config(&config, dir.path(), runtime_config)
+            .expect("session runtime config boot");
+
+        assert_ne!(
+            first_instance,
+            second.cutover().manifest().application_instance_id
+        );
+        assert_eq!(second.config().agent.model, "session-model");
+        assert_eq!(
+            sigil_kernel::RootConfig::load(&config)
+                .expect("reload persisted config")
+                .agent
+                .model,
+            "old-model"
+        );
+        let published = RuntimeGlobalCutoverV1::load_and_validate_manifest(
+            &config
+                .parent()
+                .expect("config parent")
+                .join(".sigil-cutover-manifest.json"),
+        )
+        .expect("published manifest");
+        assert_eq!(published, *second.cutover().manifest());
     }
 
     #[test]
