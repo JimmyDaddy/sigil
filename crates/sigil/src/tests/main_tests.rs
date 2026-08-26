@@ -1074,7 +1074,7 @@ fn render_doctor_report_formats_checks_and_summary() {
     let rendered = render_doctor_report(&report);
 
     assert!(rendered.contains("Sigil doctor"));
-    assert!(rendered.contains("cutover: epoch=legacy authority=legacy blockers=0"));
+    assert!(rendered.contains("cutover: epoch=unavailable authority=unavailable blockers=1"));
     assert!(rendered.contains("[ok] config:load - config parsed"));
     assert!(rendered.contains("[warn] terminal - TERM is not set"));
     assert!(rendered.contains("fix: set TERM in the shell before launching the TUI"));
@@ -1652,10 +1652,12 @@ async fn run_json_classifies_missing_config_without_leaking_raw_source() -> Resu
     assert_eq!(exit, MachineExitCode::InvalidInput);
     let record: serde_json::Value = serde_json::from_slice(&stdout)?;
     assert_eq!(record["record_type"], "error");
-    // Missing config on first-run/machine flows is classified by the request layer (the boot
-    // attach degrades to epoch-only for absent configs); the message never leaks raw paths.
-    assert_eq!(record["error"]["code"], "model_route_not_configured");
-    assert_eq!(record["error"]["message"], "model route is not configured");
+    // Missing config is a typed boot failure; the message never leaks raw paths.
+    assert_eq!(record["error"]["code"], "configuration_invalid");
+    assert_eq!(
+        record["error"]["message"],
+        "application boot failed before the run started"
+    );
     assert!(!String::from_utf8(stdout)?.contains("missing.toml"));
     Ok(())
 }
