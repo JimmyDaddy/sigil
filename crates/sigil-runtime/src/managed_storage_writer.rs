@@ -561,12 +561,24 @@ impl ManagedStorageWriterAdapterV1 {
         path: &Path,
         handle: &ManagedStorageNamespaceHandleV1,
     ) -> Result<(), ManagedStorageWriterErrorV1> {
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
-            "handle_id": handle.handle_id.as_str(),
-            "namespace_hash": handle.namespace_hash,
-        }))
-        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        let marker = if let Some(admission) = handle.durable_admission() {
+            serde_json::json!({
+                "schema_version": 2,
+                "handle_id": handle.handle_id.as_str(),
+                "namespace_hash": handle.namespace_hash,
+                "grant_hash": admission.grant_hash,
+                "admission_sequence": admission.admission_sequence,
+                "admission_record_hash": admission.admission_record_hash,
+            })
+        } else {
+            serde_json::json!({
+                "schema_version": 1,
+                "handle_id": handle.handle_id.as_str(),
+                "namespace_hash": handle.namespace_hash,
+            })
+        };
+        let bytes = serde_json::to_vec(&marker)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         sigil_kernel::atomic_publish_private_file(&path.join("authority-admission.json"), &bytes)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))
     }
@@ -1424,6 +1436,28 @@ mod tests {
         let lease = writer
             .acquire(StorageWriterChannelV1::SessionLog)
             .expect("acquire");
+        let durable_binding = lease
+            .handle
+            .durable_admission()
+            .expect("journal-backed handle binding");
+        let marker: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(lease.path().join("authority-admission.json"))
+                .expect("admission marker"),
+        )
+        .expect("marker json");
+        assert_eq!(marker["schema_version"], 2);
+        assert_eq!(
+            marker["grant_hash"],
+            serde_json::to_value(durable_binding.grant_hash).expect("grant hash json")
+        );
+        assert_eq!(
+            marker["admission_sequence"],
+            durable_binding.admission_sequence
+        );
+        assert_eq!(
+            marker["admission_record_hash"],
+            serde_json::to_value(durable_binding.admission_record_hash).expect("record hash json")
+        );
         let namespace_hash = lease.namespace_digest();
         let grant_hash = session_log_grant().grant_hash;
         writer.write_record(&lease, b"seq=1").expect("write");
@@ -1434,14 +1468,16 @@ mod tests {
         );
         writer.write_record(&lease, b"seq=2").expect("second write");
         let current_frontier = writer.physical_frontier(&lease).expect("current frontier");
-        let shadow_handle = sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1::new(
-            lease.handle.handle_id.clone(),
-            lease.handle.namespace_hash,
-            lease.handle.capability_family,
-            sigil_kernel::resource::OpaqueKernelCapabilityAuthenticatorV1::new(
-                "test-shadow".to_owned(),
-            ),
-        );
+        let shadow_handle =
+            sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1::new_durable(
+                lease.handle.handle_id.clone(),
+                lease.handle.namespace_hash,
+                lease.handle.capability_family,
+                durable_binding,
+                sigil_kernel::resource::OpaqueKernelCapabilityAuthenticatorV1::new(
+                    "test-shadow".to_owned(),
+                ),
+            );
         let receipt = service
             .finalize_namespace_with_physical_frontier(
                 shadow_handle,

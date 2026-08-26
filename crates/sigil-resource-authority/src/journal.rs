@@ -84,6 +84,16 @@ pub enum ResourceJournalEventV1 {
         generation: u64,
         quarantine_ref: String,
     },
+    /// Terminal recovery fact for a legacy admission whose sequence-only physical marker was
+    /// reused by more than one writer. Every candidate is retained, no physical object is
+    /// selected or deleted, and the stale capability is revoked by exact admission sequence.
+    StorageAdmissionAliasQuarantined {
+        grant_hash: CanonicalHash,
+        namespace_hash: CanonicalHash,
+        admission_sequence: u64,
+        candidate_count: u64,
+        candidate_set_hash: CanonicalHash,
+    },
     /// Physical writer frontier observed before a normal settlement. This is deliberately
     /// separate from `GenerationSettled`: the latter is the authority lifecycle fact, while
     /// this record binds it to the bytes that were actually observed on disk.
@@ -290,13 +300,13 @@ impl ResourceJournalMemoryV1 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DurableJournalRecordV1 {
     record: ResourceJournalRecordV1,
     payload: ResourceJournalEventV1,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DurableJournalSnapshotV1 {
     header: ResourceJournalHeaderV1,
     records: Vec<DurableJournalRecordV1>,
@@ -399,29 +409,39 @@ impl ResourceJournalFileV1 {
     /// Returns grant identities with an admitted namespace that has no durable settlement yet.
     /// A restarted authority must not silently reuse such a physical namespace.
     pub fn unsettled_storage_grants(&self) -> std::collections::BTreeSet<String> {
-        let (admissions, settled_namespaces) = self.storage_admission_state();
+        let (admissions, terminal_admissions) = self.storage_admission_state();
         admissions
             .into_iter()
-            .filter(|admission| !settled_namespaces.contains(&admission.namespace_hash.to_hex()))
+            .filter(|admission| !terminal_admissions.contains(&admission.admission_sequence))
             .map(|admission| admission.grant_hash.to_hex())
             .collect()
     }
 
-    /// Returns exact namespace identities whose admission lacks a durable settlement.
-    /// Grant identity alone is insufficient because one durable grant can own many sequential
-    /// (and, for session-scoped writers, concurrent) namespaces.
-    pub fn unsettled_storage_namespaces(&self) -> std::collections::BTreeMap<String, String> {
-        let (admissions, settled_namespaces) = self.storage_admission_state();
+    /// Returns exact admission sequences whose namespace lacks a durable terminal record.
+    /// Namespace and grant hashes may both repeat in legacy journals, so neither is sufficient
+    /// as the restart blocker key.
+    pub fn unsettled_storage_admissions(
+        &self,
+    ) -> std::collections::BTreeMap<u64, (String, String)> {
+        let (admissions, terminal_admissions) = self.storage_admission_state();
         admissions
             .into_iter()
-            .filter(|admission| !settled_namespaces.contains(&admission.namespace_hash.to_hex()))
+            .filter(|admission| !terminal_admissions.contains(&admission.admission_sequence))
             .map(|admission| {
                 (
-                    admission.namespace_hash.to_hex(),
-                    admission.grant_hash.to_hex(),
+                    admission.admission_sequence,
+                    (
+                        admission.namespace_hash.to_hex(),
+                        admission.grant_hash.to_hex(),
+                    ),
                 )
             })
             .collect()
+    }
+
+    /// Compatibility view used by older diagnostics. Exact recovery uses admission sequences.
+    pub fn unsettled_storage_namespaces(&self) -> std::collections::BTreeMap<String, String> {
+        self.unsettled_storage_admissions().into_values().collect()
     }
 
     /// Replays every storage admission and its settlement frontier for authority startup.
@@ -429,7 +449,7 @@ impl ResourceJournalFileV1 {
         &self,
     ) -> (
         Vec<ResourceJournalStorageAdmissionV1>,
-        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<u64>,
     ) {
         let mut observations_by_record = BTreeMap::new();
         let mut namespaces_by_frontier = BTreeMap::new();
@@ -453,8 +473,8 @@ impl ResourceJournalFileV1 {
         }
 
         let mut admissions = Vec::new();
-        let mut settled = std::collections::BTreeSet::new();
-        let mut pending_by_grant: BTreeMap<String, Vec<CanonicalHash>> = BTreeMap::new();
+        let mut terminal = std::collections::BTreeSet::new();
+        let mut pending_by_grant: BTreeMap<String, Vec<(u64, CanonicalHash)>> = BTreeMap::new();
         for durable in &self.records {
             match &durable.payload {
                 ResourceJournalEventV1::StorageNamespaceAdmitted {
@@ -466,6 +486,7 @@ impl ResourceJournalFileV1 {
                 } => {
                     admissions.push(ResourceJournalStorageAdmissionV1 {
                         admission_sequence: durable.record.sequence,
+                        admission_record_hash: durable.record.record_hash,
                         grant_hash: *grant_hash,
                         handle_id: handle_id.clone(),
                         namespace_hash: *namespace_hash,
@@ -475,7 +496,7 @@ impl ResourceJournalFileV1 {
                     pending_by_grant
                         .entry(grant_hash.to_hex())
                         .or_default()
-                        .push(*namespace_hash);
+                        .push((durable.record.sequence, *namespace_hash));
                 }
                 ResourceJournalEventV1::GenerationSettled {
                     grant_hash,
@@ -506,11 +527,13 @@ impl ResourceJournalFileV1 {
                         .or_else(|| {
                             pending_by_grant
                                 .get(&grant_hash.to_hex())
-                                .and_then(|pending| pending.last().copied())
+                                .and_then(|pending| pending.last().map(|(_, namespace)| *namespace))
                         });
-                    if let Some(namespace) = namespace {
-                        settled.insert(namespace.to_hex());
-                        remove_pending_namespace(&mut pending_by_grant, *grant_hash, namespace);
+                    if let Some(namespace) = namespace
+                        && let Some(sequence) =
+                            remove_pending_admission(&mut pending_by_grant, *grant_hash, namespace)
+                    {
+                        terminal.insert(sequence);
                     }
                 }
                 ResourceJournalEventV1::RecoveryOperationSettled {
@@ -521,15 +544,36 @@ impl ResourceJournalFileV1 {
                     if let Some(namespace) = namespaces_by_frontier
                         .get(&(grant_hash.to_hex(), settled_frontier_hash.to_hex()))
                         .copied()
+                        && let Some(sequence) =
+                            remove_pending_admission(&mut pending_by_grant, *grant_hash, namespace)
                     {
-                        settled.insert(namespace.to_hex());
-                        remove_pending_namespace(&mut pending_by_grant, *grant_hash, namespace);
+                        terminal.insert(sequence);
+                    }
+                }
+                ResourceJournalEventV1::StorageAdmissionAliasQuarantined {
+                    grant_hash,
+                    namespace_hash,
+                    admission_sequence,
+                    ..
+                } => {
+                    let Some(pending) = pending_by_grant.get_mut(&grant_hash.to_hex()) else {
+                        continue;
+                    };
+                    let Some(index) = pending.iter().position(|(sequence, namespace)| {
+                        sequence == admission_sequence && namespace == namespace_hash
+                    }) else {
+                        continue;
+                    };
+                    pending.remove(index);
+                    terminal.insert(*admission_sequence);
+                    if pending.is_empty() {
+                        pending_by_grant.remove(&grant_hash.to_hex());
                     }
                 }
                 _ => {}
             }
         }
-        (admissions, settled)
+        (admissions, terminal)
     }
 
     /// Returns a terminal record only when it belongs to this exact admission instance.
@@ -822,6 +866,9 @@ impl ResourceJournalFileV1 {
     }
 
     fn persist(&self) -> Result<(), JournalErrorV1> {
+        let _writer_lock =
+            crate::durable_snapshot::open_owner_only_snapshot_writer_lock(&self.path)
+                .map_err(map_io)?;
         let snapshot = DurableJournalSnapshotV1 {
             header: self
                 .journal
@@ -830,6 +877,30 @@ impl ResourceJournalFileV1 {
                 .clone(),
             records: self.records.clone(),
         };
+        let expected_predecessor = DurableJournalSnapshotV1 {
+            header: snapshot.header.clone(),
+            records: snapshot
+                .records
+                .get(..snapshot.records.len().saturating_sub(1))
+                .unwrap_or_default()
+                .to_vec(),
+        };
+        if self.path.exists() {
+            let metadata = fs::symlink_metadata(&self.path).map_err(map_io)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(JournalErrorV1::Corrupt(
+                    "journal path is not a regular file".to_owned(),
+                ));
+            }
+            let current: DurableJournalSnapshotV1 =
+                serde_json::from_slice(&fs::read(&self.path).map_err(map_io)?)
+                    .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+            if current != expected_predecessor {
+                return Err(JournalErrorV1::PreconditionMismatch);
+            }
+        } else if !expected_predecessor.records.is_empty() {
+            return Err(JournalErrorV1::PreconditionMismatch);
+        }
         let parent = self.path.parent().ok_or_else(|| {
             JournalErrorV1::Filesystem("journal has no parent directory".to_owned())
         })?;
@@ -850,26 +921,28 @@ impl ResourceJournalFileV1 {
     }
 }
 
-fn remove_pending_namespace(
-    pending_by_grant: &mut BTreeMap<String, Vec<CanonicalHash>>,
+fn remove_pending_admission(
+    pending_by_grant: &mut BTreeMap<String, Vec<(u64, CanonicalHash)>>,
     grant_hash: CanonicalHash,
     namespace_hash: CanonicalHash,
-) {
+) -> Option<u64> {
     let grant_key = grant_hash.to_hex();
-    let remove_grant = if let Some(pending) = pending_by_grant.get_mut(&grant_key) {
-        pending.retain(|current| *current != namespace_hash);
-        pending.is_empty()
-    } else {
-        false
-    };
+    let pending = pending_by_grant.get_mut(&grant_key)?;
+    let index = pending
+        .iter()
+        .rposition(|(_, current)| *current == namespace_hash)?;
+    let (sequence, _) = pending.remove(index);
+    let remove_grant = pending.is_empty();
     if remove_grant {
         pending_by_grant.remove(&grant_key);
     }
+    Some(sequence)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceJournalStorageAdmissionV1 {
     pub admission_sequence: u64,
+    pub admission_record_hash: CanonicalHash,
     pub grant_hash: CanonicalHash,
     pub handle_id: String,
     pub namespace_hash: CanonicalHash,
@@ -1206,5 +1279,38 @@ mod tests {
             .expect("retry after rollback");
         let reopened = ResourceJournalFileV1::open(path, header()).expect("reopen");
         assert_eq!(reopened.tail().expect("tail").sequence, 2);
+    }
+
+    #[test]
+    fn r71_durable_journal_rejects_stale_cross_process_snapshot_without_lost_update() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority.journal.json");
+        let mut first = ResourceJournalFileV1::open(&path, header()).expect("first writer");
+        let mut stale = ResourceJournalFileV1::open(&path, header()).expect("stale writer");
+
+        first
+            .append_event(ResourceJournalEventV1::GenerationReserved {
+                resource_id: "first".to_owned(),
+                generation: 2,
+            })
+            .expect("first append");
+        let error = stale
+            .append_event(ResourceJournalEventV1::GenerationReserved {
+                resource_id: "stale".to_owned(),
+                generation: 3,
+            })
+            .expect_err("stale snapshot must not replace the first append");
+        assert!(matches!(error, JournalErrorV1::PreconditionMismatch));
+        assert_eq!(stale.tail().expect("rolled back stale tail").sequence, 1);
+
+        let reopened = ResourceJournalFileV1::open(path, header()).expect("reopen");
+        assert_eq!(reopened.tail().expect("first append retained").sequence, 2);
+        assert_eq!(
+            reopened.records.last().map(|durable| &durable.payload),
+            Some(&ResourceJournalEventV1::GenerationReserved {
+                resource_id: "first".to_owned(),
+                generation: 2,
+            })
+        );
     }
 }

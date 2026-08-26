@@ -40,6 +40,18 @@ fn default_terminal_execution_owner() -> TerminalExecutionOwnerV1 {
 }
 
 impl TerminalProcessManager {
+    fn ensure_execution_available(&self) -> Result<()> {
+        match &self.execution_owner {
+            TerminalExecutionOwnerV1::Managed(port) if !port.is_available() => {
+                Err(anyhow::Error::new(
+                    sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable,
+                )
+                .context("managed terminal launch failed"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Creates a non-PTY process manager rooted at `workspace_root`.
     ///
     /// # Errors
@@ -178,6 +190,7 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     ) -> Result<TerminalTaskEntry> {
+        self.ensure_execution_available()?;
         let plan = self
             .prepare_start(request, TerminalStartMode::LocalProcess)
             .await?;
@@ -343,6 +356,7 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     ) -> Result<TerminalTaskEntry> {
+        self.ensure_execution_available()?;
         match &self.execution_owner {
             TerminalExecutionOwnerV1::Managed(managed_execution) => {
                 let plan = self

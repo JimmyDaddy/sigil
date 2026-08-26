@@ -115,6 +115,31 @@ fn r71_broker_storage_handle_distinct_from_probe_and_family_bound() {
 }
 
 #[test]
+fn r71_broker_handles_are_unique_across_compositions() {
+    let namespace = CanonicalHash::from_bytes([0x4du8; 32]);
+    let first = KernelCapabilityBrokerV1::new();
+    let second = KernelCapabilityBrokerV1::new();
+    let first_handle =
+        first
+            .issue_storage_namespace_handle(first.seal_storage_namespace_proof(
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                namespace,
+            ))
+            .expect("first handle");
+    let second_handle =
+        second
+            .issue_storage_namespace_handle(second.seal_storage_namespace_proof(
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                namespace,
+            ))
+            .expect("second handle");
+
+    assert_ne!(first_handle.handle_id, second_handle.handle_id);
+    assert!(first_handle.handle_id.as_str().starts_with("proof-"));
+    assert!(second_handle.handle_id.as_str().starts_with("proof-"));
+}
+
+#[test]
 fn r71_broker_storage_proof_consumed_once() {
     let broker = KernelCapabilityBrokerV1::new();
     let proof = broker.seal_storage_namespace_proof(

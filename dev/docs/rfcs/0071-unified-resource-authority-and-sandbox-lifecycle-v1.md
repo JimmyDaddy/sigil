@@ -1,8 +1,8 @@
 # RFC-0071：Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1
 
-状态：Implemented / Frozen（2026-08-26；implementation-completeness findings、clean exact-SHA local full 与 fixed five-platform qualification 已闭合）
+状态：Gated / Partial / Not Frozen（2026-08-26；第三十五轮真实 plan-review session 暴露 borrowed file subject onboarding 与 child artifact resource bundle 未闭合，重新进入 implementation）
 
-> 当前审查覆盖、逐项回应与最终 exact-SHA evidence 见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十二轮关闭 Terminal public-manager ownership、plugin Extension-purpose admission/control、artifact retire frontier/GC/prune、durable owner quota/replay、storage physical-frontier/recovery、task/parent/TUI verification 及 test-feature 污染等剩余 implementation findings；后续 qualification closure 又修复 execution temp generation 缺失及 TUI artifact-GC gate 抖动。implementation candidate `e410172c410cc6e86d3403cdd0be3401eb94d125` 的 clean local full 与 GitHub fixed five-platform run `32883914430` 均通过；本状态所在的最终文档提交也由同一聚合器按 exact SHA 复验，最终 SHA 与证据摘要保存在 repo-local audit/handoff ledger。历史证据继续保留供追溯，但不替代最终提交本身的资格证明。
+> 当前审查覆盖、逐项回应与历史 exact-SHA evidence 见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十三轮曾在 `441243dfdffaaba27ea5a59225d64c6f4405387c` 冻结；第三十四轮真实用户 journal 又暴露 pending source-bound grant rollover、sequence-only broker proof 重用、legacy marker alias 与多 composer snapshot 覆盖缺陷。第三十五轮 session `70c1896d-02a8-4c62-b273-3e43aeeb95aa` 进一步证明：shipping composition 创建空 borrowed-subject registry，却没有 production workspace registration/onboarding；plan-review child/finalizer 也没有 authority-managed ArtifactStaging/ArtifactStore resource bundle。现有 full gate 使用忽略真实 `ToolContext` 的 inspection fixture，无法证明实际 `ls/grep/read_file` 产品链。第三十四轮 qualification candidate 判定和更早 freeze 均被本段 supersede；完成 R71.9 implementation、真实 current-schema E2E 与新 clean exact-SHA full/five-platform qualification 前不得恢复 Candidate/Frozen，也不得启动或继续 RFC-0070 implementation。
 
 创建日期：2026-08-23
 
@@ -142,6 +142,39 @@ sigil-tui-test-storage-95792-23/cache/support-bundles -> .../external-support
 
 这不是一个条件判断写错，而是缺少独立资源层后形成的结构性重复实现。
 
+### 2.5 Session `70c1896d-02a8-4c62-b273-3e43aeeb95aa`：permission allow 后 authority 拒绝真实 file tool
+
+该 session 的用户目标是“收尾当前工作区所有变更确保工作区 clean”。root conversation 因 `high_impact + scope_uncertain` 按 RFC-0063 正常进入 `review_first -> plan_review`；plan-review child 最终提交了 typed draft，root durable frontier 停在 `PlanReviewAttemptStatus::DraftReady`。日志中没有 `PlanDecisionRecorded` 或 Task admission，因此尚未进入测试、修复、commit 或 push。这个 plan approval 边界本身是预期行为，不得通过 R71.9 改成自动接受高影响计划。
+
+真正的 RFC-0071 故障发生在 plan-review research 的真实 in-process file tools：
+
+| durable fact | 现场证据 | 判定 |
+|---|---|---|
+| `ls`、两次 `grep` 的 `ToolPermissionDecisionV2` | `policy_decision=allow`、`local_policy_decision=allow`、`external_directory_required=false`、`subject_zone=workspace_source` | 不是 arbitrary external-directory denial，也不是用户未授权 workspace read |
+| 同一 call 随后的 tool result | `managed file access refused: file access adjudication failed: operation not permitted for this binding` | permission 后的 Resource Authority composition/onboarding failure |
+| plan-review child 的 7 个 ToolResultRecordedV3 | 7/7 `initial_availability=unavailable`，reason=`session has no durable artifact store`；其中 4 个 tool outcome 本身 success | child runtime resource bundle 未接入 managed artifact storage；小 inline preview 只是偶然避免本次 draft 丢失 |
+| child run terminal | `completed/final_answer`，typed draft 已提交 | file error 没有阻止 draft，却削弱了研究证据；任务未执行是后续 plan decision 尚不存在 |
+
+物理 workspace、session JSONL 与 attachment 文件均为当前用户所有；失败发生在 file tool 第一次 `fs::metadata/read_dir/open` 之前。该事故与 2.1 的 SessionScratch descendant-symlink provisioning 故障不是同一问题，也与 ExecutionTemp/SystemTemp 默认权限无关。
+
+源码链证明这不是一次偶发 drift：
+
+1. shipping authority composition 构造新的空 `BorrowedSubjectRegistryV1`，并把它注入 `AuthorityManagedFileAccessServiceV1`；
+2. production runtime/kernel 没有 workspace activation 或 permission planning 对应的 `observe/observe_with_identity` 调用；现有 composition test 只证明未注册 subject 会 fail closed，却用注释假定“surface bootstrap 会注册”；
+3. builtin file tool 自行把 normalized host path 写入 `OpaquePermissionSubjectRef`，自行构造 `authority_generation=0`、zero resolver proof 与 zero file plan hash；V2→V3 bridge原样复制该 ref，没有由 RA planner seal exact local plan；
+4. kernel facade对同一operation生成token/request后，RA查询空registry并返回`OperationNotPermitted`；即使绕过该拒绝，实际`fs::*`仍由`sigil-tools-builtin`执行，而不是RFC §8.5要求的RA-private descriptor/executor；
+5. `build_plan_review_child_session`与finalizer只attach URL capability store，没有从boot composition为child scope取得paired ArtifactStaging/ArtifactStore lease；
+6. plan-review测试用返回固定文本且忽略`ToolContext`的fake inspection tool，TUI handoff测试也没有运行shipping `ls/grep/read_file`，所以workspace full与five-platform gate可以false-green。
+
+因此本事故不是“fail closed 太严格”，而是 permission plan、borrowed subject registration、RA-private file plan、file I/O executor与artifact capture lifecycle没有形成同一原子resource admission。安全规则应继续fail closed；实现必须在`ToolExecutionStarted`之前证明这些前置条件已ready，并用typed resource-precondition failure区分“policy deny”与“authority composition unavailable”。
+
+### 2.6 第三十五轮直接结论
+
+- RFC §8.5已经规定`BorrowedSubjectRegistrationServiceV1`、RA-owned planner/private plan table与RA-owned file execution；当前shipping实现只落地token/adjudication的过渡子集，属于**实现不完整且与RFC不一致**，不得以给空registry增加宽泛默认allow修补。
+- current-schema child session不是“换一个JSONL路径的普通Session”；plan-review、plan finalizer、Task role、agent child与任何future child都必须由同一application composition按child scope原子 provision session writer、artifact staging/store、tool authority与所需managed storage/resource handles。
+- qualification不能再用category看似为File、实际忽略`ToolContext`的fixture替代shipping tool。至少一条required E2E必须从真实TUI/current-schema boot开始，经automatic plan-review调用真实`ls/grep/read_file`，再由用户接受typed plan并进入Task execution；artifact availability、file receipt与task admission均需durable断言。
+- 第三十四轮“仅剩新exact-SHA qualification”的判定失效。R71.9代码、测试、inventory/negative gate、execution ledger与新qualification全部闭合前，RFC保持`Gated / Partial / Not Frozen`，RFC-0070不得开始或继续implementation。
+
 ---
 
 ## 3. 与现有 RFC 的关系
@@ -190,7 +223,7 @@ RFC-0005 的 capability probe、permission/enforcement 分离、requested-versus
 
 ### 3.5 与 RFC-0070 严格串行，禁止形成实现环
 
-两份 RFC 的冻结实施顺序是：**先完整实施并资格化 R71.0-R71.8，再以该稳定结果作为 R70.0 的新基线实施 R70.0-R70.8**。RFC-0071 不等待 `sigil-application`、TUI package 拆分或 `CommittedPresentation`；RFC-0070 则必须消费 RFC-0071 已冻结的 `ToolPermissionPlanV3/ToolPermissionDecisionV3`、`RecoveryBlockerV2`、resource/effect receipt、ManagedStorage/ManagedFileAccess/ManagedExecution 与 resource-recovery surface contract，不能重新定义第二份物理资源 authority、durable schema 或 recovery state machine。
+两份 RFC 的冻结实施顺序是：**先完整实施并资格化 R71.0-R71.9，再以该稳定结果作为 R70.0 的新基线实施 R70.0-R70.8**。RFC-0071 不等待 `sigil-application`、TUI package 拆分或 `CommittedPresentation`；RFC-0070 则必须消费 RFC-0071 已冻结的 `ToolPermissionPlanV3/ToolPermissionDecisionV3`、`RecoveryBlockerV2`、resource/effect receipt、ManagedStorage/ManagedFileAccess/ManagedExecution 与 resource-recovery surface contract，不能重新定义第二份物理资源 authority、durable schema 或 recovery state machine。
 
 严格串行还表示：
 
@@ -356,6 +389,18 @@ durable spawn record必须自包含或通过同一validated hash chain完整引�
 `sigil-kernel`拥有 versioned、pathless、provider-neutral 的 resource/recovery surface contract：至少包括 shared blocker projection、resource/effect receipt view、available-action token、command/event correlation 与 stable frontier/binding。它不得包含 TUI/Ratatui、Desktop/HTTP transport、`PathBuf`、descriptor、ACL/profile、Resource Authority/Sandbox concrete type或runtime-private handle。
 
 R71 阶段可由 current runtime facade 实现并向 TUI/HTTP/CLI 暴露这份 contract，Desktop 继续经 generated wire schema 消费同一投影；但 facade 只能做 lossless mechanical projection/dispatch，不能成为新的 durable truth 或 physical authority。未来 RFC-0070 的 `sigil-application` 必须复用或无损包裹同一 contract，使产品 adapter 的 dependency edge 可从 runtime facade 机械替换为 application port，而无需改写 permission V3、resource journal、receipt、blocker/action token 或 recovery schema。任何表面直接导入 `sigil-resource-authority`/`sigil-sandbox` concrete type，或因迁移而出现第二份 canonical hash/状态机，都违反本不变量。
+
+### I71.16 Permission allow 不得领先于 resource readiness
+
+`ToolPermissionDecisionV3=Allow`只证明policy允许，不证明borrowed subject已经注册、RA-private file plan已经seal、artifact capture lease已经取得或physical executor已经ready。对in-process file tool，workspace/borrowed subject observation、exact authority generation/resolver proof/file plan、tool authority与required artifact capture binding必须在`ToolExecutionStarted`前形成同一prepared resource context；任一缺失均以typed `ResourcePreconditionUnavailable`或更窄closed error在首个filesystem effect前fail closed。不得先向用户显示permission allow、再用通用`OperationNotPermitted`掩盖composition缺口。
+
+### I71.17 Child session 必须从 application composition provision resource bundle
+
+plan-review、plan finalizer、Task role、agent child与future child session不能只从parent JSONL路径派生新store，也不能静默缺省artifact backend。每个child scope必须通过同一application authority composition取得独立、scope-bound的SessionLog attachment、ArtifactStaging/ArtifactStore paired lease、tool authority、managed storage handles及其lifetime finalizer；parent只能传递opaque lineage与provisioning authority，不能共享raw root、未分区store或隐式fallback。bundle acquisition失败时child在provider/tool执行前进入typed blocked terminal，不能以`session has no durable artifact store`继续best-effort运行。
+
+### I71.18 Qualification 必须覆盖 shipping composition 和真实 tool
+
+category/access看似等价但忽略`ToolContext`、不声明managed file plan或直接返回固定字符串的fixture，只能证明coordinator控制流，不能证明RFC-0071 consumer onboarding。required conformance至少使用一次shipping registry、真实`ls/grep/read_file`、真实authority composition与managed artifact backend；negative case必须证明unregistered/cross-generation subject在filesystem effect前zero-I/O拒绝，positive case必须证明permission decision、registration receipt、file access receipt、artifact descriptor与child scope可逐项对账。
 
 ---
 
@@ -4831,6 +4876,44 @@ Desktop native picker运行在Tauri Rust backend，而RA在sidecar，不能靠re
 
 Desktop返回response后，session-lifecycle必须在append前调用`consume_registration_response(response, expected Planned|Started frontier)`；service原子验证response MAC/table/context并返回字段与proof hash绑定的`VerifiedBorrowedSubjectRegistrationResultV1`。CreateIntent/RecoverySubjectBound writer只接受该verified result并按值consume proof，逐字段复制subject/binding/observation/receipt；不存在接受raw response或caller自行组payload的append API。field substitution、另一个response、response replay或expected frontier漂移在domain append前失败，因此durable lifecycle不会先写入伪造observation。bearer本身不授权access；nonce/purpose/generation/event/confirmation/access/TTL任一漂移、access widening、cross-purpose、observation/context mismatch、capsule replay或duplicate nonce不同payload均拒绝。sidecar restart清空table和unconsumed capsule，用户必须重新picker；session-export create/reselect均复用该协议。private endpoint另有生成contract与allowlist，Desktop real-sidecar fixture与encode/decode golden证明renderer抓不到raw path、错误bearer/capsule/nonce/purpose/recovery event、response substitution/replay与old-server capsule失败。R71.7 support-bundle native save 的实际实现采用同一 host-private sidecar boundary，但 registration capsule 由当前 typed request 直接携带 bounded content/hash，authority 返回不含 path 的 closed receipt；CLI在同进程调用同一factory service，不经HTTP。
 
+#### 8.5.1 Workspace borrowed-subject onboarding 与 RA-private file plan
+
+Workspace不是因为进程持有cwd就自动成为registered borrowed subject。`WorkspaceActivated`之后、任何file-tool permission planning之前，application composition必须通过`BorrowedSubjectRegistrationServiceV1`提交host-private workspace activation capsule；RA在private platform registry中no-follow解析并观察exact workspace root identity，返回opaque workspace subject ref、registration receipt、authority generation与resolver binding。runtime只能持有这些opaque结果，不能取得registry或private descriptor。
+
+每个file tool只声明bounded workspace-relative selector、closed operation与semantic scope，不得把normalized absolute path塞进`OpaquePermissionSubjectRef`，也不得构造zero generation、zero resolver proof或zero plan hash。`ManagedFileAccessPlannerV1`以registered workspace root + relative selector在RA内部完成canonical containment、symlink/external classification与identity observation，缓存one-shot private `BorrowedFileAccessPlanV1`，向kernel/runtime只返回完整非零的`ManagedFileAccessPlanDraftRefV1` hashes/generation。plan hash必须覆盖registration receipt、root identity、relative selector、operation、resolver proof、authority generation与expected pre-effect identity；任一zero/sentinel或caller-computed替代值在permission plan seal前拒绝。
+
+permission通过后，kernel broker签发的one-shot file token绑定exact V3 plan、decision、approval continuity、tool-start digest、registration receipt、file plan、subject、operation与authority generation。`ManagedFileAccessServiceV1::execute`在RA内部consume token、查询private plan/descriptor、重验identity并执行read/list/glob/grep或mutation-bound write/edit/delete，再返回bounded data/opaque stream handle与borrowed-access receipt。`sigil-tools-builtin`只负责参数schema、preview/model-view mapping和RFC-0002 mutation coordination；shipping path不得在adjudication receipt之后自行调用`std::fs`完成同一file effect。
+
+`BorrowedSubjectRegistryV1`保持RA-private。shipping composition可以先构造空private table，但在对应workspace registration receipt durable/active前，workspace surface readiness必须为blocked；不能用“registry对象存在”或“unregistered subject会fail closed”作为positive readiness。workspace deactivate、authority generation replacement或root identity drift必须撤销该registration及其未消费private plans；旧ref/token不能跨workspace、child scope或generation复用。
+
+#### 8.5.2 Current-schema child session resource bundle
+
+runtime必须提供唯一`CurrentSchemaChildSessionResourceProvisionerV1`（名称可在实现时按现有命名收敛，但职责不可拆散到各coordinator）：输入parent session lineage、host-owned child `SessionRef`、child purpose与application composition generation；输出non-serializable、scope-bound的child runtime bundle。bundle至少原子持有：
+
+- authority-admitted child SessionLog attachment及其writer/finalizer；
+- paired ArtifactStaging/ArtifactStore leases与child-scoped opaque `ToolArtifactStore` facade；
+- application-global `KernelToolAuthorityV1`的child binding，以及workspace registration/authority generation reference；
+- child purpose允许的managed storage、execution/extension与recovery ports；
+- cancellation、terminal settlement、lease finalize与crash reconciliation owner。
+
+plan-review research与submit-only finalizer必须各自取得bundle；需要在两个child间转交证据时只传递durable opaque artifact refs和typed evidence，不共享raw artifact root或未分区parent store。`Session::load_from_store`加URL capability不是current-schema child onboarding。bundle acquisition任一mandatory channel失败时，coordinator在provider physical attempt与tool execution前写typed blocked/failed terminal并向parent投影stable recovery code；不得创建一个没有durable artifact store却继续运行的child。
+
+artifact backend在首个tool call前必须ready。工具已经发生effect后出现真实disk-full/backpressure仍按现有single-drain规则将artifact标记`Unavailable`且不重放effect；但“coordinator从未provision store”属于zero-effect composition blocker，不能伪装成每个ToolResultRecordedV3各自的capture failure。child natural terminal、cancel、provider failure、parent detach与process crash均按bundle owner完成settlement或typed reconciliation，不能依赖`Drop`猜测已释放。
+
+#### 8.5.3 Prepared resource context 与错误分类
+
+runtime在append `ToolExecutionStarted`前必须对当前call建立不可变prepared resource context，至少逐hash绑定permission V3 plan/decision、workspace registration、RA file plan、artifact capture binding、child session scope与authority generation。prepare只验证/取得已经声明的prerequisite，不执行file effect；prepared context一经seal，任一plan/subject/operation/scope/generation/artifact lease drift都要求重新plan/authorization，不能在execute内补注册或换store。
+
+错误面至少区分：
+
+- `PolicyDenied`：permission或external-directory policy拒绝；
+- `ResourcePreconditionUnavailable`：registration service、workspace activation、child resource bundle或mandatory artifact backend未ready；
+- `SubjectIdentityDrift`：registered observation与pre-effect identity不一致；
+- `AdmissionMismatch`：plan/decision/token/operation/scope/generation cross-swap或replay；
+- `ArtifactCaptureFailedAfterEffect`：prepared backend存在，但execution/capture期间发生真实storage failure。
+
+只有第一类可向用户解释为权限策略拒绝。第二类必须指向composition/recovery action且保持同一stable blocker；不得降级为泛化`OperationNotPermitted`、建议chmod、启用external-directory或重试同一call。positive receipt与negative error都不得包含host absolute path。
+
 ### 8.6 Host-owned managed storage port
 
 session/control/plan/catalog、provider/cache与artifact semantic owner同样不能import`sigil-resource-authority` concrete type或接收root`PathBuf`。kernel提供object-safe、logical storage primitive port，由runtime闭包组合authority并注入各writer：
@@ -6806,7 +6889,7 @@ R71.1交付contract/golden，R71.4由verification adapter填充，R71.6 readines
 
 ### 9.1 依赖方向
 
-下图是 **R71.8 完成、RFC-0070 尚未启动** 时允许存在的 Cargo graph。箭头明确表示 Cargo `depends on`，不是调用或数据流；三条 product-to-runtime edge 都是有删除条件的 transitional edge：
+下图是 **R71.9 完成、RFC-0070 尚未启动** 时允许存在的 Cargo graph。箭头明确表示 Cargo `depends on`，不是调用或数据流；三条 product-to-runtime edge 都是有删除条件的 transitional edge：
 
 ```mermaid
 flowchart BT
@@ -9576,7 +9659,7 @@ private support bundle 可包含脱敏 manifest、reason code、generation 与 p
 
 R71.1-R71.5允许新增实现、shadow plan与isolated current-schema qualification，但已发布build/user session仍整体走旧epoch；shadow不得创建production目录、签发grant、spawn、cleanup或写用户durable V3/V2并行事实。R71.4必须先为shell、terminal、MCP、plugin、verification、RuntimeState/Cache、ArtifactStaging等全部§9.5 consumer准备好current-lease adapter；R71.5再完成journal/recovery/cross-surface fault qualification。
 
-R71.6才在未发布release candidate的application startup选择唯一schema/authority epoch，并对**全部consumer原子切换**：新epoch只使用Resource Authority、`ManagedExecutionServiceV1`、V3 admission与RecoveryBlockerV2；旧epoch只运行旧binary/旧session，不被当前binary读取。不存在per-consumer生产开关、V2/V3 dual write、legacy allocator fallback或“先切shell、长生命周期稍后再说”。active process固定其adapter/provider generation；feature flag不允许dual execute/dual cleanup。若任何mandatory consumer adapter或recovery projector未ready，application startup fail closed，不能部分启动。R71.6/7不得独立发布，必须等待R71.8同一candidate资格门禁。
+R71.6才在未发布release candidate的application startup选择唯一schema/authority epoch，并对**全部consumer原子切换**：新epoch只使用Resource Authority、`ManagedExecutionServiceV1`、V3 admission与RecoveryBlockerV2；旧epoch只运行旧binary/旧session，不被当前binary读取。不存在per-consumer生产开关、V2/V3 dual write、legacy allocator fallback或“先切shell、长生命周期稍后再说”。active process固定其adapter/provider generation；feature flag不允许dual execute/dual cleanup。若任何mandatory consumer adapter或recovery projector未ready，application startup fail closed，不能部分启动。R71.6/7不得独立发布；原 R71.8 evidence 在历史候选 SHA 上保留，但当前 closure 必须等待 R71.9 同一 candidate 重新通过资格门禁。
 
 ---
 
@@ -9659,8 +9742,10 @@ R71.6才在未发布release candidate的application startup选择唯一schema/au
 | `R71-F-RET-001..008`：retire evidence伪造/不存在、cross-owner/target/grant/policy、stale verifier/restart、duplicate/cross-request token | target保持或exact retired terminal | none或single retire effect | frozen owner registry + one-shot token；不接受裸hash、不由runtime注册任意verifier |
 | `R71-F-JRN-001..008`：header create/write/rename、header-only、首BootstrapBound append/fsync、duplicate instance/scope/bootstrap swap、zero/invalid genesis与restart | shard不存在、valid header-only或唯一sequence=1首record | none | atomic header + closed Empty/Existing CAS；invalid published header fail closed，不用zero hash猜genesis |
 | `R71-F-ABR-001..008`：failed-evidence probe、old-epoch quiescence、operator confirmation、authorize后crash、fresh-root commit、duplicate/cross-operation/expired authorization与old child重新出现 | 旧epoch保持inert；最多一个fresh epoch被选择 | none或既有旧effect保持 | doctor-only one-shot signer/table/expiry + quiescence recheck；任一old process re-live或evidence/root drift都拒绝fresh commit |
+| `R71-F-FIL-001..012`：workspace registration positive/unavailable、zero generation/resolver proof/plan hash、cross-workspace subject swap、generation/restart stale、root identity drift、symlink external escape、token replay、shipping direct-filesystem negative proof、read/list/grep positive receipts | 只有exact registered subject + current plan/decision可进入I/O；其余均typed fail closed | invalid case零filesystem effect；positive case仅RA private executor产生effect | 撤销stale capsule/plan，重新activation/register/plan；不扩大external permission、不chmod、不execute-time late observe |
+| `R71-F-CSR-001..008`：child bundle atomic provision、mandatory artifact component absent、research-child artifact publish、finalizer evidence publish、cross-scope bundle swap、cancel/failure terminalization、crash/recovery、real TUI plan-review + explicit accept到task admission | child只在exact current-schema bundle完整时启动；artifact ref可用且plan decision边界保持 | bundle缺失时零provider/tool/I/O；启动后effect与artifact/session frontier唯一 | 同lifecycle guard结算/replay；不借parent raw store、不以child final text代替artifact publish |
 
-上述case range均为inclusive、无空洞的required manifest集合；每个ID在`r71-conformance-inventory-v1.toml`中恰好映射一个注入frontier与非零expected assertion count。runner若只实现range中的部分case、把多个frontier折成一个case或用ignored/skipped填洞即失败。
+上述case range均为inclusive、无空洞的required manifest集合；R71.9 新 closure 共220个required case。每个ID在`r71-conformance-inventory-v1.toml`中恰好映射一个注入frontier与非零expected assertion count。runner若只实现range中的部分case、把多个frontier折成一个case或用ignored/skipped填洞即失败。
 
 ---
 
@@ -9818,7 +9903,7 @@ qualification 后删除：
 
 **Release invariant**：R71.6的global cutover与R71.7的legacy删除不得作为独立用户release发布；它们必须与R71.8属于同一feature branch/release candidate，保持distribution/release gate关闭。只有R71.8全平台声明与full gate通过后才允许产出用户可安装artifact。若R71.8失败，回退整个未发布candidate，不把半迁移build交给用户。
 
-**Cross-RFC serial invariant**：R71.0-R71.8期间不得执行、合并或宣称完成任何R70 slice，也不得创建`sigil-application`/public TUI package cutover来“顺便”完成RFC-0070。R71.8 closure必须产出post-R71 handoff manifest，冻结kernel-owned surface contract schema/hash、runtime transitional facade入口、consumer清单与待R70删除的dependency edge；只有该closure通过后，RFC-0070才能从R70.0重新取基线。
+**Cross-RFC serial invariant**：R71.0-R71.9期间不得执行、合并或宣称完成任何R70 slice，也不得创建`sigil-application`/public TUI package cutover来“顺便”完成RFC-0070。R71.9 closure必须产出post-R71 handoff manifest，冻结kernel-owned surface contract schema/hash、runtime transitional facade入口、consumer清单与待R70删除的dependency edge；只有该closure通过后，RFC-0070才能从R70.0重新取基线。
 
 ### R71.0 Characterization 与事故冻结（serial）
 
@@ -10035,9 +10120,9 @@ cargo test -p sigil-release-tools
 
 **Schema/运行边界**：V3/RecoveryBlockerV2/resource journal只写isolated fixture store；禁止写真实user log或dual-write。fixture store只能由同build current schema读取。
 
-**失败/恢复**：logical start/approve/acquire、journal header/genesis、reserve/mkdir/external-creator leaf/adopt/harden/quota/blob open/chunk/publish prepare/commit/settle/database WAL/rebuild/bind/`SpawnPrepared`/bridge/`SpawnInitiated`/activation/supervisor transfer/spawn/settle/finalize/cleanup/session append/domain-storage七resource-record chain/operation-effect/domain projection、doctor fresh-authority authorize/commit全部fault injected；此外必须完整执行§16的`R71-F-EXP-001..024`、`R71-F-BOR-001..018`、`R71-F-BOOT-001..010`、`R71-F-REC-001..010`、`R71-F-BRG-001..012`、`R71-F-MUT-001..022`、`R71-F-CAT-001..010`、`R71-F-ATT-001..014`、`R71-F-CHILD-001..008`、`R71-F-UPD-001..006`、`R71-F-KEY-001..010`、`R71-F-SPN-001..032`、`R71-F-RET-001..008`、`R71-F-JRN-001..008`与`R71-F-ABR-001..008`，共200个required case，manifest count/hash必须exact匹配；unresolved initiated spawn=`OutcomeUncertain`；capture/storage/cleanup/projector失败不得改写process settlement；resource journal corruption/lock/reserve exhaustion与active old child覆盖fresh-epoch禁止条件。
+**失败/恢复**：logical start/approve/acquire、journal header/genesis、reserve/mkdir/external-creator leaf/adopt/harden/quota/blob open/chunk/publish prepare/commit/settle/database WAL/rebuild/bind/`SpawnPrepared`/bridge/`SpawnInitiated`/activation/supervisor transfer/spawn/settle/finalize/cleanup/session append/domain-storage七resource-record chain/operation-effect/domain projection、doctor fresh-authority authorize/commit全部fault injected；此外必须完整执行 R71.5 初始 baseline 的`R71-F-EXP-001..024`、`R71-F-BOR-001..018`、`R71-F-BOOT-001..010`、`R71-F-REC-001..010`、`R71-F-BRG-001..012`、`R71-F-MUT-001..022`、`R71-F-CAT-001..010`、`R71-F-ATT-001..014`、`R71-F-CHILD-001..008`、`R71-F-UPD-001..006`、`R71-F-KEY-001..010`、`R71-F-SPN-001..032`、`R71-F-RET-001..008`、`R71-F-JRN-001..008`与`R71-F-ABR-001..008`，共200个required case，manifest count/hash必须exact匹配；unresolved initiated spawn=`OutcomeUncertain`；capture/storage/cleanup/projector失败不得改写process settlement；resource journal corruption/lock/reserve exhaustion与active old child覆盖fresh-epoch禁止条件。R71.9 在此 baseline 上追加`R71-F-FIL-001..012`与`R71-F-CSR-001..008`，新 closure 总数为220。
 
-**验收**：200个新增required case与其余§16 crash point重启后均有唯一终态且无重复spawn/publish/recovery operation/fresh-authority epoch；session export default/external/reselect、borrowed native/config/release writer、bootstrap三阶段、managed recovery、workspace mutation、SessionCatalog source、SessionLog attachment、child report、updater cache、logical storage key、spawn registration/prepared/activation/actor handoff/physical producer authority/owner recovery/cursor/successor/closure reserve/supervisor claim transfer、semantic retire、journal genesis与doctor bootstrap recovery各自case group无缺口；logical start后零resource-record只有valid header + 完整EOF proof才NoEffect；`resource_ref=None` blocker可跨不同call/attempt稳定拦截，resolution后CAS放行；同一broken generation跨consumer不因requirement字段分片；workspace quota blocker只暂停新reservation，不删除active sibling；SessionScratch reset exact generation + confirmation + preserve quarantine；domain writer自失败从七个resource-record prefix、operation-effect frontier与四个domain-event prefix中的每一个crash后，都只能凭RA-authenticated canonical shadow按`Observed -> StartedShadow -> 通用Prepared -> bridge Prepared -> 通用Settled -> bridge Settled -> Projected` fixed-forward，重放exact四事件集合且event count/set/final frontier一致，已修复namespace不残留active blocker；authoritative storage不可generic replace，rebuildable storage须semantic proof；maintenance public target与selection/action token exact；四表面统一输出`recoverability/effect_settlement/available_actions/enforcement_context/cleanup_status`，execution variant逐项一致，host-managed variant明确NotApplicable reason；不输出`retryable`决策字段或host path。
+**验收**：R71.5 的200个初始required case与其余§16 crash point重启后均有唯一终态且无重复spawn/publish/recovery operation/fresh-authority epoch；session export default/external/reselect、borrowed native/config/release writer、bootstrap三阶段、managed recovery、workspace mutation、SessionCatalog source、SessionLog attachment、child report、updater cache、logical storage key、spawn registration/prepared/activation/actor handoff/physical producer authority/owner recovery/cursor/successor/closure reserve/supervisor claim transfer、semantic retire、journal genesis与doctor bootstrap recovery各自case group无缺口；logical start后零resource-record只有valid header + 完整EOF proof才NoEffect；`resource_ref=None` blocker可跨不同call/attempt稳定拦截，resolution后CAS放行；同一broken generation跨consumer不因requirement字段分片；workspace quota blocker只暂停新reservation，不删除active sibling；SessionScratch reset exact generation + confirmation + preserve quarantine；domain writer自失败从七个resource-record prefix、operation-effect frontier与四个domain-event prefix中的每一个crash后，都只能凭RA-authenticated canonical shadow按`Observed -> StartedShadow -> 通用Prepared -> bridge Prepared -> 通用Settled -> bridge Settled -> Projected` fixed-forward，重放exact四事件集合且event count/set/final frontier一致，已修复namespace不残留active blocker；authoritative storage不可generic replace，rebuildable storage须semantic proof；maintenance public target与selection/action token exact；四表面统一输出`recoverability/effect_settlement/available_actions/enforcement_context/cleanup_status`，execution variant逐项一致，host-managed variant明确NotApplicable reason；不输出`retryable`决策字段或host path。R71.9 必须再以新220-case manifest完整重跑，不得把本阶段的200-case历史 evidence当作新 closure。
 
 **命令**：
 
@@ -10091,7 +10176,7 @@ pnpm --dir apps/desktop check
 
 **目标**：删除双authority、反向依赖、private allocator与漏gate。
 
-**交付物**：删除§17.4及§9.5所有legacy allocation/cleanup route；Cargo dependency方向固化；`scripts/check-touched.sh`把authority/sandbox/permission/backend/reconciliation/schema/projector列为high-risk并有deterministic classifier tests；治理/架构/产品文档同步；`check-r71-negative-dependencies.sh`以Cargo metadata + Rust AST执行禁止依赖/构造规则。gate同时拒绝surface导入RA/Sandbox concrete/physical type、runtime facade复制kernel surface schema/hash，以及R71 candidate中出现RFC-0070专属package split/cutover；保留的product-to-runtime edge必须只到transitional facade并登记在R71.8 handoff manifest。
+**交付物**：删除§17.4及§9.5所有legacy allocation/cleanup route；Cargo dependency方向固化；`scripts/check-touched.sh`把authority/sandbox/permission/backend/reconciliation/schema/projector列为high-risk并有deterministic classifier tests；治理/架构/产品文档同步；`check-r71-negative-dependencies.sh`以Cargo metadata + Rust AST执行禁止依赖/构造规则。gate同时拒绝surface导入RA/Sandbox concrete/physical type、runtime facade复制kernel surface schema/hash，以及R71 candidate中出现RFC-0070专属package split/cutover；保留的product-to-runtime edge必须只到transitional facade并登记在最终 R71.9 handoff manifest。
 
 **Owner**：workspace Cargo、scripts、governance/docs与全部touched crates。
 
@@ -10154,6 +10239,64 @@ base_sha="$(git merge-base origin/main "$candidate_sha")"
 
 **退出/回滚/旧路径**：无legacy path，所有declared supported平台实测通过后才将RFC标记实施完成；不满足就不发布、不关闭RFC。
 
+### R71.9 Borrowed file onboarding、child resource bundle 与 post-qualification reopening（depends R71.8 evidence baseline）
+
+**Depends**：R71.8 的历史 evidence 只作为不可变审计输入，不再作为当前 implementation 已冻结的证明。R71.9 必须在包含本补充设计的新 exact SHA 上重做 full/five-platform qualification，不得复用 `e410172c410cc6e86d3403cdd0be3401eb94d125` 的结论代替新基线。
+
+**目标**：关闭 session `70c1896d-02a8-4c62-b273-3e43aeeb95aa` 暴露的两个 P1：（1）shipping composition 未将 workspace borrowed file subject 注册、规划、执行闭合在 Resource Authority 内；（2）plan-review child/finalizer 未由 application composition 原子获得 current-schema resource bundle，artifact 因此全部 unavailable。本 slice 不改变 plan-review 必须等待用户明确 accept/reject 的产品边界，不得把“停在审批”当成权限故障修复。
+
+**实施顺序**：R71.9a-R71.9d 是串行 slice；每片一个独立 commit，前一片的 targeted gate 通过后才进入后一片。
+
+1. **R71.9a — characterization 与 shipping composition proof**
+   - 将本 session 的脱敏 event chain 固化为 golden fixture：permission allow、file adjudication `operation not permitted for this binding`、7/7 child artifact `initial_availability=unavailable`、child 仍提交 draft、parent 正常等待 `PlanDecisionRecorded`。
+   - 增加使用真实 runtime registry、真实 plan-review coordinator、真实 builtin file tool 和真实 managed artifact store 的黑盒测试；禁止 `PlanReviewInspectionTool` 一类忽略 `ToolContext` 的 fake 满足 qualification。
+   - 在 shipping composition 测试中直接断言 borrowed registry readiness、workspace registration generation、file-plan issuer、child resource bundle 和 artifact writer 全部非空；任一缺失必须在 provider/tool start 前返回 typed precondition failure。
+2. **R71.9b — workspace borrowed subject onboarding 与 RA-private I/O**
+   - workspace activation 通过唯一 composition owner 调用 §8.5 registration service，生成绑定 application/workspace/authority generation/root identity/observation version 的 opaque registration capsule。重复激活必须 idempotent，identity drift 或 generation 改变必须撤销旧 capsule 并 typed fail closed。
+   - `ManagedFileAccessPlanV3` 只能由 Resource Authority 内部 planner 从 exact registered subject 与 permission decision 派生；`authority_generation`、`resolver_proof_hash`、`plan_hash`、subject identity 与 decision binding 全部必须为已验证的非 sentinel 值。
+   - opaque file ref 不携带可被 tool/runtime 还原的 raw absolute path。`read/list/grep/stat`的 physical open/scan/read 由 Resource Authority 或其 owner-private adapter 执行并返回 bounded result + authority receipt；shipping builtin 不得在 adjudication 后再直接调用 `std::fs`/`tokio::fs`/`walkdir` 第二条 I/O seam。
+   - 旧 path-shaped ref、zero hash/generation 与 runtime-local 宽泛 registry 一次性 clean cutover；只允许 test-support adapter 显式保留，且 negative dependency gate 必须证明 shipping graph 不可达。
+3. **R71.9c — current-schema child session resource bundle**
+   - application composition 必须只有一个 `CurrentSchemaChildSessionResourceProvisionerV1`（最终命名可与现有 owner 对齐，但职责不可拆成 best-effort attach），在 child provider/tool 启动前原子交付 SessionLog、ArtifactStaging、ArtifactStore、managed file/storage/tool authority、scope/generation 与 terminalization guard。
+   - plan-review research child 与 finalizer 使用不同的 scoped bundle；两者均必须具备 artifact writer/store，不得共享 parent 的 raw store object、writer handle 或 unscoped token。
+   - success/failure/cancel/timeout/panic/restart 由同一 lifecycle guard 结算 lease、seal/publish artifact、finalize SessionLog；不能因 child 最终文本存在就忽略 artifact capture 缺口。
+   - mandatory bundle 任一 component 缺失时返回 `ResourcePreconditionUnavailable`（或等价 closed current-schema variant），并证明零 provider request、零 tool start、零 filesystem effect。
+4. **R71.9d — production E2E、negative gate 与重新资格化**
+   - 新增 temporary Git workspace 的 product-level TUI/runner E2E：路由到 plan review、child 真实执行 `ls/grep/read_file`、所有 tool result 有 durable artifact ref、draft ready、用户 accept 后进入 task admission。测试必须显式输入 plan decision，不得绕过或自动批准。
+   - 增加 `R71-F-FIL-001..012` 与 `R71-F-CSR-001..008` 共20个required case，将 required manifest 从200增至220；任何 missing/skipped/zero-match/fake-only case 都阻止 closure。
+   - 重做 inventory、negative dependency、full/cross-surface、fault campaign 和 exact-SHA five-platform qualification；新 local/hosted evidence 的 candidate/base/manifest hash 必须相同，历史 run 不可充值。
+
+**Owner 与主要落点**：
+
+- `sigil-kernel`：managed file contract、permission/tool authority binding、child resource bundle 的 transport-neutral schema；
+- `sigil-resource-authority`：borrowed registration registry、file-plan issuer/private table、owner-private filesystem executor、receipt/recovery；
+- `sigil-runtime`：R71 composition、workspace activation onboarding、plan-review coordinator、child/finalizer provisioner、managed artifact composition；
+- `sigil-tools-builtin`：file tool 只消费 opaque plan/result/receipt，删除 shipping direct filesystem seam；
+- `sigil-tui`与 release qualification：真实 product E2E、fault manifest、inventory/negative gate 与 exact-SHA evidence。
+
+**禁止的快速修复**：不得在 tool `execute()` 内临时 `observe/register`；不得把 normalized raw path 塞进 runtime-global allowlist；不得用 default allow、chmod、扩大 `permission.external_directory`、授权 host temp 或 retry 来掩盖 composition 缺失；不得让 child 借用 parent raw artifact store；不得将 artifact unavailable 降级为正常可发布状态；不得修改 plan approval 边界作为本 slice 的解法。
+
+**Required fault groups**：
+
+- `R71-F-FIL-001..012`：workspace registration positive、registration unavailable、zero generation、zero resolver proof、zero plan hash、cross-workspace subject swap、generation/restart stale、root identity drift、symlink external escape、token replay、shipping direct-filesystem negative proof、`read/list/grep` positive receipts；
+- `R71-F-CSR-001..008`：child bundle atomic provision、mandatory artifact component absent、research-child artifact publish、finalizer evidence publish、cross-scope bundle swap、cancel/failure terminalization、crash/recovery、real TUI plan-review + explicit accept 到 task admission。
+
+**Targeted 验收命令**（实施者先落地对应 test target，不得用不存在/零匹配伪造通过）：
+
+```bash
+cargo test -p sigil-resource-authority managed_file_access
+cargo test -p sigil-kernel tool_authority
+cargo test -p sigil-tools-builtin managed_file_access
+cargo test -p sigil-runtime plan_review_coordinator
+cargo test -p sigil-tui real_plan_review_managed_file_artifact_e2e -- --nocapture
+./scripts/check-local-resource-producer-inventory.sh --mode enforce
+./scripts/check-r71-negative-dependencies.sh
+./scripts/run-r71-consumer-conformance.sh --all --epoch current
+./scripts/run-r71-fault-campaign.sh --required
+```
+
+**Closure 条件**：R71.9a-R71.9d 各有独立 commit/gate/evidence；implementation ledger、completeness review、handoff、core technical solution、inventory/golden manifest 同步；工作树 clean 后对最终 exact SHA 运行 §19.5 唯一 full release wrapper 和五平台 dispatch。只有新220-case manifest、真实 product-composition E2E、全部 full/five-platform job 及 evidence hash 一致时，才能恢复 `Implemented / Frozen`并重新允许 RFC-0070 开始或继续。
+
 ---
 
 ## 19. 资格门禁
@@ -10203,7 +10346,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-R71.8 release qualification不再使用staged scope；只调用§19.5的clean-tree、exact candidate/base SHA `run-r71-release-qualification.sh --suite full`，由wrapper重跑上列full engineering gate及全部targeted/cross-surface/conformance gate。
+R71.8 与 R71.9d release qualification不再使用staged scope；只调用§19.5的clean-tree、exact candidate/base SHA `run-r71-release-qualification.sh --suite full`，由wrapper重跑上列full engineering gate及全部targeted/cross-surface/conformance gate。R71.9a-R71.9c 每片仍须运行 `check-touched --scope staged --tier full`及该片targeted gate，不得把全部风险延后到 R71.9d 一次暴露。
 
 ### 19.4 Required conformance assertions
 
@@ -10222,6 +10365,10 @@ R71.8 release qualification不再使用staged scope；只调用§19.5的clean-tr
 - sanitized config view只存在于exact ExecutionTemp generation并绑定source identity/projection policy；raw UserConfig不因view获权；
 - host-private diagnostics不可由child enumerate/open；
 - ToolPermission V3逐draft绑定exact resource plan；terminal/extension persistent token、start source与lifetime交叉使用均失败；
+- workspace activation必须在真实shipping composition中产生非zero borrowed registration generation、resolver proof与file-plan hash；未注册、cross-workspace/generation、identity drift、sentinel与replay都在provider/tool/filesystem effect前返回typed closed failure；
+- shipping `read/list/grep/stat`只能通过Resource Authority的private plan与I/O executor返回bounded result/receipt；tool/runtime直接`std::fs`/`tokio::fs`/`walkdir`、path-shaped opaque ref、execute-time late registration与runtime-global raw-path allowlist均被Cargo/AST/contract gate拒绝；
+- current-schema plan-review child与finalizer在启动前原子获得SessionLog、ArtifactStaging、ArtifactStore、managed file/storage/tool authority、exact scope/generation与terminalization guard；缺任一component时零provider request、零tool start、零filesystem effect；
+- 真实product-composition E2E必须运行builtin `ls/grep/read_file`、产出durable artifact ref、完成draft ready，并只在显式`PlanDecisionRecorded::Accepted`后进入task admission；fake inspection tool、mock artifact availability或仅unit seam不能满足required qualification；
 - persistent output stream满足single take、channel/sequence/EOF；MCP protocol backpressure与TUI lossy projection不会阻塞supervisor/capture/finalize；
 - same-session 多 holder、cross-process lease、GC/session delete race 通过；
 - large stdout/stderr全程经ManagedBlobWriter；storage backpressure/disk-full/crash切换bounded discard-drain且不终止/重放process，只有typed output resource limit可终止；
@@ -10257,7 +10404,7 @@ R71.8 release qualification不再使用staged scope；只调用§19.5的clean-tr
 
 ### 19.5 Gate runner 与 workflow contract
 
-R71.0-R71.8必须交付并维护`dev/governance/r71-conformance-inventory-v1.toml`。每条case至少包含`case_id/slice/command_id/platform/backend/required/test_binary/test_name/expected_assertion_count/owner`；case id唯一，required case count与golden manifest hash进入implementation ledger。以下是固定gate入口，不是说明性占位符：
+R71.0-R71.9必须交付并维护`dev/governance/r71-conformance-inventory-v1.toml`。每条case至少包含`case_id/slice/command_id/platform/backend/required/test_binary/test_name/expected_assertion_count/owner`；case id唯一，required case count与golden manifest hash进入implementation ledger。R71.9必须将`R71-F-FIL-001..012`与`R71-F-CSR-001..008`纳入required set，因此新closure的exact required count为220；仍报告200或复用旧manifest hash即gate失败。以下是固定gate入口，不是说明性占位符：
 
 ```text
 scripts/check-local-process-inventory.sh
@@ -10300,7 +10447,7 @@ gh workflow run sandbox-conformance.yml \
   -f require_conformance=true
 ```
 
-`r71-release-candidate`是R71.6-R71.8同一未发布candidate的固定remote ref；dispatch前脚本验证该ref解析到`candidate_sha`、base SHA与本地qualification evidence一致，不一致即非零退出。workflow必须断言`run.head_sha == candidate_sha`并checkout exact SHA；workflow run id、URL、每个job conclusion与evidence artifact digest全部写ledger。只有五个固定job均为`success`、`linux-bubblewrap` full-suite evidence存在且所有evidence candidate/base/manifest hash吻合，dispatch才返回0。
+`r71-release-candidate`是R71.6-R71.9同一未发布candidate的固定remote ref；dispatch前脚本验证该ref解析到`candidate_sha`、base SHA与本地qualification evidence一致，不一致即非零退出。workflow必须断言`run.head_sha == candidate_sha`并checkout exact SHA；workflow run id、URL、每个job conclusion与evidence artifact digest全部写ledger。只有五个固定job均为`success`、`linux-bubblewrap` full-suite evidence存在且所有evidence candidate/base/manifest hash吻合，dispatch才返回0。
 
 ---
 
@@ -10322,6 +10469,8 @@ Proposed 阶段只创建本 RFC，不更新 README、`dev/docs/index.md` 或 `.r
 R71.8 closure record：上述同步已完成。固定五 job workflow、exact candidate/base 校验、200 个 required fault cases、inventory/shipping/negative gates、四表面 contract checks 与三平台 sandbox qualification 的逐项证据由本地 execution ledger 和 handoff manifest 记录；R71.6–R71.8 仍作为同一未发布 release candidate 管理，RFC-0070 不在本闭环中提前启动。
 
 2026-08-26 final closure record：completeness review 后的 implementation candidate `e410172c410cc6e86d3403cdd0be3401eb94d125` 以 immutable base `44d043517d1893ff1043f5597aa71d31b527f16a` 通过 clean macOS full qualification，local evidence SHA-256 为 `1f8fdc92734a164d7f691d61721cd49d8186293e1d9c16aae83a1ccfd64879d4`；GitHub run `32883914430` 的 `macos-seatbelt`、`linux-bubblewrap`、`windows-restricted`、`docker-declared`、`toolchain-offline` 五个固定 job 全部 success，且五份 artifact 均经 candidate/base/manifest hash/result 复核。Linux full job 实际越过此前 rustdoc `TMPDIR` 子目录缺失故障并完成全部 full gate。状态修改所在的最终提交继续按同一 exact-SHA protocol 复验；repo-local audit ledger 是最终 SHA、二次 local evidence 与二次 hosted run 的闭合记录。RFC-0071 不再有 P1/P2 implementation 或 qualification blocker，post-R71 稳定基线可供 RFC-0070 按串行约束启动。
+
+2026-08-26 post-qualification reopening record：真实 session `70c1896d-02a8-4c62-b273-3e43aeeb95aa` 证明上述 closure 结论不完整，本记录因而 supersede “不再有 P1/P2 blocker”与“RFC-0070 可启动”两个状态声明，但不删除或改写历史 evidence。新证据表明 shipping composition 的 borrowed registry 未完成 workspace subject onboarding，builtin file tool 仍可构造缺 authority proof 的 path-shaped plan，plan-review child/finalizer 也没有 mandatory artifact resource bundle；原 required suite 又使用不消费真实 `ToolContext` 的 fake inspection tool，因此 full/five-platform 全绿仍未覆盖真实 product composition。RFC 状态恢复 `Gated / Partial / Not Frozen`，须完成 R71.9、220-case manifest 与新 exact-SHA qualification 才能再次 closure；期间 RFC-0070 不得开始或继续。实施者还必须同步 completeness review、handoff、execution plan、core technical solution 与 RFC status，防止任一文档继续引用已失效的 frozen 结论。
 
 ---
 
@@ -10404,6 +10553,21 @@ resource journal是physical lease/quota/ACL/process frontier authority；session
 
 RFC-0071 只定义 execution truth 与 verification evidence，不在 host production code 用关键词/regex 判定用户意图。若 shell dialect 无法提供 upstream status，必须标记 proof insufficient。
 
+### 22.7 Durable storage admission 的跨版本与多进程恢复
+
+第三十四轮真实事故表明，grant hash、namespace hash 或进程内递增 proof sequence 都不能单独作为 durable admission identity：source-bound manifest 轮换会合法改变 grant hash；旧 broker 每次 composition 又从 `proof-1` 重新计数；多个 session leaf 因而可能持有相同 v1 marker，而并发 composer 还可能用各自的旧 snapshot 覆盖同一 journal tail。
+
+V1 的 fixed-forward 规则补充如下：
+
+1. journal-backed handle 必须携带 `grant_hash + admission_sequence + admission_record_hash`；physical marker schema v2 原样持久化这三个字段。marker 只是 evidence，不能自行授权或复活 handle；authority 仍以私有 admitted table 和 journal chain 校验。
+2. kernel broker identity 必须跨 composition/process 唯一；局部 sequence 只提供实例内排序，不能成为 durable identity。namespace claim 由唯一 opaque handle 派生，后续 named writer 不再跨进程别名。
+3. journal terminal tracking 以 exact admission sequence 为主键。namespace/grant hash 可重复，只能作为绑定字段，不能把同 grant 或同 namespace 的其他 pending admission 误判为 settled。
+4. pending admission 遇到 source-bound grant rollover 时，只在除 `source_binding_hash/grant_hash` 外全部 frozen grant 字段相等、历史 request 与历史 grant 精确自洽且 authority generation 相同时进入 **recovery-only**。它仍阻止所有新 production admission，直到 physical reconciliation 产生 durable terminal；任何其他漂移仍按 corruption fail closed。
+5. v2 marker 只能匹配同一 admission sequence/record hash。只有一个匹配的 legacy v1 marker时可走既有 physical-frontier recovery；多个 v1 marker复用同一 handle/namespace 时不得猜选、合并或删除。authority 必须在锁定并验证全部候选及其 frontier 后追加 `StorageAdmissionAliasQuarantined`，记录 exact stale admission、候选数量和候选集合哈希，保留全部物理数据并撤销旧 capability。
+6. resource 与 quota 的 file-backed journal 每次 append 必须使用 Resource Authority 内部统一的 owner-only、no-follow sidecar writer lock，并比较磁盘 snapshot 与调用方预期 predecessor；不相等即 typed precondition failure 并回滚内存/book mutation，禁止 last-writer-wins 丢失其他进程已经 durable 的记录。若 quota reservation 已 durable、resource admission 因竞争未落盘，restart 只释放不在 exact pending-admission owner set 中的 orphan；旧 terminal 与较新 pending 复用同一 legacy owner key 时由 pending 保留 reservation，旧 terminal 不得误释放。domain journal schema 与 replay 仍分别归属各自模块，只有 host-filesystem exclusion 原语集中管理。
+
+上述补充只为历史 pending state 提供保守终结，不把 pending 当作 settled，不给 legacy marker 新写权限，也不修改既有 session 数据。新 schema、terminal event、lock producer 与恢复路径必须进入 inventory、restart、cross-version、concurrency、corruption 和 five-platform qualification。
+
 ---
 
 ## 23. 完成定义
@@ -10427,13 +10591,13 @@ RFC-0071 只有同时满足以下条件才可从 Proposed/实施中改为“实�
 15. hierarchical quota可原子reserve/settle/reconcile，workspace/quarantine cap与effective enforcement truthful；
 16. resource journal与session log按§22.4唯一precedence恢复，未结算`SpawnInitiated`不被重放；
 17. `FinalStageOnly`/其他lossy pipeline始终投影`VerificationEvidenceV1::Insufficient`，不再产生seq 652式false-green；
-18. R71.6/7未被独立发布，R71.8同一release candidate通过后才产出用户artifact；
+18. R71.6/7未被独立发布，R71.9同一release candidate通过后才产出用户artifact；
 19. process spawn与filesystem producer inventory覆盖全workspace且无未分类production site；
 20. implementation ledger记录每个slice的commit、gate、fault evidence与旧路径删除证据；
 21. session export、native save、configuration、release output、child-agent final report与SignedUpdaterCache均有closed owner、durable physical frontier、完整receipt和明确direct-writer删除证据；
 22. SessionCatalog可在零session cold start并仅从lifecycle-owned source snapshot重建，kernel无production FileProjectionStore；SessionLog controller attachment由authority holder管理且无`.attachment-*` sidecar或Drop释放真相；
 23. RFC-0002 workspace lease、before-image artifact与retention全部走原子mutation bundle/ManagedStorage/ManagedFileAccess seam，kernel mutation模块无raw root、环境fallback或filesystem lock/writer；
-24. §16新增200个closed case与§19.4 required assertions均由exact manifest计数执行，任何missing/skipped/zero-case均阻止R71.6 cutover与R71.8发布；
+24. §16的220个closed case与§19.4 required assertions均由exact manifest计数执行，任何missing/skipped/zero-case、仍使用历史200-case manifest或复用旧hash均阻止R71.9 closure与发布；
 25. spawn、storage activation、recovery Prepared、workspace mutation、domain-storage shadow、SessionCatalog source与host-process observation全部由composition epoch冻结的owner verifier查询真实private state；公开DTO/MAC/hash不能自证；
 26. successful spawn只返回sandbox-owned同一supervisor handle aggregate，one-shot直接wait、persistent按值转交；不存在从process ref或runtime side table重建platform handle的路径；
 27. 每个resource journal都有可验证header/instance/genesis，首BootstrapBound固定sequence=1，header-only与首record crash可确定恢复，zero-hash私约定被golden拒绝；
@@ -10444,7 +10608,11 @@ RFC-0071 只有同时满足以下条件才可从 Proposed/实施中改为“实�
 32. bounded recovery cursor、full host owner/quiescence proof、三代claim上限、same-lineage/ledger successor与no-successor conservative terminal均通过fault campaign；每个provider registration在Dormant前预留closure slot，只有Activated→Unavailable可授权conservative uncertain，closure/spawn terminal/settlement reserve互不可借用且ENOSPC仍可完成安全终态。
 33. `ResourceRecoverySurfaceContractV1`在kernel只有一份canonical schema/hash，四表面经同一fixture产生相同blocker、receipt、frontier与action binding；surface/runtime facade无RA/Sandbox concrete或physical type泄漏；
 34. `future_application_facade` compile-positive fixture不依赖runtime即可完整消费该contract，证明RFC-0070可机械接管facade而无需改写permission V3、resource journal、receipt、blocker或recovery schema；
-35. R71.0-R71.8 ledger无任何R70 slice/package split/public preview/runner relocation，R71.8 handoff manifest完整记录post-R71 baseline、transitional edges及其R70删除owner。
+35. R71.0-R71.9 ledger无任何R70 slice/package split/public preview/runner relocation，R71.9 handoff manifest完整记录post-R71 baseline、transitional edges及其R70删除owner；
+36. 每个shipping workspace在激活时已由唯一composition owner注册borrowed subject，file plan绑定current authority/workspace generation、root identity、resolver proof、permission decision与非zero plan hash，不存在path-shaped或sentinel production ref；
+37. shipping builtin file tool与runtime不再执行第二条direct filesystem I/O seam，read/list/grep/stat只通过Resource Authority private executor返回bounded result/receipt，unregistered、drift、cross-scope与replay均在I/O前typed fail closed；
+38. plan-review research child与finalizer在provider/tool start前由application composition原子获得current-schema SessionLog/ArtifactStaging/ArtifactStore/file-storage-tool authority/scope-generation/terminalization bundle，且success/failure/cancel/timeout/crash/restart后artifact与session frontier均可唯一结算；
+39. temporary Git workspace中的真实product-composition E2E完成plan-review child的builtin file research、durable artifact publish、draft ready、显式plan accept与task admission；新exact SHA的local full与five-platform evidence共220个required case且candidate/base/manifest hash一致，fake tool、mock availability或历史qualification不能满足本条。
 
 ---
 
@@ -10458,4 +10626,16 @@ temp 默认具备权限，但准确含义是：
 
 resource permission、physical allocation、OS sandbox、mutation evidence 与 lifecycle recovery 必须由同一 execution binding 串联。任何模块都不能再通过 cwd、env 或目录命名自行推断“应该可写”。
 
-这项拆分是消除重复权限故障的架构前提；在新 authority/sandbox seam 建成并通过跨平台 fault/conformance gate 前，不把任何局部 symlink、chmod 或 temp-dir patch 宣称为问题已根治。
+这项拆分是消除重复权限故障的架构前提；在新 authority/sandbox seam 建成并通过跨平台 fault/conformance gate 前，不把任何局部 symlink、chmod 或 temp-dir patch 宣称为问题已根治。session `70c1896d-02a8-4c62-b273-3e43aeeb95aa` 进一步证明：“合同和单元测试存在”不等于“shipping composition已交付完整资源”。因此 R71.9 必须同时关闭 borrowed file onboarding、child resource bundle 和真实产品路径资格门禁，否则 RFC-0071 继续保持未冻结。
+
+### R71.9 implementation update（2026-08-26）
+
+R71.9a–R71.9c 已分别提交为 `f9a60e53`、`61861bfc`、`4e9a14c0`：真实 session authority-readiness golden、borrowed workspace file authority、current-schema plan-review child bundle 均已落地。R71.9d 当前工作树补齐真实 TUI runner E2E、`R71-F-FIL-001..012`、`R71-F-CSR-001..008` 与 220-case manifest/test bijection；fault campaign、negative dependency、inventory 与 current consumer conformance 已通过。
+
+本更新不构成 RFC closure。由于 R71.9d 尚未形成独立 commit，也尚未在最终 clean/pushed exact SHA 上运行 §19.5 local full 与五平台 qualification，RFC 状态保持 **Gated / Partial / Not Frozen**，RFC-0070 不得开始。
+
+### R71.9d committed implementation update（2026-08-26）
+
+R71.9d 已形成独立 slice commit，包含真实 product-composition E2E、FIL 12 与 CSR 8 fault cases、220-case manifest/test bijection、durable journal admission binding/recovery/quarantine、跨 composer snapshot CAS、durable quota replay 与 TUI current-schema path-boundary 修复。staged full touched gate（26 个变更文件）已通过：整仓 cargo test、全部 doc tests、`cargo clippy --all-targets -- -D warnings`；TUI `1704 passed / 3 ignored`、runtime `1194 passed / 4 ignored`、tools `286 passed / 1 ignored`。
+
+这只证明 R71.9 implementation slice 与本地 engineering gate 已闭合，不等同于 §19.5 release qualification。最终 clean exact-SHA local release wrapper、固定五平台 hosted qualification 与 candidate/base/manifest evidence 尚未完成，因此 RFC 仍保持 **Gated / Partial / Not Frozen**，RFC-0070 仍不得开始。

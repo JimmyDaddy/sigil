@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fs, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -2366,6 +2366,209 @@ fn ordinary_chat_plan_review_route_commits_typed_draft_and_surfaces_plan_ready()
         )),
         "plan review must not create a task handoff"
     );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn real_plan_review_managed_file_artifact_e2e() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    fs::write(
+        workspace_root.join("README.md"),
+        "managed plan review evidence\nneedle: authority-owned\n",
+    )?;
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-managed-file-plan-review-e2e.jsonl");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let review_args = r#"{"reason_codes":["architectural_tradeoff","scope_uncertain"]}"#;
+    let draft_args = r#"{
+        "schema_version": 2,
+        "summary": "Review the managed workspace evidence",
+        "steps": [{
+            "step_id": "review_1",
+            "title": "Review managed evidence",
+            "role": "executor",
+            "mode": "read",
+            "isolation": "shared_read_only",
+            "target_paths": ["README.md"]
+        }],
+        "target_paths": ["README.md"],
+        "suggested_checks": ["inspect durable artifact refs"]
+    }"#;
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "review-call".to_owned(),
+                name: sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "review-call".to_owned(),
+                delta: review_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "review-call".to_owned(),
+                name: sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                args_json: review_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "list-call".to_owned(),
+                name: "list_files".to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "list-call".to_owned(),
+                delta: r#"{"path":".","limit":20}"#.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "list-call".to_owned(),
+                name: "list_files".to_owned(),
+                args_json: r#"{"path":".","limit":20}"#.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "grep-call".to_owned(),
+                name: "grep".to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "grep-call".to_owned(),
+                delta: r#"{"pattern":"authority-owned","path":"README.md"}"#.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "grep-call".to_owned(),
+                name: "grep".to_owned(),
+                args_json: r#"{"pattern":"authority-owned","path":"README.md"}"#.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "read-call".to_owned(),
+                name: "read_file".to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "read-call".to_owned(),
+                delta: r#"{"path":"README.md"}"#.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "read-call".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: r#"{"path":"README.md"}"#.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(submit_plan_draft_chunks("draft-call", draft_args)),
+    ]);
+    let mut registry = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools(&mut registry);
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path,
+        Agent::new(provider, registry),
+        workspace_root,
+    )?;
+    let authority_root = worker.authority_root_path().to_path_buf();
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "inspect the workspace evidence before proposing the plan".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let finished = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
+        matches!(message, WorkerMessage::PlanRunFinished { .. })
+    })?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+            if attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(_))
+    )));
+
+    // Exercise the real user acceptance boundary after the managed file evidence run.  A
+    // paused task keeps this black-box fixture focused on admission rather than requiring a
+    // second provider stream for task execution.
+    let draft = PlanArtifactProjection::from_entries(&entries)
+        .latest_pending_plan()
+        .context("managed file plan review should produce a pending draft")?
+        .clone();
+    worker.send(WorkerCommand::CreateTaskFromPlan {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+        start_mode: PlanTaskStartMode::CreatePaused,
+        permission_grant: None,
+    })?;
+    let admitted = worker
+        .recv_until_with_timeout(Duration::from_secs(20), |message| {
+            matches!(message, WorkerMessage::TaskCreatedFromPlan { .. })
+        })
+        .context("accepted managed file plan should create a task admission")?;
+    let WorkerMessage::TaskCreatedFromPlan {
+        entry: task_entry,
+        start_mode,
+        entries: admitted_entries,
+    } = admitted
+    else {
+        unreachable!("recv_until only returns TaskCreatedFromPlan");
+    };
+    assert_eq!(start_mode, PlanTaskStartMode::CreatePaused);
+    assert_eq!(task_entry.plan_id, draft.plan_id);
+    assert_eq!(task_entry.plan_hash, draft.plan_hash);
+    let task_projection = sigil_kernel::TaskStateProjection::from_entries(&admitted_entries);
+    let task = task_projection
+        .tasks
+        .get(&task_entry.task_id)
+        .context("accepted managed file plan should project a task")?;
+    assert!(task.direct_execution_admission.is_some());
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(
+        PlanArtifactProjection::from_entries(&admitted_entries)
+            .latest_decision(&draft.plan_id)
+            .context("accepted managed file plan should record its decision")?
+            .decision,
+        sigil_kernel::PlanDecision::Accepted
+    );
+    assert!(admitted_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))
+            if admission.task_id == task_entry.task_id
+    )));
+
+    let mut observed_tools = BTreeSet::new();
+    let mut artifact_backed_results = 0usize;
+    let mut records_files = vec![authority_root.join("state")];
+    while let Some(path) = records_files.pop() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                records_files.push(entry?.path());
+            }
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("records.jsonl") {
+            for entry in sigil_kernel::JsonlSessionStore::read_entries(&path)? {
+                if let SessionLogEntry::ToolResultV3(recorded) = entry {
+                    observed_tools.insert(recorded.tool_name.to_owned());
+                    if recorded.artifact.descriptor().is_some() {
+                        artifact_backed_results += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(observed_tools.contains("list_files"));
+    assert!(observed_tools.contains("grep"));
+    assert!(observed_tools.contains("read_file"));
+    assert_eq!(artifact_backed_results, observed_tools.len());
     worker.shutdown()?;
     Ok(())
 }

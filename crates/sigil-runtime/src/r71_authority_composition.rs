@@ -776,6 +776,10 @@ mod tests {
 
     #[test]
     fn r71_current_boot_publishes_one_green_current_manifest_and_replays_it() {
+        // Composition boot resolves shared state/cache defaults in a few nested adapters. Keep
+        // this replay assertion behind the runtime test environment lock so parallel fixtures
+        // that temporarily override those process-wide roots cannot invalidate the second boot.
+        let _environment_guard = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
         std::fs::write(

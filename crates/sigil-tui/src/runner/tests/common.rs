@@ -228,6 +228,10 @@ impl TestWorker {
     ) -> Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
         Arc::clone(&self.managed_storage_writer)
     }
+
+    pub(super) fn authority_root_path(&self) -> &Path {
+        self._authority_root.path()
+    }
 }
 
 impl Drop for TestWorker {

@@ -4,7 +4,7 @@
 //! claims. The factory returns only kernel pathsless trait objects; semantic writers never
 //! import authority concrete types nor receive an authority token.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -14,9 +14,9 @@ use fs2::FileExt;
 use serde::Deserialize;
 
 use sigil_kernel::managed_storage::{
-    ManagedStorageAdmissionRequestV1, ManagedStorageErrorV1, ManagedStorageNamespaceHandleV1,
-    ManagedStorageServiceV1, ManagedStorageStorageReceiptV1, StorageAdmissionGrantV1,
-    ValidatedStorageAdmissionCapabilityV1,
+    ManagedStorageAdmissionRequestV1, ManagedStorageDurableAdmissionBindingV1,
+    ManagedStorageErrorV1, ManagedStorageNamespaceHandleV1, ManagedStorageServiceV1,
+    ManagedStorageStorageReceiptV1, StorageAdmissionGrantV1, ValidatedStorageAdmissionCapabilityV1,
 };
 use sigil_kernel::resource::{
     AuthorityGeneration, CanonicalHash, ManagedStorageSemanticOwnerV1,
@@ -118,6 +118,7 @@ struct StorageAdmissionRecordV1 {
     request: ManagedStorageAdmissionRequestV1,
     namespace_hash: CanonicalHash,
     admission_sequence: u64,
+    admission_record_hash: Option<CanonicalHash>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,6 +126,12 @@ struct PhysicalStorageAdmissionMarkerV1 {
     schema_version: u32,
     handle_id: String,
     namespace_hash: CanonicalHash,
+    #[serde(default)]
+    grant_hash: Option<CanonicalHash>,
+    #[serde(default)]
+    admission_sequence: Option<u64>,
+    #[serde(default)]
+    admission_record_hash: Option<CanonicalHash>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +140,12 @@ struct PhysicalStorageFrontierV1 {
     record_count: u64,
     content_hash: CanonicalHash,
     frontier_hash: CanonicalHash,
+}
+
+#[derive(Debug)]
+enum PhysicalNamespaceResolutionV1 {
+    Exact(PathBuf),
+    LegacyAlias(Vec<PathBuf>),
 }
 
 /// Authority-owned managed storage service behind the kernel trait object.
@@ -144,10 +157,9 @@ pub struct AuthorityManagedStorageServiceV1 {
     /// The journal parent is the authority-owned state anchor. It is used only by the
     /// authority's physical recovery verifier; no path crosses the kernel storage port.
     journal_root: Option<PathBuf>,
-    /// Exact namespace -> grant identity for admissions left unsettled by the prior process.
-    /// A grant can own more than one namespace across time, so grant-only recovery state would
-    /// let an older settlement incorrectly clear a newer admission.
-    blocked_namespaces_after_restart: Mutex<BTreeMap<String, String>>,
+    /// Exact admission sequence -> grant identity for namespaces left terminally unresolved by
+    /// the prior process. Legacy namespace and grant hashes may repeat across restarts.
+    blocked_admissions_after_restart: Mutex<BTreeMap<u64, String>>,
 }
 
 impl AuthorityManagedStorageServiceV1 {
@@ -162,7 +174,7 @@ impl AuthorityManagedStorageServiceV1 {
             journal: None,
             quota: Mutex::new(QuotaBookV1::new(quota_cap)),
             journal_root: None,
-            blocked_namespaces_after_restart: Mutex::new(BTreeMap::new()),
+            blocked_admissions_after_restart: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -186,14 +198,18 @@ impl AuthorityManagedStorageServiceV1 {
             )),
         };
         let journal = ResourceJournalFileV1::open(journal_path.as_ref().to_path_buf(), header)?;
-        let blocked_namespaces_after_restart = journal.unsettled_storage_namespaces();
-        let (admissions, settled_namespaces) = journal.storage_admission_state();
+        let blocked_admissions_after_restart = journal
+            .unsettled_storage_admissions()
+            .into_iter()
+            .map(|(sequence, (_, grant_hash))| (sequence, grant_hash))
+            .collect();
+        let (admissions, terminal_admissions) = journal.storage_admission_state();
         let all_admissions = admissions.clone();
         rehydrate_storage_state(
             &table,
             authority_generation,
             admissions,
-            &settled_namespaces,
+            &terminal_admissions,
         )?;
         let journal_root = journal_path.as_ref().parent().map(Path::to_path_buf);
         let quota_path = journal_root
@@ -215,9 +231,13 @@ impl AuthorityManagedStorageServiceV1 {
             .values()
             .cloned()
             .collect::<Vec<_>>();
+        let pending_quota_owners = admitted
+            .iter()
+            .map(|record| storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash))
+            .collect::<BTreeSet<_>>();
         for record in admitted {
             let owner_key = storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
-            if settled_namespaces.contains(&record.namespace_hash.to_hex()) {
+            if terminal_admissions.contains(&record.admission_sequence) {
                 quota
                     .release_owner(&owner_key)
                     .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
@@ -228,9 +248,25 @@ impl AuthorityManagedStorageServiceV1 {
             }
         }
         for admission in all_admissions {
-            if settled_namespaces.contains(&admission.namespace_hash.to_hex()) {
+            if terminal_admissions.contains(&admission.admission_sequence) {
                 let owner_key =
                     storage_quota_owner_key(admission.grant_hash, admission.namespace_hash);
+                // Legacy sequence-only handles can repeat the same grant/namespace pair. An
+                // older terminal admission must not release the reservation reattached to a
+                // newer exact pending admission that happens to share that legacy owner key.
+                if !pending_quota_owners.contains(&owner_key) {
+                    quota
+                        .release_owner(&owner_key)
+                        .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+                }
+            }
+        }
+        // A process can durably reserve quota and then lose the resource-journal append race.
+        // The reservation is conservative but orphaned: no admission can ever consume it. Replay
+        // releases only owners absent from the exact pending-admission set, fixed-forward under
+        // the quota journal's own predecessor CAS.
+        for owner_key in quota.active_owner_keys() {
+            if !pending_quota_owners.contains(&owner_key) {
                 quota
                     .release_owner(&owner_key)
                     .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
@@ -242,7 +278,7 @@ impl AuthorityManagedStorageServiceV1 {
             journal: Some(Mutex::new(journal)),
             quota: Mutex::new(quota),
             journal_root,
-            blocked_namespaces_after_restart: Mutex::new(blocked_namespaces_after_restart),
+            blocked_admissions_after_restart: Mutex::new(blocked_admissions_after_restart),
         })
     }
 
@@ -255,7 +291,7 @@ impl AuthorityManagedStorageServiceV1 {
     /// silently settling here would erase an effect frontier that this authority cannot prove.
     pub fn require_startup_reconciliation(&self) -> Result<(), ManagedStorageErrorV1> {
         let blocked = self
-            .blocked_namespaces_after_restart
+            .blocked_admissions_after_restart
             .lock()
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
         if blocked.keys().next().is_some() {
@@ -284,9 +320,7 @@ impl AuthorityManagedStorageServiceV1 {
             .get(handle.handle_id.as_str())
             .cloned()
             .ok_or(ManagedStorageErrorV1::CapabilityMismatch)?;
-        if record.namespace_hash != handle.namespace_hash
-            || record.grant.capability_family != handle.capability_family
-        {
+        if !handle_matches_record(&handle, &record) {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
         drop(admitted);
@@ -302,7 +336,12 @@ impl AuthorityManagedStorageServiceV1 {
             return self.finalize_namespace(handle, reason);
         }
 
-        let directory = self.physical_namespace_directory(&record)?;
+        let directory = match self.physical_namespace_directory(&record)? {
+            PhysicalNamespaceResolutionV1::Exact(directory) => directory,
+            PhysicalNamespaceResolutionV1::LegacyAlias(_) => {
+                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            }
+        };
         let _namespace_lock = open_physical_namespace_lock(&directory)?;
         let observed = self.read_physical_frontier(&record, &directory)?;
         if observed.byte_length != byte_length
@@ -334,9 +373,9 @@ impl AuthorityManagedStorageServiceV1 {
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
             .iter()
             .filter(|record| {
-                self.blocked_namespaces_after_restart
+                self.blocked_admissions_after_restart
                     .lock()
-                    .map(|blocked| blocked.contains_key(&record.1.namespace_hash.to_hex()))
+                    .map(|blocked| blocked.contains_key(&record.1.admission_sequence))
                     .unwrap_or(true)
             })
             .map(|(handle_id, record)| (handle_id.clone(), record.clone()))
@@ -344,24 +383,22 @@ impl AuthorityManagedStorageServiceV1 {
 
         let mut receipts = Vec::with_capacity(records.len());
         for (handle_id, record) in records {
-            let directory = self.physical_namespace_directory(&record)?;
-            let _namespace_lock = open_physical_namespace_lock(&directory)?;
-            let frontier = self.read_physical_frontier(&record, &directory)?;
-            self.ensure_physical_frontier(&record, frontier)?;
-            self.append_storage_recovery_chain(&record, frontier)?;
-            let handle = ManagedStorageNamespaceHandleV1::new(
-                OpaqueKernelCapabilityHandleId::new(handle_id),
-                record.namespace_hash,
-                record.grant.capability_family,
-                OpaqueKernelCapabilityAuthenticatorV1::new(format!(
-                    "recovery-{}",
-                    record.grant.grant_id.as_str()
-                )),
-            );
-            receipts.push(self.finalize_namespace(
-                handle,
-                "domain-storage-recovery-retained-frontier".to_owned(),
-            )?);
+            match self.physical_namespace_directory(&record)? {
+                PhysicalNamespaceResolutionV1::Exact(directory) => {
+                    let _namespace_lock = open_physical_namespace_lock(&directory)?;
+                    let frontier = self.read_physical_frontier(&record, &directory)?;
+                    self.ensure_physical_frontier(&record, frontier)?;
+                    self.append_storage_recovery_chain(&record, frontier)?;
+                    let handle = recovery_namespace_handle(handle_id, &record);
+                    receipts.push(self.finalize_namespace(
+                        handle,
+                        "domain-storage-recovery-retained-frontier".to_owned(),
+                    )?);
+                }
+                PhysicalNamespaceResolutionV1::LegacyAlias(candidates) => {
+                    receipts.push(self.quarantine_legacy_alias_admission(&record, &candidates)?);
+                }
+            }
         }
         Ok(receipts)
     }
@@ -369,7 +406,7 @@ impl AuthorityManagedStorageServiceV1 {
     fn physical_namespace_directory(
         &self,
         record: &StorageAdmissionRecordV1,
-    ) -> Result<PathBuf, ManagedStorageErrorV1> {
+    ) -> Result<PhysicalNamespaceResolutionV1, ManagedStorageErrorV1> {
         let root = self
             .journal_root
             .as_ref()
@@ -407,7 +444,8 @@ impl AuthorityManagedStorageServiceV1 {
             }
         }
 
-        let mut matched = None;
+        let mut exact_match = None;
+        let mut legacy_matches = Vec::new();
         for candidate in candidates {
             let marker_path = candidate.join("authority-admission.json");
             let marker_metadata = match fs::symlink_metadata(&marker_path) {
@@ -423,17 +461,134 @@ impl AuthorityManagedStorageServiceV1 {
                     .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?,
             )
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
-            if marker.schema_version != 1 {
-                return Err(ManagedStorageErrorV1::JournalUnavailable);
+            match marker.schema_version {
+                1 if marker.namespace_hash == record.namespace_hash
+                    && marker.handle_id == record.handle_id =>
+                {
+                    legacy_matches.push(candidate);
+                }
+                2 if marker.namespace_hash == record.namespace_hash
+                    && marker.handle_id == record.handle_id
+                    && marker.grant_hash == Some(record.grant.grant_hash)
+                    && marker.admission_sequence == Some(record.admission_sequence)
+                    && marker.admission_record_hash == record.admission_record_hash =>
+                {
+                    if exact_match.replace(candidate).is_some() {
+                        return Err(ManagedStorageErrorV1::JournalUnavailable);
+                    }
+                }
+                1 | 2 => {}
+                _ => return Err(ManagedStorageErrorV1::JournalUnavailable),
             }
-            if marker.namespace_hash == record.namespace_hash
-                && marker.handle_id == record.handle_id
-                && matched.replace(candidate).is_some()
+        }
+        if let Some(exact) = exact_match {
+            return Ok(PhysicalNamespaceResolutionV1::Exact(exact));
+        }
+        match legacy_matches.len() {
+            0 => Err(ManagedStorageErrorV1::JournalUnavailable),
+            1 => Ok(PhysicalNamespaceResolutionV1::Exact(
+                legacy_matches.remove(0),
+            )),
+            _ => Ok(PhysicalNamespaceResolutionV1::LegacyAlias(legacy_matches)),
+        }
+    }
+
+    fn quarantine_legacy_alias_admission(
+        &self,
+        record: &StorageAdmissionRecordV1,
+        candidates: &[PathBuf],
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
+        let mut candidates = candidates.to_vec();
+        candidates.sort();
+        let mut locks = Vec::with_capacity(candidates.len());
+        let mut candidate_facts = Vec::with_capacity(candidates.len());
+        for candidate in &candidates {
+            locks.push(open_physical_namespace_lock(candidate)?);
+            let marker_path = candidate.join("authority-admission.json");
+            let marker: PhysicalStorageAdmissionMarkerV1 = serde_json::from_slice(
+                &read_no_follow_file(&marker_path)
+                    .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?,
+            )
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+            if marker.schema_version != 1
+                || marker.handle_id != record.handle_id
+                || marker.namespace_hash != record.namespace_hash
             {
                 return Err(ManagedStorageErrorV1::JournalUnavailable);
             }
+            let relative_identity = candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| hash_bytes(name.as_bytes()))
+                .ok_or(ManagedStorageErrorV1::JournalUnavailable)?;
+            let frontier = self.read_physical_frontier(record, candidate)?;
+            candidate_facts.push((
+                relative_identity,
+                frontier.byte_length,
+                frontier.record_count,
+                frontier.content_hash,
+            ));
         }
-        matched.ok_or(ManagedStorageErrorV1::JournalUnavailable)
+        if candidate_facts.len() < 2 {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        let candidate_set_hash = hash_debug(&(
+            "legacy-storage-admission-alias-set-v1",
+            record.grant.grant_hash,
+            record.namespace_hash,
+            record.admission_sequence,
+            &candidate_facts,
+        ));
+        let terminal = self
+            .append_journal_event(ResourceJournalEventV1::StorageAdmissionAliasQuarantined {
+                grant_hash: record.grant.grant_hash,
+                namespace_hash: record.namespace_hash,
+                admission_sequence: record.admission_sequence,
+                candidate_count: candidate_facts.len() as u64,
+                candidate_set_hash,
+            })?
+            .ok_or(ManagedStorageErrorV1::JournalUnavailable)?;
+        let quota_owner_key =
+            storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
+        self.release_quota(&quota_owner_key)?;
+        self.table
+            .finalized_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .insert(record.namespace_hash.to_hex(), ());
+        let removed = self
+            .table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
+            .remove(&record.handle_id)
+            .is_some_and(|removed| removed.admission_sequence == record.admission_sequence);
+        if !removed {
+            return Err(ManagedStorageErrorV1::JournalUnavailable);
+        }
+        self.clear_restart_blocker(record.admission_sequence);
+        let operation_digest = hash_debug(&(
+            "quarantine-legacy-storage-admission-alias-v1",
+            candidate_set_hash,
+        ));
+        Ok(ManagedStorageStorageReceiptV1 {
+            grant_id: record.grant.grant_id.clone(),
+            grant_hash: record.grant.grant_hash,
+            semantic_owner: record.grant.semantic_owner,
+            capability_family: record.grant.capability_family,
+            resource_id: record.grant.resource_ref.resource_id.clone(),
+            operation_digest,
+            committed_sequence_or_version: Some(terminal.sequence),
+            committed_frontier_hash: terminal.committed_frontier_hash,
+            receipt_hash: hash_debug(&(
+                record.grant.grant_hash,
+                record.admission_sequence,
+                terminal.record_hash,
+                candidate_set_hash,
+            )),
+            physical_frontier_hash: None,
+            physical_observation_record_hash: None,
+        })
     }
 
     fn read_physical_frontier(
@@ -870,9 +1025,9 @@ impl AuthorityManagedStorageServiceV1 {
             })
     }
 
-    fn clear_restart_blocker(&self, namespace_hash: CanonicalHash) {
-        if let Ok(mut blocked) = self.blocked_namespaces_after_restart.lock() {
-            blocked.remove(&namespace_hash.to_hex());
+    fn clear_restart_blocker(&self, admission_sequence: u64) {
+        if let Ok(mut blocked) = self.blocked_admissions_after_restart.lock() {
+            blocked.remove(&admission_sequence);
         }
     }
 
@@ -932,27 +1087,67 @@ impl AuthorityManagedStorageServiceV1 {
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
             .iter()
             .filter(|record| {
-                self.blocked_namespaces_after_restart
+                self.blocked_admissions_after_restart
                     .lock()
-                    .map(|blocked| blocked.contains_key(&record.1.namespace_hash.to_hex()))
+                    .map(|blocked| blocked.contains_key(&record.1.admission_sequence))
                     .unwrap_or(true)
             })
-            .map(|(handle_id, record)| {
-                ManagedStorageNamespaceHandleV1::new(
-                    OpaqueKernelCapabilityHandleId::new(handle_id.clone()),
-                    record.namespace_hash,
-                    record.grant.capability_family,
-                    OpaqueKernelCapabilityAuthenticatorV1::new(format!(
-                        "rehydrated-{}",
-                        record.grant.grant_id.as_str()
-                    )),
-                )
-            })
+            .map(|(handle_id, record)| recovery_namespace_handle(handle_id.clone(), record))
             .collect::<Vec<_>>();
         handles
             .into_iter()
             .map(|handle| self.finalize_namespace(handle, cleanup_status.to_owned()))
             .collect()
+    }
+}
+
+fn recovery_namespace_handle(
+    handle_id: String,
+    record: &StorageAdmissionRecordV1,
+) -> ManagedStorageNamespaceHandleV1 {
+    let authenticator = OpaqueKernelCapabilityAuthenticatorV1::new(format!(
+        "recovery-{}",
+        record.grant.grant_id.as_str()
+    ));
+    if let Some(admission_record_hash) = record.admission_record_hash {
+        ManagedStorageNamespaceHandleV1::new_durable(
+            OpaqueKernelCapabilityHandleId::new(handle_id),
+            record.namespace_hash,
+            record.grant.capability_family,
+            ManagedStorageDurableAdmissionBindingV1 {
+                grant_hash: record.grant.grant_hash,
+                admission_sequence: record.admission_sequence,
+                admission_record_hash,
+            },
+            authenticator,
+        )
+    } else {
+        ManagedStorageNamespaceHandleV1::new(
+            OpaqueKernelCapabilityHandleId::new(handle_id),
+            record.namespace_hash,
+            record.grant.capability_family,
+            authenticator,
+        )
+    }
+}
+
+fn handle_matches_record(
+    handle: &ManagedStorageNamespaceHandleV1,
+    record: &StorageAdmissionRecordV1,
+) -> bool {
+    if record.namespace_hash != handle.namespace_hash
+        || record.grant.capability_family != handle.capability_family
+    {
+        return false;
+    }
+    match (handle.durable_admission(), record.admission_record_hash) {
+        (Some(binding), Some(record_hash)) => {
+            binding.grant_hash == record.grant.grant_hash
+                && binding.admission_sequence == record.admission_sequence
+                && binding.admission_record_hash == record_hash
+        }
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => true,
     }
 }
 
@@ -999,9 +1194,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         let record = admitted
             .get(handle.handle_id.as_str())
             .ok_or(ManagedStorageErrorV1::HandleFinalized)?;
-        if record.namespace_hash != handle.namespace_hash
-            || record.grant.capability_family != handle.capability_family
-        {
+        if !handle_matches_record(handle, record) {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
         Ok(())
@@ -1039,9 +1232,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             .get(handle.handle_id.as_str())
             .cloned()
             .ok_or(ManagedStorageErrorV1::HandleFinalized)?;
-        if record.namespace_hash != handle.namespace_hash
-            || record.grant.capability_family != handle.capability_family
-        {
+        if !handle_matches_record(handle, &record) {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
         let owner_key = storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
@@ -1071,12 +1262,11 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         };
         let binding = capability.binding();
         if !probe {
-            if self
-                .blocked_namespaces_after_restart
+            if !self
+                .blocked_admissions_after_restart
                 .lock()
                 .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?
-                .values()
-                .any(|blocked_grant| blocked_grant == &grant.grant_hash.to_hex())
+                .is_empty()
             {
                 return Err(ManagedStorageErrorV1::JournalUnavailable);
             }
@@ -1131,35 +1321,28 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                 )),
             )
         };
-        let handle = ManagedStorageNamespaceHandleV1::new(
-            handle_id,
-            namespace_hash,
-            grant.capability_family,
-            authenticator,
-        );
+        let handle_key = handle_id.as_str().to_owned();
         let mut admitted = self
             .table
             .admitted_namespaces
             .lock()
             .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
-        if admitted.contains_key(handle.handle_id.as_str()) {
+        if admitted.contains_key(&handle_key) {
             return Err(ManagedStorageErrorV1::DuplicateClaim);
         }
         let quota_owner_key = storage_quota_owner_key(grant.grant_hash, namespace_hash);
         if !probe {
             self.reserve_quota(&quota_owner_key, &grant.quota_profile)?;
         }
-        let admission_sequence =
+        let admission_record =
             match self.append_journal_event(ResourceJournalEventV1::StorageNamespaceAdmitted {
                 grant_hash: grant.grant_hash,
-                handle_id: handle.handle_id.as_str().to_owned(),
+                handle_id: handle_key.clone(),
                 namespace_hash,
                 grant: Box::new(grant.clone()),
                 request: Box::new(request.clone()),
             }) {
-                Ok(record) => record
-                    .map(|record| record.sequence)
-                    .unwrap_or(grant.journal_admission_sequence),
+                Ok(record) => record,
                 Err(error) => {
                     if !probe {
                         let _ = self.release_quota(&quota_owner_key);
@@ -1167,14 +1350,40 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
                     return Err(error);
                 }
             };
+        let admission_sequence = admission_record
+            .as_ref()
+            .map(|record| record.sequence)
+            .unwrap_or(grant.journal_admission_sequence);
+        let admission_record_hash = admission_record.as_ref().map(|record| record.record_hash);
+        let handle = if let Some(record_hash) = admission_record_hash {
+            ManagedStorageNamespaceHandleV1::new_durable(
+                handle_id,
+                namespace_hash,
+                grant.capability_family,
+                ManagedStorageDurableAdmissionBindingV1 {
+                    grant_hash: grant.grant_hash,
+                    admission_sequence,
+                    admission_record_hash: record_hash,
+                },
+                authenticator,
+            )
+        } else {
+            ManagedStorageNamespaceHandleV1::new(
+                handle_id,
+                namespace_hash,
+                grant.capability_family,
+                authenticator,
+            )
+        };
         admitted.insert(
-            handle.handle_id.as_str().to_owned(),
+            handle_key,
             StorageAdmissionRecordV1 {
                 handle_id: handle.handle_id.as_str().to_owned(),
                 grant: grant.clone(),
                 request,
                 namespace_hash,
                 admission_sequence,
+                admission_record_hash,
             },
         );
         Ok(handle)
@@ -1194,9 +1403,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             .get(handle.handle_id.as_str())
             .cloned()
             .ok_or(ManagedStorageErrorV1::CapabilityMismatch)?;
-        if record.namespace_hash != handle.namespace_hash
-            || record.grant.capability_family != handle.capability_family
-        {
+        if !handle_matches_record(&handle, &record) {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
         let physical_binding = if handle
@@ -1255,7 +1462,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         self.release_quota(&quota_owner_key)?;
         self.table.record_finalized(&handle.namespace_hash)?;
         admitted.remove(handle.handle_id.as_str());
-        self.clear_restart_blocker(record.namespace_hash);
+        self.clear_restart_blocker(record.admission_sequence);
         let committed_frontier_hash = if let Some(settlement) = &settlement {
             settlement.committed_frontier_hash
         } else {
@@ -1300,7 +1507,7 @@ fn rehydrate_storage_state(
     table: &AuthorityStorageGrantTableV1,
     authority_generation: AuthorityGeneration,
     admissions: Vec<ResourceJournalStorageAdmissionV1>,
-    settled_namespaces: &std::collections::BTreeSet<String>,
+    terminal_admissions: &std::collections::BTreeSet<u64>,
 ) -> Result<(), JournalErrorV1> {
     for admission in admissions {
         if let Some(sequence) = admission
@@ -1322,7 +1529,7 @@ fn rehydrate_storage_state(
                 "journal admission grant payload hash mismatch for {grant_id}"
             )));
         }
-        if settled_namespaces.contains(&admission.namespace_hash.to_hex()) {
+        if terminal_admissions.contains(&admission.admission_sequence) {
             table
                 .finalized_namespaces
                 .lock()
@@ -1335,9 +1542,19 @@ fn rehydrate_storage_state(
                 "journal admission references unregistered grant {grant_id}"
             )));
         };
-        if registered != &admission.grant
-            || admission.grant_hash != admission.grant.grant_hash
+        let request_matches_historical_grant = admission.request.semantic_owner
+            == admission.grant.semantic_owner
+            && admission.request.capability_family == admission.grant.capability_family
+            && admission.request.purpose == admission.grant.purpose
+            && admission.request.owner_scope == admission.grant.owner_scope
+            && admission.request.journal_scope == admission.grant.journal_scope
+            && admission.request.source.source_class() == admission.grant.source_class
+            && source_binding_hash(&admission.request.source)
+                == admission.grant.source_binding_hash;
+        if (!source_bound_grant_rollover_compatible(registered, &admission.grant)
+            && registered != &admission.grant)
             || admission.grant.authority_generation != authority_generation
+            || !request_matches_historical_grant
         {
             return Err(JournalErrorV1::Corrupt(format!(
                 "journal admission grant binding mismatch for {grant_id}"
@@ -1355,6 +1572,7 @@ fn rehydrate_storage_state(
                     request: admission.request,
                     namespace_hash: admission.namespace_hash,
                     admission_sequence: admission.admission_sequence,
+                    admission_record_hash: Some(admission.admission_record_hash),
                 },
             );
         if previous.is_some() {
@@ -1365,6 +1583,16 @@ fn rehydrate_storage_state(
         }
     }
     Ok(())
+}
+
+fn source_bound_grant_rollover_compatible(
+    current: &StorageAdmissionGrantV1,
+    historical: &StorageAdmissionGrantV1,
+) -> bool {
+    let mut normalized = current.clone();
+    normalized.source_binding_hash = historical.source_binding_hash;
+    normalized.grant_hash = historical.grant_hash;
+    normalized == *historical
 }
 
 fn source_binding_hash(
@@ -1794,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn r71_storage_rehydrates_pending_grant_binding_mismatch_fail_closed() {
+    fn r71_storage_rehydrates_source_bound_pending_grant_for_recovery_only() {
         let directory = tempfile::tempdir().expect("journal directory");
         let path = directory.path().join("authority-resources.journal.json");
         let header = storage_test_header();
@@ -1819,21 +2047,133 @@ mod tests {
         current.source_binding_hash = CanonicalHash::from_bytes([0xabu8; 32]);
         current.grant_hash = CanonicalHash::from_bytes([0xacu8; 32]);
         let mut table = AuthorityStorageGrantTableV1::new();
-        table.register(current).expect("current grant");
-        let result = AuthorityManagedStorageServiceV1::new_with_journal(
+        table.register(current.clone()).expect("current grant");
+        let service = AuthorityManagedStorageServiceV1::new_with_journal(
             table,
             historical.authority_generation,
             &path,
             header.bootstrap_manifest_hash,
             header.journal_instance_hash,
+        )
+        .expect("source-bound rollover is recoverable historical state");
+        assert!(matches!(
+            service.require_startup_reconciliation(),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
+        assert!(matches!(
+            service.reconcile_unsettled_storage_grants_with_physical_bridge(),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
+
+        let broker = sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new();
+        let current_capability =
+            broker
+                .issue_storage_namespace_capability(broker.seal_storage_namespace_proof(
+                    current.capability_family,
+                    current.namespace_hash,
+                ))
+                .expect("current capability");
+        assert!(matches!(
+            service.admit_namespace(storage_test_request(), current_capability),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
+    }
+
+    #[test]
+    fn r71_storage_quarantines_ambiguous_legacy_alias_without_selecting_or_deleting_data() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority-resources.journal.json");
+        let header = storage_test_header();
+        let historical = grant();
+        let namespace_hash = CanonicalHash::from_bytes([3u8; 32]);
+        {
+            let mut journal = crate::journal::ResourceJournalFileV1::open(&path, header.clone())
+                .expect("journal");
+            journal
+                .append_event(
+                    crate::journal::ResourceJournalEventV1::StorageNamespaceAdmitted {
+                        grant_hash: historical.grant_hash,
+                        handle_id: "proof-4".to_owned(),
+                        namespace_hash,
+                        grant: Box::new(historical.clone()),
+                        request: Box::new(storage_test_request()),
+                    },
+                )
+                .expect("admission");
+        }
+
+        let first = directory.path().join("managed/session-log/session-a");
+        let second = directory.path().join("managed/session-log/session-b");
+        for (candidate, records) in [
+            (&first, b"{\"seq\":1}\n".as_slice()),
+            (&second, b"{\"seq\":2}\n".as_slice()),
+        ] {
+            std::fs::create_dir_all(candidate).expect("legacy candidate");
+            std::fs::write(
+                candidate.join("authority-admission.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version": 1,
+                    "handle_id": "proof-4",
+                    "namespace_hash": namespace_hash,
+                }))
+                .expect("marker json"),
+            )
+            .expect("marker");
+            std::fs::write(candidate.join("records.jsonl"), records).expect("records");
+        }
+        let first_before = std::fs::read(first.join("records.jsonl")).expect("first before");
+        let second_before = std::fs::read(second.join("records.jsonl")).expect("second before");
+
+        let mut current = historical.clone();
+        current.source_binding_hash = CanonicalHash::from_bytes([0xabu8; 32]);
+        current.grant_hash = CanonicalHash::from_bytes([0xacu8; 32]);
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(current.clone()).expect("current grant");
+        let service = AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            historical.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("recoverable historical admission");
+        let receipts = service
+            .reconcile_unsettled_storage_grants_with_physical_bridge()
+            .expect("quarantine legacy alias");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].committed_sequence_or_version, Some(3));
+        assert_eq!(receipts[0].physical_frontier_hash, None);
+        service
+            .require_startup_reconciliation()
+            .expect("exact admission blocker cleared");
+        assert_eq!(
+            std::fs::read(first.join("records.jsonl")).expect("first retained"),
+            first_before
         );
-        let error = match result {
-            Ok(_) => panic!("pending grant binding drift must remain blocked"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(error, JournalErrorV1::Corrupt(message) if message.contains("binding mismatch"))
+        assert_eq!(
+            std::fs::read(second.join("records.jsonl")).expect("second retained"),
+            second_before
         );
+        drop(service);
+
+        let mut reopened_table = AuthorityStorageGrantTableV1::new();
+        reopened_table.register(current).expect("current grant");
+        let reopened = AuthorityManagedStorageServiceV1::new_with_journal(
+            reopened_table,
+            historical.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("terminal quarantine replays");
+        reopened
+            .require_startup_reconciliation()
+            .expect("quarantine remains terminal");
+        let journal = crate::journal::ResourceJournalFileV1::open(&path, header)
+            .expect("reopen durable journal");
+        assert!(journal.unsettled_storage_admissions().is_empty());
+        let journal_text = std::fs::read_to_string(path).expect("journal text");
+        assert!(journal_text.contains("StorageAdmissionAliasQuarantined"));
     }
 
     #[test]
@@ -2097,6 +2437,104 @@ mod tests {
     }
 
     #[test]
+    fn r71_storage_restart_releases_quota_owner_without_durable_admission() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority-resources.journal.json");
+        let quota_path = directory
+            .path()
+            .join(".authority-quota/managed-storage.json");
+        let header = storage_test_header();
+        let grant = grant();
+        let workspace_cap = grant.quota_profile.max_bytes;
+        {
+            let mut quota = QuotaBookV1::open(&quota_path, workspace_cap).expect("quota journal");
+            quota
+                .reserve_owned("storage:orphan", &grant.quota_profile, 0, 1)
+                .expect("orphan reservation");
+        }
+
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant.clone()).expect("grant");
+        drop(
+            AuthorityManagedStorageServiceV1::new_with_journal(
+                table,
+                grant.authority_generation,
+                &path,
+                header.bootstrap_manifest_hash,
+                header.journal_instance_hash,
+            )
+            .expect("restart reconciliation"),
+        );
+
+        let reopened = QuotaBookV1::open(quota_path, workspace_cap).expect("reopen quota");
+        assert!(reopened.reservation_for_owner("storage:orphan").is_none());
+        assert_eq!(reopened.workspace_used_bytes(), 0);
+    }
+
+    #[test]
+    fn r71_storage_restart_keeps_quota_for_pending_legacy_owner_after_older_terminal() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("authority-resources.journal.json");
+        let header = storage_test_header();
+        let grant = grant();
+        let namespace_hash = CanonicalHash::from_bytes([3u8; 32]);
+        {
+            let mut journal = crate::journal::ResourceJournalFileV1::open(&path, header.clone())
+                .expect("journal");
+            for handle_id in ["settled-proof-4", "pending-proof-4"] {
+                journal
+                    .append_event(
+                        crate::journal::ResourceJournalEventV1::StorageNamespaceAdmitted {
+                            grant_hash: grant.grant_hash,
+                            handle_id: handle_id.to_owned(),
+                            namespace_hash,
+                            grant: Box::new(grant.clone()),
+                            request: Box::new(storage_test_request()),
+                        },
+                    )
+                    .expect("admission");
+                if handle_id == "settled-proof-4" {
+                    journal
+                        .append_event(crate::journal::ResourceJournalEventV1::GenerationSettled {
+                            grant_hash: grant.grant_hash,
+                            resource_id: grant.resource_ref.resource_id.as_str().to_owned(),
+                            generation: grant.resource_ref.generation,
+                            cleanup_status: "settled legacy admission".to_owned(),
+                            physical_frontier_hash: None,
+                            physical_observation_record_hash: None,
+                        })
+                        .expect("settlement");
+                }
+            }
+        }
+
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant.clone()).expect("grant");
+        let service = AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            grant.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("restart reconciliation");
+        let owner_key = storage_quota_owner_key(grant.grant_hash, namespace_hash);
+        assert!(
+            service
+                .quota
+                .lock()
+                .expect("quota")
+                .reservation_for_owner(&owner_key)
+                .is_some(),
+            "an older terminal must not release the exact pending admission's legacy owner"
+        );
+        assert!(matches!(
+            service.require_startup_reconciliation(),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
+    }
+
+    #[test]
     fn r71_storage_physical_bridge_rejects_pending_without_marker() {
         let directory = tempfile::tempdir().expect("journal directory");
         let path = directory.path().join("authority-resources.journal.json");
@@ -2173,21 +2611,27 @@ mod tests {
             .lock()
             .expect("journal lock")
             .set_path_for_test(original_path);
+        let record = service
+            .table
+            .admitted_namespaces
+            .lock()
+            .expect("admitted namespaces")
+            .get("handle-probe-storage-1")
+            .cloned()
+            .expect("retained admission");
+        let downgraded = ManagedStorageNamespaceHandleV1::new(
+            sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(record.handle_id.clone()),
+            record.namespace_hash,
+            record.grant.capability_family,
+            OpaqueKernelCapabilityAuthenticatorV1::new("downgraded".to_owned()),
+        );
+        assert!(matches!(
+            service.validate_namespace_write(&downgraded),
+            Err(ManagedStorageErrorV1::CapabilityMismatch)
+        ));
         let receipt = service
             .finalize_namespace(
-                ManagedStorageNamespaceHandleV1::new(
-                    sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
-                        "handle-probe-storage-1".to_owned(),
-                    ),
-                    CanonicalHash::from_bytes({
-                        let mut namespace = [0x9fu8; 32];
-                        namespace[0] = 1;
-                        namespace[24..].copy_from_slice(&1u64.to_be_bytes());
-                        namespace
-                    }),
-                    grant().capability_family,
-                    OpaqueKernelCapabilityAuthenticatorV1::new("retry".to_owned()),
-                ),
+                recovery_namespace_handle(record.handle_id.clone(), &record),
                 "recovered".to_owned(),
             )
             .expect("retry finalize");

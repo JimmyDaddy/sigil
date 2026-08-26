@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod borrowed;
 pub mod configuration;
 pub mod consumer_ports;
+mod durable_snapshot;
 pub mod factory;
 pub mod file_access;
 pub mod file_access_stub;

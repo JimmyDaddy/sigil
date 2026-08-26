@@ -178,7 +178,7 @@ impl Tool for ReadFileTool {
                 subjects: vec![file_permission_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
                 managed_file_access: Some(file_access_ref(
-                    &ctx,
+                    ctx,
                     path,
                     "read-file",
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::Read,
@@ -353,9 +353,9 @@ fn file_access_ref(
     }
     #[cfg(not(test))]
     {
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "managed file planning requires an active authority composition"
-        ));
+        ))
     }
     #[cfg(test)]
     let workspace_root = &ctx.workspace_root;
@@ -565,7 +565,7 @@ impl Tool for WriteFileTool {
                 workspace_code_steps: 0,
             },
             managed_file_access: Some(file_access_ref(
-                &ctx,
+                ctx,
                 path,
                 "write-file",
                 sigil_kernel::managed_file_access::ManagedFileOperationV1::Write,
@@ -737,7 +737,7 @@ impl Tool for EditFileTool {
                 workspace_code_steps: 0,
             },
             managed_file_access: Some(file_access_ref(
-                &ctx,
+                ctx,
                 path,
                 "edit-file",
                 sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
@@ -920,7 +920,7 @@ impl Tool for DeleteFileTool {
                 workspace_code_steps: 0,
             },
             managed_file_access: Some(file_access_ref(
-                &ctx,
+                ctx,
                 path,
                 "delete-file",
                 sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete,
@@ -1066,7 +1066,7 @@ impl Tool for ListTool {
                 subjects: vec![file_permission_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
                 managed_file_access: Some(file_access_ref(
-                    &ctx,
+                    ctx,
                     path,
                     "list-dir",
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::List,
@@ -1172,7 +1172,7 @@ impl Tool for GlobTool {
                 subjects: vec![file_permission_subject(&ctx.workspace_root, ".")?],
                 tool_default_mode: None,
                 managed_file_access: Some(file_access_ref(
-                    &ctx,
+                    ctx,
                     ".",
                     "glob-pattern",
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::Glob,
@@ -1268,7 +1268,7 @@ impl Tool for GrepTool {
                 subjects: vec![file_permission_subject(&ctx.workspace_root, path)?],
                 tool_default_mode: None,
                 managed_file_access: Some(file_access_ref(
-                    &ctx,
+                    ctx,
                     path,
                     "grep-subject",
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::Grep,

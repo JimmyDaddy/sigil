@@ -606,6 +606,7 @@ pub(in crate::runner) enum PlanReviewExecutionResult {
     Blocked { reason: String, paused: bool },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     run_session: &mut Session,
     action: sigil_kernel::StartPlanReviewAction,

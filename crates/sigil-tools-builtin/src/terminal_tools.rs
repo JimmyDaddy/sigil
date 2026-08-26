@@ -300,6 +300,18 @@ pub enum TerminalLifecycleRoute {
 }
 
 impl TerminalProcessManagers {
+    pub(crate) fn ensure_execution_available(&self) -> Result<()> {
+        match &self.execution_owner {
+            TerminalManagerExecutionOwnerV1::Managed(port) if !port.is_available() => {
+                Err(anyhow::Error::new(
+                    sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable,
+                )
+                .context("managed terminal launch failed"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn new_managed(
         terminal_execution_config: TerminalExecutionConfig,
         managed_execution: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
@@ -628,6 +640,7 @@ impl Tool for TerminalStartTool {
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let args = parse_terminal_start_args(&args)?;
         validate_terminal_start_execution_mode(args.mode, args.pty)?;
+        self.managers.ensure_execution_available()?;
         let shell = self.managers.resolve_shell(args.shell.as_deref())?;
         let execution_analysis = self.analyze_command(&ctx, &args.command, &shell)?;
         reject_known_finite_terminal_start_command(&args.command, &shell, &execution_analysis)?;

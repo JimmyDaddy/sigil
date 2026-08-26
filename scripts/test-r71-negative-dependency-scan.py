@@ -157,8 +157,44 @@ def test_registration_invariant_rejects_legacy_public_manager_constructor() -> N
         assert any("selects legacy direct execution" in finding for finding in findings)
 
 
+def test_registration_invariant_rejects_normal_build_direct_spawn() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        write_registry(
+            root,
+            "Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1)",
+            "Arc<dyn ManagedTerminalExecutionPortV1>",
+        )
+        manager = root / "crates/sigil-tools-builtin/src/terminal_process/manager.rs"
+        manager.write_text(
+            manager.read_text(encoding="utf-8")
+            + "\nfn shipping_path() { Command::new(\"sh\").spawn().unwrap(); }\n",
+            encoding="utf-8",
+        )
+        findings = scanner.check_registration_invariants(root)
+        assert any("direct spawn route" in finding for finding in findings)
+
+
+def test_registration_invariant_rejects_normal_build_plugin_backend() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        write_registry(
+            root,
+            "Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1)",
+            "Arc<dyn ManagedTerminalExecutionPortV1>",
+        )
+        plugins = root / "crates/sigil-runtime/src/plugins.rs"
+        plugins.write_text(
+            plugins.read_text(encoding="utf-8")
+            + "\npub fn legacy_hook(executor: Arc<dyn ExecutionBackend>) { let _ = executor; }\n",
+            encoding="utf-8",
+        )
+        findings = scanner.check_source(root)
+        assert any("legacy ExecutionBackend seam" in finding for finding in findings)
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("r71 negative dependency scanner tests: 4 passed")
+    print("r71 negative dependency scanner tests: 6 passed")

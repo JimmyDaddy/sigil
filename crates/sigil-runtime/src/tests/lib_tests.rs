@@ -1757,8 +1757,30 @@ async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -
 
 #[tokio::test]
 #[cfg(target_os = "macos")]
+#[allow(clippy::await_holding_lock)] // Serializes process-wide storage-root overrides for the async fixture.
 async fn build_tool_registry_rejects_uncomposed_terminal_pty_route() -> Result<()> {
+    // Path resolution reads process-wide SIGIL_STATE_HOME / SIGIL_CACHE_HOME. Serialize this
+    // test with the environment-mutating fixtures and bind both roots to this test's lifetime;
+    // otherwise parallel runtime tests can legitimately contend with the developer's default
+    // scratch root before this assertion reaches the uncomposed managed-execution seam.
+    let _environment_guard = crate::test_env::lock();
     let temp = tempfile::tempdir()?;
+    let _environment = EnvScope::set_owned(&[
+        (
+            crate::SIGIL_STATE_HOME_ENV,
+            temp.path()
+                .join("state-home")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            crate::SIGIL_CACHE_HOME_ENV,
+            temp.path()
+                .join("cache-home")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ]);
     let provider_capabilities =
         provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");

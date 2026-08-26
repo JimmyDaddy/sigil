@@ -60,7 +60,7 @@ struct ActiveReservationV1 {
     reserved_entries: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum QuotaJournalEventV1 {
     Reserved {
         reservation_epoch: u64,
@@ -80,7 +80,7 @@ enum QuotaJournalEventV1 {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct QuotaJournalRecordV1 {
     sequence: u64,
     previous_hash: Option<CanonicalHash>,
@@ -88,7 +88,7 @@ struct QuotaJournalRecordV1 {
     record_hash: CanonicalHash,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct QuotaJournalSnapshotV1 {
     schema_version: u32,
     workspace_cap: u64,
@@ -143,6 +143,7 @@ impl QuotaJournalV1 {
             }
             let mut book = QuotaBookV1::new(workspace_cap);
             verify_and_replay_records(&mut book, &snapshot.records)?;
+            let expected_predecessor = snapshot.clone();
             let journal = Self {
                 path,
                 workspace_cap,
@@ -150,7 +151,7 @@ impl QuotaJournalV1 {
                 poisoned: false,
             };
             if authorized_migration {
-                journal.persist()?;
+                journal.persist(Some(&expected_predecessor))?;
             }
             Ok((journal, book))
         } else {
@@ -160,7 +161,7 @@ impl QuotaJournalV1 {
                 records: Vec::new(),
                 poisoned: false,
             };
-            journal.persist()?;
+            journal.persist(None)?;
             Ok((journal, QuotaBookV1::new(workspace_cap)))
         }
     }
@@ -182,7 +183,12 @@ impl QuotaJournalV1 {
             event,
         };
         self.records.push(record);
-        if let Err(error) = self.persist() {
+        let expected_predecessor = QuotaJournalSnapshotV1 {
+            schema_version: QUOTA_JOURNAL_SCHEMA_VERSION,
+            workspace_cap: self.workspace_cap,
+            records: self.records[..self.records.len().saturating_sub(1)].to_vec(),
+        };
+        if let Err(error) = self.persist(Some(&expected_predecessor)) {
             self.records.pop();
             if matches!(error, QuotaErrorV1::Journal(ref message) if message.contains("uncertain"))
             {
@@ -193,7 +199,39 @@ impl QuotaJournalV1 {
         Ok(())
     }
 
-    fn persist(&self) -> Result<(), QuotaErrorV1> {
+    fn persist(
+        &self,
+        expected_predecessor: Option<&QuotaJournalSnapshotV1>,
+    ) -> Result<(), QuotaErrorV1> {
+        let _writer_lock =
+            crate::durable_snapshot::open_owner_only_snapshot_writer_lock(&self.path)
+                .map_err(quota_io_error)?;
+        match expected_predecessor {
+            Some(expected) => {
+                let metadata = fs::symlink_metadata(&self.path).map_err(quota_io_error)?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(QuotaErrorV1::Journal(
+                        "quota journal path is not a regular file".to_owned(),
+                    ));
+                }
+                let current: QuotaJournalSnapshotV1 =
+                    serde_json::from_slice(&fs::read(&self.path).map_err(quota_io_error)?)
+                        .map_err(|error| {
+                            QuotaErrorV1::Journal(format!("invalid journal: {error}"))
+                        })?;
+                if current != *expected {
+                    return Err(QuotaErrorV1::Journal(
+                        "quota journal append precondition mismatch".to_owned(),
+                    ));
+                }
+            }
+            None if self.path.exists() => {
+                return Err(QuotaErrorV1::Journal(
+                    "quota journal create precondition mismatch".to_owned(),
+                ));
+            }
+            None => {}
+        }
         let snapshot = QuotaJournalSnapshotV1 {
             schema_version: QUOTA_JOURNAL_SCHEMA_VERSION,
             workspace_cap: self.workspace_cap,
@@ -525,6 +563,17 @@ impl QuotaBookV1 {
             })
     }
 
+    /// Returns the durable owner identities currently holding reservations. Domain authorities
+    /// use this only during restart reconciliation to release reservations whose corresponding
+    /// admission never became durable.
+    #[must_use]
+    pub fn active_owner_keys(&self) -> std::collections::BTreeSet<String> {
+        self.active_reservations
+            .values()
+            .map(|reservation| reservation.owner_key.clone())
+            .collect()
+    }
+
     /// Settles the active reservation for one owner. Unknown owners are idempotent.
     pub fn release_owner(&mut self, owner_key: &str) -> Result<(), QuotaErrorV1> {
         let Some((epoch, active)) = self
@@ -768,6 +817,38 @@ mod tests {
 
         let reopened_again = QuotaBookV1::open(&path, 200).expect("replay release");
         assert_eq!(reopened_again.workspace_used_bytes(), 0);
+    }
+
+    #[test]
+    fn r71_quota_durable_book_rejects_stale_snapshot_without_lost_update() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("quota.json");
+        let prof = profile(100, 10);
+        let mut first = QuotaBookV1::open(&path, 200).expect("first writer");
+        let mut stale = QuotaBookV1::open(&path, 200).expect("stale writer");
+
+        first
+            .reserve_owned("first", &prof, 40, 4)
+            .expect("first reservation");
+        let error = stale
+            .reserve_owned("stale", &prof, 20, 2)
+            .expect_err("stale quota snapshot must not overwrite the first reservation");
+        assert!(matches!(
+            error,
+            QuotaErrorV1::Journal(message) if message.contains("precondition mismatch")
+        ));
+        assert_eq!(stale.workspace_used_bytes(), 0);
+
+        let reopened = QuotaBookV1::open(path, 200).expect("reopen");
+        assert_eq!(reopened.workspace_used_bytes(), 40);
+        assert_eq!(
+            reopened
+                .reservation_for_owner("first")
+                .expect("first reservation retained")
+                .reserved_bytes,
+            40
+        );
+        assert!(reopened.reservation_for_owner("stale").is_none());
     }
 
     #[test]

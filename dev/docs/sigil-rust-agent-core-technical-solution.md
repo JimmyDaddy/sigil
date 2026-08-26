@@ -3,7 +3,7 @@
 > Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
 > no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
 
-> RFC-0071 frozen implementation snapshot (2026-08-26): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. R71.6-R71.8 completed as one exact-SHA-qualified candidate; subsequent application/TUI boundary work must preserve this frozen authority, durable schema and recovery contract.
+> RFC-0071 qualification-candidate snapshot (2026-08-26): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. The previously frozen SHA was superseded by the post-freeze pending-admission repair: durable admissions now use exact journal binding, broker identities are process-unique, legacy marker aliases are retained and terminally quarantined without guessed selection, and file-journal appends reject stale snapshots. A new exact-SHA full/five-platform qualification is required before this snapshot is frozen again.
 
 ## 1. 背景
 
@@ -2777,3 +2777,11 @@ pub fn prepare_tools(
 5. 如果要做 JSON mode，优先在 `request.rs` 里作为 DeepSeek request shaping，而不是新建公共 kernel 能力
 
 这个顺序的好处是，先把主链路打通，再加 DeepSeek 专项增强，不会一开始就把 Beta 能力和 repair 分支缠成一团。
+
+## RFC-0071 R71.9 current implementation boundary（2026-08-26）
+
+R71.9 已将真实 current-schema product path 的三个边界落到代码：workspace activation 由 authority composition 唯一注册 borrowed subject；file tool 只消费 pathless managed plan 与 authority-private bounded result/receipt；plan-review research/finalizer 各自通过 current-schema provisioner 获取 SessionLog、ArtifactStaging、ArtifactStore、tool authority、scope 和 authority generation。真实 TUI runner 已覆盖 child `ls/grep/read_file`、durable artifact descriptor、draft-ready 与显式决策前边界。
+
+当前仍是 `Gated / Partial / Not Frozen`。R71.9a–R71.9c 的提交为 `f9a60e53`、`61861bfc`、`4e9a14c0`；R71.9d 已在工作树中完成真实 E2E、FIL/CSR 20 个 required cases、220-case fault campaign 与 structural gates，但最终 clean exact-SHA full/five-platform qualification 尚未完成。RFC-0070 在此之前不得开始。
+
+R71.9d 随后已形成独立 slice commit，并通过 staged full touched gate：真实 TUI runner E2E、FIL 12、CSR 8、220-case manifest/test bijection、journal recovery/quarantine、durable quota replay、整仓测试、doc tests 与 strict clippy 均通过。该记录仍不改变 qualification boundary：最终 clean exact-SHA local release wrapper 与五平台 hosted evidence 尚未取得，故当前仍为 `Gated / Partial / Not Frozen`，RFC-0070 不得开始。

@@ -35,6 +35,14 @@ pub struct ManagedTerminalStartRequestV1 {
 /// child itself on the production route.
 #[async_trait]
 pub trait ManagedTerminalExecutionPortV1: Send + Sync {
+    /// Reports whether the runtime composition supplied a live managed owner.
+    ///
+    /// The default keeps third-party ports source-compatible; the built-in unavailable port
+    /// overrides it so terminal tools can reject before allocating scratch or artifact state.
+    fn is_available(&self) -> bool {
+        true
+    }
+
     async fn start_persistent(
         &self,
         request: ManagedTerminalStartRequestV1,
@@ -127,6 +135,10 @@ impl ManagedCommandExecutionPortV1 for UnavailableManagedCommandExecutionPortV1 
 
 #[async_trait]
 impl ManagedTerminalExecutionPortV1 for UnavailableManagedCommandExecutionPortV1 {
+    fn is_available(&self) -> bool {
+        false
+    }
+
     async fn start_persistent(
         &self,
         _request: ManagedTerminalStartRequestV1,

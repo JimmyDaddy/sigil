@@ -823,7 +823,7 @@ impl ToolContext {
     > {
         self.tool_authority
             .as_deref()
-            .ok_or_else(|| {
+            .ok_or({
                 crate::tool_authority::KernelToolAuthorityErrorV1::Access(
                     crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
                 )
@@ -895,19 +895,19 @@ impl ToolContext {
         crate::managed_file_access::ManagedFileExecutionOutcomeV1,
         crate::tool_authority::KernelToolAuthorityErrorV1,
     > {
-        let plan = self.sealed_v3_plan().ok_or_else(|| {
+        let plan = self.sealed_v3_plan().ok_or({
             crate::tool_authority::KernelToolAuthorityErrorV1::Access(
                 crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
             )
         })?;
-        let decision = self.sealed_v3_decision().ok_or_else(|| {
+        let decision = self.sealed_v3_decision().ok_or({
             crate::tool_authority::KernelToolAuthorityErrorV1::Access(
                 crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
             )
         })?;
         self.tool_authority
             .as_deref()
-            .ok_or_else(|| {
+            .ok_or({
                 crate::tool_authority::KernelToolAuthorityErrorV1::Access(
                     crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
                 )
@@ -929,7 +929,7 @@ impl ToolContext {
         let plan = self.plan_managed_file_access(logical_path, operation, "file-preview")?;
         self.tool_authority
             .as_deref()
-            .ok_or_else(|| {
+            .ok_or({
                 crate::tool_authority::KernelToolAuthorityErrorV1::Access(
                     crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
                 )
