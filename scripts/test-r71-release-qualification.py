@@ -67,6 +67,17 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("-f require_conformance=true", dispatch)
         self.assertIn('run.get("headSha") != candidate', dispatch)
 
+    def test_shipping_tui_gate_is_included_in_full_release_wrapper(self) -> None:
+        wrapper = (common.ROOT / "scripts/run-r71-release-qualification.sh").read_text(
+            encoding="utf-8"
+        )
+        gate = common.ROOT / "scripts/run-r71-tui-shipping-e2e.sh"
+        self.assertTrue(gate.is_file())
+        self.assertIn(
+            "run_step tui-shipping-e2e bash scripts/run-r71-tui-shipping-e2e.sh",
+            wrapper,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

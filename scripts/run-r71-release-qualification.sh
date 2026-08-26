@@ -224,6 +224,7 @@ else
   run_step cross-surface-http cargo test --locked -p sigil-http
   run_step cross-surface-desktop cargo test --locked -p sigil-desktop
   run_step cross-surface-cli cargo test --locked -p sigil
+  run_step tui-shipping-e2e bash scripts/run-r71-tui-shipping-e2e.sh
   run_step desktop-contract bash scripts/generate-desktop-contract.sh --check
   run_step desktop-renderer-check pnpm --dir apps/desktop check
 

@@ -2821,3 +2821,9 @@ The transaction path was exercised by the shipping TUI current-schema file-surfa
 Unix managed delete now binds each operation to the durable journal instance, sequence frontier and plan hash, with an authority-private same-filesystem quarantine arena. The reducer validates `Prepared`, `Renamed`, `IdentityObserved`, `Restored`, `Deleted` and `ReconciliationRequired` phases and rejects duplicate, reversed, terminal, unknown-operation, identity or binding substitutions. Restart replay checks both leaf and arena; a provable rename-before-record crash is fixed forward, while ambiguity, restore collision and orphan entries remain typed blockers.
 
 Eight required delete fault fixtures extend the frozen conformance manifest to 228 rows, with `228/228` manifest/test bijection. Existing journals are not deleted or rewritten; recovery appends only durable facts. R71.9l and exact-SHA/five-platform qualification remain pending, so RFC-0071 remains `Gated / Partial / Not Frozen` and RFC-0070 remains paused.
+
+### R71.9l shipping TUI and fault qualification expansion (2026-08-26)
+
+R71.9l adds a shipping-shaped TUI bootstrap/file-surface gate. It uses the runtime-owned current-schema boot transaction, then exercises authority-managed list, grep and read operations and checks the returned access receipts. The gate also covers launcher setup/configuration replacement and the durable delete fixture family. The full release wrapper includes the gate and a deterministic contract test protects that inclusion.
+
+The conformance manifest now contains 228 required rows, including eight delete reducer/recovery fixtures, and the fault campaign verifies a `228/228` manifest/test bijection. These are implementation and local engineering gates, not release qualification: clean exact-SHA local full execution and five-platform hosted evidence remain required before RFC state can change. RFC-0071 remains `Gated / Partial / Not Frozen`; RFC-0070 remains paused.
