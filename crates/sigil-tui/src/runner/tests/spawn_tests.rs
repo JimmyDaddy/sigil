@@ -134,7 +134,10 @@ while True:
 fn test_authority_composition(
     root_config: &RootConfig,
     root: &std::path::Path,
-) -> Result<Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>> {
+) -> Result<(
+    Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+    Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>,
+)> {
     let config_path = root.join("sigil.toml");
     root_config.save(&config_path)?;
     let paths =
@@ -154,7 +157,7 @@ fn test_authority_composition(
             root,
         )?
         .ok_or_else(|| anyhow::anyhow!("authority config snapshot is unavailable"))?;
-    let (_cutover, composition) =
+    let (cutover, composition) =
         sigil_runtime::r71_authority_composition::compose_current_boot_authority(
             &config_snapshot,
             &paths.state_root,
@@ -164,7 +167,7 @@ fn test_authority_composition(
     composition
         .activate_workspace(root)
         .map_err(anyhow::Error::msg)?;
-    Ok(Arc::new(composition))
+    Ok((Arc::new(composition), Arc::new(cutover)))
 }
 
 #[test]
@@ -490,7 +493,8 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         startup_timeout_secs: 5,
         ..McpServerConfig::default()
     });
-    let authority_composition = test_authority_composition(&root_config, temp.path())?;
+    let (authority_composition, boot_cutover) =
+        test_authority_composition(&root_config, temp.path())?;
 
     let spawned = super::super::spawn::spawn_agent_worker_with_route_directive_and_attachment(
         root_config,
@@ -500,7 +504,7 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         sigil_kernel::InteractionMode::Interactive,
         super::super::spawn::WorkerSessionRouteDirective::default(),
         Some(authority_composition),
-        None,
+        Some(boot_cutover),
         None,
     )?;
     let command_tx = spawned.command_tx;
