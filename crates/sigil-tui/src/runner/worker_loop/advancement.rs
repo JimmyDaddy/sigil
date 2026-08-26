@@ -3075,7 +3075,10 @@ where
                         Arc::clone(elicitation_handler),
                         Arc::clone(role_provider_builder),
                         managed_verification_execution.as_ref().map(Arc::clone),
-                        state.managed_storage_writer.as_ref().map(Arc::clone),
+                        state
+                            .managed_plan_review_child_resources
+                            .as_ref()
+                            .map(Arc::clone),
                         &state.session.log_path,
                         &mut state.run.next_id,
                         &state.terminal_lifecycle_router,

@@ -137,6 +137,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         context_resolver,
         managed_extension_execution,
         managed_verification_execution,
+        managed_plan_review_child_resources,
     } = mcp_handlers;
     let WorkerLoopTerminalRuntime {
         lifecycle_router: terminal_lifecycle_router,
@@ -295,6 +296,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         managed_storage_writer,
         managed_artifact_store,
     );
+    state.managed_plan_review_child_resources = managed_plan_review_child_resources;
     // RFC-0062 14.1: one startup TTL sweep over the workspace scratch namespaces. Leases are
     // in-memory only, so a fresh worker cannot hold one; expired namespaces from crashed or
     // deleted sessions are reclaimed here, and the sweep never races a live tool or terminal

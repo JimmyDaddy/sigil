@@ -91,8 +91,8 @@ pub struct CurrentSchemaPlanReviewChildResourceBundleV1 {
     authority_generation: sigil_kernel::resource::AuthorityGeneration,
     artifact_store: sigil_kernel::ToolArtifactStore,
     tool_authority: Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>,
-    _session_log_lease: ManagedPlanReviewSessionLogLeaseV1,
-    _artifact_lease: ManagedArtifactStoreLeaseV1,
+    session_log_lease: ManagedPlanReviewSessionLogLeaseV1,
+    artifact_lease: ManagedArtifactStoreLeaseV1,
 }
 
 impl std::fmt::Debug for CurrentSchemaPlanReviewChildResourceBundleV1 {
@@ -128,10 +128,41 @@ impl CurrentSchemaPlanReviewChildResourceBundleV1 {
     fn tool_authority(&self) -> Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1> {
         Arc::clone(&self.tool_authority)
     }
+
+    /// Settles both child namespaces explicitly. `Drop` remains only a last-resort fallback for
+    /// cancellation, panic or process teardown; normal coordinator exits must surface settlement
+    /// failure to the caller so the parent can record a typed terminal failure.
+    pub(crate) fn finish(self) -> Result<()> {
+        let artifact_result = self.artifact_lease.finalize();
+        let session_result = self.session_log_lease.finish();
+        match (artifact_result, session_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(artifact), Ok(())) => {
+                Err(artifact.context("plan-review child artifact namespace settlement failed"))
+            }
+            (Ok(()), Err(session)) => {
+                Err(session.context("plan-review child session-log settlement failed"))
+            }
+            (Err(artifact), Err(session)) => Err(anyhow!(
+                "plan-review child resource settlement failed: artifact={artifact:#}; session-log={session:#}"
+            )),
+        }
+    }
 }
 
-/// Drop-finalized guard for the child session-log namespace. A child must never leave an
-/// admitted namespace pending when provider execution fails, is cancelled, times out or panics.
+fn combine_child_resource_settlement<T>(result: Result<T>, settlement: Result<()>) -> Result<T> {
+    match (result, settlement) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(settlement_error)) => Err(error.context(format!(
+            "plan-review child resource settlement also failed: {settlement_error:#}"
+        ))),
+    }
+}
+
+/// Guard for the child session-log namespace. Explicit `finish` is the normal path; `Drop` is only
+/// the last-resort cleanup when cancellation, panic or process teardown interrupts the owner.
 struct ManagedPlanReviewSessionLogLeaseV1 {
     writer: Arc<ManagedStorageWriterAdapterV1>,
     lease: Option<ManagedStorageWriterLeaseV1>,
@@ -153,6 +184,17 @@ impl ManagedPlanReviewSessionLogLeaseV1 {
             .as_ref()
             .expect("child session-log lease must remain live")
             .path()
+    }
+
+    fn finish(mut self) -> Result<()> {
+        let lease = self
+            .lease
+            .take()
+            .context("plan-review child session-log lease was already settled")?;
+        self.writer
+            .finalize(lease)
+            .map(|_| ())
+            .map_err(|error| anyhow!("plan-review child session-log finalize failed: {error}"))
     }
 }
 
@@ -201,21 +243,7 @@ pub struct RuntimePlanReviewChildResourceProvisionerV1 {
 }
 
 impl RuntimePlanReviewChildResourceProvisionerV1 {
-    pub fn new(
-        writer: Arc<ManagedStorageWriterAdapterV1>,
-        tool_authority: Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>,
-    ) -> Self {
-        Self::new_with_generation(
-            writer,
-            tool_authority,
-            sigil_kernel::resource::AuthorityGeneration {
-                epoch: 1,
-                instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
-            },
-        )
-    }
-
-    pub fn new_with_generation(
+    pub(crate) fn new_with_generation(
         writer: Arc<ManagedStorageWriterAdapterV1>,
         tool_authority: Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>,
         authority_generation: sigil_kernel::resource::AuthorityGeneration,
@@ -258,8 +286,8 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
             authority_generation: self.authority_generation,
             artifact_store: artifact_lease.store(),
             tool_authority: Arc::clone(&self.tool_authority),
-            _session_log_lease: session_log_lease,
-            _artifact_lease: artifact_lease,
+            session_log_lease,
+            artifact_lease,
         })
     }
 }
@@ -482,6 +510,7 @@ impl PlanReviewCoordinator {
     /// If research reaches that bound, finishes without a draft, or loses a provider stream at a
     /// typed recoverable boundary, the host starts one submit-only finalization turn. A draft-less
     /// finalization closes with `CompletedWithoutDraft`.
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn run_plan_review<H, A>(
         parent_session: &mut Session,
@@ -573,6 +602,7 @@ impl PlanReviewCoordinator {
                 provisioner.provision(request, PlanReviewChildResourceKindV1::Research, 0)
             })
             .transpose()?;
+        let outcome = async {
         let mut child_session =
             build_plan_review_child_session(parent_session, request, child_bundle.as_ref())?;
         let draft_context = sigil_kernel::PlanReviewDraftContext {
@@ -878,6 +908,7 @@ impl PlanReviewCoordinator {
                     )
                 })
                 .transpose()?;
+            let finalization = async {
             let mut finalizer_session = build_plan_review_finalizer_session(
                 parent_session,
                 request,
@@ -895,7 +926,7 @@ impl PlanReviewCoordinator {
                     PlanReviewRunOutcome::DraftReady {
                         draft: Box::new(draft),
                     },
-                );
+                ).map(Some);
             }
             let mut finalization_options = options.clone();
             if let Some(bundle) = finalizer_bundle.as_ref() {
@@ -922,11 +953,11 @@ impl PlanReviewCoordinator {
                 .await;
             let output = match finalization {
                 Ok(_) if cancellation.is_cancel_requested() => {
-                    return Ok(PlanReviewRunOutcome::Cancelled);
+                    return Ok(Some(PlanReviewRunOutcome::Cancelled));
                 }
                 Ok(output) => output,
                 Err(_) if cancellation.is_cancel_requested() => {
-                    return Ok(PlanReviewRunOutcome::Cancelled);
+                    return Ok(Some(PlanReviewRunOutcome::Cancelled));
                 }
                 Err(error) => {
                     let context = recovery_cause.as_deref().map_or_else(
@@ -956,12 +987,12 @@ impl PlanReviewCoordinator {
                         "Plan finalization attempted an unavailable research tool; retrying once in a fresh submit-only context."
                             .to_owned(),
                     ))?;
-                    continue;
+                    return Ok(None);
                 }
                 return complete_plan_review_run(
                     &cancellation,
                     PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
-                );
+                ).map(Some);
             }
             if let Some(reason) = invalid_plan_draft_submission_reason(&finalizer_session) {
                 last_violation = Some(reason.clone());
@@ -970,7 +1001,7 @@ impl PlanReviewCoordinator {
                         "Plan finalization produced an invalid typed draft; retrying once in a fresh submit-only context."
                             .to_owned(),
                     ))?;
-                    continue;
+                    return Ok(None);
                 }
                 if let Some(outcome) =
                     plain_text_plan_review_outcome(request, &output.result.final_text, now_ms())?
@@ -979,12 +1010,12 @@ impl PlanReviewCoordinator {
                         "The model could not satisfy the structured Plan schema; preserved its complete text as the reviewable Plan instead."
                             .to_owned(),
                     ))?;
-                    return complete_plan_review_run(&cancellation, outcome);
+                    return complete_plan_review_run(&cancellation, outcome).map(Some);
                 }
                 return complete_plan_review_run(
                     &cancellation,
                     PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
-                );
+                ).map(Some);
             }
             let outcome = match output.disposition {
                 AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
@@ -1015,13 +1046,28 @@ impl PlanReviewCoordinator {
                     "plan review finalization requested a nested plan review".to_owned(),
                 ),
             };
-            return complete_plan_review_run(&cancellation, outcome);
+            complete_plan_review_run(&cancellation, outcome).map(Some)
+            }.await;
+            let finalization = combine_child_resource_settlement(
+                finalization,
+                finalizer_bundle
+                    .map(|bundle| bundle.finish())
+                    .unwrap_or(Ok(())),
+            )?;
+            if let Some(outcome) = finalization {
+                return Ok(outcome);
+            }
         }
         complete_plan_review_run(
             &cancellation,
             PlanReviewRunOutcome::SubmitOnlyProtocolViolation(
                 last_violation.unwrap_or_else(|| "submit-only finalizer failed".to_owned()),
             ),
+        )
+        }.await;
+        combine_child_resource_settlement(
+            outcome,
+            child_bundle.map(|bundle| bundle.finish()).unwrap_or(Ok(())),
         )
     }
 

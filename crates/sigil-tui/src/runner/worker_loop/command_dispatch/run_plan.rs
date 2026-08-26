@@ -266,7 +266,10 @@ where
                 }
                 let plan_review_root_config = Arc::clone(&plan_review_root_config);
                 let session_log_path = state.session.log_path.clone();
-                let managed_storage_writer = state.managed_storage_writer.as_ref().map(Arc::clone);
+                let managed_plan_review_child_resources = state
+                    .managed_plan_review_child_resources
+                    .as_ref()
+                    .map(Arc::clone);
                 let managed_verification_execution =
                     managed_verification_execution.as_ref().map(Arc::clone);
                 let handle = runtime.spawn(async move {
@@ -294,7 +297,7 @@ where
                                 &mut handler,
                                 &mut approval_handler,
                                 cancellation_handle.clone(),
-                                managed_storage_writer.clone(),
+                                managed_plan_review_child_resources.clone(),
                             )
                             .await;
                             match result {
@@ -704,7 +707,7 @@ where
                                         &mut handler,
                                         &mut approval_handler,
                                         cancellation_handle.clone(),
-                                        managed_storage_writer.clone(),
+                                        managed_plan_review_child_resources.clone(),
                                     )
                                     .await;
                                     match result {
@@ -1696,8 +1699,10 @@ where
                     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                     let task_result_tx = state.run.result_tx.clone();
                     let plan_review_root_config = Arc::clone(&plan_review_root_config);
-                    let managed_storage_writer =
-                        state.managed_storage_writer.as_ref().map(Arc::clone);
+                    let managed_plan_review_child_resources = state
+                        .managed_plan_review_child_resources
+                        .as_ref()
+                        .map(Arc::clone);
                     let handle = runtime.spawn(async move {
                         let _run_task_guard = run_task_guard;
                         let mut run_session = run_session;
@@ -1719,7 +1724,7 @@ where
                             &mut handler,
                             &mut approval_handler,
                             cancellation_handle,
-                            managed_storage_writer,
+                            managed_plan_review_child_resources,
                         )
                         .await;
                         let result = match append_mcp_elicitation_audits(

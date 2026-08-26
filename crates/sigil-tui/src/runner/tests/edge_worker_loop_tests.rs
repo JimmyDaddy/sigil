@@ -1862,6 +1862,7 @@ fn spawn_loop_with_shared_agent(
                     context_resolver,
                     managed_extension_execution: None,
                     managed_verification_execution: None,
+                    managed_plan_review_child_resources: None,
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,

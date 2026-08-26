@@ -193,8 +193,34 @@ def test_registration_invariant_rejects_normal_build_plugin_backend() -> None:
         assert any("legacy ExecutionBackend seam" in finding for finding in findings)
 
 
+def test_source_rejects_plan_review_generation_inventor() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "crates/sigil-runtime/src/plan_review.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "RuntimePlanReviewChildResourceProvisionerV1::new(writer, authority);\n",
+            encoding="utf-8",
+        )
+        findings = scanner.check_source(root)
+        assert any("may not invent an authority generation" in finding for finding in findings)
+
+
+def test_source_rejects_legacy_plan_review_runner() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "crates/sigil-runtime/src/application_run.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "PlanReviewCoordinator::run_plan_review(&mut session, request);\n",
+            encoding="utf-8",
+        )
+        findings = scanner.check_source(root)
+        assert any("current-schema child resource provisioner" in finding for finding in findings)
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("r71 negative dependency scanner tests: 6 passed")
+    print("r71 negative dependency scanner tests: 8 passed")

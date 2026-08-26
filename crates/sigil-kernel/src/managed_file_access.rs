@@ -29,6 +29,7 @@ impl ManagedFileLogicalPathV1 {
             || value.starts_with('/')
             || value.starts_with('\\')
             || value.contains('\0')
+            || value.contains('\\')
             || value.split('/').any(|part| part == "..")
             || value.contains(':')
         {

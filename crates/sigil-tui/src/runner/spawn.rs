@@ -202,6 +202,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 Arc::clone(&composition.command_execution)
                     as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
             });
+            let managed_plan_review_child_resources = authority_composition
+                .as_ref()
+                .map(|composition| composition.plan_review_child_resource_provisioner());
             let extension_network_admission = ExtensionProcessNetworkAdmission::new(
                 options.permission_context.network_policy,
                 false,
@@ -428,6 +431,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     context_resolver,
                     managed_extension_execution,
                     managed_verification_execution,
+                    managed_plan_review_child_resources,
                 },
                 WorkerLoopTerminalRuntime::new(
                     terminal_lifecycle_router,

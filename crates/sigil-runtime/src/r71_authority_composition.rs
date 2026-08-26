@@ -95,10 +95,7 @@ impl RuntimeAuthorityCompositionV1 {
                 "sigil",
                 workspace_id.as_str().to_owned(),
                 workspace_root,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: CanonicalHash::from_bytes([0x75; 32]),
-                },
+                self.authority_generation,
             )
             .map_err(|error| error.to_string())
     }

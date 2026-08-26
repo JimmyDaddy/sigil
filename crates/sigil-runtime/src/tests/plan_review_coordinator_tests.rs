@@ -31,7 +31,7 @@ use crate::{
 };
 
 #[test]
-fn current_schema_child_resource_bundle_is_scoped_and_drop_finalized() -> Result<()> {
+fn current_schema_child_resource_bundle_is_scoped_and_explicitly_finalized() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
     use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
 
@@ -63,13 +63,13 @@ fn current_schema_child_resource_bundle_is_scoped_and_drop_finalized() -> Result
         composition.authority_generation()
     );
     assert!(!format!("{bundle:?}").contains("state/"));
-    drop(bundle);
+    bundle.finish()?;
 
-    // Drop must settle both the child SessionLog and paired artifact namespaces. Reusing the
-    // same deterministic child key is the recovery assertion: a leaked pending lease would
+    // Explicit finish settles both the child SessionLog and paired artifact namespaces. Reusing
+    // the same deterministic child key is the recovery assertion: a leaked pending lease would
     // poison the next admission instead of closing the child scope.
     let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
-    drop(recovered);
+    recovered.finish()?;
     Ok(())
 }
 
@@ -115,6 +115,7 @@ fn r71_f_csr_001_research_bundle_has_a_scoped_identity() -> Result<()> {
             .starts_with(&request.child_logical_run_id())
     );
     assert!(bundle.scope_id().ends_with("-research"));
+    bundle.finish()?;
     Ok(())
 }
 
@@ -133,6 +134,7 @@ fn r71_f_csr_002_bundle_carries_current_authority_generation() -> Result<()> {
         bundle.authority_generation().instance_hash,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32])
     );
+    bundle.finish()?;
     Ok(())
 }
 
@@ -149,11 +151,12 @@ fn r71_f_csr_003_bundle_debug_never_exposes_physical_paths() -> Result<()> {
     let debug = format!("{bundle:?}");
     assert!(!debug.contains(temp.path().to_string_lossy().as_ref()));
     assert!(!debug.contains("records.jsonl"));
+    bundle.finish()?;
     Ok(())
 }
 
 #[test]
-fn r71_f_csr_004_research_drop_releases_the_exact_admissions() -> Result<()> {
+fn r71_f_csr_004_research_finish_releases_the_exact_admissions() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
     use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[
@@ -162,14 +165,14 @@ fn r71_f_csr_004_research_drop_releases_the_exact_admissions() -> Result<()> {
         Channel::ArtifactStore,
     ])?;
     let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
-    drop(bundle);
+    bundle.finish()?;
     let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
-    drop(recovered);
+    recovered.finish()?;
     Ok(())
 }
 
 #[test]
-fn r71_f_csr_005_finalizer_drop_releases_the_exact_admissions() -> Result<()> {
+fn r71_f_csr_005_finalizer_finish_releases_the_exact_admissions() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
     use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[
@@ -178,9 +181,9 @@ fn r71_f_csr_005_finalizer_drop_releases_the_exact_admissions() -> Result<()> {
         Channel::ArtifactStore,
     ])?;
     let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
-    drop(bundle);
+    bundle.finish()?;
     let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
-    drop(recovered);
+    recovered.finish()?;
     Ok(())
 }
 
@@ -198,8 +201,8 @@ fn r71_f_csr_006_research_and_finalizer_never_share_scope() -> Result<()> {
     assert_ne!(research.scope_id(), finalizer.scope_id());
     assert!(research.scope_id().ends_with("-research"));
     assert!(finalizer.scope_id().ends_with("-finalizer"));
-    drop(finalizer);
-    drop(research);
+    finalizer.finish()?;
+    research.finish()?;
     Ok(())
 }
 
@@ -226,13 +229,13 @@ fn r71_f_csr_008_child_scope_is_retry_stable_and_kind_bound() -> Result<()> {
     ])?;
     let first = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
     let first_scope = first.scope_id().to_owned();
-    drop(first);
+    first.finish()?;
     let retry = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
     assert_eq!(retry.scope_id(), first_scope);
-    drop(retry);
+    retry.finish()?;
     let next = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 2)?;
     assert_eq!(next.scope_id(), first_scope);
-    drop(next);
+    next.finish()?;
     Ok(())
 }
 

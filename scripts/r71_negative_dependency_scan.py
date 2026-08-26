@@ -62,6 +62,14 @@ LEGACY_PATTERNS = (
     (re.compile(r"\bFileProjectionStore\b"), "production path-rooted FileProjectionStore"),
     (re.compile(r'PathBuf::from\("\.sigil-(?:state|cache)"\)'), "cwd-relative legacy writable root"),
     (re.compile(r'Path::new\("\.sigil-(?:state|cache)"\)'), "cwd-relative legacy writable root"),
+    (
+        re.compile(r"RuntimePlanReviewChildResourceProvisionerV1::new\s*\("),
+        "plan-review child provisioner may not invent an authority generation",
+    ),
+    (
+        re.compile(r"PlanReviewCoordinator::run_plan_review\s*\("),
+        "production plan review must use the current-schema child resource provisioner",
+    ),
 )
 
 KERNEL_ARTIFACT_LEGACY_PATTERNS = (
@@ -288,6 +296,18 @@ def check_registration_invariants(root: Path) -> list[str]:
     composition_source = (
         root / "crates/sigil-runtime/src/r71_authority_composition.rs"
     ).read_text(encoding="utf-8")
+    activation = re.search(
+        r"pub fn activate_workspace\([\s\S]*?(?=\n\s*}\n\s*})",
+        composition_source,
+    )
+    if activation and "AuthorityGeneration {" in activation.group(0):
+        findings.append(
+            "workspace activation must reuse the composition authority generation"
+        )
+    if activation and "self.authority_generation" not in activation.group(0):
+        findings.append(
+            "workspace activation does not source its generation from the authority composition"
+        )
     if "pub plugin_hook_execution:" not in composition_source or "plugin_hook_runner" not in composition_source:
         findings.append(
             "production authority composition does not expose the managed plugin hook route"
@@ -296,6 +316,26 @@ def check_registration_invariants(root: Path) -> list[str]:
         findings.append(
             "production authority composition does not declare ApplicationControlLog before plugin activation"
         )
+
+    child_provisioner_path = root / "crates/sigil-runtime/src/plan_review_coordinator.rs"
+    if child_provisioner_path.exists():
+        child_provisioner_source = child_provisioner_path.read_text(encoding="utf-8")
+        legacy_runner = re.search(
+            r"pub async fn run_plan_review<H, A>\s*\(", child_provisioner_source
+        )
+        if legacy_runner:
+            prefix = child_provisioner_source[: legacy_runner.start()]
+            if "#[cfg(test)]" not in prefix[-400:]:
+                findings.append(
+                    "legacy plan-review runner must be cfg(test)-only; production must use the current-schema entry point"
+                )
+        if re.search(
+            r"impl RuntimePlanReviewChildResourceProvisionerV1[\s\S]*?pub fn new\s*\(",
+            child_provisioner_source,
+        ):
+            findings.append(
+                "plan-review child provisioner exposes a default constructor without composition generation"
+            )
 
     adapters_source = (
         root / "crates/sigil-runtime/src/managed_resource_adapters.rs"

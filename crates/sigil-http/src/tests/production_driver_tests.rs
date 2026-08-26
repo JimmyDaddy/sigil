@@ -4196,31 +4196,46 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
     let state_root = temp.path().join("state").to_string_lossy().into_owned();
     let cache_root = temp.path().join("cache").to_string_lossy().into_owned();
 
-    // Local chat-completions fixture answering the revision plan review with a typed draft.
+    // Local chat-completions fixture exercising the real current-schema review tool sequence.
+    // The request always contains the available tool declarations, so selecting a response by
+    // searching for `submit_plan_draft` would make this test false-green.
+    let provider_call = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener should bind");
     let address = listener.local_addr().expect("fixture address");
-    let fixture = tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                break;
-            };
-            let mut buffer = vec![0; 16384];
-            let read = socket.read(&mut buffer).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
-            let body = if request.contains("\"submit_plan_draft\"") {
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised coordinator migration\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
-                    "data: [DONE]\n\n"
-                )
-            } else {
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"revised\"},\"finish_reason\":\"stop\"}]}\n\n",
-                    "data: [DONE]\n\n"
-                )
-            };
-            let _ = socket
+    let fixture = tokio::spawn({
+        let provider_call = Arc::clone(&provider_call);
+        async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0; 16384];
+                let _read = socket.read(&mut buffer).await.unwrap_or(0);
+                let call_index = provider_call.fetch_add(1, Ordering::SeqCst);
+                let body = if call_index >= 3 {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised coordinator migration\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else if call_index == 2 {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-read-call\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else if call_index == 1 {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-grep-call\",\"type\":\"function\",\"function\":{\"name\":\"grep\",\"arguments\":\"{\\\"pattern\\\":\\\"coordinator\\\",\\\"path\\\":\\\".\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-list-call\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\",\\\"limit\\\":20}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                };
+                let _ = socket
                 .write_all(
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -4229,6 +4244,7 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
                     .as_bytes(),
                 )
                 .await;
+            }
         }
     });
 
@@ -4426,6 +4442,10 @@ credential = {{ source = "none" }}
             .plans
             .values()
             .any(|draft| draft.summary == "Revised coordinator migration")
+    );
+    assert!(
+        provider_call.load(Ordering::SeqCst) >= 4,
+        "revision must execute list_files, grep, read_file, and submit_plan_draft"
     );
 
     // Ownership is released: the run leaves active_runs and the foreground slot is free.

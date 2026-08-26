@@ -10,8 +10,19 @@
 //! writer slice wires them through explicitly.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::{CStr, CString};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use sigil_kernel::managed_execution::BorrowedResourceAccessReceiptV1;
 use sigil_kernel::managed_file_access::{
@@ -64,8 +75,13 @@ pub struct AuthorityManagedFileAccessServiceV1 {
 #[derive(Debug, Clone)]
 struct PlannedFileAccessV1 {
     subject_ref: OpaquePermissionSubjectRef,
+    #[cfg(not(unix))]
     root: PathBuf,
+    logical_path: String,
+    #[cfg(not(unix))]
     physical_path: PathBuf,
+    #[cfg(unix)]
+    root_handle: Arc<std::fs::File>,
     operation: ManagedFileOperationV1,
     operation_digest: CanonicalHash,
     authority_generation: AuthorityGeneration,
@@ -145,6 +161,16 @@ impl AuthorityManagedFileAccessServiceV1 {
         Ok(candidate)
     }
 
+    #[cfg(unix)]
+    fn open_workspace_root(root: &Path) -> Result<Arc<std::fs::File>, ManagedFileAccessErrorV1> {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root)
+            .map(Arc::new)
+            .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))
+    }
+
     fn hash_parts(parts: &[&[u8]]) -> CanonicalHash {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -210,6 +236,8 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         let (subject_ref, root, authority_generation, root_identity) = self.sole_workspace()?;
         let logical_path = request.logical_path.as_str().to_owned();
         let physical_path = Self::resolve_plan_path(&root, &logical_path)?;
+        #[cfg(unix)]
+        let root_handle = Self::open_workspace_root(&root)?;
         let subject_binding_hash = Self::hash_parts(&[
             subject_ref.as_str().as_bytes(),
             root_identity.as_bytes(),
@@ -253,8 +281,13 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
                 plan_hash.to_hex(),
                 PlannedFileAccessV1 {
                     subject_ref,
+                    #[cfg(not(unix))]
                     root,
+                    logical_path,
+                    #[cfg(not(unix))]
                     physical_path,
+                    #[cfg(unix)]
+                    root_handle,
                     operation: request.operation,
                     operation_digest,
                     authority_generation,
@@ -375,11 +408,6 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         if current_root != plan.root_identity {
             return Err(ManagedFileAccessErrorV1::SubjectIdentityDrift);
         }
-        if let Ok(metadata) = std::fs::symlink_metadata(&plan.physical_path)
-            && metadata.file_type().is_symlink()
-        {
-            return Err(ManagedFileAccessErrorV1::AliasCollision);
-        }
         let PhysicalExecutionOutcomeV1 {
             payload,
             observed_bytes,
@@ -426,19 +454,10 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         if current_root != plan.root_identity {
             return Err(ManagedFileAccessErrorV1::SubjectIdentityDrift);
         }
-        if let Ok(metadata) = std::fs::symlink_metadata(&plan.physical_path)
-            && metadata.file_type().is_symlink()
-        {
-            return Err(ManagedFileAccessErrorV1::AliasCollision);
-        }
-        let raw = match std::fs::read_to_string(&plan.physical_path) {
+        let raw = match read_relative_text(&plan) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => {
-                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
-                    error.to_string(),
-                ));
-            }
+            Err(error) => return Err(relative_io_error(error)),
         };
         let safe = sigil_kernel::safe_persistence_text(&raw);
         let truncated = safe.len() > request.max_bytes;
@@ -459,6 +478,116 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
             },
         )
     }
+}
+
+#[cfg(unix)]
+fn relative_io_error(error: std::io::Error) -> ManagedFileAccessErrorV1 {
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        ManagedFileAccessErrorV1::AliasCollision
+    } else {
+        ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+    }
+}
+
+#[cfg(not(unix))]
+fn relative_io_error(error: std::io::Error) -> ManagedFileAccessErrorV1 {
+    ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+}
+
+#[cfg(unix)]
+fn open_at(
+    directory: &std::fs::File,
+    component: &str,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> std::io::Result<std::fs::File> {
+    let component = CString::new(component)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL component"))?;
+    // SAFETY: `component` is NUL-terminated and `directory` owns a valid directory fd.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            component.as_ptr(),
+            flags,
+            mode as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: the fd is newly returned by openat and is transferred to File exactly once.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+}
+
+#[cfg(unix)]
+fn relative_components(logical_path: &str) -> Vec<&str> {
+    logical_path
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect()
+}
+
+#[cfg(unix)]
+fn open_relative_path(
+    plan: &PlannedFileAccessV1,
+    flags: libc::c_int,
+) -> std::io::Result<std::fs::File> {
+    let components = relative_components(&plan.logical_path);
+    if components.is_empty() {
+        return plan.root_handle.try_clone();
+    }
+    let mut parent = plan.root_handle.try_clone()?;
+    for component in &components[..components.len() - 1] {
+        parent = open_at(
+            &parent,
+            component,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )?;
+    }
+    open_at(
+        &parent,
+        components[components.len() - 1],
+        flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0o600,
+    )
+}
+
+#[cfg(unix)]
+fn open_relative_parent(plan: &PlannedFileAccessV1) -> std::io::Result<(std::fs::File, CString)> {
+    let components = relative_components(&plan.logical_path);
+    let Some(leaf) = components.last() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "workspace root is not a file leaf",
+        ));
+    };
+    let mut parent = plan.root_handle.try_clone()?;
+    for component in &components[..components.len() - 1] {
+        parent = open_at(
+            &parent,
+            component,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )?;
+    }
+    let leaf = CString::new(*leaf)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL component"))?;
+    Ok((parent, leaf))
+}
+
+#[cfg(unix)]
+fn read_relative_text(plan: &PlannedFileAccessV1) -> std::io::Result<String> {
+    let mut file = open_relative_path(plan, libc::O_RDONLY)?;
+    let mut raw = String::new();
+    std::io::Read::read_to_string(&mut file, &mut raw)?;
+    Ok(raw)
+}
+
+#[cfg(not(unix))]
+fn read_relative_text(plan: &PlannedFileAccessV1) -> std::io::Result<String> {
+    std::fs::read_to_string(&plan.physical_path)
 }
 
 fn operation_tag(operation: ManagedFileOperationV1) -> &'static [u8] {
@@ -484,6 +613,411 @@ struct PhysicalExecutionOutcomeV1 {
     truncated: bool,
 }
 
+#[cfg(unix)]
+fn execute_physical(
+    plan: &PlannedFileAccessV1,
+    input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
+) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
+    match (plan.operation, input) {
+        (
+            ManagedFileOperationV1::Read,
+            ManagedFileExecutionInputV1::Read {
+                offset,
+                limit,
+                max_bytes,
+            },
+        ) => {
+            let raw = read_relative_text(plan).map_err(relative_io_error)?;
+            let lines: Vec<&str> = raw.lines().collect();
+            let selected = lines
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .copied()
+                .collect::<Vec<_>>();
+            let mut payload = selected
+                .iter()
+                .map(|line| sigil_kernel::safe_persistence_text(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let truncated =
+                offset.saturating_add(selected.len()) < lines.len() || payload.len() > max_bytes;
+            if payload.len() > max_bytes {
+                payload.truncate(max_bytes);
+            }
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes: raw.len() as u64,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: selected.len() as u64,
+                total_lines: lines.len() as u64,
+                truncated,
+            })
+        }
+        (
+            ManagedFileOperationV1::List,
+            ManagedFileExecutionInputV1::List {
+                recursive,
+                limit,
+                max_depth,
+            },
+        ) => {
+            let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)
+                .map_err(relative_io_error)?;
+            let mut entries = Vec::new();
+            collect_entries_relative(&directory, "", recursive, max_depth, 0, &mut entries)?;
+            entries.sort();
+            let total = entries.len();
+            let truncated = total > limit;
+            entries.truncate(limit);
+            let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes: 0,
+                returned_entries: entries.len() as u64,
+                total_entries: total as u64,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated,
+            })
+        }
+        (
+            ManagedFileOperationV1::Grep,
+            ManagedFileExecutionInputV1::Grep {
+                pattern,
+                limit,
+                max_bytes,
+            },
+        ) => {
+            let regex = regex::Regex::new(&pattern).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            let target = open_relative_path(plan, libc::O_RDONLY).map_err(relative_io_error)?;
+            let mut matches = Vec::new();
+            let mut observed_bytes = 0u64;
+            let display_path = if plan.logical_path == "." {
+                String::new()
+            } else {
+                plan.logical_path.clone()
+            };
+            if is_directory(&target).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })? {
+                collect_grep_relative(
+                    &target,
+                    &display_path,
+                    &regex,
+                    &mut matches,
+                    &mut observed_bytes,
+                )?;
+            } else {
+                let mut file = target;
+                let mut raw = String::new();
+                file.read_to_string(&mut raw).map_err(|_| {
+                    ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                        "non-UTF-8 or unreadable file".to_owned(),
+                    )
+                })?;
+                observed_bytes = observed_bytes.saturating_add(raw.len() as u64);
+                for (index, line) in raw.lines().enumerate() {
+                    if regex.is_match(line) {
+                        matches.push(format!(
+                            "{display_path}:{}:{}",
+                            index + 1,
+                            sigil_kernel::safe_persistence_text(line)
+                        ));
+                    }
+                }
+            }
+            let total = matches.len();
+            let truncated = total > limit;
+            matches.truncate(limit);
+            let mut payload = matches.join("\n");
+            if payload.len() > max_bytes {
+                payload.truncate(max_bytes);
+            }
+            let byte_truncated = payload.len() == max_bytes;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes,
+                returned_entries: 0,
+                total_entries: total as u64,
+                returned_lines: matches.len() as u64,
+                total_lines: 0,
+                truncated: truncated || byte_truncated,
+            })
+        }
+        (ManagedFileOperationV1::Glob, ManagedFileExecutionInputV1::Glob { pattern, limit }) => {
+            let wildcard = format!(
+                "^{}$",
+                pattern
+                    .split('*')
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join(".*")
+            );
+            let matcher = regex::Regex::new(&wildcard).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)
+                .map_err(relative_io_error)?;
+            let mut entries = Vec::new();
+            collect_entries_relative(&directory, "", true, usize::MAX, 0, &mut entries)?;
+            entries.retain(|entry| matcher.is_match(entry));
+            entries.sort();
+            let total = entries.len();
+            let truncated = total > limit;
+            entries.truncate(limit);
+            let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload,
+                observed_bytes: 0,
+                returned_entries: entries.len() as u64,
+                total_entries: total as u64,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated,
+            })
+        }
+        (ManagedFileOperationV1::Write, ManagedFileExecutionInputV1::Write { content }) => {
+            let mut file = open_relative_path(plan, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC)
+                .map_err(relative_io_error)?;
+            file.write_all(content.as_bytes()).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload: "managed file write applied".to_owned(),
+                observed_bytes: content.len() as u64,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated: false,
+            })
+        }
+        (
+            ManagedFileOperationV1::Edit,
+            ManagedFileExecutionInputV1::Edit { old_text, new_text },
+        ) => {
+            let mut file = open_relative_path(plan, libc::O_RDWR).map_err(relative_io_error)?;
+            let mut current = String::new();
+            file.read_to_string(&mut current).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            if !current.contains(&old_text) {
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    "edit target text was not found".to_owned(),
+                ));
+            }
+            let updated = current.replacen(&old_text, &new_text, 1);
+            file.set_len(0).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            file.seek(SeekFrom::Start(0)).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            file.write_all(updated.as_bytes()).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload: "managed file edit applied".to_owned(),
+                observed_bytes: updated.len() as u64,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated: false,
+            })
+        }
+        (ManagedFileOperationV1::Delete, ManagedFileExecutionInputV1::Delete) => {
+            let (parent, leaf) = open_relative_parent(plan).map_err(relative_io_error)?;
+            // SAFETY: `parent` is an authority-owned directory fd and `leaf` is a single
+            // validated component; unlinkat never follows a symlink in the leaf position.
+            let status = unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), 0) };
+            if status < 0 {
+                return Err(relative_io_error(std::io::Error::last_os_error()));
+            }
+            Ok(PhysicalExecutionOutcomeV1 {
+                payload: "managed file delete applied".to_owned(),
+                observed_bytes: 0,
+                returned_entries: 0,
+                total_entries: 0,
+                returned_lines: 0,
+                total_lines: 0,
+                truncated: false,
+            })
+        }
+        _ => Err(ManagedFileAccessErrorV1::AdmissionMismatch),
+    }
+}
+
+#[cfg(unix)]
+fn is_directory(file: &std::fs::File) -> std::io::Result<bool> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` points to writable storage and the fd is owned by `file`.
+    let status = unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) };
+    if status < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fstat initialized `stat` on success.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.st_mode & libc::S_IFMT) == libc::S_IFDIR)
+}
+
+#[cfg(unix)]
+fn directory_entry_names(directory: &std::fs::File) -> std::io::Result<Vec<String>> {
+    // fdopendir takes ownership of its fd, so duplicate the authority-owned handle first.
+    let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `duplicate` is a valid fd and ownership transfers to DIR on success.
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        // SAFETY: fdopendir did not take ownership on failure.
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `stream` remains valid until closed below.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is the NUL-terminated name returned by readdir.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        if name != "." && name != ".." {
+            names.push(name);
+        }
+    }
+    // SAFETY: stream was returned by fdopendir and has not been closed.
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
+#[cfg(unix)]
+fn is_directory_at(directory: &std::fs::File, name: &str) -> std::io::Result<bool> {
+    let name = CString::new(name)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL entry name"))?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: name is NUL-terminated and stat points to writable storage. AT_SYMLINK_NOFOLLOW
+    // makes the type check itself non-following.
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fstatat initialized stat on success.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.st_mode & libc::S_IFMT) == libc::S_IFDIR)
+}
+
+#[cfg(unix)]
+fn collect_entries_relative(
+    directory: &std::fs::File,
+    prefix: &str,
+    recursive: bool,
+    max_depth: usize,
+    depth: usize,
+    entries: &mut Vec<String>,
+) -> Result<(), ManagedFileAccessErrorV1> {
+    for name in directory_entry_names(directory)
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+    {
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        entries.push(relative);
+        if recursive
+            && is_directory_at(directory, &name).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?
+            && depth < max_depth
+        {
+            let child = open_at(directory, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)
+                .map_err(relative_io_error)?;
+            let child_prefix = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            collect_entries_relative(
+                &child,
+                &child_prefix,
+                recursive,
+                max_depth,
+                depth + 1,
+                entries,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn collect_grep_relative(
+    directory: &std::fs::File,
+    prefix: &str,
+    regex: &regex::Regex,
+    matches: &mut Vec<String>,
+    observed_bytes: &mut u64,
+) -> Result<(), ManagedFileAccessErrorV1> {
+    for name in directory_entry_names(directory)
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+    {
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if is_directory_at(directory, &name)
+            .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+        {
+            let child = open_at(directory, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)
+                .map_err(relative_io_error)?;
+            collect_grep_relative(&child, &relative, regex, matches, observed_bytes)?;
+            continue;
+        }
+        let mut file = match open_at(directory, &name, libc::O_RDONLY, 0) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => continue,
+            Err(error) => return Err(relative_io_error(error)),
+        };
+        let mut raw = String::new();
+        if file.read_to_string(&mut raw).is_err() {
+            continue;
+        }
+        *observed_bytes = observed_bytes.saturating_add(raw.len() as u64);
+        for (index, line) in raw.lines().enumerate() {
+            if regex.is_match(line) {
+                matches.push(format!(
+                    "{relative}:{}:{}",
+                    index + 1,
+                    sigil_kernel::safe_persistence_text(line)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
@@ -706,6 +1240,7 @@ fn execute_physical(
     }
 }
 
+#[cfg(not(unix))]
 fn collect_entries(
     root: &Path,
     current: &Path,
@@ -742,6 +1277,7 @@ fn collect_entries(
     Ok(())
 }
 
+#[cfg(not(unix))]
 fn collect_grep(
     root: &Path,
     current: &Path,
@@ -1149,7 +1685,13 @@ mod tests {
 
     #[test]
     fn r71_f_fil_002_absolute_and_traversal_paths_are_rejected() {
-        for value in ["/etc/passwd", "../outside", "C:\\outside"] {
+        for value in [
+            "/etc/passwd",
+            "../outside",
+            "..\\outside",
+            "folder\\..\\outside",
+            "C:\\outside",
+        ] {
             assert!(matches!(
                 ManagedFileLogicalPathV1::new(value),
                 Err(ManagedFileAccessErrorV1::AliasCollision)
@@ -1316,6 +1858,47 @@ mod tests {
         assert!(
             true,
             "symlink leaf case is covered by platform-specific authority tests"
+        );
+    }
+
+    #[test]
+    fn r71_f_fil_013_alias_replacement_cannot_redirect_a_planned_read() {
+        #[cfg(unix)]
+        {
+            let (workspace, service, plan) = registered_read_plan(Some("inside"));
+            let outside = tempfile::tempdir().expect("outside");
+            std::fs::write(outside.path().join("secret.txt"), "outside-secret").expect("secret");
+            std::fs::rename(
+                workspace.path().join("notes.txt"),
+                workspace.path().join("notes.original"),
+            )
+            .expect("move planned leaf");
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.txt"),
+                workspace.path().join("notes.txt"),
+            )
+            .expect("replace with symlink");
+            let (request, token) = execution_request_for_plan(
+                &plan,
+                ManagedFileExecutionInputV1::Read {
+                    offset: 0,
+                    limit: 1,
+                    max_bytes: 64,
+                },
+            );
+            let error = service
+                .execute(request, token)
+                .expect_err("alias replacement must fail closed");
+            assert!(matches!(error, ManagedFileAccessErrorV1::AliasCollision));
+            assert_eq!(
+                std::fs::read_to_string(outside.path().join("secret.txt")).expect("secret"),
+                "outside-secret"
+            );
+        }
+        #[cfg(not(unix))]
+        assert!(
+            true,
+            "handle-relative alias replacement is covered by Unix authority tests"
         );
     }
 

@@ -618,8 +618,8 @@ pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
-    managed_storage_writer: Option<
-        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
     >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
@@ -643,7 +643,7 @@ where
         handler,
         approval_handler,
         cancellation_handle,
-        managed_storage_writer,
+        managed_plan_review_child_resources,
     )
     .await
 }
@@ -661,8 +661,8 @@ pub(in crate::runner) async fn run_explicit_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
-    managed_storage_writer: Option<
-        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
     >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
@@ -687,7 +687,7 @@ where
         handler,
         approval_handler,
         cancellation_handle,
-        managed_storage_writer,
+        managed_plan_review_child_resources,
     )
     .await
 }
@@ -704,8 +704,8 @@ pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
-    managed_storage_writer: Option<
-        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
     >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
@@ -719,18 +719,7 @@ where
     )
     .map_err(|error| format!("failed to start plan review attempt: {error:#}"))?;
     let plan_review_workspace_root = options.workspace_root.clone();
-    let child_resource_provisioner = managed_storage_writer
-        .zip(options.tool_authority.clone())
-        .map(|(writer, authority)| {
-            std::sync::Arc::new(
-                sigil_runtime::plan_review_coordinator::RuntimePlanReviewChildResourceProvisionerV1::new(
-                    writer,
-                    authority,
-                ),
-            ) as std::sync::Arc<
-                dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1,
-            >
-        });
+    let child_resource_provisioner = managed_plan_review_child_resources;
     let outcome_result = match child_resource_provisioner {
         Some(provisioner) => {
             sigil_runtime::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
@@ -1001,8 +990,8 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     managed_verification_execution: Option<
         Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>,
     >,
-    managed_storage_writer: Option<
-        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
     >,
     session_log_path: &Path,
     next_run_id: &mut u64,
@@ -1450,7 +1439,7 @@ where
                                         &mut handler,
                                         &mut approval_handler,
                                         cancellation_handle.clone(),
-                                        managed_storage_writer.clone(),
+                        managed_plan_review_child_resources.clone(),
                                     )
                         .await;
                         match result {

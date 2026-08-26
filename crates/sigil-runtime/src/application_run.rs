@@ -6431,6 +6431,10 @@ pub async fn execute_plan_review_revision_with_managed_execution<H>(
     managed_command_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
     >,
+    managed_tool_authority: Option<Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
+    child_resource_provisioner: Option<
+        Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    >,
 ) -> Result<crate::PlanReviewRunOutcome>
 where
     H: ApplicationRunEventHandler + Send,
@@ -6509,12 +6513,15 @@ where
         crate::register_agent_tools(&mut base_registry, root_config)?;
         let tool_registry =
             crate::build_plan_review_tool_registry(&base_registry, root_config).into_registry();
-        let options = crate::build_run_options(
+        let mut options = crate::build_run_options(
             root_config,
             workspace_root.to_path_buf(),
             sigil_kernel::InteractionMode::Headless,
             None,
         );
+        if let Some(tool_authority) = managed_tool_authority {
+            options = options.with_tool_authority(tool_authority);
+        }
         let agent = crate::configured_agent(root_config, provider, base_registry)?;
         let mut bridge = PublicApplicationEventBridge::new(
             ApplicationRunEventSequence::new(
@@ -6523,18 +6530,45 @@ where
             ),
             handler,
         );
-        let outcome = match crate::PlanReviewCoordinator::run_plan_review(
-            &mut session,
-            request,
-            &agent,
-            options,
-            tool_registry,
-            &mut bridge,
-            &mut sigil_kernel::AutoApproveHandler,
-            cancellation_handle,
-        )
-        .await
-        {
+        let outcome = match child_resource_provisioner {
+            Some(provisioner) => {
+                crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+                    &mut session,
+                    request,
+                    &agent,
+                    options,
+                    tool_registry,
+                    &mut bridge,
+                    &mut sigil_kernel::AutoApproveHandler,
+                    cancellation_handle,
+                    provisioner,
+                )
+                .await
+            }
+            None => {
+                #[cfg(test)]
+                {
+                    crate::PlanReviewCoordinator::run_plan_review(
+                        &mut session,
+                        request,
+                        &agent,
+                        options,
+                        tool_registry,
+                        &mut bridge,
+                        &mut sigil_kernel::AutoApproveHandler,
+                        cancellation_handle,
+                    )
+                    .await
+                }
+                #[cfg(not(test))]
+                {
+                    bail!(
+                        "current-schema plan review revision requires the composed child resource bundle"
+                    );
+                }
+            }
+        };
+        let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
@@ -6640,6 +6674,8 @@ where
         request,
         handler,
         cancellation,
+        None,
+        None,
         None,
     )
     .await

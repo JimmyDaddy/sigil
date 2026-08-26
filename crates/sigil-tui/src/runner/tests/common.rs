@@ -462,6 +462,9 @@ where
                     context_resolver,
                     managed_extension_execution,
                     managed_verification_execution,
+                    managed_plan_review_child_resources: Some(
+                        authority_composition.plan_review_child_resource_provisioner(),
+                    ),
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 Some(managed_storage_writer),

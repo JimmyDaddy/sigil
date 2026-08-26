@@ -544,6 +544,14 @@ impl HttpProductionRunDriver {
             .services
             .authority_composition()
             .map(|composition| Arc::clone(&composition.command_execution));
+        let managed_tool_authority = self
+            .services
+            .authority_composition()
+            .map(|composition| Arc::new(composition.tool_authority.clone()));
+        let child_resource_provisioner = self
+            .services
+            .authority_composition()
+            .map(|composition| composition.plan_review_child_resource_provisioner());
         let runtime = self.runtime.clone();
         self.runtime.spawn(async move {
             let _held_session_attachment = attachment;
@@ -564,6 +572,8 @@ impl HttpProductionRunDriver {
                     &mut handler,
                     Some(cancellation_handle),
                     managed_command_execution,
+                    managed_tool_authority,
+                    child_resource_provisioner,
                 )
                 .await
             });
