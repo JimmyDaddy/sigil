@@ -346,7 +346,7 @@ where
 }
 
 pub(super) fn test_authority_composition(
-    _workspace_root: &Path,
+    workspace_root: &Path,
 ) -> Result<(
     Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
     tempfile::TempDir,
@@ -381,6 +381,9 @@ pub(super) fn test_authority_composition(
             Channel::AdapterIdempotencyLedger,
         ],
     )?;
+    composition
+        .activate_workspace(workspace_root)
+        .map_err(anyhow::Error::msg)?;
     Ok((Arc::new(composition), authority_root))
 }
 

@@ -155,6 +155,9 @@ fn test_authority_composition(
             &paths.cache_root,
             &paths.scratch_root,
         )?;
+    composition
+        .activate_workspace(root)
+        .map_err(anyhow::Error::msg)?;
     Ok(Arc::new(composition))
 }
 

@@ -42,6 +42,9 @@ pub struct RuntimeAuthorityCompositionV1 {
     pub plugin_hook_execution: std::sync::Arc<RuntimeManagedPluginHookExecutionRouteV1>,
     /// Managed one-shot command route used by the built-in Bash surface.
     pub command_execution: std::sync::Arc<RuntimeManagedCommandExecutionRouteV1>,
+    borrowed_workspace_registry: std::sync::Arc<
+        std::sync::Mutex<sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1>,
+    >,
 }
 
 impl RuntimeAuthorityCompositionV1 {
@@ -51,6 +54,30 @@ impl RuntimeAuthorityCompositionV1 {
         let route: Arc<dyn crate::plugins::ManagedPluginHookExecutionPortV1> =
             self.plugin_hook_execution.clone();
         crate::plugins::PluginHookExecutionRunner::new(route)
+    }
+
+    /// Registers the exact workspace root used by this composition. Builtin file tools may not
+    /// plan or execute before this activation succeeds.
+    pub fn activate_workspace(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<sigil_resource_authority::borrowed::BorrowedWorkspaceRegistrationCapsuleV1, String>
+    {
+        let workspace_id =
+            sigil_kernel::stable_workspace_id(workspace_root).map_err(|error| error.to_string())?;
+        self.borrowed_workspace_registry
+            .lock()
+            .map_err(|_| "borrowed workspace registry is poisoned".to_owned())?
+            .activate_workspace(
+                "sigil",
+                workspace_id.as_str().to_owned(),
+                workspace_root,
+                AuthorityGeneration {
+                    epoch: 1,
+                    instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+                },
+            )
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -242,11 +269,12 @@ fn compose_runtime_authority_inner(
     let registry = Arc::new(std::sync::Mutex::new(
         sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
     ));
-    let file_access: Arc<dyn ManagedFileAccessServiceV1> = Arc::new(
+    let file_access_impl = Arc::new(
         sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new(
             Arc::clone(&registry),
         ),
     );
+    let file_access: Arc<dyn ManagedFileAccessServiceV1> = file_access_impl.clone();
     let borrowed_native_save: Arc<
         dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1,
     > = Arc::new(
@@ -348,6 +376,7 @@ fn compose_runtime_authority_inner(
         extension_execution,
         plugin_hook_execution,
         command_execution,
+        borrowed_workspace_registry: registry,
     })
 }
 
@@ -570,6 +599,9 @@ pub fn attach_boot_authority_to_services(
         &paths.cache_root,
         &paths.scratch_root,
     )?;
+    composition
+        .activate_workspace(workspace_root)
+        .map_err(BootAuthorityErrorV1::Config)?;
     let services = services.with_global_cutover(cutover);
     services.require_cutover_or_fail().map_err(|error| {
         BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(error))

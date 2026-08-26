@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 fs2.workspace = true
 libc.workspace = true
+regex.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 serde.workspace = true
 serde_json.workspace = true

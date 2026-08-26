@@ -17,11 +17,13 @@ pub(crate) struct ResolvedToolPath {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct DeleteFileTarget {
     pub(crate) path: PathBuf,
     pub(crate) display_path: String,
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_workspace_path(workspace_root: &Path, requested: &str) -> Result<PathBuf> {
     Ok(resolve_tool_path(workspace_root, requested)?.canonical)
 }
@@ -44,6 +46,7 @@ pub(crate) fn resolve_tool_path(
     resolve_tool_path_from_base(&workspace_root, &workspace_root, requested)
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_delete_file_target(
     workspace_root: &Path,
     requested: &str,
@@ -65,6 +68,7 @@ pub(crate) fn resolve_delete_file_target(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn validate_delete_file_target(path: &Path, display_path: &str) -> Result<fs::Metadata> {
     let symlink_metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {}", path.display()))?;

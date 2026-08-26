@@ -16,6 +16,113 @@ use crate::resource::{
     OpaqueSessionExportId, ResourceAccessV1,
 };
 
+/// Pathless logical input accepted by the managed-file planner. The string is a workspace
+/// relative selector; a host/authority implementation resolves it only after registration. It
+/// is deliberately not a `PathBuf` and must never contain a host absolute path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedFileLogicalPathV1(pub String);
+
+impl ManagedFileLogicalPathV1 {
+    pub fn new(value: impl Into<String>) -> Result<Self, ManagedFileAccessErrorV1> {
+        let value = value.into();
+        if value.is_empty()
+            || value.starts_with('/')
+            || value.starts_with('\\')
+            || value.contains('\0')
+            || value.split('/').any(|part| part == "..")
+            || value.contains(':')
+        {
+            return Err(ManagedFileAccessErrorV1::AliasCollision);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Side-effect-free planning request. The authority returns a pathless V3 plan reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedFileAccessPlanRequestV1 {
+    pub logical_path: ManagedFileLogicalPathV1,
+    pub operation: ManagedFileOperationV1,
+    pub operation_scope: String,
+}
+
+/// Bounded physical operation input. Physical path resolution remains authority-private.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManagedFileExecutionInputV1 {
+    Read {
+        offset: usize,
+        limit: usize,
+        max_bytes: usize,
+    },
+    List {
+        recursive: bool,
+        limit: usize,
+        max_depth: usize,
+    },
+    Glob {
+        pattern: String,
+        limit: usize,
+    },
+    Grep {
+        pattern: String,
+        limit: usize,
+        max_bytes: usize,
+    },
+    Write {
+        content: String,
+    },
+    Edit {
+        old_text: String,
+        new_text: String,
+    },
+    Delete,
+}
+
+/// Authority-private executor request after kernel seal/issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedFileExecutionRequestV1 {
+    pub access: ManagedFileAccessRequestV1,
+    pub input: ManagedFileExecutionInputV1,
+}
+
+/// Bounded result returned by the authority executor; callers do not perform a second filesystem
+/// read. `payload` is already policy-safe text/JSON and is bounded by the authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedFileExecutionOutcomeV1 {
+    pub access_receipt: crate::managed_execution::BorrowedResourceAccessReceiptV1,
+    pub effect_settlement: EffectSettlementV1,
+    pub result_digest: CanonicalHash,
+    pub payload: String,
+    pub observed_bytes: u64,
+    pub returned_entries: u64,
+    pub total_entries: u64,
+    pub returned_lines: u64,
+    pub total_lines: u64,
+    pub truncated: bool,
+}
+
+/// Authority-owned pre-approval preview input. A preview may inspect only the exact pathless
+/// plan it was given; it never receives a physical path and it never grants mutation authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedFilePreviewRequestV1 {
+    pub plan_hash: CanonicalHash,
+    pub operation: ManagedFileOperationV1,
+    pub max_bytes: usize,
+}
+
+/// Bounded result for a physical preview read performed by the authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedFilePreviewOutcomeV1 {
+    pub payload: String,
+    pub observed_bytes: u64,
+    pub result_digest: CanonicalHash,
+    pub truncated: bool,
+}
+
 /// Closed in-process file operation classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManagedFileOperationV1 {
@@ -272,11 +379,39 @@ pub struct ManagedFileAccessResultV1 {
 
 /// Object-safe post-decision file access service (authority implementation).
 pub trait ManagedFileAccessServiceV1: Send + Sync {
+    /// Creates a pathless plan from an already registered borrowed subject.
+    fn plan(
+        &self,
+        _request: ManagedFileAccessPlanRequestV1,
+    ) -> Result<crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1, ManagedFileAccessErrorV1>
+    {
+        Err(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)
+    }
+
     fn access(
         &self,
         request: ManagedFileAccessRequestV1,
         token: ManagedFileAccessAdmissionTokenV1,
     ) -> Result<ManagedFileAccessResultV1, ManagedFileAccessErrorV1>;
+
+    /// Executes one admitted operation. Implementations must perform physical I/O only behind
+    /// this authority-owned method and return a bounded result.
+    fn execute(
+        &self,
+        _request: ManagedFileExecutionRequestV1,
+        _token: ManagedFileAccessAdmissionTokenV1,
+    ) -> Result<ManagedFileExecutionOutcomeV1, ManagedFileAccessErrorV1> {
+        Err(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)
+    }
+
+    /// Reads bounded preview data behind the authority-owned plan table without creating an
+    /// execution admission. Builtin previews must use this port instead of touching the host FS.
+    fn preview(
+        &self,
+        _request: ManagedFilePreviewRequestV1,
+    ) -> Result<ManagedFilePreviewOutcomeV1, ManagedFileAccessErrorV1> {
+        Err(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)
+    }
 }
 
 /// Closed file access error taxonomy.
@@ -290,6 +425,14 @@ pub enum ManagedFileAccessErrorV1 {
     AliasCollision,
     #[error("operation not permitted for this binding")]
     OperationNotPermitted,
+    #[error("managed file resource is not ready or workspace registration is missing")]
+    ResourcePreconditionUnavailable,
+    #[error("managed file admission token has already been consumed")]
+    TokenReplay,
+    #[error("managed file plan is stale or belongs to another authority generation")]
+    PlanStale,
+    #[error("managed file physical execution failed: {0}")]
+    PhysicalExecutionFailed(String),
 }
 
 /// Non-clone one-shot claim marker.

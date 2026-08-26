@@ -231,7 +231,8 @@ fn tool_context_with_mutation_recorder(workspace: &Path, timeout_secs: u64) -> R
 }
 
 #[test]
-fn r71_every_in_process_file_tool_declares_a_managed_file_access_ref() -> Result<()> {
+fn managed_file_access_every_in_process_file_tool_declares_a_managed_file_access_ref() -> Result<()>
+{
     use sigil_kernel::resource::CanonicalHash;
     let temp = tempfile::tempdir()?;
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
