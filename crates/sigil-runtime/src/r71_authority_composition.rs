@@ -237,7 +237,7 @@ fn load_config_payload_with_identity(
         use std::os::unix::fs::OpenOptionsExt;
         match std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(config_path)
         {
             Ok(file) => file,
