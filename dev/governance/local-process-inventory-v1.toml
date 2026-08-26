@@ -578,25 +578,6 @@ site_id = "P-0031"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/launcher.rs"
 constructor = "CommandNew"
-line = 1367
-class = "managed-execution"
-owner = "ResourceAuthority"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "Model"
-child_access = "ExactManagedGrant"
-admission_contract = "ManagedExecutionLease"
-resource_contract = "ManagedGeneration(ExecutionTemp)"
-lifecycle_contract = "AuthorityLeaseAndJournal"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:launcher.rs:1367"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
-site_id = "P-0032"
-crate_name = "sigil-tui"
-module = "crates/sigil-tui/src/launcher.rs"
-constructor = "SpawnCall"
 line = 1372
 class = "managed-execution"
 owner = "ResourceAuthority"
@@ -608,6 +589,25 @@ resource_contract = "ManagedGeneration(ExecutionTemp)"
 lifecycle_contract = "AuthorityLeaseAndJournal"
 receipt_contract = "ManagedResourceReceipt"
 reachability_proof_digest = "scanner-line:launcher.rs:1372"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "P-0032"
+crate_name = "sigil-tui"
+module = "crates/sigil-tui/src/launcher.rs"
+constructor = "SpawnCall"
+line = 1377
+class = "managed-execution"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Model"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedExecutionLease"
+resource_contract = "ManagedGeneration(ExecutionTemp)"
+lifecycle_contract = "AuthorityLeaseAndJournal"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:launcher.rs:1377"
 test_case_ids = []
 exception_rfc = "0071"
 

@@ -30,7 +30,7 @@ fn production_boot_current_schema_uses_real_authority_transaction() -> Result<()
     let (_temp, config_path, persisted) = fixture()?;
     let transaction = sigil_runtime::r71_authority_composition::boot_current_schema(
         &config_path,
-        &config_path.parent().expect("config parent"),
+        config_path.parent().expect("config parent"),
     )?;
 
     assert_eq!(transaction.config().agent.model, persisted.agent.model);
