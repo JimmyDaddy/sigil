@@ -219,8 +219,26 @@ def test_source_rejects_legacy_plan_review_runner() -> None:
         assert any("current-schema child resource provisioner" in finding for finding in findings)
 
 
+def test_registration_invariant_rejects_non_test_legacy_runner() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        write_registry(
+            root,
+            "Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1)",
+            "Arc<dyn ManagedTerminalExecutionPortV1>",
+        )
+        coordinator = root / "crates/sigil-runtime/src/plan_review_coordinator.rs"
+        coordinator.parent.mkdir(parents=True, exist_ok=True)
+        coordinator.write_text(
+            "pub async fn run_plan_review<H, A>(session: H, approval: A) {}\n",
+            encoding="utf-8",
+        )
+        findings = scanner.check_registration_invariants(root)
+        assert any("test/test-support-only" in finding for finding in findings)
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("r71 negative dependency scanner tests: 8 passed")
+    print("r71 negative dependency scanner tests: 9 passed")

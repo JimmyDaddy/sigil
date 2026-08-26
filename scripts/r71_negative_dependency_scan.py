@@ -325,9 +325,12 @@ def check_registration_invariants(root: Path) -> list[str]:
         )
         if legacy_runner:
             prefix = child_provisioner_source[: legacy_runner.start()]
-            if "#[cfg(test)]" not in prefix[-400:]:
+            if not re.search(
+                r"#\[cfg\(\s*(?:test|any\(\s*test\s*,\s*feature\s*=\s*\"test-support\"\s*\))\s*\)\]",
+                prefix[-400:],
+            ):
                 findings.append(
-                    "legacy plan-review runner must be cfg(test)-only; production must use the current-schema entry point"
+                    "legacy plan-review runner must be test/test-support-only; production must use the current-schema entry point"
                 )
         if re.search(
             r"impl RuntimePlanReviewChildResourceProvisionerV1[\s\S]*?pub fn new\s*\(",
