@@ -617,6 +617,9 @@ pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
+    managed_storage_writer: Option<
+        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
@@ -639,6 +642,7 @@ where
         handler,
         approval_handler,
         cancellation_handle,
+        managed_storage_writer,
     )
     .await
 }
@@ -656,6 +660,9 @@ pub(in crate::runner) async fn run_explicit_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
+    managed_storage_writer: Option<
+        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
@@ -679,6 +686,7 @@ where
         handler,
         approval_handler,
         cancellation_handle,
+        managed_storage_writer,
     )
     .await
 }
@@ -695,6 +703,9 @@ pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
+    managed_storage_writer: Option<
+        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
@@ -707,18 +718,57 @@ where
     )
     .map_err(|error| format!("failed to start plan review attempt: {error:#}"))?;
     let plan_review_workspace_root = options.workspace_root.clone();
-    let outcome = match sigil_runtime::PlanReviewCoordinator::run_plan_review(
-        run_session,
-        request,
-        agent,
-        options,
-        tool_registry,
-        handler,
-        approval_handler,
-        cancellation_handle,
-    )
-    .await
-    {
+    let child_resource_provisioner = managed_storage_writer
+        .zip(options.tool_authority.clone())
+        .map(|(writer, authority)| {
+            std::sync::Arc::new(
+                sigil_runtime::plan_review_coordinator::RuntimePlanReviewChildResourceProvisionerV1::new(
+                    writer,
+                    authority,
+                ),
+            ) as std::sync::Arc<
+                dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1,
+            >
+        });
+    let outcome_result = match child_resource_provisioner {
+        Some(provisioner) => {
+            sigil_runtime::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+                run_session,
+                request,
+                agent,
+                options,
+                tool_registry,
+                handler,
+                approval_handler,
+                cancellation_handle,
+                provisioner,
+            )
+            .await
+        }
+        None => {
+            #[cfg(test)]
+            {
+                sigil_runtime::PlanReviewCoordinator::run_plan_review(
+                    run_session,
+                    request,
+                    agent,
+                    options,
+                    tool_registry,
+                    handler,
+                    approval_handler,
+                    cancellation_handle,
+                )
+                .await
+            }
+            #[cfg(not(test))]
+            {
+                Err(anyhow::anyhow!(
+                    "TUI plan review requires the composed child resource bundle"
+                ))
+            }
+        }
+    };
+    let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(error) => {
             let close = sigil_runtime::PlanReviewCoordinator::close_plan_review_run_if_open(
@@ -949,6 +999,9 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     managed_verification_execution: Option<
         Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>,
+    >,
+    managed_storage_writer: Option<
+        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
     session_log_path: &Path,
     next_run_id: &mut u64,
@@ -1386,17 +1439,18 @@ where
                             agent.as_ref(),
                             &plan_review_root_config,
                             options.clone(),
-                            plan_registry,
+                                    plan_registry,
                             sigil_runtime::plan_handoff_workspace_snapshot_id(
                                 &plan_review_root_config,
                                 &options.workspace_root,
                             )
                             .ok()
                             .flatten(),
-                            &mut handler,
-                            &mut approval_handler,
-                            cancellation_handle.clone(),
-                        )
+                                        &mut handler,
+                                        &mut approval_handler,
+                                        cancellation_handle.clone(),
+                                        managed_storage_writer.clone(),
+                                    )
                         .await;
                         match result {
                             Ok(PlanReviewExecutionResult::Finished(result)) => {

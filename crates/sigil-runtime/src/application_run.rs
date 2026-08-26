@@ -2056,6 +2056,8 @@ struct ApplicationPlanReviewRuntime {
     agent: Box<Agent<Box<dyn sigil_kernel::Provider>>>,
     tool_registry: sigil_kernel::ToolRegistry,
     workspace_snapshot_id: Option<String>,
+    child_resource_provisioner:
+        Option<Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>>,
 }
 
 enum ApplicationRunExecutionKind {
@@ -2941,22 +2943,50 @@ where
         root_config,
         agent,
         tool_registry,
+        child_resource_provisioner,
         ..
     } = runtime;
     let plan_review_workspace_root = options.workspace_root.clone();
     emit_current_plan_review_attempt(session, &request, handler)?;
-    let outcome = match crate::PlanReviewCoordinator::run_plan_review(
-        session,
-        &request,
-        agent.as_ref(),
-        options,
-        tool_registry,
-        handler,
-        approval_handler,
-        cancellation_handle.clone(),
-    )
-    .await
-    {
+    let outcome = match child_resource_provisioner {
+        Some(provisioner) => {
+            crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+                session,
+                &request,
+                agent.as_ref(),
+                options,
+                tool_registry,
+                handler,
+                approval_handler,
+                cancellation_handle.clone(),
+                provisioner,
+            )
+            .await
+        }
+        None => {
+            #[cfg(test)]
+            {
+                crate::PlanReviewCoordinator::run_plan_review(
+                    session,
+                    &request,
+                    agent.as_ref(),
+                    options,
+                    tool_registry,
+                    handler,
+                    approval_handler,
+                    cancellation_handle.clone(),
+                )
+                .await
+            }
+            #[cfg(not(test))]
+            {
+                Err(anyhow!(
+                    "current-schema plan review requires the managed child resource bundle"
+                ))
+            }
+        }
+    };
+    let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
@@ -3979,6 +4009,9 @@ async fn prepare_application_run_internal(
                 ),
                 tool_registry: crate::build_plan_review_tool_registry(&registry, &root_config)
                     .into_registry(),
+                child_resource_provisioner: services
+                    .authority_composition()
+                    .map(|composition| composition.plan_review_child_resource_provisioner()),
             }),
             kind,
             task_execution,

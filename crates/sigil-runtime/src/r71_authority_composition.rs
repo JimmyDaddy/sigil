@@ -42,6 +42,7 @@ pub struct RuntimeAuthorityCompositionV1 {
     pub plugin_hook_execution: std::sync::Arc<RuntimeManagedPluginHookExecutionRouteV1>,
     /// Managed one-shot command route used by the built-in Bash surface.
     pub command_execution: std::sync::Arc<RuntimeManagedCommandExecutionRouteV1>,
+    authority_generation: AuthorityGeneration,
     borrowed_workspace_registry: std::sync::Arc<
         std::sync::Mutex<sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1>,
     >,
@@ -54,6 +55,28 @@ impl RuntimeAuthorityCompositionV1 {
         let route: Arc<dyn crate::plugins::ManagedPluginHookExecutionPortV1> =
             self.plugin_hook_execution.clone();
         crate::plugins::PluginHookExecutionRunner::new(route)
+    }
+
+    /// Returns the only production child-resource provisioner. It closes the child over the
+    /// composed writer/artifact authority and kernel tool authority; no parent raw store or
+    /// writer token is handed to plan-review code.
+    pub fn plan_review_child_resource_provisioner(
+        &self,
+    ) -> std::sync::Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>
+    {
+        std::sync::Arc::new(
+            crate::plan_review_coordinator::RuntimePlanReviewChildResourceProvisionerV1::new_with_generation(
+                std::sync::Arc::clone(&self.storage_writer),
+                std::sync::Arc::new(self.tool_authority.clone()),
+                self.authority_generation,
+            ),
+        )
+    }
+
+    /// Exact generation bound into every current-schema child bundle.
+    #[must_use]
+    pub const fn authority_generation(&self) -> AuthorityGeneration {
+        self.authority_generation
     }
 
     /// Registers the exact workspace root used by this composition. Builtin file tools may not
@@ -376,6 +399,7 @@ fn compose_runtime_authority_inner(
         extension_execution,
         plugin_hook_execution,
         command_execution,
+        authority_generation: authority,
         borrowed_workspace_registry: registry,
     })
 }
@@ -849,5 +873,75 @@ mod tests {
                 .find(|probe| probe.adapter == MandatoryAdapterKindV1::StorageSessionLog)
                 .is_some_and(|probe| probe.passed)
         );
+    }
+
+    #[test]
+    fn r71_reopen_recovers_pending_v2_admission_after_source_bound_grant_rollover() {
+        use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let exec = dir.path().join("exec");
+        std::fs::create_dir_all(state.join("cache")).expect("cache dir");
+        std::fs::create_dir_all(&exec).expect("exec dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+                .expect("state mode");
+            std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700))
+                .expect("exec mode");
+        }
+
+        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ));
+        let first = compose_runtime_authority(
+            &state,
+            &exec,
+            CanonicalHash::from_bytes([0x55; 32]),
+            planner,
+            &[Ch::SessionLog],
+        )
+        .expect("first composition");
+        let pending = first
+            .storage_writer
+            .acquire_named(Ch::SessionLog, "pending-session")
+            .expect("pending admission");
+        first
+            .storage_writer
+            .write_record(&pending, b"{\"seq\":1}")
+            .expect("pending physical write");
+        let pending_path = pending.path().to_path_buf();
+        let records_before =
+            std::fs::read(pending_path.join("records.jsonl")).expect("pending physical records");
+        drop(pending);
+        drop(first);
+
+        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            ));
+        let second = compose_runtime_authority(
+            &state,
+            &exec,
+            CanonicalHash::from_bytes([0x56; 32]),
+            planner,
+            &[Ch::SessionLog],
+        )
+        .expect("pending historical admission must be reconciled across grant rollover");
+        assert_eq!(
+            std::fs::read(pending_path.join("records.jsonl")).expect("records retained"),
+            records_before
+        );
+        let new_lease = second
+            .storage_writer
+            .acquire_named(Ch::SessionLog, "after-recovery")
+            .expect("new admissions unblocked");
+        second
+            .storage_writer
+            .finalize(new_lease)
+            .expect("new admission finalizes");
     }
 }

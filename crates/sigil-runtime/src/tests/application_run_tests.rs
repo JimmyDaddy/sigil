@@ -5929,6 +5929,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         )),
         tool_registry: sigil_kernel::ToolRegistry::new(),
         workspace_snapshot_id: None,
+        child_resource_provisioner: None,
     };
     let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
     let mut handler = RecordingRunEvents::default();

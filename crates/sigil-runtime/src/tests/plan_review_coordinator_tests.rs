@@ -30,6 +30,49 @@ use crate::{
     ConversationCoordinator, PlanDecisionCommand, PlanReviewCoordinator, PlanReviewRunRequest,
 };
 
+#[test]
+fn current_schema_child_resource_bundle_is_scoped_and_drop_finalized() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let execution_temp = temp.path().join("execution-temp");
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&execution_temp)?;
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        &[
+            Channel::SessionLog,
+            Channel::ArtifactStaging,
+            Channel::ArtifactStore,
+        ],
+    )?;
+    let provisioner = composition.plan_review_child_resource_provisioner();
+    let (_, request) = session_with_route_decision()?;
+
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    assert!(!bundle.scope_id().is_empty());
+    assert_eq!(
+        bundle.authority_generation(),
+        composition.authority_generation()
+    );
+    assert!(!format!("{bundle:?}").contains("state/"));
+    drop(bundle);
+
+    // Drop must settle both the child SessionLog and paired artifact namespaces. Reusing the
+    // same deterministic child key is the recovery assertion: a leaked pending lease would
+    // poison the next admission instead of closing the child scope.
+    let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    drop(recovered);
+    Ok(())
+}
+
 fn session_with_route_decision() -> Result<(Session, PlanReviewRunRequest)> {
     let mut session = Session::new("plan-review-test", "planned-model");
     session.append_control(ControlEntry::SessionIdentity {
