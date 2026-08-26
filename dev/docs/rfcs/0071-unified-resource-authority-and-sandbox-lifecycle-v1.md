@@ -10679,3 +10679,11 @@ R71.9i supersedes any earlier wording that described Legacy as a runnable compat
 The production `LegacyLauncher` and `LegacyDirectWriter` semantics were removed. Historical boot helpers remain only in test fixtures. `ApplicationRunServices::require_current_schema_authority` makes the composition requirement explicit at the production prepare boundary. Kernel cutover tests (`14`), runtime cutover tests (`16 passed / 1 ignored`), TUI launcher tests (`46`), negative dependency, process/producer inventory, shipping-targets and formatting passed.
 
 This is an implementation slice, not release qualification: R71.9j boot transaction, R71.9k strict delete reducer and R71.9l shipping/fault expansion plus clean exact-SHA local/five-platform qualification remain required. RFC-0071 stays `Gated / Partial / Not Frozen`; RFC-0070 remains paused.
+
+### R71.9j runtime-owned current boot transaction (2026-08-26)
+
+R71.9j moves production boot to a single `RuntimeCurrentBootTransactionV1`. Its loader reads and identifies the configuration through one no-follow handle, validates and freezes the effective configuration, workspace and storage roots, composes authority, checks mandatory readiness, activates the workspace, reconciles authority journals, and publishes the cutover manifest only after those steps succeed. The returned transaction carries the effective config, frozen paths, cutover, composition and workspace registration capsule together.
+
+TUI initial boot, Quick Setup, configuration replacement and worker startup consume this same transaction. Configuration replacement stops the old worker and clears its old authority attachment before attempting the new transaction; a failed replacement leaves the surface unavailable. The worker receives the already-published cutover rather than reopening a manifest by pathname. The shipping TUI bootstrap/file-surface test, launcher tests (`46`), runtime composition tests (`7`) and targeted checks passed.
+
+No existing authority or file-delete journal was deleted, rewritten or silently migrated; recovery remains append-only and fact-bound. R71.9k/l and clean exact-SHA local/five-platform qualification remain pending, so RFC-0071 stays `Gated / Partial / Not Frozen` and RFC-0070 remains paused.

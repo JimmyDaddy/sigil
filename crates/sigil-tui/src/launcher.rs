@@ -138,10 +138,13 @@ fn run_tui_with_initial_session(
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(config.as_deref(), &cwd)?;
+    let boot_result =
+        sigil_runtime::r71_authority_composition::boot_current_schema(&config_path, &cwd)
+            .map_err(anyhow::Error::new);
     let (mut app, mut worker) = build_initial_app_with_session(
         cwd,
         config_path.clone(),
-        RootConfig::load(&config_path),
+        boot_result,
         initial_session,
         spawn_worker,
     )?;
@@ -752,10 +755,17 @@ fn build_initial_app<F>(
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
+    let boot_result = match load_result {
+        Ok(_root_config) => {
+            sigil_runtime::r71_authority_composition::boot_current_schema(&config_path, &cwd)
+                .map_err(anyhow::Error::new)
+        }
+        Err(error) => Err(error),
+    };
     build_initial_app_with_session(
         cwd,
         config_path,
-        load_result,
+        boot_result,
         InitialSessionTarget::Fresh,
         spawn_worker_fn,
     )
@@ -764,7 +774,7 @@ where
 fn build_initial_app_with_session<F>(
     cwd: PathBuf,
     config_path: PathBuf,
-    load_result: Result<RootConfig>,
+    boot_result: Result<sigil_runtime::r71_authority_composition::RuntimeCurrentBootTransactionV1>,
     initial_session: InitialSessionTarget<'_>,
     mut spawn_worker_fn: F,
 ) -> Result<(AppState, Option<WorkerRuntime>)>
@@ -772,55 +782,16 @@ where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
     let mut worker = None;
-    let app = match load_result {
-        Ok(root_config) => {
+    let app = match boot_result {
+        Ok(transaction) => {
+            // Runtime owns the indivisible current-schema boot transaction. The TUI consumes its
+            // frozen config/path/composition values and performs no independent authority load.
+            let (root_config, workspace_root, paths, boot_cutover, composition, _registration) =
+                transaction.into_published_parts();
             let mut app = AppState::from_root_config(&config_path, &root_config);
-            // RFC-0071 R71.6: compose the authority surface once at boot and share it with the
-            // worker and the UI (input history through the managed seam). A failed composition
-            // aborts startup: no run without a consistent authority surface.
-            {
-                let paths = sigil_runtime::resolve_sigil_paths(
-                    &root_config.storage,
-                    &root_config.session,
-                    &app.workspace_root,
-                );
-                for anchor in [&paths.state_root, &paths.scratch_root] {
-                    std::fs::create_dir_all(anchor).map_err(anyhow::Error::new)?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(anchor, std::fs::Permissions::from_mode(0o700))
-                            .map_err(anyhow::Error::new)?;
-                    }
-                }
-                std::fs::create_dir_all(paths.state_root.join("cache"))
-                    .map_err(anyhow::Error::new)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(
-                        paths.state_root.join("cache"),
-                        std::fs::Permissions::from_mode(0o700),
-                    )
-                    .map_err(anyhow::Error::new)?;
-                }
-                let config_snapshot = sigil_runtime::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::load(
-                    &config_path,
-                    &cwd,
-                )
-                .map_err(anyhow::Error::new)?
-                .ok_or_else(|| anyhow::anyhow!("authority config snapshot is unavailable"))?;
-                let (boot_cutover, composition) =
-                    sigil_runtime::r71_authority_composition::compose_current_boot_authority(
-                        &config_snapshot,
-                        &paths.state_root,
-                        &paths.cache_root,
-                        &paths.scratch_root,
-                    )
-                    .map_err(anyhow::Error::new)?;
-                app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
-                app.set_authority_composition(std::sync::Arc::new(composition));
-            }
+            app.set_frozen_boot_paths(workspace_root, paths);
+            app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
+            app.set_authority_composition(std::sync::Arc::new(composition));
             if app.workspace_is_trusted_from_history() {
                 restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
                 let trust_ready = match app.ensure_current_workspace_trust_decision(
@@ -883,6 +854,39 @@ where
     Ok((app, worker))
 }
 
+#[cfg(not(test))]
+fn install_current_boot_transaction(
+    app: &mut AppState,
+    config_path: &Path,
+    _config: RootConfig,
+    launch_cwd: &Path,
+) -> Result<RootConfig> {
+    // Re-read the persisted bytes through the runtime authority loader after the atomic save.
+    // This binds the replacement transaction to the exact file identity it will use.
+    let transaction =
+        sigil_runtime::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
+            .map_err(anyhow::Error::new)?;
+    let (config, workspace_root, paths, boot_cutover, composition, _registration) =
+        transaction.into_published_parts();
+    app.set_frozen_boot_paths(workspace_root, paths);
+    app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
+    app.set_authority_composition(std::sync::Arc::new(composition));
+    app.apply_runtime_config_snapshot(&config);
+    Ok(config)
+}
+
+#[cfg(test)]
+fn install_current_boot_transaction(
+    _app: &mut AppState,
+    _config_path: &Path,
+    config: RootConfig,
+    _launch_cwd: &Path,
+) -> Result<RootConfig> {
+    // Unit action tests inject a worker factory and intentionally exercise only action ordering;
+    // the shipping launcher uses the production implementation above.
+    Ok(config)
+}
+
 fn restore_initial_session_from_disk(
     app: &mut AppState,
     root_config: &RootConfig,
@@ -931,16 +935,32 @@ where
         } => {
             let support_build_info = app.support_build_info().clone();
             let update_build_info = app.update_build_info().clone();
+            let root_config = *root_config;
             *app = AppState::from_root_config(&config_path, &root_config);
             app.set_support_build_info(support_build_info);
             app.set_update_build_info(update_build_info);
+            let root_config = match install_current_boot_transaction(
+                app,
+                &config_path,
+                root_config,
+                &std::env::current_dir()?,
+            ) {
+                Ok(root_config) => root_config,
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("setup completed but authority boot is unavailable: {error:#}"),
+                    )?;
+                    return Ok(());
+                }
+            };
             if let Err(error) =
                 app.ensure_current_workspace_trust_decision("trusted by user during quick setup")
             {
                 apply_worker_startup_recovery(app, &error, &app.session_log_path.clone())?;
                 return Ok(());
             }
-            match spawn_worker_fn(*root_config, app) {
+            match spawn_worker_fn(root_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
                     app,
@@ -971,7 +991,27 @@ where
             let Some(runtime_config) = app.runtime_config_for_current_session(*root_config)? else {
                 return Ok(());
             };
+            let config_path = app.config_path.clone();
+            let launch_cwd = std::env::current_dir()?;
+            let transaction_config = runtime_config.clone();
             shutdown_and_join_worker(worker);
+            #[cfg(not(test))]
+            app.clear_boot_authority();
+            let runtime_config = match install_current_boot_transaction(
+                app,
+                &config_path,
+                transaction_config,
+                &launch_cwd,
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("configuration saved but authority reboot failed: {error:#}"),
+                    )?;
+                    return Ok(());
+                }
+            };
             match spawn_worker_fn(runtime_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
@@ -1757,6 +1797,7 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
             explicit_selection: app.pending_session_route_selection().cloned(),
         },
         app.authority_composition().cloned(),
+        app.boot_cutover().cloned(),
         app.worker_session_attachment(),
     )?;
     Ok(WorkerRuntime {

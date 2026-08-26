@@ -1342,6 +1342,17 @@ impl RootConfig {
         Ok(config)
     }
 
+    /// Parses one configuration payload and applies only the documented model-request
+    /// environment overrides. Callers that already hold an authority-opened config handle use
+    /// this entry point so parsing cannot silently reopen a path that may have been replaced.
+    pub fn parse_with_model_request_env(raw: &str) -> Result<Self> {
+        let mut config = parse_root_config_toml(raw)
+            .map_err(|_| anyhow::anyhow!("failed to parse configuration payload"))?;
+        config.validate_config_schema()?;
+        config.apply_model_request_env_overrides_with(|name| env::var(name).ok())?;
+        Ok(config)
+    }
+
     fn load_with_model_request_env(
         path: &Path,
         read_env: impl Fn(&str) -> Option<String>,

@@ -108,6 +108,82 @@ impl RuntimeAuthorityCompositionV1 {
     }
 }
 
+/// The indivisible current-schema boot result. A product surface may consume this value, but it
+/// must not independently reload configuration, resolve authority paths, or activate a second
+/// workspace registration.
+pub struct RuntimeCurrentBootTransactionV1 {
+    config: sigil_kernel::RootConfig,
+    workspace_root: PathBuf,
+    resolved_paths: crate::paths::SigilPaths,
+    cutover: crate::r71_global_cutover::RuntimeGlobalCutoverV1,
+    composition: RuntimeAuthorityCompositionV1,
+    workspace_registration:
+        sigil_resource_authority::borrowed::BorrowedWorkspaceRegistrationCapsuleV1,
+}
+
+impl RuntimeCurrentBootTransactionV1 {
+    /// Returns the exact validated configuration consumed by this boot.
+    #[must_use]
+    pub fn config(&self) -> &sigil_kernel::RootConfig {
+        &self.config
+    }
+
+    /// Returns the frozen effective workspace root.
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    /// Returns the frozen authority path view.
+    #[must_use]
+    pub fn resolved_paths(&self) -> &crate::paths::SigilPaths {
+        &self.resolved_paths
+    }
+
+    /// Returns the immutable published cutover decision.
+    #[must_use]
+    pub fn cutover(&self) -> &crate::r71_global_cutover::RuntimeGlobalCutoverV1 {
+        &self.cutover
+    }
+
+    /// Returns the already activated authority composition.
+    #[must_use]
+    pub fn composition(&self) -> &RuntimeAuthorityCompositionV1 {
+        &self.composition
+    }
+
+    /// Returns the authority-issued workspace registration capsule.
+    #[must_use]
+    pub fn workspace_registration(
+        &self,
+    ) -> &sigil_resource_authority::borrowed::BorrowedWorkspaceRegistrationCapsuleV1 {
+        &self.workspace_registration
+    }
+
+    /// Transfers the transaction's owned values to a surface that must retain them for the
+    /// lifetime of its worker and renderer state.
+    #[must_use]
+    pub fn into_published_parts(
+        self,
+    ) -> (
+        sigil_kernel::RootConfig,
+        PathBuf,
+        crate::paths::SigilPaths,
+        crate::r71_global_cutover::RuntimeGlobalCutoverV1,
+        RuntimeAuthorityCompositionV1,
+        sigil_resource_authority::borrowed::BorrowedWorkspaceRegistrationCapsuleV1,
+    ) {
+        (
+            self.config,
+            self.workspace_root,
+            self.resolved_paths,
+            self.cutover,
+            self.composition,
+            self.workspace_registration,
+        )
+    }
+}
+
 impl std::fmt::Debug for RuntimeAuthorityCompositionV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -148,12 +224,100 @@ pub struct ValidatedAuthorityConfigSnapshotV1 {
     config_hash: CanonicalHash,
 }
 
+/// Reads the configuration bytes and observes its identity through the same no-follow handle.
+/// The returned payload is the only input used for parsing, so an atomic replacement between
+/// metadata inspection and parsing cannot create a split-brain boot.
+fn load_config_payload_with_identity(
+    config_path: &Path,
+) -> Result<Option<(Vec<u8>, CanonicalHash)>, BootAuthorityErrorV1> {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(config_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(BootAuthorityErrorV1::Config(error.to_string())),
+        }
+    };
+
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+            )
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(config_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(BootAuthorityErrorV1::Config(error.to_string())),
+        }
+    };
+
+    #[cfg(not(any(unix, windows)))]
+    let file = match std::fs::File::open(config_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(BootAuthorityErrorV1::Config(error.to_string())),
+    };
+
+    let metadata = file
+        .metadata()
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(BootAuthorityErrorV1::Config(
+            "authority config is not a regular file".to_owned(),
+        ));
+    }
+    #[cfg(windows)]
+    let identity =
+        sigil_resource_authority::identity::canonical_identity_from_handle(config_path, &file)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
+            .digest;
+    #[cfg(not(windows))]
+    let identity = sigil_resource_authority::identity::canonical_identity_from_metadata(
+        config_path,
+        &metadata,
+    )
+    .digest;
+    let mut raw = Vec::new();
+    file.take(2 * 1024 * 1024)
+        .read_to_end(&mut raw)
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    Ok(Some((raw, identity)))
+}
+
 impl ValidatedAuthorityConfigSnapshotV1 {
     /// Builds a snapshot from a config value that the caller has already loaded and validated.
+    #[cfg(test)]
     pub(crate) fn from_loaded(
         config_path: &Path,
         config: sigil_kernel::RootConfig,
         launch_cwd: &Path,
+    ) -> Result<Self, BootAuthorityErrorV1> {
+        let config_path_identity =
+            sigil_resource_authority::identity::canonical_identity(config_path)
+                .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
+                .digest;
+        Self::from_loaded_with_identity(config_path, config, launch_cwd, config_path_identity)
+    }
+
+    fn from_loaded_with_identity(
+        config_path: &Path,
+        config: sigil_kernel::RootConfig,
+        launch_cwd: &Path,
+        config_path_identity: CanonicalHash,
     ) -> Result<Self, BootAuthorityErrorV1> {
         let launch_cwd = std::fs::canonicalize(launch_cwd)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
@@ -163,10 +327,6 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let resolved_paths =
             crate::resolve_sigil_paths(&config.storage, &config.session, &workspace_root);
-        let config_path_identity =
-            sigil_resource_authority::identity::canonical_identity(config_path)
-                .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
-                .digest;
         let workspace_identity =
             sigil_resource_authority::identity::canonical_identity(&workspace_root)
                 .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
@@ -194,25 +354,23 @@ impl ValidatedAuthorityConfigSnapshotV1 {
         })
     }
 
-    /// Loads one valid snapshot. Missing, non-regular, or malformed config preserves the
-    /// pre-existing epoch-only boot behavior by returning `Ok(None)`.
+    /// Loads one valid snapshot. Missing, non-regular, or malformed config is unavailable to
+    /// current-schema boot; the caller must route the typed error to setup/recovery UI or abort
+    /// the headless request. There is no epoch-only fallback.
     pub fn load(
         config_path: &Path,
         launch_cwd: &Path,
     ) -> Result<Option<Self>, BootAuthorityErrorV1> {
-        let metadata = match std::fs::symlink_metadata(config_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(BootAuthorityErrorV1::Config(error.to_string())),
-        };
-        if !metadata.file_type().is_file() {
+        let Some((raw, config_path_identity)) = load_config_payload_with_identity(config_path)?
+        else {
             return Ok(None);
-        }
-        let config = match sigil_kernel::RootConfig::load(config_path) {
-            Ok(config) => config,
-            Err(_) => return Ok(None),
         };
-        Self::from_loaded(config_path, config, launch_cwd).map(Some)
+        let raw = std::str::from_utf8(&raw)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        let config = sigil_kernel::RootConfig::parse_with_model_request_env(raw)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        Self::from_loaded_with_identity(config_path, config, launch_cwd, config_path_identity)
+            .map(Some)
     }
 
     #[must_use]
@@ -604,7 +762,55 @@ pub enum BootAuthorityErrorV1 {
     Composition(RuntimeAuthorityCompositionErrorV1),
 }
 
-/// Builds and publishes the current-schema authority composition for one valid boot surface.
+fn build_current_boot_transaction(
+    config_snapshot: ValidatedAuthorityConfigSnapshotV1,
+) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
+    let config = config_snapshot.config().clone();
+    let workspace_root = config_snapshot.workspace_root().to_path_buf();
+    let resolved_paths = config_snapshot.resolved_paths().clone();
+    let (cutover, composition) = compose_current_boot_authority(
+        &config_snapshot,
+        &resolved_paths.state_root,
+        &resolved_paths.cache_root,
+        &resolved_paths.scratch_root,
+    )?;
+    let workspace_registration = composition
+        .activate_workspace(&workspace_root)
+        .map_err(BootAuthorityErrorV1::Config)?;
+    cutover.gate().map_err(|error| {
+        BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
+            error.clone(),
+        ))
+    })?;
+    publish_current_boot_manifest(config_snapshot.config_path(), &cutover)?;
+    Ok(RuntimeCurrentBootTransactionV1 {
+        config,
+        workspace_root,
+        resolved_paths,
+        cutover,
+        composition,
+        workspace_registration,
+    })
+}
+
+/// Loads and publishes one current-schema boot transaction. Missing or malformed configuration
+/// is a typed failure and never selects a legacy epoch.
+pub fn boot_current_schema(
+    config_path: &Path,
+    launch_cwd: &Path,
+) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
+    let snapshot =
+        ValidatedAuthorityConfigSnapshotV1::load(config_path, launch_cwd)?.ok_or_else(|| {
+            BootAuthorityErrorV1::Config(
+                "current-schema authority config is unavailable".to_owned(),
+            )
+        })?;
+    build_current_boot_transaction(snapshot)
+}
+
+/// Builds the current-schema authority composition for one valid boot surface. Publication of the
+/// cutover manifest belongs to [`build_current_boot_transaction`], after workspace activation and
+/// journal reconciliation have completed.
 ///
 /// The readiness manifest is computed once against an isolated provisional composition, then the
 /// production composition is rebound to the resulting content hash so storage grants and the
@@ -719,8 +925,14 @@ pub fn compose_current_boot_authority(
             error.clone(),
         ))
     })?;
-    let manifest_path = config_snapshot
-        .config_path()
+    Ok((decision, composition))
+}
+
+fn publish_current_boot_manifest(
+    config_path: &Path,
+    decision: &crate::r71_global_cutover::RuntimeGlobalCutoverV1,
+) -> Result<(), BootAuthorityErrorV1> {
+    let manifest_path = config_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join(".sigil-cutover-manifest.json");
@@ -748,35 +960,20 @@ pub fn compose_current_boot_authority(
             )
         })?;
     }
-    Ok((decision, composition))
+    Ok(())
 }
 
 /// One-call boot attach shared by CLI headless/machine and HTTP serve: publishes the current
 /// epoch for a valid config, prepares the authority anchors and composes the authority surface
 /// once, then attaches both to the run services (fail closed on any step). Missing or malformed
-/// config keeps the legacy epoch-only recovery path.
+/// config is a typed unavailable failure; there is no epoch-only recovery path.
 pub fn attach_boot_authority_to_services(
     services: crate::application_run::ApplicationRunServices,
     config_path: &std::path::Path,
     launch_cwd: &std::path::Path,
 ) -> Result<crate::application_run::ApplicationRunServices, BootAuthorityErrorV1> {
-    // The shared composition owner loads and freezes the config exactly once. Missing or
-    // malformed config keeps the legacy epoch-only recovery path.
-    let Some(config_snapshot) = ValidatedAuthorityConfigSnapshotV1::load(config_path, launch_cwd)?
-    else {
-        return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
-            .map_err(BootAuthorityErrorV1::Cutover);
-    };
-    let paths = config_snapshot.resolved_paths().clone();
-    let (cutover, composition) = compose_current_boot_authority(
-        &config_snapshot,
-        &paths.state_root,
-        &paths.cache_root,
-        &paths.scratch_root,
-    )?;
-    composition
-        .activate_workspace(config_snapshot.workspace_root())
-        .map_err(BootAuthorityErrorV1::Config)?;
+    let transaction = boot_current_schema(config_path, launch_cwd)?;
+    let (_, _, _, cutover, composition, _) = transaction.into_published_parts();
     let services = services.with_global_cutover(cutover);
     services.require_cutover_or_fail().map_err(|error| {
         BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(error))

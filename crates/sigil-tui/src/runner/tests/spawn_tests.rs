@@ -501,6 +501,7 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         super::super::spawn::WorkerSessionRouteDirective::default(),
         Some(authority_composition),
         None,
+        None,
     )?;
     let command_tx = spawned.command_tx;
     let message_rx = spawned.message_rx;

@@ -964,6 +964,33 @@ impl AppState {
         self.boot_cutover = Some(cutover);
     }
 
+    /// Clears all authority-owned boot attachments before a replacement transaction is
+    /// attempted. A failed config replacement must not leave the stopped worker paired with an
+    /// authority composition built from a previous snapshot.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn clear_boot_authority(&mut self) {
+        self.managed_history_writer = None;
+        self.authority_composition = None;
+        self.boot_cutover = None;
+    }
+
+    /// Applies the runtime boot owner's frozen workspace/path view before any session or writer
+    /// state is initialized. This prevents the TUI shell from resolving authority roots a second
+    /// time from its own process cwd.
+    pub(crate) fn set_frozen_boot_paths(
+        &mut self,
+        workspace_root: PathBuf,
+        sigil_paths: sigil_runtime::paths::SigilPaths,
+    ) {
+        self.workspace_root = workspace_root.clone();
+        self.workspace_git_status = inspect_workspace_git_status(&workspace_root);
+        self.sigil_paths = sigil_paths;
+        self.session_log_dir = self.sigil_paths.session_log_dir.clone();
+        self.session_log_path = self
+            .session_log_dir
+            .join(format!("session-{}.jsonl", self.session_id));
+    }
+
     /// Authority-declared managed session-log leaf for the CURRENT session (opaque stem as the
     /// per-session key); None when no writer is attached (tests / legacy boot).
     fn managed_session_log_path(&self) -> Option<std::path::PathBuf> {
@@ -1011,6 +1038,15 @@ impl AppState {
         &std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
     > {
         self.authority_composition.as_ref()
+    }
+
+    /// The boot owner's published current-schema decision shared with the worker. Production
+    /// worker startup must consume this value instead of reopening a manifest by pathname.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn boot_cutover(
+        &self,
+    ) -> Option<&std::sync::Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>> {
+        self.boot_cutover.as_ref()
     }
 
     pub fn from_root_config(config_path: &Path, root_config: &RootConfig) -> Self {

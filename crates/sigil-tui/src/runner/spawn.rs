@@ -79,6 +79,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive(
         route_directive,
         None,
         None,
+        None,
     )
 }
 
@@ -92,40 +93,51 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     authority_composition: Option<
         std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
     >,
+    boot_cutover: Option<std::sync::Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>>,
     supplied_attachment: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
 ) -> Result<SpawnedAgentWorker> {
-    // Production launcher passes the published composition, so the worker must reopen the
-    // same current-schema decision. Test-only wrappers without a composition retain the legacy
-    // compatibility epoch and therefore cannot accidentally claim the managed route.
-    let current_schema = authority_composition.is_some();
-    let session_epoch = if current_schema {
-        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
-    } else {
-        sigil_kernel::cutover_manifest::StartupEpochV1::Legacy
-    };
-    let boot_cutover = std::sync::Arc::new(
-        if current_schema {
-            sigil_runtime::r71_global_cutover::current_boot_decision(&config_path)
-        } else {
-            sigil_runtime::r71_global_cutover::legacy_boot_decision(&config_path)
+    // Production launch must receive the current-schema composition from the boot owner. The
+    // no-composition branch is retained only for this crate's unit fixtures; it opens the
+    // explicit test session directly and never selects or persists a legacy epoch.
+    let boot_cutover = match authority_composition.is_some() {
+        true => Some(boot_cutover.ok_or_else(|| {
+            anyhow::anyhow!(
+                "current-schema boot cutover is required when authority composition is attached"
+            )
+        })?),
+        false => {
+            #[cfg(test)]
+            {
+                let _ = boot_cutover;
+                None
+            }
+            #[cfg(not(test))]
+            {
+                anyhow::bail!(
+                    "current-schema authority composition is required before worker spawn"
+                )
+            }
         }
-        .map_err(anyhow::Error::new)?,
-    );
-    boot_cutover
-        .admit_session_open(session_epoch)
-        .map_err(anyhow::Error::new)?;
-    // RFC-0071 R71.6: the worker consumes the boot composition shared via the launcher (None
-    // only for test wrappers; production boot always composes in the launcher).
+    };
+    let session_epoch = sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema;
+    if let Some(boot_cutover) = boot_cutover.as_ref() {
+        boot_cutover
+            .admit_session_open(session_epoch)
+            .map_err(anyhow::Error::new)?;
+    }
     let authority_composition = authority_composition;
     let attachment_lease = if let Some(attachment) = supplied_attachment {
-        let store = sigil_runtime::r71_global_cutover::guarded_session_open(
-            &session_log_path,
-            boot_cutover.as_ref(),
-            session_epoch,
-        )
-        .map_err(anyhow::Error::new)?;
+        let store = match boot_cutover.as_ref() {
+            Some(boot_cutover) => sigil_runtime::r71_global_cutover::guarded_session_open(
+                &session_log_path,
+                boot_cutover.as_ref(),
+                session_epoch,
+            )
+            .map_err(anyhow::Error::new)?,
+            None => JsonlSessionStore::new(&session_log_path)?,
+        };
         anyhow::ensure!(
             attachment.session_path() == store.path(),
             "transferred worker attachment belongs to another durable session"
@@ -238,9 +250,11 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     "连接配置已更新，已使用当前配置继续；服务端上下文缓存已重置。".to_owned(),
                 ));
             }
-            // Session-open guard applies inside the worker too: every session store open in
-            // this epoch must be an admitted (legacy) open, fail closed otherwise.
-            if let Err(error) = boot_cutover.admit_session_open(session_epoch) {
+            // Session-open guard applies inside the worker too: every current-schema session
+            // store open must be admitted by the boot decision, fail closed otherwise.
+            if let Some(boot_cutover) = boot_cutover.as_ref()
+                && let Err(error) = boot_cutover.admit_session_open(session_epoch)
+            {
                 tracing::debug!(%error, "session epoch guard rejected the open");
                 send_worker_startup_recovery(
                     &message_tx,
@@ -253,11 +267,16 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 );
                 return;
             }
-            let store = match sigil_runtime::r71_global_cutover::guarded_session_open(
-                &session_log_path,
-                boot_cutover.as_ref(),
-                session_epoch,
-            ) {
+            let store_result: Result<JsonlSessionStore> = match boot_cutover.as_ref() {
+                Some(boot_cutover) => sigil_runtime::r71_global_cutover::guarded_session_open(
+                    &session_log_path,
+                    boot_cutover.as_ref(),
+                    session_epoch,
+                )
+                .map_err(|error| anyhow::anyhow!(error)),
+                None => JsonlSessionStore::new(&session_log_path),
+            };
+            let store = match store_result {
                 Ok(store) => store,
                 Err(error) => {
                     tracing::debug!(%error, "session writer startup is unavailable");
