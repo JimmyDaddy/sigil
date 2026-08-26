@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -735,6 +738,156 @@ fn open_relative_parent(plan: &PlannedFileAccessV1) -> std::io::Result<(std::fs:
 }
 
 #[cfg(unix)]
+fn same_unix_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.nlink() == right.nlink()
+        && left.len() == right.len()
+        && (left.mode() & libc::S_IFMT as u32) == (right.mode() & libc::S_IFMT as u32)
+}
+
+#[cfg(unix)]
+fn rename_noreplace_at(
+    directory: &std::fs::File,
+    source: &CStr,
+    destination: &CStr,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
+        libc::renameat2(
+            directory.as_raw_fd(),
+            source.as_ptr(),
+            directory.as_raw_fd(),
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+
+    #[cfg(target_os = "macos")]
+    let status = unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            source.as_ptr(),
+            directory.as_raw_fd(),
+            destination.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let status = {
+        let _ = (directory, source, destination);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "managed delete quarantine is unsupported on this Unix target",
+        ));
+    };
+
+    if status < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+static DELETE_QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+fn delete_via_quarantine(
+    parent: &std::fs::File,
+    leaf: &CStr,
+    approved: &std::fs::Metadata,
+    plan_hash: CanonicalHash,
+) -> Result<(), ManagedFileAccessErrorV1> {
+    let sequence = DELETE_QUARANTINE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let quarantine = CString::new(format!(
+        ".sigil-delete-quarantine-{}-{}-{}",
+        std::process::id(),
+        sequence,
+        plan_hash.to_hex()
+    ))
+    .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+
+    // The rename is the linearization point: it moves whichever object is currently bound to the
+    // approved leaf into an authority-generated private name without replacing a pre-existing
+    // entry. The identity is checked only after that move, so a pathname replacement cannot be
+    // deleted merely because it passed an earlier fstatat check.
+    rename_noreplace_at(parent, leaf, &quarantine).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ManagedFileAccessErrorV1::PlanStale
+        } else {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                "managed delete quarantine rename failed: {error}"
+            ))
+        }
+    })?;
+
+    let quarantine_name = quarantine
+        .to_str()
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+    let quarantined = match open_at(
+        parent,
+        quarantine_name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    ) {
+        Ok(file) => file,
+        Err(error) => {
+            let restore = rename_noreplace_at(parent, &quarantine, leaf);
+            return Err(match restore {
+                Ok(()) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                    "managed delete quarantine identity could not be opened: {error}"
+                )),
+                Err(restore_error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                    "managed delete quarantine requires reconciliation: open failed: {error}; restore failed: {restore_error}"
+                )),
+            });
+        }
+    };
+    let observed = match quarantined.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let restore = rename_noreplace_at(parent, &quarantine, leaf);
+            return Err(match restore {
+                Ok(()) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                    "managed delete quarantine identity observation failed: {error}"
+                )),
+                Err(restore_error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                    "managed delete quarantine requires reconciliation: identity observation failed: {error}; restore failed: {restore_error}"
+                )),
+            });
+        }
+    };
+    if !same_unix_identity(approved, &observed) {
+        let restore = rename_noreplace_at(parent, &quarantine, leaf);
+        return Err(match restore {
+            Ok(()) => ManagedFileAccessErrorV1::PlanStale,
+            Err(error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                "managed delete quarantine identity mismatch requires reconciliation: restore failed: {error}"
+            )),
+        });
+    }
+
+    let status = unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), 0) };
+    if status < 0 {
+        let error = std::io::Error::last_os_error();
+        let restore = rename_noreplace_at(parent, &quarantine, leaf);
+        return Err(match restore {
+            Ok(()) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                "managed file delete failed after quarantine: {error}"
+            )),
+            Err(restore_error) => ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
+                "managed delete quarantine requires reconciliation: delete failed: {error}; restore failed: {restore_error}"
+            )),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn read_relative_text(plan: &PlannedFileAccessV1) -> Result<String, ManagedFileAccessErrorV1> {
     let mut file = open_relative_path(plan, libc::O_RDONLY)?;
     let mut raw = String::new();
@@ -1007,43 +1160,14 @@ fn execute_physical(
             if plan.expected_physical_identity.is_none() {
                 return Err(ManagedFileAccessErrorV1::PlanStale);
             }
-            // Pin and revalidate the approved leaf immediately before unlink. The no-follow
-            // open rejects symlink leaves and compares the opened inode/file identity; the
-            // parent fd then keeps the unlink rooted in the authority-owned directory.
+            // Pin the approved leaf before the quarantine rename. The no-follow open rejects
+            // symlink leaves and the plan-level revalidation above binds this handle to the
+            // approved identity; the parent fd keeps the rename rooted in the authority-owned
+            // directory.
             let leaf_guard = open_relative_path(plan, libc::O_RDONLY)?;
             let (parent, leaf) = open_relative_parent(plan).map_err(relative_io_error)?;
-            let mut current = std::mem::MaybeUninit::<libc::stat>::uninit();
-            // SAFETY: `current` is writable storage and `parent`/`leaf` are authority-bound.
-            let stat_status = unsafe {
-                libc::fstatat(
-                    parent.as_raw_fd(),
-                    leaf.as_ptr(),
-                    current.as_mut_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-            if stat_status < 0 {
-                return Err(relative_io_error(std::io::Error::last_os_error()));
-            }
-            // SAFETY: fstatat initialized `current` on success.
-            let current = unsafe { current.assume_init() };
-            use std::os::unix::fs::MetadataExt;
             let approved = leaf_guard.metadata().map_err(relative_io_error)?;
-            let same_identity = current.st_dev as u64 == approved.dev()
-                && current.st_ino == approved.ino()
-                && current.st_nlink as u64 == approved.nlink()
-                && current.st_size as i128 == approved.size() as i128
-                && (current.st_mode as u32 & libc::S_IFMT as u32)
-                    == (approved.mode() & libc::S_IFMT as u32);
-            if !same_identity {
-                return Err(ManagedFileAccessErrorV1::PlanStale);
-            }
-            // SAFETY: `parent` is an authority-owned directory fd and `leaf` is a single
-            // validated component; unlinkat never follows a symlink in the leaf position.
-            let status = unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), 0) };
-            if status < 0 {
-                return Err(relative_io_error(std::io::Error::last_os_error()));
-            }
+            delete_via_quarantine(&parent, &leaf, &approved, plan.plan_hash)?;
             Ok(PhysicalExecutionOutcomeV1 {
                 payload: "managed file delete applied".to_owned(),
                 observed_bytes: 0,
@@ -1232,6 +1356,8 @@ struct WindowsRelativeHandle {
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy)]
 enum WindowsOpenKind {
+    /// Opens either a regular file or a directory without asserting a leaf type.
+    Any,
     Read,
     ReadWrite,
     Write,
@@ -1250,7 +1376,7 @@ fn windows_open_component(
     };
     let mut options = OpenOptions::new();
     match kind {
-        WindowsOpenKind::Read | WindowsOpenKind::Directory => {
+        WindowsOpenKind::Any | WindowsOpenKind::Read | WindowsOpenKind::Directory => {
             options.read(true);
         }
         WindowsOpenKind::ReadWrite => {
@@ -1329,7 +1455,7 @@ fn windows_open_relative_component(
         Buffer: name.as_ptr() as *mut u16,
     };
     let desired_access = match kind {
-        WindowsOpenKind::Read | WindowsOpenKind::Directory => GENERIC_READ,
+        WindowsOpenKind::Any | WindowsOpenKind::Read | WindowsOpenKind::Directory => GENERIC_READ,
         WindowsOpenKind::ReadWrite => GENERIC_READ | GENERIC_WRITE,
         WindowsOpenKind::Write => GENERIC_WRITE,
         WindowsOpenKind::Delete => DELETE | GENERIC_READ | FILE_READ_ATTRIBUTES,
@@ -1338,7 +1464,7 @@ fn windows_open_relative_component(
     let create_options = FILE_SYNCHRONOUS_IO_NONALERT
         | FILE_OPEN_REPARSE_POINT
         | match kind {
-            WindowsOpenKind::Directory => FILE_OPEN_FOR_BACKUP_INTENT,
+            WindowsOpenKind::Any | WindowsOpenKind::Directory => FILE_OPEN_FOR_BACKUP_INTENT,
             WindowsOpenKind::Read
             | WindowsOpenKind::ReadWrite
             | WindowsOpenKind::Write
@@ -1500,7 +1626,7 @@ fn windows_collect_entries(
         let name = entry.file_name().to_string_lossy().into_owned();
         let relative = windows_child_path(base, &name);
         let child =
-            windows_open_relative_root(root, &relative, WindowsOpenKind::Read, false, root_guard)?;
+            windows_open_relative_root(root, &relative, WindowsOpenKind::Any, false, root_guard)?;
         let is_directory = crate::identity::canonical_identity_from_handle(
             &directory_path.join(&name),
             &child.file,
@@ -1533,7 +1659,7 @@ fn windows_collect_grep(
     observed_bytes: &mut u64,
     root_guard: Option<&std::fs::File>,
 ) -> Result<(), ManagedFileAccessErrorV1> {
-    let handle = windows_open_relative_root(root, base, WindowsOpenKind::Read, false, root_guard)?;
+    let handle = windows_open_relative_root(root, base, WindowsOpenKind::Any, false, root_guard)?;
     let identity = crate::identity::canonical_identity_from_handle(
         &if base == "." || base.is_empty() {
             root.to_path_buf()
@@ -2434,6 +2560,17 @@ mod tests {
         AuthorityManagedFileAccessServiceV1,
         sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1,
     ) {
+        registered_plan_for_operation(content, ManagedFileOperationV1::Read)
+    }
+
+    fn registered_plan_for_operation(
+        content: Option<&str>,
+        operation: ManagedFileOperationV1,
+    ) -> (
+        tempfile::TempDir,
+        AuthorityManagedFileAccessServiceV1,
+        sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1,
+    ) {
         let workspace = tempfile::tempdir().expect("workspace");
         if let Some(content) = content {
             std::fs::write(workspace.path().join("notes.txt"), content).expect("file");
@@ -2456,8 +2593,11 @@ mod tests {
         let plan = service
             .plan(ManagedFileAccessPlanRequestV1 {
                 logical_path: ManagedFileLogicalPathV1::new("notes.txt").expect("logical"),
-                operation: ManagedFileOperationV1::Read,
-                operation_scope: "fault-file-read".to_owned(),
+                operation,
+                operation_scope: format!(
+                    "fault-file-{}",
+                    String::from_utf8_lossy(operation_tag(operation))
+                ),
             })
             .expect("plan");
         (workspace, service, plan)
@@ -2470,6 +2610,15 @@ mod tests {
         ManagedFileExecutionRequestV1,
         ManagedFileAccessAdmissionTokenV1,
     ) {
+        let operation = match &input {
+            ManagedFileExecutionInputV1::Read { .. } => ManagedFileOperationV1::Read,
+            ManagedFileExecutionInputV1::List { .. } => ManagedFileOperationV1::List,
+            ManagedFileExecutionInputV1::Glob { .. } => ManagedFileOperationV1::Glob,
+            ManagedFileExecutionInputV1::Grep { .. } => ManagedFileOperationV1::Grep,
+            ManagedFileExecutionInputV1::Write { .. } => ManagedFileOperationV1::Write,
+            ManagedFileExecutionInputV1::Edit { .. } => ManagedFileOperationV1::Edit,
+            ManagedFileExecutionInputV1::Delete => ManagedFileOperationV1::Delete,
+        };
         let binding = ManagedFileAdmissionBindingV1::ToolPermissionPlan {
             permission_plan_hash: hash(0x01),
             decision_hash: hash(0x02),
@@ -2484,7 +2633,7 @@ mod tests {
         let request = ManagedFileExecutionRequestV1 {
             access: ManagedFileAccessRequestV1 {
                 subject_ref: plan.subject_ref.clone(),
-                operation: ManagedFileOperationV1::Read,
+                operation,
                 operation_digest: plan.operation_digest,
                 admission_binding: binding.clone(),
                 admission_binding_hash: plan.plan_hash,
@@ -2499,6 +2648,43 @@ mod tests {
             ),
         );
         (request, token)
+    }
+
+    #[cfg(windows)]
+    fn registered_plan_for_workspace(
+        workspace: &tempfile::TempDir,
+        logical_path: &str,
+        operation: ManagedFileOperationV1,
+    ) -> (
+        AuthorityManagedFileAccessServiceV1,
+        sigil_kernel::permission_plan_v3::ManagedFileAccessPlanDraftRefV1,
+    ) {
+        let registry = Arc::new(Mutex::new(BorrowedSubjectRegistryV1::new()));
+        registry
+            .lock()
+            .expect("registry")
+            .activate_workspace(
+                "sigil",
+                "fault-file-custom-workspace",
+                workspace.path(),
+                AuthorityGeneration {
+                    epoch: 9,
+                    instance_hash: hash(0x93),
+                },
+            )
+            .expect("activate");
+        let service = AuthorityManagedFileAccessServiceV1::new(registry);
+        let plan = service
+            .plan(ManagedFileAccessPlanRequestV1 {
+                logical_path: ManagedFileLogicalPathV1::new(logical_path).expect("logical"),
+                operation,
+                operation_scope: format!(
+                    "fault-file-{}",
+                    String::from_utf8_lossy(operation_tag(operation))
+                ),
+            })
+            .expect("plan");
+        (service, plan)
     }
 
     #[test]
@@ -2815,6 +3001,121 @@ mod tests {
             service.execute(request, token),
             Err(ManagedFileAccessErrorV1::PlanStale)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_quarantine_restores_replacement_on_identity_mismatch() {
+        let (workspace, service, plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let planned = service
+            .plans
+            .lock()
+            .expect("plans")
+            .get(&plan.plan_hash.to_hex())
+            .cloned()
+            .expect("planned file");
+        let approved = std::fs::symlink_metadata(workspace.path().join("notes.txt"))
+            .expect("approved metadata");
+        let (parent, leaf) = open_relative_parent(&planned).expect("parent");
+        std::fs::rename(
+            workspace.path().join("notes.txt"),
+            workspace.path().join("notes.original"),
+        )
+        .expect("move approved leaf");
+        std::fs::write(workspace.path().join("notes.txt"), "replacement").expect("replacement");
+
+        let error = delete_via_quarantine(&parent, &leaf, &approved, plan.plan_hash)
+            .expect_err("replacement must not be deleted");
+        assert!(matches!(error, ManagedFileAccessErrorV1::PlanStale));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("notes.txt")).expect("restored"),
+            "replacement"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("notes.original")).expect("original"),
+            "approved"
+        );
+        assert!(
+            !std::fs::read_dir(workspace.path())
+                .expect("workspace entries")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".sigil-delete-quarantine-"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_delete_removes_the_approved_leaf_after_quarantine_check() {
+        let (workspace, service, plan) =
+            registered_plan_for_operation(Some("approved"), ManagedFileOperationV1::Delete);
+        let (request, token) =
+            execution_request_for_plan(&plan, ManagedFileExecutionInputV1::Delete);
+        let outcome = service.execute(request, token).expect("delete");
+        assert_eq!(outcome.payload, "managed file delete applied");
+        assert!(!workspace.path().join("notes.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nested_directory_tools_open_any_leaf_kind() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir_all(workspace.path().join("nested/deeper")).expect("directories");
+        std::fs::write(workspace.path().join("root.txt"), "needle at root").expect("root file");
+        std::fs::write(
+            workspace.path().join("nested/match.txt"),
+            "needle in nested",
+        )
+        .expect("nested file");
+        std::fs::write(
+            workspace.path().join("nested/deeper/deep.txt"),
+            "needle in deeper",
+        )
+        .expect("deep file");
+
+        let (service, list_plan) =
+            registered_plan_for_workspace(&workspace, ".", ManagedFileOperationV1::List);
+        let (request, token) = execution_request_for_plan(
+            &list_plan,
+            ManagedFileExecutionInputV1::List {
+                recursive: true,
+                limit: 20,
+                max_depth: 8,
+            },
+        );
+        let list = service.execute(request, token).expect("recursive list");
+        assert!(list.payload.contains("nested"));
+        assert!(list.payload.contains("nested/deeper/deep.txt"));
+
+        let (service, glob_plan) =
+            registered_plan_for_workspace(&workspace, ".", ManagedFileOperationV1::Glob);
+        let (request, token) = execution_request_for_plan(
+            &glob_plan,
+            ManagedFileExecutionInputV1::Glob {
+                pattern: "*.txt".to_owned(),
+                limit: 20,
+            },
+        );
+        let glob = service.execute(request, token).expect("recursive glob");
+        assert!(glob.payload.contains("nested/match.txt"));
+        assert!(glob.payload.contains("nested/deeper/deep.txt"));
+
+        let (service, grep_plan) =
+            registered_plan_for_workspace(&workspace, ".", ManagedFileOperationV1::Grep);
+        let (request, token) = execution_request_for_plan(
+            &grep_plan,
+            ManagedFileExecutionInputV1::Grep {
+                pattern: "needle".to_owned(),
+                limit: 20,
+                max_bytes: 4096,
+            },
+        );
+        let grep = service.execute(request, token).expect("recursive grep");
+        assert!(grep.payload.contains("nested/match.txt"));
+        assert!(grep.payload.contains("nested/deeper/deep.txt"));
     }
 
     #[test]

@@ -1227,13 +1227,10 @@ fn attach_boot_cutover(
 ) -> Result<ApplicationRunServices> {
     // RFC-0071 R71.6: one-call boot attach (epoch + authority composition) shared by every
     // surface; CLI surfaces never re-implement the decision or the composition.
-    let authority_workspace_root = RootConfig::load(config_path)
-        .map(|config| resolve_workspace_root(config_path, launch_cwd, &config.workspace.root))
-        .unwrap_or_else(|_| launch_cwd.to_path_buf());
     sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
         services,
         config_path,
-        &authority_workspace_root,
+        launch_cwd,
     )
     .map_err(anyhow::Error::new)
 }

@@ -1323,6 +1323,13 @@ mod tests {
             std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("mode");
             std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700)).expect("mode");
         }
+        let config_snapshot =
+            crate::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::from_loaded(
+                &config_path,
+                sigil_kernel::RootConfig::load(&config_path).expect("load config"),
+                dir.path().to_path_buf(),
+            )
+            .expect("config snapshot");
         let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
             Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
                 crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
@@ -1332,7 +1339,7 @@ mod tests {
                 &state,
                 &state.join("cache"),
                 &exec,
-                &config_path,
+                &config_snapshot,
                 CanonicalHash::from_bytes([0x55; 32]),
                 planner,
                 &[

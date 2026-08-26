@@ -148,9 +148,15 @@ fn test_authority_composition(
         fs::create_dir_all(anchor)?;
         sigil_kernel::config::secure_private_path_permissions(anchor)?;
     }
+    let config_snapshot =
+        sigil_runtime::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::from_loaded(
+            &config_path,
+            root_config.clone(),
+            root.to_path_buf(),
+        )?;
     let (_cutover, composition) =
         sigil_runtime::r71_authority_composition::compose_current_boot_authority(
-            &config_path,
+            &config_snapshot,
             &paths.state_root,
             &paths.cache_root,
             &paths.scratch_root,

@@ -8,7 +8,7 @@
 //! because their production construction belongs to kernel/boot owners).
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sigil_kernel::capability_issuer::KernelCapabilityIssuerV1;
@@ -124,6 +124,95 @@ pub enum RuntimeAuthorityCompositionErrorV1 {
     ExecutionConfigurationInvalid(String),
 }
 
+/// Validated, immutable configuration input for one authority composition.
+///
+/// The surface that owns boot parsing creates this snapshot once and passes it through every
+/// authority constructor. In particular, the workspace root and execution policy are derived
+/// from the same parsed value, so an atomic config replacement cannot split storage resolution
+/// from workspace registration during one boot.
+#[derive(Clone)]
+pub struct ValidatedAuthorityConfigSnapshotV1 {
+    config_path: PathBuf,
+    config: sigil_kernel::RootConfig,
+    workspace_root: PathBuf,
+    config_hash: CanonicalHash,
+}
+
+impl ValidatedAuthorityConfigSnapshotV1 {
+    /// Builds a snapshot from a config value that the caller has already loaded and validated.
+    pub fn from_loaded(
+        config_path: &Path,
+        config: sigil_kernel::RootConfig,
+        workspace_root: PathBuf,
+    ) -> Result<Self, BootAuthorityErrorV1> {
+        let encoded = serde_json::to_vec(&config)
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(encoded);
+        Ok(Self {
+            config_path: config_path.to_path_buf(),
+            config,
+            workspace_root,
+            config_hash: CanonicalHash::from_bytes(hasher.finalize().into()),
+        })
+    }
+
+    /// Loads one valid snapshot. Missing, non-regular, or malformed config preserves the
+    /// pre-existing epoch-only boot behavior by returning `Ok(None)`.
+    pub fn load(
+        config_path: &Path,
+        launch_cwd: &Path,
+    ) -> Result<Option<Self>, BootAuthorityErrorV1> {
+        let metadata = match std::fs::symlink_metadata(config_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(BootAuthorityErrorV1::Config(error.to_string())),
+        };
+        if !metadata.file_type().is_file() {
+            return Ok(None);
+        }
+        let config = match sigil_kernel::RootConfig::load(config_path) {
+            Ok(config) => config,
+            Err(_) => return Ok(None),
+        };
+        let workspace_root =
+            sigil_kernel::resolve_workspace_root(config_path, launch_cwd, &config.workspace.root);
+        Self::from_loaded(config_path, config, workspace_root).map(Some)
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &sigil_kernel::RootConfig {
+        &self.config
+    }
+
+    #[must_use]
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    #[must_use]
+    pub fn config_hash(&self) -> CanonicalHash {
+        self.config_hash
+    }
+}
+
+impl std::fmt::Debug for ValidatedAuthorityConfigSnapshotV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ValidatedAuthorityConfigSnapshotV1")
+            .field("config_path", &self.config_path)
+            .field("workspace_root", &self.workspace_root)
+            .field("config_hash", &self.config_hash)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Composes the R71.6 authority surface from verified anchors and declared channels.
 ///
 /// `state_anchor` / `execution_temp_root` must already exist as owner-only dirs (the boot
@@ -159,16 +248,12 @@ pub fn compose_runtime_authority_with_product_updater(
     state_anchor: &Path,
     cache_root: &Path,
     execution_temp_root: &Path,
-    config_path: &Path,
+    config_snapshot: &ValidatedAuthorityConfigSnapshotV1,
     cutover_manifest_hash: CanonicalHash,
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     declared: &[StorageWriterChannelV1],
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
-    let execution_config = sigil_kernel::RootConfig::load(config_path)
-        .map_err(|error| {
-            RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(error.to_string())
-        })?
-        .execution;
+    let execution_config = config_snapshot.config().execution.clone();
     let mut composition = compose_runtime_authority_inner(
         state_anchor,
         execution_temp_root,
@@ -184,7 +269,7 @@ pub fn compose_runtime_authority_with_product_updater(
         dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1,
     > = Arc::new(
         sigil_resource_authority::configuration::AuthorityBorrowedConfigurationServiceV1::new(
-            config_path,
+            config_snapshot.config_path(),
         ),
     );
     let release_output: Arc<
@@ -432,7 +517,7 @@ pub enum BootAuthorityErrorV1 {
 /// settlement, so their provisional journal must not contaminate the production journal before
 /// the source binding is frozen.
 pub fn compose_current_boot_authority(
-    config_path: &std::path::Path,
+    config_snapshot: &ValidatedAuthorityConfigSnapshotV1,
     state_anchor: &std::path::Path,
     cache_root: &std::path::Path,
     execution_temp_root: &std::path::Path,
@@ -445,8 +530,11 @@ pub fn compose_current_boot_authority(
 > {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
     let instance_id = format!(
-        "sigil:{}",
-        sigil_kernel::external::sha256_hex(config_path.to_string_lossy().as_bytes())
+        "sigil:{}:{}",
+        sigil_kernel::external::sha256_hex(
+            config_snapshot.config_path().to_string_lossy().as_bytes()
+        ),
+        config_snapshot.config_hash().to_hex()
     );
     let authority = sigil_kernel::resource::AuthorityGeneration {
         epoch: 1,
@@ -473,12 +561,13 @@ pub fn compose_current_boot_authority(
     let provisional_state_anchor = provisional_root.path().join("state");
     std::fs::create_dir_all(provisional_state_anchor.join("cache"))
         .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-    let provisional_hash = hash_path_binding("cutover-provisional-v1", config_path);
+    let provisional_hash =
+        hash_path_binding("cutover-provisional-v1", config_snapshot.config_path());
     let provisional = compose_runtime_authority_with_product_updater(
         &provisional_state_anchor,
         cache_root,
         execution_temp_root,
-        config_path,
+        config_snapshot,
         provisional_hash,
         planner,
         &declared,
@@ -506,7 +595,7 @@ pub fn compose_current_boot_authority(
         state_anchor,
         cache_root,
         execution_temp_root,
-        config_path,
+        config_snapshot,
         first.manifest().manifest_hash,
         planner,
         &declared,
@@ -525,7 +614,8 @@ pub fn compose_current_boot_authority(
             error.clone(),
         ))
     })?;
-    let manifest_path = config_path
+    let manifest_path = config_snapshot
+        .config_path()
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join(".sigil-cutover-manifest.json");
@@ -563,36 +653,20 @@ pub fn compose_current_boot_authority(
 pub fn attach_boot_authority_to_services(
     services: crate::application_run::ApplicationRunServices,
     config_path: &std::path::Path,
-    workspace_root: &std::path::Path,
+    launch_cwd: &std::path::Path,
 ) -> Result<crate::application_run::ApplicationRunServices, BootAuthorityErrorV1> {
-    // Config may be absent on first run or non-regular (streamed FIFO): attach the epoch only
-    // (manifest + guard) and skip authority composition, which requires a real config file.
-    let config_meta = match std::fs::symlink_metadata(config_path) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
-                .map_err(BootAuthorityErrorV1::Cutover);
-        }
-        Err(error) => {
-            return Err(BootAuthorityErrorV1::Config(error.to_string()));
-        }
-    };
-    if !config_meta.file_type().is_file() {
+    // The shared composition owner loads and freezes the config exactly once. Missing or
+    // malformed config keeps the legacy epoch-only recovery path.
+    let Some(config_snapshot) = ValidatedAuthorityConfigSnapshotV1::load(config_path, launch_cwd)?
+    else {
         return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
             .map_err(BootAuthorityErrorV1::Cutover);
-    }
-    // A malformed config must not hard-block the recovery/first-run server: degrade to an
-    // epoch-only attach (manifest + guard, no authority composition) exactly like absent
-    // configs. The authority gate applies to runs with a valid config.
-    let root_config = match sigil_kernel::RootConfig::load(config_path) {
-        Ok(config) => config,
-        Err(_) => {
-            return crate::r71_global_cutover::attach_legacy_boot_cutover(services, config_path)
-                .map_err(BootAuthorityErrorV1::Cutover);
-        }
     };
-    let paths =
-        crate::resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    let paths = crate::resolve_sigil_paths(
+        &config_snapshot.config().storage,
+        &config_snapshot.config().session,
+        config_snapshot.workspace_root(),
+    );
     for anchor in [&paths.state_root, &paths.scratch_root] {
         std::fs::create_dir_all(anchor)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
@@ -615,13 +689,13 @@ pub fn attach_boot_authority_to_services(
         .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     }
     let (cutover, composition) = compose_current_boot_authority(
-        config_path,
+        &config_snapshot,
         &paths.state_root,
         &paths.cache_root,
         &paths.scratch_root,
     )?;
     composition
-        .activate_workspace(workspace_root)
+        .activate_workspace(config_snapshot.workspace_root())
         .map_err(BootAuthorityErrorV1::Config)?;
     let services = services.with_global_cutover(cutover);
     services.require_cutover_or_fail().map_err(|error| {
@@ -789,8 +863,15 @@ mod tests {
         let exec = dir.path().join("exec");
         std::fs::create_dir_all(&cache).expect("cache");
         std::fs::create_dir_all(&exec).expect("exec");
+        let config_snapshot = ValidatedAuthorityConfigSnapshotV1::from_loaded(
+            &config,
+            sigil_kernel::RootConfig::load(&config).expect("load config"),
+            dir.path().to_path_buf(),
+        )
+        .expect("snapshot");
         let (first, _composition) =
-            compose_current_boot_authority(&config, &state, &cache, &exec).expect("current boot");
+            compose_current_boot_authority(&config_snapshot, &state, &cache, &exec)
+                .expect("current boot");
         assert!(first.is_current_schema_ready());
         assert_eq!(first.manifest().mandatory_readiness.len(), 18);
         assert_eq!(
@@ -798,8 +879,55 @@ mod tests {
             sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
         );
         let (second, _composition) =
-            compose_current_boot_authority(&config, &state, &cache, &exec).expect("replay");
+            compose_current_boot_authority(&config_snapshot, &state, &cache, &exec)
+                .expect("replay");
         assert_eq!(first.manifest(), second.manifest());
+    }
+
+    #[test]
+    fn r71_authority_snapshot_survives_config_replacement_without_split_brain() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace_a = dir.path().join("workspace-a");
+        let workspace_b = dir.path().join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).expect("workspace a");
+        std::fs::create_dir_all(&workspace_b).expect("workspace b");
+        let config = dir.path().join("sigil.toml");
+        let config_a = "config_version = 2\n[workspace]\nroot = \"workspace-a\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n";
+        let config_b = config_a.replace("workspace-a", "workspace-b");
+        std::fs::write(&config, config_a).expect("config a");
+        let snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+            .expect("load snapshot")
+            .expect("valid snapshot");
+        let original_hash = snapshot.config_hash();
+        std::fs::write(&config, config_b).expect("config b");
+
+        assert_eq!(snapshot.workspace_root(), workspace_a.as_path());
+        assert_eq!(snapshot.config_hash(), original_hash);
+        let live = sigil_kernel::RootConfig::load(&config).expect("live config");
+        let live_snapshot =
+            ValidatedAuthorityConfigSnapshotV1::from_loaded(&config, live, workspace_b.clone())
+                .expect("live snapshot");
+        assert_ne!(snapshot.config_hash(), live_snapshot.config_hash());
+
+        let state = dir.path().join("state");
+        let cache = state.join("cache");
+        let exec = dir.path().join("exec");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::create_dir_all(&exec).expect("exec");
+        let (_cutover, composition) =
+            compose_current_boot_authority(&snapshot, &state, &cache, &exec)
+                .expect("compose from frozen snapshot");
+        let capsule = composition
+            .activate_workspace(snapshot.workspace_root())
+            .expect("activate frozen workspace");
+        let workspace_identity = sigil_resource_authority::identity::canonical_identity(
+            &workspace_a.canonicalize().expect("canonical workspace"),
+        )
+        .expect("workspace identity")
+        .digest;
+        assert_eq!(capsule.root_identity_hash, workspace_identity);
+        assert_ne!(capsule.root_identity_hash, snapshot.config_hash());
     }
 
     #[test]

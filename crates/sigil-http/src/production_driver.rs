@@ -823,19 +823,10 @@ impl HttpProductionRunDriver {
         .with_scratch_control(options.scratch_control.clone());
         // RFC-0071 R71.6: the server surface runs the one-call boot attach (epoch + authority
         // composition, shared with CLI/TUI) and fails closed before serving.
-        let authority_workspace_root = sigil_kernel::RootConfig::load(&options.config_path)
-            .map(|config| {
-                sigil_kernel::resolve_workspace_root(
-                    &options.config_path,
-                    &options.launch_cwd,
-                    &config.workspace.root,
-                )
-            })
-            .unwrap_or_else(|_| options.launch_cwd.clone());
         let services = sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
             services,
             &options.config_path,
-            &authority_workspace_root,
+            &options.launch_cwd,
         )
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let mut options = options;

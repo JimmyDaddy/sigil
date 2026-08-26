@@ -10650,3 +10650,13 @@ R71.9d 已形成独立 slice commit，包含真实 product-composition E2E、FIL
 - child bundle 在第二阶段 Artifact admission 失败时显式 settlement 已取得的 SessionLog lease；normal/typed-error path 的 reprovision regression 通过，crash/kill 仍由 durable recovery qualification 证明。
 
 本轮 targeted gates、negative dependency/inventory、220-case fault campaign、fmt/diff 与 Windows authority cross-compile 已通过；新 candidate 尚未取得 clean exact-SHA local full 与 five-platform evidence，因此 RFC 继续 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停。
+
+### R71.9g Unix delete quarantine / Windows enumeration / frozen config snapshot（2026-08-26）
+
+本 slice 关闭了上一轮复核中的三个 implementation finding，但不关闭 release qualification：
+
+1. Unix delete 改为 authority-bound parent fd 下的 no-replace quarantine rename；rename 后复核实际对象 identity，mismatch 使用 no-replace restore，restore/delete failure 保留可 reconciliation 的 typed failure，避免在 pathname replacement 后直接删除未知对象。
+2. Windows file inspection 的 relative component 打开新增 `Any` 类型，不再为 `ls/glob/grep` 的目录项带 `FILE_NON_DIRECTORY_FILE`；entries、grep base 和递归 grep 均以 handle identity 区分 file/directory，并新增 nested-directory Windows-only regression。
+3. authority boot composition 新增 `ValidatedAuthorityConfigSnapshotV1`，一次冻结 validated `RootConfig`、workspace root、execution policy、config path 与 config hash；CLI/HTTP 删除 surface-side authority workspace 重解析，composition、storage path、workspace activation 和 cutover instance binding 使用同一 snapshot。
+
+本 slice 的 file-access `25/25`、runtime composition `6/6`、targeted crate check、strict clippy、Windows GNU cross-check、fmt/diff check 均通过。Windows 实机 nested-directory、new exact-SHA local full 与 five-platform hosted qualification 尚未执行；RFC-0071 继续 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停。
