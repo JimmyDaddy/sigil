@@ -40,7 +40,9 @@ fn doctor_json_process_emits_one_parseable_redacted_document() {
     let report: DoctorSupportReportV1 =
         serde_json::from_slice(&output.stdout).expect("stdout should be one JSON document");
     assert_eq!(report.schema_version, DOCTOR_SUPPORT_SCHEMA_VERSION);
-    assert_eq!(report.summary.error, 1);
+    // Current-schema fail-closed boot reports the cutover epoch, authority and blocker checks
+    // separately, in addition to the missing configuration check.
+    assert_eq!(report.summary.error, 4);
     assert!(report.privacy.review_before_sharing);
     let stdout = String::from_utf8(output.stdout).expect("doctor JSON should be UTF-8");
     for canary in canaries {
