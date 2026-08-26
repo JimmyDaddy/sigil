@@ -10725,3 +10725,9 @@ The follow-up commit `91f04d78` (`rfc-0071(R71.9m): sync production inventory ga
 3. normal-dependency shipping integration 现在验证真实 production launcher 使用磁盘 authority roots、session model overlay、磁盘默认模型不变且 cutover manifest 不因 `/model` 改变；新增 `/model → permission toggle` 回归验证 persisted CAS 成功且两个 snapshot 保持分离。
 
 实现门禁通过：runtime full `1199 passed / 4 ignored`，TUI full `1706 passed / 3 ignored`，authority composition `8/8`，TUI state regression `1/1`，shipping integration `2/2`，negative dependency、strict clippy、fmt 与 diff check 全部通过。该 slice 的 exact-SHA local full wrapper 与 hosted five-platform qualification 仍需在提交后重新执行；RFC-0071 继续 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停。
+
+### R71.9n exact local qualification（2026-08-27）
+
+新提交 `6e8be0d89630a4cfe5893b4dcf9d3b71591e3edc`（base `43b9048602148d9059aa036674d89eb6695ee3ca`）已在 clean exact checkout 运行 local full release wrapper：`candidate_sha == head_sha`、`dirty=false`、macOS Seatbelt、`30/30` steps passed。持久化证据为 `.repo-local-dev/r71-evidence/6e8be0d8-r719n-final/qualification.json`，SHA-256 为 `83f1ffd3b4caa1caa54fbeed414a7ad88e2c6aa8e896424f5f8b07b84682594b`；required fault cases `228`、manifest/test binding `228/228`、required platform jobs `5`。
+
+该 exact candidate 的本地实现与 engineering qualification 已闭合；五平台 hosted qualification 尚未运行，未 push/dispatch。因此 RFC-0071 仍保持 **Gated / Partial / Not Frozen**，RFC-0070 继续暂停，等待同一 candidate 的固定五平台 exact-SHA evidence。
