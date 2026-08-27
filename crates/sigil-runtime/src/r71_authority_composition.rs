@@ -1176,6 +1176,22 @@ mod tests {
     use crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1;
     use sigil_kernel::cutover_manifest::MandatoryAdapterKindV1;
 
+    fn write_r71_boot_config(config: &Path) {
+        let fixture_root = config.parent().expect("config parent");
+        let state = fixture_root.join(".r71-test-state");
+        let cache = fixture_root.join(".r71-test-cache");
+        std::fs::create_dir_all(&cache).expect("test cache");
+        std::fs::write(
+            config,
+            format!(
+                "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
+                state.display(),
+                cache.display(),
+            ),
+        )
+        .expect("config");
+    }
+
     #[test]
     fn r71_composition_tool_authority_facade_is_wired() {
         use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
@@ -1403,11 +1419,7 @@ mod tests {
         let _environment_guard = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
-        std::fs::write(
-            &config,
-            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
-        )
-        .expect("config");
+        write_r71_boot_config(&config);
         let first = boot_current_schema(&config, dir.path()).expect("first boot");
         drop(first);
         let bootstrap =
@@ -1435,11 +1447,7 @@ mod tests {
         let _environment_guard = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
-        std::fs::write(
-            &config,
-            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
-        )
-        .expect("config");
+        write_r71_boot_config(&config);
         let first = boot_current_schema(&config, dir.path()).expect("first boot");
         drop(first);
         let bootstrap =
@@ -1470,11 +1478,7 @@ mod tests {
         let _environment_guard = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
-        std::fs::write(
-            &config,
-            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
-        )
-        .expect("config");
+        write_r71_boot_config(&config);
         let first = boot_current_schema(&config, dir.path()).expect("first boot");
         drop(first);
         let bootstrap =
@@ -1508,11 +1512,7 @@ mod tests {
         let _environment_guard = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
-        std::fs::write(
-            &config,
-            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
-        )
-        .expect("config");
+        write_r71_boot_config(&config);
         let first = boot_current_schema(&config, dir.path()).expect("first boot");
         drop(first);
         let bootstrap =
@@ -1543,11 +1543,7 @@ mod tests {
         let _environment_guard = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
-        std::fs::write(
-            &config,
-            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
-        )
-        .expect("config");
+        write_r71_boot_config(&config);
         let first = boot_current_schema(&config, dir.path()).expect("first boot");
         let expected = first.cutover().manifest().clone();
         drop(first);
