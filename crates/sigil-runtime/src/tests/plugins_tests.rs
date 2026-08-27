@@ -2295,14 +2295,15 @@ timeout_ms = 5000
         fs::set_permissions(&execution_temp, fs::Permissions::from_mode(0o700))
             .expect("execution temp should harden");
     }
-    let composition = crate::r71_authority_composition::compose_runtime_authority(
-        &state,
-        &execution_temp,
-        sigil_kernel::resource::CanonicalHash::from_bytes([0x5a; 32]),
-        planner.clone() as Arc<dyn ManagedExecutionPlannerV1>,
-        &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
-    )
-    .expect("managed authority composition should build");
+    let composition =
+        crate::r71_authority_composition::compose_runtime_authority_for_test_execution(
+            &state,
+            &execution_temp,
+            sigil_kernel::resource::CanonicalHash::from_bytes([0x5a; 32]),
+            planner.clone() as Arc<dyn ManagedExecutionPlannerV1>,
+            &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
+        )
+        .expect("managed authority composition should build");
     let runner = composition.plugin_hook_runner();
     let wrong_purpose_registration = registration.clone();
 
@@ -2448,14 +2449,15 @@ timeout_ms = 15000
             .expect("execution temp should harden");
     }
     let planner = Arc::new(RecordingManagedPlanner::default());
-    let composition = crate::r71_authority_composition::compose_runtime_authority(
-        &state,
-        &execution_temp,
-        sigil_kernel::resource::CanonicalHash::from_bytes([0x5b; 32]),
-        planner as Arc<dyn ManagedExecutionPlannerV1>,
-        &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
-    )
-    .expect("managed authority composition should build");
+    let composition =
+        crate::r71_authority_composition::compose_runtime_authority_for_test_execution(
+            &state,
+            &execution_temp,
+            sigil_kernel::resource::CanonicalHash::from_bytes([0x5b; 32]),
+            planner as Arc<dyn ManagedExecutionPlannerV1>,
+            &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
+        )
+        .expect("managed authority composition should build");
     let runner = composition.plugin_hook_runner();
     let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
     let request = PluginHookExecutionRequest::new(registration, workspace.path().to_path_buf())

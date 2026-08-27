@@ -427,6 +427,31 @@ pub fn compose_runtime_authority(
     )
 }
 
+/// Unit-test composition for physical managed execution. Shipping callers must obtain their
+/// durable inventory from [`boot_current_schema`]; tests opt into the feature-gated in-memory
+/// adapter explicitly so the production helper remains fail-closed.
+#[cfg(test)]
+pub(crate) fn compose_runtime_authority_for_test_execution(
+    state_anchor: &Path,
+    execution_temp_root: &Path,
+    cutover_manifest_hash: CanonicalHash,
+    planner: Arc<dyn ManagedExecutionPlannerV1>,
+    declared: &[StorageWriterChannelV1],
+) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
+    compose_runtime_authority_inner(
+        state_anchor,
+        execution_temp_root,
+        cutover_manifest_hash,
+        planner,
+        declared,
+        None,
+        sigil_kernel::ExecutionConfig::default(),
+        Some(Arc::new(
+            sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default(),
+        )),
+    )
+}
+
 /// Composes the production authority surface with the independent product updater owner.
 ///
 /// The updater cache is a trusted product-plane object, not a managed agent resource. Keeping

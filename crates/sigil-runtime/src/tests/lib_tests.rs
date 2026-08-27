@@ -1405,7 +1405,8 @@ for line in sys.stdin:
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             temp.path().to_path_buf(),
-        ),
+        )
+        .with_process_inventory(managed_process_inventory_for_test()),
     );
     let launcher = super::ConfiguredMcpProcessLauncher {
         execution: sigil_kernel::ExecutionConfig::default(),
@@ -2353,7 +2354,8 @@ fn managed_mcp_registration_options(
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             workspace_root.to_path_buf(),
-        ),
+        )
+        .with_process_inventory(managed_process_inventory_for_test()),
     );
     Ok(sigil_mcp::McpToolRegistrationOptions::eager()?
         .with_working_dir(workspace_root.to_path_buf())
@@ -2361,6 +2363,11 @@ fn managed_mcp_registration_options(
             execution: sigil_kernel::ExecutionConfig::default(),
             managed_extension_execution: Some(route),
         })))
+}
+
+fn managed_process_inventory_for_test()
+-> Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> {
+    Arc::new(sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default())
 }
 
 #[tokio::test]
