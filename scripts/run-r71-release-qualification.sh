@@ -82,25 +82,61 @@ esac
 # is checked before cleanup so a future edit cannot accidentally turn this into broad deletion.
 qualification_original_home="${HOME:-}"
 [[ -n "$qualification_original_home" ]] || { echo "HOME is required for qualification" >&2; exit 1; }
+qualification_original_userprofile="${USERPROFILE:-}"
 qualification_rustup_home="${RUSTUP_HOME:-$qualification_original_home/.rustup}"
 qualification_cargo_home="${CARGO_HOME:-$qualification_original_home/.cargo}"
 qualification_corepack_home="${COREPACK_HOME:-$qualification_original_home/.cache/node/corepack}"
+qualification_windows_vctip_baseline=""
+if [[ "$platform" == "windows" && "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  command -v powershell.exe >/dev/null || {
+    echo "powershell.exe is required to track Windows qualification helpers" >&2
+    exit 1
+  }
+  qualification_windows_vctip_baseline="$(
+    # shellcheck disable=SC2016 # This single-quoted argument is PowerShell source; Bash must not expand it.
+    powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
+      '$ErrorActionPreference = "Stop"; @(Get-Process -Name vctip -ErrorAction SilentlyContinue | ForEach-Object { "{0}:{1}" -f $_.Id, $_.StartTime.ToUniversalTime().Ticks }) -join ","' \
+      | tr -d '\r\n'
+  )"
+fi
+export SIGIL_R71_QUALIFICATION_VCTIP_BASELINE="$qualification_windows_vctip_baseline"
 qualification_home="$(mktemp -d -t sigil-r71-qualification-home-XXXXXX)"
 qualification_home_marker="$qualification_home/.sigil-r71-qualification-home"
 touch "$qualification_home_marker"
 qualification_home_cleaned=0
+settle_qualification_windows_helpers() {
+  if [[ "$platform" != "windows" || "${GITHUB_ACTIONS:-}" != "true" ]]; then
+    return
+  fi
+  # The hosted runner otherwise reaps vctip only after this step and after our EXIT trap. Stop only
+  # helper process identities that appeared after this qualification began; never target a
+  # pre-existing process.
+  # shellcheck disable=SC2016 # This single-quoted argument is PowerShell source; Bash must not expand it.
+  powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
+    '$ErrorActionPreference = "Stop"; $baseline = @(); if ($env:SIGIL_R71_QUALIFICATION_VCTIP_BASELINE) { $baseline = @($env:SIGIL_R71_QUALIFICATION_VCTIP_BASELINE -split "," | Where-Object { $_ -ne "" }) }; $targets = @(Get-Process -Name vctip -ErrorAction SilentlyContinue | ForEach-Object { $identity = "{0}:{1}" -f $_.Id, $_.StartTime.ToUniversalTime().Ticks; if ($baseline -notcontains $identity) { $_ } }); if ($targets.Count -gt 0) { $targets | Stop-Process -Force -PassThru -ErrorAction Stop | Wait-Process -Timeout 10 -ErrorAction Stop }'
+}
 cleanup_qualification_home() {
   if [[ "$qualification_home_cleaned" == "1" ]]; then
     return
   fi
-  if [[ ! -f "$qualification_home_marker" ]]; then
+  if [[ ! -f "$qualification_home_marker" || -L "$qualification_home_marker" ]]; then
     echo "refusing qualification HOME cleanup without ownership marker" >&2
-    return
+    return 1
+  fi
+  export HOME="$qualification_original_home"
+  if [[ -n "$qualification_original_userprofile" ]]; then
+    export USERPROFILE="$qualification_original_userprofile"
+  else
+    unset USERPROFILE
+  fi
+  if ! settle_qualification_windows_helpers; then
+    echo "failed to settle Windows qualification helpers" >&2
+    return 1
   fi
   # Windows may create and remove INetCache compatibility directories while `find` is walking
   # the isolated profile. Retry the same marker-bounded cleanup so a disappeared child is not
   # mistaken for a qualification failure; the exact root must still be gone after the retries.
-  for qualification_cleanup_pass in 1 2 3; do
+  for _qualification_cleanup_pass in 1 2 3; do
     find "$qualification_home" -depth \( -type f -o -type l -o -type p -o -type s \) -delete 2>/dev/null || true
     find "$qualification_home" -depth -type d -empty -delete 2>/dev/null || true
     if [[ ! -e "$qualification_home" ]]; then
@@ -111,7 +147,7 @@ cleanup_qualification_home() {
     qualification_home_cleaned=1
   else
     echo "qualification HOME cleanup left unexpected residue: $qualification_home" >&2
-    find "$qualification_home" -mindepth 1 -maxdepth 4 -print 2>/dev/null \
+    find "$qualification_home" -mindepth 1 -maxdepth 8 -print 2>/dev/null \
       | LC_ALL=C sort \
       | head -50 >&2 || true
     return 1
