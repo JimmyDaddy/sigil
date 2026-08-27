@@ -151,15 +151,11 @@ impl AuthorityBootstrapStoreV1 {
         // itself is still rejected by `ensure_owner_only_directory`.
         let user_parent = fs::canonicalize(user_parent)
             .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
-        let user_root = user_parent.join(
-            configured_user_root
-                .file_name()
-                .ok_or_else(|| {
-                    BootstrapErrorV1::HardeningFailed(
-                        "user config directory has no final component".to_owned(),
-                    )
-                })?,
-        );
+        let user_root = user_parent.join(configured_user_root.file_name().ok_or_else(|| {
+            BootstrapErrorV1::HardeningFailed(
+                "user config directory has no final component".to_owned(),
+            )
+        })?);
         ensure_owner_only_directory(&user_root)?;
         let root = user_root
             .join(AUTHORITY_BOOTSTRAP_DIRECTORY_NAME)
