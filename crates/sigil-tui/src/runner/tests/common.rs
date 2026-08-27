@@ -364,27 +364,28 @@ pub(super) fn test_authority_composition(
     let execution_temp_root = authority_root.path().join("execution-temp");
     fs::create_dir_all(state_root.join("cache"))?;
     fs::create_dir_all(&execution_temp_root)?;
-    let composition = sigil_runtime::r71_authority_composition::compose_runtime_authority(
-        &state_root,
-        &execution_temp_root,
-        sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
-        Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
-            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-        )),
-        &[
-            Channel::ApplicationControlLog,
-            Channel::SessionLog,
-            Channel::SessionLifecycleLog,
-            Channel::InputHistory,
-            Channel::DurableMemory,
-            Channel::SessionCatalog,
-            Channel::ArtifactStaging,
-            Channel::ArtifactStore,
-            Channel::AdapterDurableState,
-            Channel::AdapterEgressDisclosure,
-            Channel::AdapterIdempotencyLedger,
-        ],
-    )?;
+    let composition =
+        sigil_runtime::r71_authority_composition::compose_runtime_authority_for_test_execution(
+            &state_root,
+            &execution_temp_root,
+            sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
+            Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+                sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+            )),
+            &[
+                Channel::ApplicationControlLog,
+                Channel::SessionLog,
+                Channel::SessionLifecycleLog,
+                Channel::InputHistory,
+                Channel::DurableMemory,
+                Channel::SessionCatalog,
+                Channel::ArtifactStaging,
+                Channel::ArtifactStore,
+                Channel::AdapterDurableState,
+                Channel::AdapterEgressDisclosure,
+                Channel::AdapterIdempotencyLedger,
+            ],
+        )?;
     composition
         .activate_workspace(workspace_root)
         .map_err(anyhow::Error::msg)?;

@@ -430,8 +430,9 @@ pub fn compose_runtime_authority(
 /// Unit-test composition for physical managed execution. Shipping callers must obtain their
 /// durable inventory from [`boot_current_schema`]; tests opt into the feature-gated in-memory
 /// adapter explicitly so the production helper remains fail-closed.
-#[cfg(test)]
-pub(crate) fn compose_runtime_authority_for_test_execution(
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn compose_runtime_authority_for_test_execution(
     state_anchor: &Path,
     execution_temp_root: &Path,
     cutover_manifest_hash: CanonicalHash,
