@@ -111,6 +111,9 @@ export USERPROFILE="$qualification_home"
 export RUSTUP_HOME="$qualification_rustup_home"
 export CARGO_HOME="$qualification_cargo_home"
 export COREPACK_HOME="$qualification_corepack_home"
+# Some product-surface fixtures intentionally exercise process-global environment seams. Keep the
+# required release qualification deterministic while the tests share one isolated HOME.
+export RUST_TEST_THREADS=1
 export XDG_CONFIG_HOME="$qualification_home/.config"
 export XDG_STATE_HOME="$qualification_home/.local/state"
 export XDG_CACHE_HOME="$qualification_home/.cache"
@@ -207,6 +210,7 @@ payload = {
     "bootstrap_root_isolated": os.environ.get("SIGIL_R71_BOOTSTRAP_ISOLATED") == "1",
     "bootstrap_root_retention_policy": os.environ.get("SIGIL_R71_BOOTSTRAP_RETENTION_POLICY"),
     "bootstrap_root_residue_count_before_cleanup": bootstrap_residue_count,
+    "test_thread_policy": "single-threaded-process-global-fixtures",
     "steps": steps,
     "finished_at": datetime.now(timezone.utc).isoformat(),
 }
