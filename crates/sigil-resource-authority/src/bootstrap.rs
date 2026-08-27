@@ -141,8 +141,25 @@ impl AuthorityBootstrapStoreV1 {
             format!("authority-bootstrap-instance-v1\0{}", config_path.display()).as_bytes(),
         )
         .to_hex();
-        let user_root = sigil_kernel::default_user_config_dir()
+        let configured_user_root = sigil_kernel::default_user_config_dir()
             .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+        let user_parent = configured_user_root.parent().ok_or_else(|| {
+            BootstrapErrorV1::HardeningFailed("user config directory has no parent".to_owned())
+        })?;
+        // macOS commonly exposes `/var` as a compatibility symlink. Resolve only the trusted
+        // host HOME parent before hardening the authority-owned suffix; a symlink in the suffix
+        // itself is still rejected by `ensure_owner_only_directory`.
+        let user_parent = fs::canonicalize(user_parent)
+            .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+        let user_root = user_parent.join(
+            configured_user_root
+                .file_name()
+                .ok_or_else(|| {
+                    BootstrapErrorV1::HardeningFailed(
+                        "user config directory has no final component".to_owned(),
+                    )
+                })?,
+        );
         ensure_owner_only_directory(&user_root)?;
         let root = user_root
             .join(AUTHORITY_BOOTSTRAP_DIRECTORY_NAME)
