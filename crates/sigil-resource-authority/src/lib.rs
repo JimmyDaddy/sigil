@@ -28,8 +28,8 @@ pub mod spawn_protocol;
 pub mod storage;
 
 pub use bootstrap::{
-    AuthorityBootstrapObjectClassV1, AuthorityBootstrapRoots, BootstrapErrorV1,
-    BootstrapRootResolverV1,
+    AuthorityBootstrapObjectClassV1, AuthorityBootstrapPublicationGuard, AuthorityBootstrapRoots,
+    AuthorityBootstrapStoreV1, BootstrapErrorV1, BootstrapRootResolverV1,
 };
 pub use journal::{JournalErrorV1, ResourceJournalEventV1, ResourceJournalHeaderV1};
 pub use lease::{

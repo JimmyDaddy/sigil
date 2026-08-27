@@ -8,11 +8,9 @@
 //! because their production construction belongs to kernel/boot owners).
 
 use std::collections::BTreeSet;
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use fs2::FileExt;
 use sigil_kernel::capability_issuer::KernelCapabilityIssuerV1;
 use sigil_kernel::managed_execution::ManagedExecutionPlannerV1;
 use sigil_kernel::managed_file_access::ManagedFileAccessServiceV1;
@@ -753,52 +751,50 @@ fn host_application_instance_id(config_path: &Path) -> String {
     )
 }
 
-fn authority_config_generation_path(state_anchor: &Path) -> PathBuf {
-    state_anchor.join("authority-config-generation.json")
-}
-
-fn authority_config_generation_lock_path(state_anchor: &Path) -> PathBuf {
-    state_anchor.join("authority-config-generation.lock")
-}
-
 fn load_authority_config_generation(
-    state_anchor: &Path,
+    bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
+    publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
 ) -> Result<Option<AuthorityConfigGenerationRecordV1>, BootAuthorityErrorV1> {
-    let path = authority_config_generation_path(state_anchor);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(BootAuthorityErrorV1::Config(error.to_string())),
+    let record = bootstrap
+        .read_json::<AuthorityConfigGenerationRecordV1>(
+            publication,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    let Some(record) = record else {
+        let cutover_exists = bootstrap
+            .read_bytes(
+                publication,
+                sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
+            )
+            .map_err(BootAuthorityErrorV1::Bootstrap)?
+            .is_some();
+        if cutover_exists || !bootstrap.was_created_for_this_open() {
+            return Err(BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(
+                    "authority config generation metadata is missing".to_owned(),
+                ),
+            ));
+        }
+        return Ok(None);
     };
-    let record: AuthorityConfigGenerationRecordV1 = serde_json::from_slice(&bytes)
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     if record.schema_version != AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION || record.generation == 0
     {
-        return Err(BootAuthorityErrorV1::Config(
-            "authority config generation record is invalid".to_owned(),
+        return Err(BootAuthorityErrorV1::Bootstrap(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
+                "authority config generation record is invalid".to_owned(),
+            ),
         ));
     }
     Ok(Some(record))
 }
 
 fn load_or_advance_authority_config_generation(
-    generation_anchor: &Path,
+    bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
+    publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
     config_hash: CanonicalHash,
 ) -> Result<u64, BootAuthorityErrorV1> {
-    let lock_path = authority_config_generation_lock_path(generation_anchor);
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-    sigil_kernel::secure_private_path_permissions(&lock_path)
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-    lock.lock_exclusive()
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-
-    let current = load_authority_config_generation(generation_anchor)?;
+    let current = load_authority_config_generation(bootstrap, publication)?;
     let generation = match current.as_ref() {
         Some(record) if record.config_hash == config_hash => record.generation,
         Some(record) => record.generation.checked_add(1).ok_or_else(|| {
@@ -817,14 +813,14 @@ fn load_or_advance_authority_config_generation(
         };
         let bytes = serde_json::to_vec(&record)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-        sigil_kernel::atomic_publish_private_file(
-            &authority_config_generation_path(generation_anchor),
-            &bytes,
-        )
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        bootstrap
+            .publish_bytes(
+                publication,
+                sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+                &bytes,
+            )
+            .map_err(BootAuthorityErrorV1::Bootstrap)?;
     }
-    lock.unlock()
-        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     Ok(generation)
 }
 
@@ -841,6 +837,8 @@ pub enum BootAuthorityErrorV1 {
     Cutover(crate::r71_global_cutover::CutoverBootErrorV1),
     #[error("authority composition failed: {0}")]
     Composition(RuntimeAuthorityCompositionErrorV1),
+    #[error("authority bootstrap failed: {0}")]
+    Bootstrap(sigil_resource_authority::bootstrap::BootstrapErrorV1),
 }
 
 fn build_current_boot_transaction(
@@ -849,11 +847,21 @@ fn build_current_boot_transaction(
     let config = config_snapshot.config().clone();
     let workspace_root = config_snapshot.workspace_root().to_path_buf();
     let resolved_paths = config_snapshot.resolved_paths().clone();
-    let (cutover, composition) = compose_current_boot_authority(
+    let bootstrap =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path(
+            config_snapshot.config_path(),
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    let publication = bootstrap
+        .acquire_publication()
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    let (cutover, composition) = compose_current_boot_authority_locked(
         &config_snapshot,
         &resolved_paths.state_root,
         &resolved_paths.cache_root,
         &resolved_paths.scratch_root,
+        &bootstrap,
+        &publication,
     )?;
     let workspace_registration = composition
         .activate_workspace(&workspace_root)
@@ -863,7 +871,8 @@ fn build_current_boot_transaction(
             error.clone(),
         ))
     })?;
-    publish_current_boot_manifest(config_snapshot.config_path(), &cutover)?;
+    publish_current_boot_manifest(&bootstrap, &publication, &cutover)?;
+    drop(publication);
     Ok(RuntimeCurrentBootTransactionV1 {
         config,
         workspace_root,
@@ -889,6 +898,21 @@ pub fn boot_current_schema(
     build_current_boot_transaction(snapshot)
 }
 
+/// Returns the host-private current cutover pointer path for one config identity. Product
+/// surfaces use this only for diagnostics/tests; they never derive the path from the config
+/// parent or publish metadata themselves.
+pub fn authority_bootstrap_manifest_path(
+    config_path: &Path,
+) -> Result<PathBuf, BootAuthorityErrorV1> {
+    let bootstrap =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+            config_path,
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    Ok(bootstrap
+        .path(sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer))
+}
+
 /// Builds the current-schema authority composition for one valid boot surface. Publication of the
 /// cutover manifest belongs to [`build_current_boot_transaction`], after workspace activation and
 /// journal reconciliation have completed.
@@ -910,6 +934,38 @@ pub fn compose_current_boot_authority(
     ),
     BootAuthorityErrorV1,
 > {
+    let bootstrap =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path(
+            config_snapshot.config_path(),
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    let publication = bootstrap
+        .acquire_publication()
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    compose_current_boot_authority_locked(
+        config_snapshot,
+        state_anchor,
+        cache_root,
+        execution_temp_root,
+        &bootstrap,
+        &publication,
+    )
+}
+
+fn compose_current_boot_authority_locked(
+    config_snapshot: &ValidatedAuthorityConfigSnapshotV1,
+    state_anchor: &std::path::Path,
+    cache_root: &std::path::Path,
+    execution_temp_root: &std::path::Path,
+    bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
+    publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
+) -> Result<
+    (
+        crate::r71_global_cutover::RuntimeGlobalCutoverV1,
+        RuntimeAuthorityCompositionV1,
+    ),
+    BootAuthorityErrorV1,
+> {
     let paths = config_snapshot.resolved_paths();
     ensure_authority_anchors(paths)?;
     if state_anchor != paths.state_root
@@ -923,10 +979,8 @@ pub fn compose_current_boot_authority(
     use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
     let instance_id = host_application_instance_id(config_snapshot.config_path());
     let application_generation = load_or_advance_authority_config_generation(
-        config_snapshot
-            .config_path()
-            .parent()
-            .unwrap_or_else(|| Path::new(".")),
+        bootstrap,
+        publication,
         config_snapshot.config_hash(),
     )?;
     let authority = sigil_kernel::resource::AuthorityGeneration {
@@ -1009,23 +1063,50 @@ pub fn compose_current_boot_authority(
 }
 
 fn publish_current_boot_manifest(
-    config_path: &Path,
+    bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
+    publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
     decision: &crate::r71_global_cutover::RuntimeGlobalCutoverV1,
 ) -> Result<(), BootAuthorityErrorV1> {
-    let manifest_path = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join(".sigil-cutover-manifest.json");
-    if manifest_path.exists() {
-        let existing =
-            crate::r71_global_cutover::RuntimeGlobalCutoverV1::load_and_validate_manifest(
-                &manifest_path,
+    let generation = bootstrap
+        .read_json::<AuthorityConfigGenerationRecordV1>(
+            publication,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?
+        .ok_or_else(|| {
+            BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(
+                    "authority config generation is missing before cutover publication".to_owned(),
+                ),
             )
-            .map_err(|error| {
-                BootAuthorityErrorV1::Cutover(
-                    crate::r71_global_cutover::CutoverBootErrorV1::Persistence(error),
-                )
-            })?;
+        })?;
+    if generation.generation != decision.manifest().application_generation {
+        return Err(BootAuthorityErrorV1::Bootstrap(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(format!(
+                "authority config generation {} does not match cutover generation {}",
+                generation.generation,
+                decision.manifest().application_generation
+            )),
+        ));
+    }
+    let existing = bootstrap
+        .read_bytes(
+            publication,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?
+        .map(|bytes| {
+            crate::r71_global_cutover::RuntimeGlobalCutoverV1::validate_manifest_bytes(&bytes)
+                .map_err(|error| {
+                    BootAuthorityErrorV1::Bootstrap(
+                        sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
+                            format!("cutover pointer validation failed: {error}"),
+                        ),
+                    )
+                })
+        })
+        .transpose()?;
+    if let Some(existing) = existing {
         if existing == *decision.manifest() {
             return Ok(());
         }
@@ -1048,11 +1129,15 @@ fn publish_current_boot_manifest(
     }
     // The file is a current-instance pointer. The decision itself remains content-addressed and
     // immutable; a validated reboot atomically publishes the new instance's decision.
-    decision.save_manifest(&manifest_path).map_err(|error| {
-        BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Persistence(
-            error,
-        ))
-    })?;
+    let bytes = serde_json::to_vec(decision.manifest())
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+    bootstrap
+        .publish_bytes(
+            publication,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
+            &bytes,
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
     Ok(())
 }
 
@@ -1307,13 +1392,295 @@ mod tests {
             "new-model"
         );
         let published = RuntimeGlobalCutoverV1::load_and_validate_manifest(
-            &config
-                .parent()
-                .expect("config parent")
-                .join(".sigil-cutover-manifest.json"),
+            &authority_bootstrap_manifest_path(&config).expect("authority bootstrap manifest path"),
         )
         .expect("published manifest");
         assert_eq!(published, *second.cutover().manifest());
+    }
+
+    #[test]
+    fn r71_bootstrap_metadata_missing_requires_typed_reconciliation() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let first = boot_current_schema(&config, dir.path()).expect("first boot");
+        drop(first);
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        std::fs::remove_file(bootstrap.path(
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+        ))
+        .expect("remove generation metadata");
+
+        let result = boot_current_schema(&config, dir.path());
+        assert!(matches!(
+            result,
+            Err(BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+            ))
+        ));
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[test]
+    fn r71_bootstrap_metadata_corruption_is_typed_and_fail_closed() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let first = boot_current_schema(&config, dir.path()).expect("first boot");
+        drop(first);
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        std::fs::write(
+            bootstrap.path(
+                sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+            ),
+            b"{corrupt",
+        )
+        .expect("corrupt generation metadata");
+
+        let result = boot_current_schema(&config, dir.path());
+        assert!(matches!(
+            result,
+            Err(BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
+            ))
+        ));
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[test]
+    fn r71_bootstrap_pointer_corruption_is_typed_and_fail_closed() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let first = boot_current_schema(&config, dir.path()).expect("first boot");
+        drop(first);
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        std::fs::write(
+            bootstrap.path(
+                sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
+            ),
+            b"{corrupt",
+        )
+        .expect("corrupt pointer metadata");
+
+        let result = boot_current_schema(&config, dir.path());
+        assert!(matches!(
+            result,
+            Err(BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
+            ))
+        ));
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r71_bootstrap_pointer_symlink_is_rejected_before_publish() {
+        use std::os::unix::fs::symlink;
+
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let first = boot_current_schema(&config, dir.path()).expect("first boot");
+        drop(first);
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        let pointer = bootstrap.path(
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
+        );
+        std::fs::remove_file(&pointer).expect("remove pointer");
+        let target = dir.path().join("pointer-target");
+        std::fs::write(&target, b"not authority metadata").expect("target");
+        symlink(&target, &pointer).expect("pointer symlink");
+
+        let result = boot_current_schema(&config, dir.path());
+        assert!(matches!(
+            result,
+            Err(BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
+            ))
+        ));
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[test]
+    fn r71_bootstrap_pointer_loss_after_generation_publication_reconciles_on_reboot() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"state\"\ncache_root = \"cache\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let first = boot_current_schema(&config, dir.path()).expect("first boot");
+        let expected = first.cutover().manifest().clone();
+        drop(first);
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        std::fs::remove_file(bootstrap.path(
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
+        ))
+        .expect("simulate crash before pointer publication");
+
+        let replay = boot_current_schema(&config, dir.path()).expect("reconcile reboot");
+        assert_eq!(*replay.cutover().manifest(), expected);
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[test]
+    fn r71_bootstrap_pointer_is_outside_an_explicit_config_parent() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("workspace").join("sigil.toml");
+        std::fs::create_dir_all(config.parent().expect("config parent")).expect("parent");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let pointer = authority_bootstrap_manifest_path(&config).expect("pointer path");
+        assert!(!pointer.starts_with(config.parent().expect("config parent")));
+        assert!(pointer.ends_with(".sigil-cutover-manifest.json"));
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[test]
+    fn r71_bootstrap_ignores_config_parent_metadata_replacement() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_parent = dir.path().join("workspace");
+        std::fs::create_dir_all(&config_parent).expect("config parent");
+        let config = config_parent.join("sigil.toml");
+        std::fs::write(
+            &config,
+            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
+        )
+        .expect("config");
+        let first = boot_current_schema(&config, dir.path()).expect("first boot");
+        let expected = first.cutover().manifest().clone();
+        drop(first);
+
+        std::fs::write(
+            config_parent.join("authority-config-generation.json"),
+            b"{corrupt",
+        )
+        .expect("replace config-parent generation");
+        std::fs::write(
+            config_parent.join(".sigil-cutover-manifest.json"),
+            b"{corrupt",
+        )
+        .expect("replace config-parent pointer");
+
+        let replay = boot_current_schema(&config, dir.path()).expect("replay boot");
+        assert_eq!(*replay.cutover().manifest(), expected);
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[test]
+    fn r71_concurrent_boots_publish_monotonic_generation_under_one_lock() {
+        use std::sync::{Arc, Barrier};
+
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        let state_a = dir.path().join("state-a");
+        let cache_a = state_a.join("cache");
+        let state_b = dir.path().join("state-b");
+        let cache_b = state_b.join("cache");
+        std::fs::create_dir_all(&cache_a).expect("cache a");
+        std::fs::create_dir_all(&cache_b).expect("cache b");
+        let config_text = |state: &Path, cache: &Path, model: &str| {
+            format!(
+                "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"{}\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
+                state.display(),
+                cache.display(),
+                model,
+            )
+        };
+        std::fs::write(&config, config_text(&state_a, &cache_a, "model-a")).expect("config a");
+        let snapshot_a = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+            .expect("load snapshot a")
+            .expect("snapshot a");
+        std::fs::write(&config, config_text(&state_b, &cache_b, "model-b")).expect("config b");
+        let snapshot_b = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+            .expect("load snapshot b")
+            .expect("snapshot b");
+
+        let barrier = Arc::new(Barrier::new(3));
+        let barrier_a = Arc::clone(&barrier);
+        let handle_a = std::thread::spawn(move || {
+            barrier_a.wait();
+            build_current_boot_transaction(snapshot_a)
+        });
+        let barrier_b = Arc::clone(&barrier);
+        let handle_b = std::thread::spawn(move || {
+            barrier_b.wait();
+            build_current_boot_transaction(snapshot_b)
+        });
+        barrier.wait();
+        assert!(handle_a.join().expect("boot a thread").is_ok());
+        assert!(handle_b.join().expect("boot b thread").is_ok());
+
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        let pointer = RuntimeGlobalCutoverV1::load_and_validate_manifest(&bootstrap.path(
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
+        ))
+        .expect("published pointer");
+        assert_eq!(pointer.application_generation, 2);
+        std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
     }
 
     #[test]

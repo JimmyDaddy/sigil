@@ -36,10 +36,7 @@ fn production_boot_current_schema_uses_real_authority_transaction() -> Result<()
     assert_eq!(transaction.config().agent.model, persisted.agent.model);
     assert!(transaction.cutover().is_current_schema_ready());
     assert!(
-        config_path
-            .parent()
-            .expect("config parent")
-            .join(".sigil-cutover-manifest.json")
+        sigil_runtime::r71_authority_composition::authority_bootstrap_manifest_path(&config_path)?
             .is_file()
     );
     Ok(())
@@ -82,10 +79,9 @@ fn production_launcher_replacement_keeps_session_runtime_config() -> Result<()> 
     );
     let published =
         sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1::load_and_validate_manifest(
-            &config_path
-                .parent()
-                .expect("config parent")
-                .join(".sigil-cutover-manifest.json"),
+            &sigil_runtime::r71_authority_composition::authority_bootstrap_manifest_path(
+                &config_path,
+            )?,
         )?;
     assert_eq!(published, first_manifest);
     Ok(())

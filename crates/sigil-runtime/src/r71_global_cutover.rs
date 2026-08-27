@@ -562,7 +562,15 @@ impl RuntimeGlobalCutoverV1 {
         }
         let bytes = std::fs::read(path)
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
-        let manifest: CutoverManifestV1 = serde_json::from_slice(&bytes)
+        Self::validate_manifest_bytes(&bytes)
+    }
+
+    /// Validates manifest bytes that were already read through an authority-owned no-follow
+    /// handle. Path permissions are intentionally checked by the caller that owns the handle.
+    pub fn validate_manifest_bytes(
+        bytes: &[u8],
+    ) -> Result<CutoverManifestV1, CutoverPersistenceErrorV1> {
+        let manifest: CutoverManifestV1 = serde_json::from_slice(bytes)
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
         validate_cutover_manifest(&manifest).map_err(|error| match error {
             CutoverErrorV1::UnknownSchemaVersion => CutoverPersistenceErrorV1::UnknownVersion,
