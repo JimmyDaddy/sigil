@@ -984,7 +984,7 @@ fn compose_current_boot_authority_locked(
         config_snapshot.config_hash(),
     )?;
     let authority = sigil_kernel::resource::AuthorityGeneration {
-        epoch: 1,
+        epoch: bootstrap.authority_epoch(),
         instance_hash: CanonicalHash::from_bytes([0x75; 32]),
     };
     let declared = [

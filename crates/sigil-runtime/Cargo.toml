@@ -27,6 +27,7 @@ sha2.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-code-intel = { path = "../sigil-code-intel" }
 sigil-mcp = { path = "../sigil-mcp" }
+sigil-process-observer = { path = "../sigil-process-observer" }
 sigil-resource-authority = { path = "../sigil-resource-authority" }
 sigil-sandbox = { path = "../sigil-sandbox" }
 sigil-updater = { path = "../sigil-updater" }

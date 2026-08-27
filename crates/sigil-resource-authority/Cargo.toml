@@ -18,6 +18,7 @@ toml.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+sigil-process-observer = { path = "../sigil-process-observer" }
 tempfile.workspace = true
 
 [lints]

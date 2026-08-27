@@ -28,8 +28,16 @@ pub mod spawn_protocol;
 pub mod storage;
 
 pub use bootstrap::{
-    AuthorityBootstrapObjectClassV1, AuthorityBootstrapPublicationGuard, AuthorityBootstrapRoots,
-    AuthorityBootstrapStoreV1, BootstrapErrorV1, BootstrapRootResolverV1,
+    AuthorityBootstrapObjectClassV1, AuthorityBootstrapOperatorChallengeV1,
+    AuthorityBootstrapPublicationGuard, AuthorityBootstrapRecoveryAuthorizationV1,
+    AuthorityBootstrapRecoveryErrorV1, AuthorityBootstrapRecoveryNamespaceV1,
+    AuthorityBootstrapRecoveryOperationV1, AuthorityBootstrapRecoveryReceiptV1,
+    AuthorityBootstrapRecoveryServiceV1, AuthorityBootstrapRecoveryTransactionGuard,
+    AuthorityBootstrapRoots, AuthorityBootstrapStoreV1, AuthorityJournalFailureClassV1,
+    BootstrapErrorV1, BootstrapRootResolverV1, ExactBootstrapOperatorConfirmationV1,
+    FailedAuthorityJournalEvidenceV1, OldAuthorityEpochQuiescenceProofV1,
+    OpaqueBootstrapRecoveryAuthorizationId, OpaqueBootstrapRootConfigRef, OpaqueDiagnosticRef,
+    OpaqueOperatorChallengeId,
 };
 pub use journal::{JournalErrorV1, ResourceJournalEventV1, ResourceJournalHeaderV1};
 pub use lease::{

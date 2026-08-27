@@ -77,6 +77,39 @@ case "$platform:$backend" in
   *) echo "platform/backend pair is not declared by R71.8: $platform/$backend" >&2; exit 2 ;;
 esac
 
+# Every qualification step runs under a newly-created HOME. This keeps the authority bootstrap
+# namespace, config, state and cache writes out of the operator's real user directory. The marker
+# is checked before cleanup so a future edit cannot accidentally turn this into broad deletion.
+qualification_home="$(mktemp -d -t sigil-r71-qualification-home-XXXXXX)"
+qualification_home_marker="$qualification_home/.sigil-r71-qualification-home"
+touch "$qualification_home_marker"
+qualification_home_cleaned=0
+cleanup_qualification_home() {
+  if [[ "$qualification_home_cleaned" == "1" ]]; then
+    return
+  fi
+  if [[ ! -f "$qualification_home_marker" ]]; then
+    echo "refusing qualification HOME cleanup without ownership marker" >&2
+    return
+  fi
+  find "$qualification_home" -depth \( -type f -o -type l -o -type p -o -type s \) -delete
+  find "$qualification_home" -depth -type d -empty -delete
+  if [[ ! -e "$qualification_home" ]]; then
+    qualification_home_cleaned=1
+  else
+    echo "qualification HOME cleanup left unexpected residue: $qualification_home" >&2
+  fi
+}
+trap cleanup_qualification_home EXIT
+export HOME="$qualification_home"
+export USERPROFILE="$qualification_home"
+export XDG_CONFIG_HOME="$qualification_home/.config"
+export XDG_STATE_HOME="$qualification_home/.local/state"
+export XDG_CACHE_HOME="$qualification_home/.cache"
+export SIGIL_R71_BOOTSTRAP_ISOLATED=1
+export SIGIL_R71_BOOTSTRAP_RETENTION_POLICY="exact-temp-home-with-marker"
+export SIGIL_R71_QUALIFICATION_HOME="$qualification_home"
+
 evidence_dir="${SIGIL_R71_EVIDENCE_DIR:-$(mktemp -d -t sigil-r71-release-XXXXXX)}"
 mkdir -p "$evidence_dir/logs"
 steps_file="$evidence_dir/steps.tsv"
@@ -133,6 +166,7 @@ finalize() {
   local result="$1"
   python3 - "$ROOT" "$evidence_dir" "$identity_json" "$suite" "$platform" "$backend" "$result" "$steps_file" <<'PY'
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -142,6 +176,14 @@ from r71_qualification_common import sha256_file, write_evidence
 
 evidence_dir = Path(sys.argv[2])
 identity = json.loads(sys.argv[3])
+qualification_home = Path(os.environ["SIGIL_R71_QUALIFICATION_HOME"])
+qualification_bootstrap_root = qualification_home / ".sigil" / "authority-bootstrap-v1"
+if qualification_bootstrap_root.is_dir():
+    bootstrap_residue_count = sum(
+        1 for entry in qualification_bootstrap_root.iterdir() if entry.is_dir()
+    )
+else:
+    bootstrap_residue_count = 0
 steps = []
 for line in Path(sys.argv[8]).read_text(encoding="utf-8").splitlines():
     label, status, log_path = line.split("\t", 2)
@@ -154,6 +196,9 @@ payload = {
     "platform": sys.argv[5],
     "backend": sys.argv[6],
     "result": sys.argv[7],
+    "bootstrap_root_isolated": os.environ.get("SIGIL_R71_BOOTSTRAP_ISOLATED") == "1",
+    "bootstrap_root_retention_policy": os.environ.get("SIGIL_R71_BOOTSTRAP_RETENTION_POLICY"),
+    "bootstrap_root_residue_count_before_cleanup": bootstrap_residue_count,
     "steps": steps,
     "finished_at": datetime.now(timezone.utc).isoformat(),
 }

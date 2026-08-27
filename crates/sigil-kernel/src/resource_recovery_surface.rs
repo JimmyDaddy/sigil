@@ -22,6 +22,7 @@ pub enum ResourceRecoveryReasonCodeV1 {
     CleanupIncomplete,
     Quarantined,
     OutcomeUncertain,
+    AuthorityBootstrapCorrupted,
 }
 
 /// Closed retry disposition (never inferred from an error string).
@@ -48,6 +49,7 @@ pub enum ResourceRecoveryActionV1 {
     ReconcileCleanupIncomplete,
     RecreateExecutionTemp,
     UserReselectDestination,
+    SelectFreshAuthorityEpoch,
 }
 
 /// Public blocker projection shared by all surfaces.
@@ -72,6 +74,7 @@ pub enum ResourceRecoveryDomainV1 {
     RealizedGeneration,
     Storage,
     Maintenance,
+    AuthorityBootstrap,
 }
 
 /// Resource / effect receipt projection (lossless view, never a second state).
@@ -186,5 +189,33 @@ mod tests {
             blocker.domain,
             ResourceRecoveryDomainV1::ManagedResource { .. }
         ));
+    }
+
+    #[test]
+    fn r71_surface_bootstrap_recovery_action_is_transport_neutral() {
+        let envelope = ResourceRecoveryActionEnvelopeV1 {
+            blocker_id: OpaqueBlockerId::new("bootstrap-corrupt".to_owned()),
+            action: ResourceRecoveryActionV1::SelectFreshAuthorityEpoch,
+            binding_hash: CanonicalHash::from_bytes([7u8; 32]),
+        };
+        let blocker = PublicRecoveryBlockerV2 {
+            blocker_id: envelope.blocker_id.clone(),
+            domain: ResourceRecoveryDomainV1::AuthorityBootstrap,
+            reason_code: ResourceRecoveryReasonCodeV1::AuthorityBootstrapCorrupted,
+            retry_disposition: ResourceRecoveryRetryDispositionV1::UserConfirmationRequired,
+            action_envelope: Some(envelope.clone()),
+            frontier_hash: CanonicalHash::from_bytes([8u8; 32]),
+        };
+        let contract = ResourceRecoverySurfaceContractV1 {
+            schema_version: RESOURCE_RECOVERY_SURFACE_SCHEMA_VERSION,
+            blocker: Some(blocker),
+            resource_effects: Vec::new(),
+            action_envelope: Some(envelope),
+        };
+        contract.validate_schema().expect("current schema");
+        let round_trip: ResourceRecoverySurfaceContractV1 =
+            serde_json::from_str(&serde_json::to_string(&contract).expect("encode"))
+                .expect("decode");
+        assert_eq!(round_trip, contract);
     }
 }

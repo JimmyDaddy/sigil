@@ -27,6 +27,29 @@ use crate::{
     resolve_openai_compat_api_key, resolve_openai_responses_api_key, resolve_sigil_paths,
 };
 
+/// Constructs the independent doctor/operator authority bootstrap recovery service. Normal boot
+/// never receives this service and no tool/model path is wired to it; the returned service owns
+/// its ephemeral authorization table and uses the real host process observer factory.
+pub fn authority_bootstrap_recovery_service(
+    config_path: &Path,
+) -> Result<sigil_resource_authority::AuthorityBootstrapRecoveryServiceV1, String> {
+    let canonical_config_path = fs::canonicalize(config_path).map_err(|error| error.to_string())?;
+    let verifier_hash = sigil_process_observer::canonical_digest(
+        format!(
+            "sigil-authority-bootstrap-recovery-process-observer-v1\0{}",
+            canonical_config_path.display()
+        )
+        .as_bytes(),
+    );
+    let process_factory =
+        sigil_process_observer::ProcessObserverFactoryV1::new(verifier_hash).instantiate();
+    sigil_resource_authority::AuthorityBootstrapRecoveryServiceV1::for_canonical_config_path(
+        &canonical_config_path,
+        process_factory,
+    )
+    .map_err(|error| error.to_string())
+}
+
 const MAX_SESSION_STREAMS_DOCTOR_SCAN: usize = 20;
 const MAX_SESSION_STREAM_DOCTOR_BYTES: u64 = 16 * 1024 * 1024;
 

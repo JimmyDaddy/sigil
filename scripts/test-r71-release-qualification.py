@@ -78,6 +78,16 @@ class QualificationContractTests(unittest.TestCase):
             wrapper,
         )
 
+    def test_bootstrap_namespace_isolated_and_marker_bound_cleanup_is_required(self) -> None:
+        wrapper = (common.ROOT / "scripts/run-r71-release-qualification.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('export HOME="$qualification_home"', wrapper)
+        self.assertIn('export SIGIL_R71_BOOTSTRAP_ISOLATED=1', wrapper)
+        self.assertIn('qualification_home_marker="$qualification_home/.sigil-r71-qualification-home"', wrapper)
+        self.assertIn('refusing qualification HOME cleanup without ownership marker', wrapper)
+        self.assertIn('"bootstrap_root_residue_count_before_cleanup"', wrapper)
+
 
 if __name__ == "__main__":
     unittest.main()

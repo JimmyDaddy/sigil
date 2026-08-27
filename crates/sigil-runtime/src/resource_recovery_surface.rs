@@ -4,6 +4,7 @@
 //! This facade owns no second durable state, canonical hash or recovery policy; it is the
 //! transitional edge that RFC-0070 R70.4/R70.6 replaces mechanically.
 
+use sigil_kernel::resource::{CanonicalHash, OpaqueBlockerId};
 use sigil_kernel::resource_recovery_surface::{
     ResourceRecoveryActionEnvelopeV1, ResourceRecoverySurfaceContractV1,
 };
@@ -43,6 +44,21 @@ pub struct RuntimeResourceRecoveryFacadeV1;
 impl RuntimeResourceRecoveryFacadeV1 {
     pub const fn new() -> Self {
         Self
+    }
+
+    /// Creates the transport-neutral action emitted for a corrupt authority bootstrap. Product
+    /// surfaces may render/return this envelope, but no surface receives a path or recovery
+    /// credential; the independent doctor service validates the eventual operator confirmation.
+    #[must_use]
+    pub fn bootstrap_recovery_action(
+        blocker_id: OpaqueBlockerId,
+        binding_hash: CanonicalHash,
+    ) -> ResourceRecoveryActionEnvelopeV1 {
+        ResourceRecoveryActionEnvelopeV1 {
+            blocker_id,
+            action: sigil_kernel::resource_recovery_surface::ResourceRecoveryActionV1::SelectFreshAuthorityEpoch,
+            binding_hash,
+        }
     }
 
     /// Lossless projection: validates the kernel contract and binds the projection to its exact
