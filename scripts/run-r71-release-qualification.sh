@@ -121,7 +121,7 @@ fi
 qualification_home_cleaned=0
 settle_qualification_windows_helpers() {
   if [[ "$platform" != "windows" || "${GITHUB_ACTIONS:-}" != "true" ]]; then
-    return
+    return 0
   fi
   # The hosted runner otherwise reaps vctip only after this step and after our EXIT trap. Stop only
   # helper process identities that appeared after this qualification began; never target a
@@ -176,7 +176,7 @@ cleanup_qualification_home() {
 }
 cleanup_windows_qualification_home() {
   if [[ "$platform" != "windows" ]]; then
-    return
+    return 0
   fi
   # Git Bash `find -delete` does not reliably remove the empty Windows compatibility-directory
   # chain created under INetCache. Use PowerShell literal paths, but keep the same exact marker

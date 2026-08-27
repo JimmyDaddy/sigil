@@ -3071,7 +3071,10 @@ fn durable_task_handoff_never_projects_as_application_success() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn application_auto_routing_stays_manual_without_attached_task_executor() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
