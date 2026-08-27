@@ -880,12 +880,17 @@ fn file_delete_header_hash(arena_root: &Path, journal_path: &Path) -> CanonicalH
 #[cfg(unix)]
 fn journal_file_identity(metadata: &std::fs::Metadata) -> ResourceJournalFileIdentityV1 {
     use std::os::unix::fs::MetadataExt;
+    #[cfg(target_os = "linux")]
+    let file_type = metadata.mode() & libc::S_IFMT;
+    #[cfg(not(target_os = "linux"))]
+    let file_type = metadata.mode() & u32::from(libc::S_IFMT);
+
     ResourceJournalFileIdentityV1 {
         device: metadata.dev(),
         inode: metadata.ino(),
         link_count: metadata.nlink(),
         size: metadata.len(),
-        file_type: metadata.mode() & u32::from(libc::S_IFMT),
+        file_type,
     }
 }
 
