@@ -885,7 +885,7 @@ fn journal_file_identity(metadata: &std::fs::Metadata) -> ResourceJournalFileIde
         inode: metadata.ino(),
         link_count: metadata.nlink(),
         size: metadata.len(),
-        file_type: metadata.mode() & libc::S_IFMT as u32,
+        file_type: metadata.mode() & u32::from(libc::S_IFMT),
     }
 }
 
