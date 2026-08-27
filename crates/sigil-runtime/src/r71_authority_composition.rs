@@ -423,6 +423,7 @@ pub fn compose_runtime_authority(
         declared,
         None,
         sigil_kernel::ExecutionConfig::default(),
+        None,
     )
 }
 
@@ -440,6 +441,7 @@ pub(crate) fn compose_runtime_authority_with_product_updater(
     cutover_manifest_hash: CanonicalHash,
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     declared: &[StorageWriterChannelV1],
+    process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
     let execution_config = config_snapshot.config().execution.clone();
     let mut composition = compose_runtime_authority_inner(
@@ -452,6 +454,7 @@ pub(crate) fn compose_runtime_authority_with_product_updater(
             sigil_updater::ProductUpdaterState::from_cache_root(cache_root),
         )),
         execution_config,
+        Some(process_inventory),
     )?;
     let configuration_service: Arc<
         dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1,
@@ -483,6 +486,7 @@ fn compose_runtime_authority_inner(
     declared: &[StorageWriterChannelV1],
     product_updater: Option<Arc<sigil_updater::ProductUpdaterState>>,
     execution_config: sigil_kernel::ExecutionConfig,
+    process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
     // The real kernel capability broker is the single issuer for this composition: execution
     // bundles and storage admission capabilities are broker-issued (one-shot proofs), never
@@ -584,25 +588,34 @@ fn compose_runtime_authority_inner(
             Arc::clone(&registry),
         ),
     );
-    let execution: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionServiceV1> = Arc::new(
-        sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
-            Arc::clone(&planner),
-            execution_temp_root.to_path_buf(),
-        ),
+    let mut sandbox_execution = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
+        Arc::clone(&planner),
+        execution_temp_root.to_path_buf(),
     );
-    let extension_execution = std::sync::Arc::new(
-        RuntimeManagedExtensionExecutionRouteV1::new(
-            Arc::clone(&planner),
-            Arc::clone(&broker),
-            execution_temp_root.to_path_buf(),
-        )
-        .with_authority_generation(authority),
-    );
-    let command_execution = std::sync::Arc::new(RuntimeManagedCommandExecutionRouteV1::new(
+    if let Some(inventory) = &process_inventory {
+        sandbox_execution = sandbox_execution.with_process_inventory(Arc::clone(inventory));
+    }
+    let execution: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionServiceV1> =
+        Arc::new(sandbox_execution);
+    let mut extension_route = RuntimeManagedExtensionExecutionRouteV1::new(
         Arc::clone(&planner),
         Arc::clone(&broker),
         execution_temp_root.to_path_buf(),
-    ));
+    )
+    .with_authority_generation(authority);
+    if let Some(inventory) = &process_inventory {
+        extension_route = extension_route.with_process_inventory(Arc::clone(inventory));
+    }
+    let extension_execution = std::sync::Arc::new(extension_route);
+    let mut command_route = RuntimeManagedCommandExecutionRouteV1::new(
+        Arc::clone(&planner),
+        Arc::clone(&broker),
+        execution_temp_root.to_path_buf(),
+    );
+    if let Some(inventory) = &process_inventory {
+        command_route = command_route.with_process_inventory(Arc::clone(inventory));
+    }
+    let command_execution = std::sync::Arc::new(command_route);
     let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new_with_borrowed_native_save(
         authority,
         storage.clone() as Arc<dyn ManagedStorageServiceV1>,
@@ -735,13 +748,16 @@ fn snapshot_binding_hash(
     CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
-const AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION: u32 = 1;
+const AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION: u32 = 2;
+const AUTHORITY_CONFIG_GENERATION_MIN_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AuthorityConfigGenerationRecordV1 {
     schema_version: u32,
     config_hash: CanonicalHash,
     generation: u64,
+    #[serde(default)]
+    process_inventory_required: bool,
 }
 
 fn host_application_instance_id(config_path: &Path) -> String {
@@ -778,7 +794,12 @@ fn load_authority_config_generation(
         }
         return Ok(None);
     };
-    if record.schema_version != AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION || record.generation == 0
+    if !(AUTHORITY_CONFIG_GENERATION_MIN_SCHEMA_VERSION
+        ..=AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION)
+        .contains(&record.schema_version)
+        || record.generation == 0
+        || (record.schema_version == AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION
+            && !record.process_inventory_required)
     {
         return Err(BootAuthorityErrorV1::Bootstrap(
             sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
@@ -792,9 +813,9 @@ fn load_authority_config_generation(
 fn load_or_advance_authority_config_generation(
     bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
     publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
+    current: Option<AuthorityConfigGenerationRecordV1>,
     config_hash: CanonicalHash,
 ) -> Result<u64, BootAuthorityErrorV1> {
-    let current = load_authority_config_generation(bootstrap, publication)?;
     let generation = match current.as_ref() {
         Some(record) if record.config_hash == config_hash => record.generation,
         Some(record) => record.generation.checked_add(1).ok_or_else(|| {
@@ -802,14 +823,17 @@ fn load_or_advance_authority_config_generation(
         })?,
         None => 1,
     };
-    if current
-        .as_ref()
-        .is_none_or(|record| record.config_hash != config_hash || record.generation != generation)
-    {
+    if current.as_ref().is_none_or(|record| {
+        record.config_hash != config_hash
+            || record.generation != generation
+            || record.schema_version != AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION
+            || !record.process_inventory_required
+    }) {
         let record = AuthorityConfigGenerationRecordV1 {
             schema_version: AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION,
             config_hash,
             generation,
+            process_inventory_required: true,
         };
         let bytes = serde_json::to_vec(&record)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
@@ -871,6 +895,9 @@ fn build_current_boot_transaction(
             error.clone(),
         ))
     })?;
+    bootstrap
+        .resolve_boot_failure(&publication)
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
     publish_current_boot_manifest(&bootstrap, &publication, &cutover)?;
     drop(publication);
     Ok(RuntimeCurrentBootTransactionV1 {
@@ -978,15 +1005,43 @@ fn compose_current_boot_authority_locked(
     }
     use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
     let instance_id = host_application_instance_id(config_snapshot.config_path());
+    let current_config_generation = load_authority_config_generation(bootstrap, publication)?;
+    let allow_pre_inventory_cutover_seed = current_config_generation
+        .as_ref()
+        .is_none_or(|record| !record.process_inventory_required);
+    let process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> =
+        Arc::new(
+            sigil_resource_authority::AuthorityManagedProcessInventoryV1::initialize(
+                bootstrap.clone(),
+                publication,
+                allow_pre_inventory_cutover_seed,
+            )
+            .map_err(|error| {
+                BootAuthorityErrorV1::Bootstrap(
+                    sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
+                        error.to_string(),
+                    ),
+                )
+            })?,
+        );
     let application_generation = load_or_advance_authority_config_generation(
         bootstrap,
         publication,
+        current_config_generation,
         config_snapshot.config_hash(),
     )?;
     let authority = sigil_kernel::resource::AuthorityGeneration {
         epoch: bootstrap.authority_epoch(),
         instance_hash: CanonicalHash::from_bytes([0x75; 32]),
     };
+    bootstrap
+        .validate_recovery_root_selection(
+            publication,
+            state_anchor,
+            cache_root,
+            execution_temp_root,
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
     let declared = [
         Ch::ApplicationControlLog,
         Ch::SessionLog,
@@ -1018,6 +1073,7 @@ fn compose_current_boot_authority_locked(
         provisional_hash,
         planner,
         &declared,
+        Arc::clone(&process_inventory),
     )
     .map_err(BootAuthorityErrorV1::Composition)?;
     let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
@@ -1037,7 +1093,7 @@ fn compose_current_boot_authority_locked(
     let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
         crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
     ));
-    let composition = compose_runtime_authority_with_product_updater(
+    let composition = match compose_runtime_authority_with_product_updater(
         state_anchor,
         cache_root,
         execution_temp_root,
@@ -1045,8 +1101,33 @@ fn compose_current_boot_authority_locked(
         first.manifest().manifest_hash,
         planner,
         &declared,
-    )
-    .map_err(BootAuthorityErrorV1::Composition)?;
+        process_inventory,
+    ) {
+        Ok(composition) => composition,
+        Err(error) => {
+            if let RuntimeAuthorityCompositionErrorV1::JournalUnavailable(message) = &error {
+                bootstrap
+                    .record_boot_failure(
+                        publication,
+                        vec![sigil_resource_authority::FailedAuthorityJournalEvidenceV1 {
+                            journal_scope:
+                                sigil_kernel::resource::ResourceJournalScopeV1::Application,
+                            expected_anchor_identity: hash_path_binding(
+                                "authority-state-anchor-v1",
+                                state_anchor,
+                            ),
+                            last_verified_record_hash: None,
+                            observed_failure_digest: crate::r71_shadow_planner::canonical_digest(
+                                message.as_bytes(),
+                            ),
+                            failure_class: sigil_resource_authority::AuthorityJournalFailureClassV1::UnreadableOrIdentityDrift,
+                        }],
+                    )
+                    .map_err(BootAuthorityErrorV1::Bootstrap)?;
+            }
+            return Err(BootAuthorityErrorV1::Composition(error));
+        }
+    };
     let decision = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate_current_schema(
         instance_id,
         application_generation,
@@ -1440,6 +1521,74 @@ mod tests {
             ))
         ));
         std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
+    }
+
+    #[test]
+    fn r71_process_inventory_cutover_is_one_time_then_missing_state_fails_closed() {
+        let _environment_guard = crate::test_env::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let xdg_config = home.join(".config");
+        std::fs::create_dir_all(&xdg_config).expect("isolated config home");
+        let _home_env = crate::test_env::EnvScope::set("HOME", &home);
+        let _xdg_env = crate::test_env::EnvScope::set("XDG_CONFIG_HOME", &xdg_config);
+        let config = dir.path().join("sigil.toml");
+        write_r71_boot_config(&config);
+        drop(boot_current_schema(&config, dir.path()).expect("first boot"));
+
+        let bootstrap =
+            sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+                &config,
+            )
+            .expect("bootstrap store");
+        let publication = bootstrap.acquire_publication().expect("publication");
+        let current = load_authority_config_generation(&bootstrap, &publication)
+            .expect("generation")
+            .expect("generation record");
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "config_hash": current.config_hash,
+            "generation": current.generation,
+        });
+        bootstrap
+            .publish_bytes(
+                &publication,
+                sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+                &serde_json::to_vec(&legacy).expect("legacy generation"),
+            )
+            .expect("publish legacy generation");
+        drop(publication);
+        for object in [
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement,
+        ] {
+            std::fs::remove_file(bootstrap.path(object)).expect("remove process inventory state");
+        }
+
+        drop(boot_current_schema(&config, dir.path()).expect("one-time inventory cutover"));
+        let publication = bootstrap.acquire_publication().expect("publication");
+        let migrated = load_authority_config_generation(&bootstrap, &publication)
+            .expect("generation")
+            .expect("generation record");
+        assert_eq!(
+            migrated.schema_version,
+            AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION
+        );
+        assert!(migrated.process_inventory_required);
+        drop(publication);
+
+        for object in [
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement,
+        ] {
+            std::fs::remove_file(bootstrap.path(object)).expect("remove required inventory state");
+        }
+        assert!(matches!(
+            boot_current_schema(&config, dir.path()),
+            Err(BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
+            ))
+        ));
     }
 
     #[test]

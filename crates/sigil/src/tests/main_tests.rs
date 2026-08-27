@@ -28,9 +28,9 @@ use tokio::{
 };
 
 use super::{
-    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
-    RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
-    StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
+    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorCommand, DoctorOutput,
+    HTTP_SERVER_STATE_DIR, RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput,
+    ServeStartupPlan, StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
     cli_application_run_request, drain_provider_stream, interactive_tui_requested,
     load_serve_root_config, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
     render_run_event, render_serve_startup_json, render_serve_startup_plan, render_update_apply,
@@ -722,6 +722,7 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
         cli.command,
         Some(Commands::Doctor {
             output: DoctorOutput::Text,
+            command: None,
         })
     ));
     Ok(())
@@ -735,6 +736,21 @@ fn cli_parses_doctor_json_output() -> Result<()> {
         cli.command,
         Some(Commands::Doctor {
             output: DoctorOutput::Json,
+            command: None,
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_authority_recovery_as_doctor_operator_command() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "doctor", "recover-authority"])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Doctor {
+            command: Some(DoctorCommand::RecoverAuthority),
+            ..
         })
     ));
     Ok(())

@@ -1409,6 +1409,20 @@ mod tests {
             Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
                 crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
             ));
+        let bootstrap =
+            sigil_resource_authority::AuthorityBootstrapStoreV1::for_config_path(&config_path)
+                .expect("bootstrap");
+        let publication = bootstrap.acquire_publication().expect("publication");
+        let process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> =
+            Arc::new(
+                sigil_resource_authority::AuthorityManagedProcessInventoryV1::initialize(
+                    bootstrap,
+                    &publication,
+                    true,
+                )
+                .expect("process inventory"),
+            );
+        drop(publication);
         let composition =
             crate::r71_authority_composition::compose_runtime_authority_with_product_updater(
                 &state,
@@ -1426,6 +1440,7 @@ mod tests {
                     Ch::ArtifactStaging,
                     Ch::AdapterDurableState,
                 ],
+                process_inventory,
             )
             .expect("compose");
         let composition = {

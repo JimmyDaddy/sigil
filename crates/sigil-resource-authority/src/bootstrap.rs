@@ -59,6 +59,9 @@ pub enum AuthorityBootstrapObjectClassV1 {
     OldEpochInertMarker,
     RecoveryIntent,
     RecoveryReceipt,
+    ProcessInventory,
+    ProcessInventoryRequirement,
+    BootFailureEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -382,6 +385,11 @@ impl AuthorityBootstrapStoreV1 {
             AuthorityBootstrapObjectClassV1::OldEpochInertMarker => OLD_EPOCH_INERT_FILE,
             AuthorityBootstrapObjectClassV1::RecoveryIntent => RECOVERY_INTENT_FILE,
             AuthorityBootstrapObjectClassV1::RecoveryReceipt => RECOVERY_RECEIPT_FILE,
+            AuthorityBootstrapObjectClassV1::ProcessInventory => "process-inventory.json",
+            AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement => {
+                "process-inventory-required.json"
+            }
+            AuthorityBootstrapObjectClassV1::BootFailureEvidence => "boot-failure-evidence.json",
         };
         match object {
             AuthorityBootstrapObjectClassV1::ActiveEpochPointer => self.namespace.join(name),
@@ -484,6 +492,104 @@ impl AuthorityBootstrapStoreV1 {
         }
         sigil_kernel::atomic_publish_private_file(&self.path(object), bytes)
             .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))
+    }
+
+    /// Binds the first boot of a recovery-selected epoch to the exact state/cache/temp roots
+    /// acknowledged by the operator. Ordinary epochs have no recovery receipt and are unchanged.
+    pub fn validate_recovery_root_selection(
+        &self,
+        guard: &AuthorityBootstrapPublicationGuard,
+        state_root: &Path,
+        cache_root: &Path,
+        execution_temp_root: &Path,
+    ) -> Result<(), BootstrapErrorV1> {
+        let Some(record): Option<FreshEpochRecoveryRecordV1> =
+            self.read_json(guard, AuthorityBootstrapObjectClassV1::RecoveryReceipt)?
+        else {
+            return Ok(());
+        };
+        let canonical_state = fs::canonicalize(state_root)
+            .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+        let canonical_cache = fs::canonicalize(cache_root)
+            .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+        let canonical_execution_temp = fs::canonicalize(execution_temp_root)
+            .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+        let observed = fresh_root_selection_hash(
+            &canonical_state,
+            &canonical_cache,
+            &canonical_execution_temp,
+        );
+        let observed_identity = fresh_root_identity_hash(
+            &canonical_state,
+            &canonical_cache,
+            &canonical_execution_temp,
+        )?;
+        if record.schema_version != RECOVERY_RECORD_SCHEMA_VERSION
+            || record.phase != "completed"
+            || record.new_authority_epoch != self.authority_epoch
+            || record.selection_hash != observed
+            || record.selection_identity_hash != observed_identity
+        {
+            return Err(BootstrapErrorV1::ReconciliationRequired(format!(
+                "active recovery epoch does not match the frozen authority root selection (expected={}, observed={}, epoch={}/{})",
+                record.selection_hash, observed, record.new_authority_epoch, self.authority_epoch,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Records a typed, authority-bound boot failure while the current publication transaction
+    /// is still held. Recovery consumes this record instead of caller-authored evidence.
+    pub fn record_boot_failure(
+        &self,
+        guard: &AuthorityBootstrapPublicationGuard,
+        failed_journal_evidence: Vec<FailedAuthorityJournalEvidenceV1>,
+    ) -> Result<(), BootstrapErrorV1> {
+        if failed_journal_evidence.is_empty() {
+            return Err(BootstrapErrorV1::MetadataCorrupted(
+                "boot failure evidence set is empty".to_owned(),
+            ));
+        }
+        let observed_bootstrap_hash = observed_bootstrap_digest(&self.root)?;
+        let mut record = DurableAuthorityBootFailureEvidenceV1 {
+            schema_version: BOOT_FAILURE_EVIDENCE_SCHEMA_VERSION,
+            authority_epoch: self.authority_epoch,
+            status: "pending".to_owned(),
+            observed_bootstrap_hash,
+            failed_journal_evidence,
+            record_hash: CanonicalHash::from_bytes([0; 32]),
+        };
+        record.record_hash = record.compute_hash()?;
+        self.publish_bytes(
+            guard,
+            AuthorityBootstrapObjectClassV1::BootFailureEvidence,
+            &serde_json::to_vec(&record)
+                .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?,
+        )
+    }
+
+    /// Marks any previous failure evidence resolved after the exact current boot is composed.
+    pub fn resolve_boot_failure(
+        &self,
+        guard: &AuthorityBootstrapPublicationGuard,
+    ) -> Result<(), BootstrapErrorV1> {
+        let Some(mut record): Option<DurableAuthorityBootFailureEvidenceV1> =
+            self.read_json(guard, AuthorityBootstrapObjectClassV1::BootFailureEvidence)?
+        else {
+            return Ok(());
+        };
+        record.validate(self.authority_epoch)?;
+        if record.status == "resolved" {
+            return Ok(());
+        }
+        record.status = "resolved".to_owned();
+        record.record_hash = record.compute_hash()?;
+        self.publish_bytes(
+            guard,
+            AuthorityBootstrapObjectClassV1::BootFailureEvidence,
+            &serde_json::to_vec(&record)
+                .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?,
+        )
     }
 
     fn validate_guard(
@@ -636,6 +742,46 @@ pub struct FailedAuthorityJournalEvidenceV1 {
     pub failure_class: AuthorityJournalFailureClassV1,
 }
 
+const BOOT_FAILURE_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct DurableAuthorityBootFailureEvidenceV1 {
+    schema_version: u32,
+    authority_epoch: u64,
+    status: String,
+    observed_bootstrap_hash: CanonicalHash,
+    failed_journal_evidence: Vec<FailedAuthorityJournalEvidenceV1>,
+    record_hash: CanonicalHash,
+}
+
+impl DurableAuthorityBootFailureEvidenceV1 {
+    fn compute_hash(&self) -> Result<CanonicalHash, BootstrapErrorV1> {
+        let bytes = serde_json::to_vec(&(
+            self.schema_version,
+            self.authority_epoch,
+            &self.status,
+            self.observed_bootstrap_hash,
+            &self.failed_journal_evidence,
+        ))
+        .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?;
+        Ok(canonical_bootstrap_hash(&bytes))
+    }
+
+    fn validate(&self, expected_epoch: u64) -> Result<(), BootstrapErrorV1> {
+        if self.schema_version != BOOT_FAILURE_EVIDENCE_SCHEMA_VERSION
+            || self.authority_epoch != expected_epoch
+            || !matches!(self.status.as_str(), "pending" | "resolved")
+            || self.failed_journal_evidence.is_empty()
+            || self.record_hash != self.compute_hash()?
+        {
+            return Err(BootstrapErrorV1::MetadataCorrupted(
+                "durable boot failure evidence is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OldAuthorityEpochQuiescenceProofV1 {
     pub failed_epoch_evidence_set_hash: CanonicalHash,
@@ -753,6 +899,7 @@ struct FreshRootSelectionRecordV1 {
     cache_root: PathBuf,
     execution_temp_root: PathBuf,
     selection_hash: CanonicalHash,
+    selection_identity_hash: CanonicalHash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -762,6 +909,7 @@ struct FreshEpochRecoveryRecordV1 {
     operation_hash: CanonicalHash,
     evidence_set_hash: CanonicalHash,
     selection_hash: CanonicalHash,
+    selection_identity_hash: CanonicalHash,
     old_authority_epoch: u64,
     new_authority_epoch: u64,
     old_root_identity_hash: CanonicalHash,
@@ -778,6 +926,8 @@ struct ChallengeRecordV1 {
 #[derive(Debug, Clone)]
 struct QuiescenceRecordV1 {
     process_refs: Vec<String>,
+    inventory_snapshot_hash: CanonicalHash,
+    authority_epoch: u64,
     proof: OldAuthorityEpochQuiescenceProofV1,
 }
 
@@ -939,6 +1089,48 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         observed_bootstrap_digest(&root).map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)
     }
 
+    /// Loads the unresolved failure record written by the failed normal boot. The operator may
+    /// acknowledge it, but cannot author or omit individual journal evidence.
+    pub fn observed_failed_journal_evidence(
+        &self,
+    ) -> Result<
+        (CanonicalHash, Vec<FailedAuthorityJournalEvidenceV1>),
+        AuthorityBootstrapRecoveryErrorV1,
+    > {
+        let _transaction = self
+            .namespace
+            .acquire_transaction()
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        self.active_failed_journal_evidence()
+    }
+
+    fn active_failed_journal_evidence(
+        &self,
+    ) -> Result<
+        (CanonicalHash, Vec<FailedAuthorityJournalEvidenceV1>),
+        AuthorityBootstrapRecoveryErrorV1,
+    > {
+        let (root, epoch) = recoverable_active_root(self.namespace.namespace())?;
+        let path = root.join("boot-failure-evidence.json");
+        let bytes =
+            read_private_bytes(&path).map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let record: DurableAuthorityBootFailureEvidenceV1 = serde_json::from_slice(&bytes)
+            .map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(
+                    format!("{}: {error}", path.display()),
+                ))
+            })?;
+        record
+            .validate(epoch)
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let observed = observed_bootstrap_digest(&root)
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        if record.status != "pending" || record.observed_bootstrap_hash != observed {
+            return Err(AuthorityBootstrapRecoveryErrorV1::ExpectedEvidenceMismatch);
+        }
+        Ok((observed, record.failed_journal_evidence))
+    }
+
     /// Registers a fresh, already-created, empty and owner-only root set. The returned reference
     /// is opaque; raw paths never enter the operation or any surface transport.
     pub fn prepare_fresh_root_selection(
@@ -948,17 +1140,22 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         execution_temp_root: &Path,
     ) -> Result<OpaqueBootstrapRootConfigRef, AuthorityBootstrapRecoveryErrorV1> {
         let state_root = validate_fresh_root(state_root, "state")?;
-        let cache_root = validate_fresh_root(cache_root, "cache")?;
         let execution_temp_root = validate_fresh_root(execution_temp_root, "execution-temp")?;
-        let selection_hash = canonical_bootstrap_hash(
-            format!(
-                "authority-bootstrap-root-selection-v1\0{}\0{}\0{}",
-                state_root.display(),
-                cache_root.display(),
-                execution_temp_root.display()
-            )
-            .as_bytes(),
-        );
+        let cache_root = validate_fresh_cache_root(cache_root, &execution_temp_root)?;
+        if cache_root == execution_temp_root
+            || paths_overlap(&state_root, &cache_root)
+            || paths_overlap(&state_root, &execution_temp_root)
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(
+                "state, cache and execution-temp roots do not have a safe ownership layout"
+                    .to_owned(),
+            ));
+        }
+        let selection_hash =
+            fresh_root_selection_hash(&state_root, &cache_root, &execution_temp_root);
+        let selection_identity_hash =
+            fresh_root_identity_hash(&state_root, &cache_root, &execution_temp_root)
+                .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
         let root_ref =
             OpaqueBootstrapRootConfigRef(format!("bootstrap-root-selection:{}", selection_hash));
         let record = FreshRootSelectionRecordV1 {
@@ -967,6 +1164,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             cache_root: cache_root.to_path_buf(),
             execution_temp_root: execution_temp_root.to_path_buf(),
             selection_hash,
+            selection_identity_hash,
         };
         self.selections
             .lock()
@@ -979,19 +1177,36 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         Ok(root_ref)
     }
 
-    /// Proves that every known old-epoch process is terminal or absent using the host observer
-    /// factory; an empty process inventory is rejected rather than treated as a waiver.
+    pub fn prepared_root_selection_hash(
+        &self,
+        root_ref: &OpaqueBootstrapRootConfigRef,
+    ) -> Result<CanonicalHash, AuthorityBootstrapRecoveryErrorV1> {
+        Ok(self.selection(root_ref)?.selection_hash)
+    }
+
+    /// Proves that every authority-recorded old-epoch process is terminal or absent using the
+    /// host observer factory. The inventory is read from the active bootstrap epoch while the
+    /// shared transaction lock is held; callers cannot omit a process or fabricate an empty set.
     pub fn probe_old_epoch_quiescence(
         &self,
         evidence_set_hash: CanonicalHash,
-        process_refs: &[String],
     ) -> Result<OldAuthorityEpochQuiescenceProofV1, AuthorityBootstrapRecoveryErrorV1> {
-        if process_refs.is_empty() || process_refs.len() > 256 {
-            return Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
+        let _transaction = self
+            .namespace
+            .acquire_transaction()
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let snapshot = self.active_process_inventory()?;
+        let mut refs = Vec::with_capacity(snapshot.entries.len());
+        for entry in snapshot.entries.values() {
+            match entry.state {
+                crate::process_inventory::AuthorityProcessInventoryStateV1::Prepared => {
+                    return Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
+                }
+                crate::process_inventory::AuthorityProcessInventoryStateV1::Attached {
+                    process_id,
+                } => refs.push(process_id.to_string()),
+            }
         }
-        let mut refs = process_refs.to_vec();
-        refs.sort();
-        refs.dedup();
         let service = self.process_factory.observation_service();
         let verifier = self.process_factory.observation_verifier();
         let mut observations = Vec::with_capacity(refs.len());
@@ -1020,13 +1235,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             observations.push((observation, verified.verified_observation_hash));
         }
         let observed_at_ms = current_epoch_ms();
-        let inventory_hash = canonical_bootstrap_hash(
-            serde_json::to_vec(&refs)
-                .map_err(|error| {
-                    AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
-                })?
-                .as_slice(),
-        );
+        let inventory_hash = snapshot.snapshot_hash;
         let owner_probe_hash = canonical_bootstrap_hash(
             serde_json::to_vec(&observations)
                 .map_err(|error| {
@@ -1072,6 +1281,8 @@ impl AuthorityBootstrapRecoveryServiceV1 {
                 proof_hash,
                 QuiescenceRecordV1 {
                     process_refs: refs,
+                    inventory_snapshot_hash: snapshot.snapshot_hash,
+                    authority_epoch: snapshot.authority_epoch,
                     proof: proof.clone(),
                 },
             );
@@ -1270,10 +1481,45 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             .namespace
             .acquire_transaction()
             .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        if let AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
+            old_epoch_quiescence,
+            failed_journal_evidence,
+            evidence_set_hash,
+            expected_failed_bootstrap_hash,
+            ..
+        } = &operation
+        {
+            let (observed_bootstrap_hash, observed_evidence) =
+                self.active_failed_journal_evidence()?;
+            if observed_evidence != *failed_journal_evidence
+                || Self::evidence_set_hash(&observed_evidence)? != *evidence_set_hash
+                || expected_failed_bootstrap_hash
+                    .is_some_and(|expected| expected != observed_bootstrap_hash)
+            {
+                return Err(AuthorityBootstrapRecoveryErrorV1::ExpectedEvidenceMismatch);
+            }
+            let proof = self
+                .proofs
+                .lock()
+                .map_err(|_| {
+                    AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                        "proof table poisoned".to_owned(),
+                    )
+                })?
+                .get(&old_epoch_quiescence.proof_hash)
+                .cloned()
+                .ok_or(AuthorityBootstrapRecoveryErrorV1::NoQuiescence)?;
+            self.verify_quiescence_under_transaction(&proof)?;
+        }
         let (old_root, old_epoch) = recoverable_active_root(self.namespace.namespace())?;
         let old_identity = bootstrap_root_identity(&old_root)
             .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
-        let (selection_hash, expected_failed_bootstrap_hash, evidence_set_hash) = match &operation {
+        let (
+            selection_hash,
+            selection_identity_hash,
+            expected_failed_bootstrap_hash,
+            evidence_set_hash,
+        ) = match &operation {
             AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
                 explicit_root_config,
                 expected_failed_bootstrap_hash,
@@ -1283,6 +1529,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
                 let selection = self.selection(explicit_root_config)?;
                 (
                     selection.selection_hash,
+                    selection.selection_identity_hash,
                     *expected_failed_bootstrap_hash,
                     *evidence_set_hash,
                 )
@@ -1333,6 +1580,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             operation_hash,
             evidence_set_hash,
             selection_hash,
+            selection_identity_hash,
             old_authority_epoch: old_epoch,
             new_authority_epoch: new_epoch,
             old_root_identity_hash: old_identity,
@@ -1457,12 +1705,19 @@ impl AuthorityBootstrapRecoveryServiceV1 {
                     "unknown fresh root selection".to_owned(),
                 )
             })?;
-        for (label, path) in [
-            ("state", selection.state_root.as_path()),
-            ("cache", selection.cache_root.as_path()),
-            ("execution-temp", selection.execution_temp_root.as_path()),
-        ] {
-            validate_fresh_root(path, label)?;
+        validate_fresh_root(&selection.state_root, "state")?;
+        validate_fresh_root(&selection.execution_temp_root, "execution-temp")?;
+        validate_fresh_cache_root(&selection.cache_root, &selection.execution_temp_root)?;
+        let observed_identity = fresh_root_identity_hash(
+            &selection.state_root,
+            &selection.cache_root,
+            &selection.execution_temp_root,
+        )
+        .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        if observed_identity != selection.selection_identity_hash {
+            return Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(
+                "fresh root identity changed after operator selection".to_owned(),
+            ));
         }
         Ok(selection)
     }
@@ -1511,7 +1766,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
                 {
                     return Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
                 }
-                self.verify_quiescence_still_terminal(&proof.process_refs)?;
+                self.verify_quiescence_still_terminal(&proof)?;
                 Ok(())
             }
             AuthorityBootstrapRecoveryOperationV1::RevealBootstrapDiagnostic { .. } => Ok(()),
@@ -1520,14 +1775,28 @@ impl AuthorityBootstrapRecoveryServiceV1 {
 
     fn verify_quiescence_still_terminal(
         &self,
-        process_refs: &[String],
+        proof: &QuiescenceRecordV1,
     ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
-        if process_refs.is_empty() {
+        let _transaction = self
+            .namespace
+            .acquire_transaction()
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        self.verify_quiescence_under_transaction(proof)
+    }
+
+    fn verify_quiescence_under_transaction(
+        &self,
+        proof: &QuiescenceRecordV1,
+    ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+        let snapshot = self.active_process_inventory()?;
+        if snapshot.authority_epoch != proof.authority_epoch
+            || snapshot.snapshot_hash != proof.inventory_snapshot_hash
+        {
             return Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
         }
         let service = self.process_factory.observation_service();
         let verifier = self.process_factory.observation_verifier();
-        for process_ref in process_refs {
+        for process_ref in &proof.process_refs {
             let observation = service
                 .observe(
                     sigil_kernel::process_observation::ProcessObservationPurposeV1::TerminalProof,
@@ -1551,6 +1820,28 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             }
         }
         Ok(())
+    }
+
+    fn active_process_inventory(
+        &self,
+    ) -> Result<
+        crate::process_inventory::AuthorityProcessInventorySnapshotV1,
+        AuthorityBootstrapRecoveryErrorV1,
+    > {
+        let (root, epoch) = recoverable_active_root(self.namespace.namespace())?;
+        let path = root.join("process-inventory.json");
+        let bytes =
+            read_private_bytes(&path).map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let snapshot: crate::process_inventory::AuthorityProcessInventorySnapshotV1 =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(
+                    format!("{}: {error}", path.display()),
+                ))
+            })?;
+        snapshot
+            .validate(epoch)
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        Ok(snapshot)
     }
 
     fn diagnostic_receipt(
@@ -1682,6 +1973,112 @@ fn validate_fresh_root(
         ));
     }
     Ok(canonical_path)
+}
+
+/// Cache layouts normally place the workspace scratch root below the cache anchor. That
+/// authority-owned directory chain is allowed in an otherwise fresh cache root; siblings,
+/// symlinks/reparse points, and files are not.
+fn validate_fresh_cache_root(
+    cache_root: &Path,
+    execution_temp_root: &Path,
+) -> Result<PathBuf, AuthorityBootstrapRecoveryErrorV1> {
+    let cache_root = validate_plain_owner_only_directory(cache_root, "cache")?;
+    if !execution_temp_root.starts_with(&cache_root) {
+        return validate_fresh_root(&cache_root, "cache");
+    }
+    let relative = execution_temp_root.strip_prefix(&cache_root).map_err(|_| {
+        AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(
+            "execution-temp root is outside the cache root".to_owned(),
+        )
+    })?;
+    let mut current = cache_root.clone();
+    for component in relative.components() {
+        let expected = component.as_os_str();
+        let mut entries = fs::read_dir(&current)
+            .map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(error.to_string())
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(error.to_string())
+            })?;
+        if entries.len() != 1
+            || entries
+                .pop()
+                .is_none_or(|entry| entry.file_name() != expected)
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(
+                "cache root contains objects outside the execution-temp directory chain".to_owned(),
+            ));
+        }
+        current.push(expected);
+        validate_plain_owner_only_directory(&current, "cache")?;
+    }
+    Ok(cache_root)
+}
+
+fn validate_plain_owner_only_directory(
+    path: &Path,
+    label: &str,
+) -> Result<PathBuf, AuthorityBootstrapRecoveryErrorV1> {
+    if !path.is_absolute() {
+        return Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(
+            format!("{label} root must be absolute"),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(format!(
+            "{label} root unavailable: {error}"
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(
+            format!("{label} root is not a plain directory"),
+        ));
+    }
+    let canonical_path = fs::canonicalize(path).map_err(|error| {
+        AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(format!(
+            "{label} root cannot be canonicalized: {error}"
+        ))
+    })?;
+    ensure_owner_only_directory(&canonical_path).map_err(|error| {
+        AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(error.to_string())
+    })?;
+    Ok(canonical_path)
+}
+
+fn fresh_root_selection_hash(
+    state_root: &Path,
+    cache_root: &Path,
+    execution_temp_root: &Path,
+) -> CanonicalHash {
+    canonical_bootstrap_hash(
+        format!(
+            "authority-bootstrap-root-selection-v1\0{}\0{}\0{}",
+            state_root.display(),
+            cache_root.display(),
+            execution_temp_root.display()
+        )
+        .as_bytes(),
+    )
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn fresh_root_identity_hash(
+    state_root: &Path,
+    cache_root: &Path,
+    execution_temp_root: &Path,
+) -> Result<CanonicalHash, BootstrapErrorV1> {
+    let bytes = serde_json::to_vec(&(
+        bootstrap_root_identity(state_root)?,
+        bootstrap_root_identity(cache_root)?,
+        bootstrap_root_identity(execution_temp_root)?,
+    ))
+    .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?;
+    Ok(canonical_bootstrap_hash(&bytes))
 }
 
 fn current_epoch_ms() -> u64 {
@@ -2203,12 +2600,28 @@ mod recovery_tests {
         }]
     }
 
+    fn publish_process_inventory(
+        root: &Path,
+        entries: BTreeMap<String, crate::process_inventory::AuthorityProcessInventoryEntryV1>,
+    ) {
+        let mut snapshot = crate::process_inventory::AuthorityProcessInventorySnapshotV1::empty(1);
+        snapshot.entries = entries;
+        snapshot.sequence = 1;
+        snapshot.snapshot_hash = snapshot.compute_hash();
+        publish_private_bootstrap_file(
+            &root.join("process-inventory.json"),
+            &serde_json::to_vec(&snapshot).expect("inventory bytes"),
+        )
+        .expect("process inventory");
+    }
+
     #[test]
     fn r71_bootstrap_recovery_selects_fresh_epoch_and_is_one_shot() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
         let namespace = base.join("authority-namespace");
         fs::create_dir(&namespace).expect("namespace");
+        publish_process_inventory(&namespace, BTreeMap::new());
         let active_pointer = namespace.join(ACTIVE_EPOCH_POINTER_FILE);
         sigil_kernel::atomic_publish_private_file(&active_pointer, b"{corrupt")
             .expect("corrupt pointer fixture");
@@ -2217,6 +2630,12 @@ mod recovery_tests {
             Err(BootstrapErrorV1::MetadataCorrupted(_))
         ));
         let expected_failed_bootstrap_hash = observed_bootstrap_digest(&namespace).expect("digest");
+        let store = AuthorityBootstrapStoreV1::open(&namespace, &namespace, 1).expect("store");
+        let publication = store.acquire_publication().expect("publication");
+        store
+            .record_boot_failure(&publication, evidence())
+            .expect("failure evidence");
+        drop(publication);
         let state = base.join("state");
         let cache = base.join("cache");
         let execution_temp = base.join("execution-temp");
@@ -2236,9 +2655,8 @@ mod recovery_tests {
         let evidence = evidence();
         let evidence_hash = AuthorityBootstrapRecoveryServiceV1::evidence_set_hash(&evidence)
             .expect("evidence hash");
-        let absent_pid = (std::process::id() as u64 + 1_000_000).to_string();
         let proof = service
-            .probe_old_epoch_quiescence(evidence_hash, &[absent_pid])
+            .probe_old_epoch_quiescence(evidence_hash)
             .expect("quiescence");
         let operation = AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
             explicit_root_config: root_ref,
@@ -2274,6 +2692,16 @@ mod recovery_tests {
         );
         assert!(namespace.join(OLD_EPOCH_INERT_FILE).is_file());
 
+        let active_store = service.namespace.active_store().expect("new active store");
+        let publication = active_store.acquire_publication().expect("new publication");
+        crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+            active_store,
+            &publication,
+            true,
+        )
+        .expect("new process inventory");
+        drop(publication);
+
         let challenge = service
             .issue_operator_challenge(&operation, current_epoch_ms(), 60_000)
             .expect("second challenge");
@@ -2284,15 +2712,12 @@ mod recovery_tests {
             operation_root_selection_hash(&operation),
             current_epoch_ms(),
         );
-        let authorization = service
-            .authorize(&operation, confirmation, current_epoch_ms())
-            .expect("second authorization");
         let error = service
-            .execute(operation.clone(), authorization)
-            .expect_err("same epoch must not be allocated twice");
+            .authorize(&operation, confirmation, current_epoch_ms())
+            .expect_err("stale old-epoch proof must not authorize twice");
         assert!(matches!(
             error,
-            AuthorityBootstrapRecoveryErrorV1::ReconciliationPending
+            AuthorityBootstrapRecoveryErrorV1::NoQuiescence
         ));
     }
 
@@ -2302,19 +2727,169 @@ mod recovery_tests {
         let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
         let namespace = base.join("authority-namespace");
         fs::create_dir(&namespace).expect("namespace");
+        let process_id = std::process::id();
+        publish_process_inventory(
+            &namespace,
+            BTreeMap::from([(
+                "live-attempt".to_owned(),
+                crate::process_inventory::AuthorityProcessInventoryEntryV1 {
+                    attempt_id: "live-attempt".to_owned(),
+                    state: crate::process_inventory::AuthorityProcessInventoryStateV1::Attached {
+                        process_id,
+                    },
+                },
+            )]),
+        );
         let service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
             AuthorityBootstrapRecoveryNamespaceV1 { namespace },
             process_factory(),
         );
         let error = service
-            .probe_old_epoch_quiescence(
-                canonical_bootstrap_hash(b"evidence"),
-                &[std::process::id().to_string()],
-            )
+            .probe_old_epoch_quiescence(canonical_bootstrap_hash(b"evidence"))
             .expect_err("current test process is live");
         assert!(matches!(
             error,
             AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(_)
+        ));
+    }
+
+    #[test]
+    fn r71_process_inventory_blocks_prepared_and_live_entries_until_settled() {
+        use crate::process_inventory::AuthorityProcessInventoryPortV1;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
+        let namespace = base.join("authority-namespace");
+        let store = AuthorityBootstrapStoreV1::open(&namespace, &namespace, 1).expect("store");
+        let store_again = store.clone();
+        let publication = store.acquire_publication().expect("publication");
+        let inventory = crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+            store,
+            &publication,
+            true,
+        )
+        .expect("inventory");
+        drop(publication);
+        let service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
+            AuthorityBootstrapRecoveryNamespaceV1 { namespace },
+            process_factory(),
+        );
+        let evidence_hash = canonical_bootstrap_hash(b"evidence");
+        let claim = inventory.prepare_spawn("attempt-1").expect("prepare");
+        assert!(matches!(
+            service.probe_old_epoch_quiescence(evidence_hash),
+            Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence)
+        ));
+        inventory
+            .attach_spawn(&claim, std::process::id())
+            .expect("attach");
+        assert!(matches!(
+            service.probe_old_epoch_quiescence(evidence_hash),
+            Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(_))
+        ));
+        inventory.settle_spawn(claim).expect("settle");
+        service
+            .probe_old_epoch_quiescence(evidence_hash)
+            .expect("settled inventory is quiescent");
+        fs::remove_file(store_again.path(AuthorityBootstrapObjectClassV1::ProcessInventory))
+            .expect("remove inventory fixture");
+        let publication = store_again.acquire_publication().expect("publication");
+        assert!(matches!(
+            crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+                store_again.clone(),
+                &publication,
+                false,
+            ),
+            Err(
+                crate::process_inventory::AuthorityProcessInventoryErrorV1::Bootstrap(
+                    BootstrapErrorV1::MetadataCorrupted(_)
+                )
+            )
+        ));
+        drop(publication);
+        fs::remove_file(
+            store_again.path(AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement),
+        )
+        .expect("remove requirement fixture");
+        let reopened = AuthorityBootstrapStoreV1::open(
+            store_again.namespace(),
+            store_again.root(),
+            store_again.authority_epoch(),
+        )
+        .expect("reopen existing store");
+        let publication = reopened.acquire_publication().expect("publication");
+        assert!(matches!(
+            crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+                reopened,
+                &publication,
+                false,
+            ),
+            Err(
+                crate::process_inventory::AuthorityProcessInventoryErrorV1::Bootstrap(
+                    BootstrapErrorV1::MetadataCorrupted(_)
+                )
+            )
+        ));
+    }
+
+    #[test]
+    fn r71_fresh_root_selection_rejects_identity_replacement_and_alias_layout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
+        let namespace = base.join("authority-namespace");
+        fs::create_dir(&namespace).expect("namespace");
+        publish_process_inventory(&namespace, BTreeMap::new());
+        let service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
+            AuthorityBootstrapRecoveryNamespaceV1 { namespace },
+            process_factory(),
+        );
+        let state = base.join("state");
+        let cache = base.join("cache");
+        let execution_temp = cache.join("workspace").join("scratch");
+        fs::create_dir(&state).expect("state");
+        fs::create_dir_all(&execution_temp).expect("execution temp");
+        let root_ref = service
+            .prepare_fresh_root_selection(&state, &cache, &execution_temp)
+            .expect("selection");
+        fs::rename(&state, base.join("state-replaced")).expect("replace old state");
+        fs::create_dir(&state).expect("replacement state");
+        assert!(matches!(
+            service.prepared_root_selection_hash(&root_ref),
+            Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(_))
+        ));
+        assert!(matches!(
+            service.prepare_fresh_root_selection(&state, &state, &state),
+            Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn r71_resolved_boot_failure_cannot_authorize_recovery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
+        let namespace = base.join("authority-namespace");
+        let store = AuthorityBootstrapStoreV1::open(&namespace, &namespace, 1).expect("store");
+        let publication = store.acquire_publication().expect("publication");
+        crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+            store.clone(),
+            &publication,
+            true,
+        )
+        .expect("inventory");
+        store
+            .record_boot_failure(&publication, evidence())
+            .expect("failure record");
+        store
+            .resolve_boot_failure(&publication)
+            .expect("resolved record");
+        drop(publication);
+        let service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
+            AuthorityBootstrapRecoveryNamespaceV1 { namespace },
+            process_factory(),
+        );
+        assert!(matches!(
+            service.observed_failed_journal_evidence(),
+            Err(AuthorityBootstrapRecoveryErrorV1::ExpectedEvidenceMismatch)
         ));
     }
 

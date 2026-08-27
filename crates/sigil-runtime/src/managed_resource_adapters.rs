@@ -98,6 +98,7 @@ pub struct RuntimeManagedExtensionExecutionRouteV1 {
     broker: Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
     execution_temp_authority: Arc<ExecutionTempAuthorityV1>,
     authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
 }
 
 impl std::fmt::Debug for RuntimeManagedExtensionExecutionRouteV1 {
@@ -123,7 +124,17 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
                 epoch: 1,
                 instance_hash: CanonicalHash::from_bytes([0x75; 32]),
             },
+            process_inventory: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_process_inventory(
+        mut self,
+        process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    ) -> Self {
+        self.process_inventory = Some(process_inventory);
+        self
     }
 
     #[must_use]
@@ -289,10 +300,15 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
                 prepared.enforcement,
             ),
         );
+        let process_inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or(sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable)?;
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
             execution_temp.binding().root.clone(),
         )
+        .with_process_inventory(Arc::clone(process_inventory))
         .with_extension_launcher(launcher);
         wrap_persistent_launch(
             service.start_persistent(bundle, prepared.request).await,
@@ -873,6 +889,7 @@ pub struct RuntimeManagedCommandExecutionRouteV1 {
     planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1>,
     broker: Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
     execution_temp_authority: Arc<ExecutionTempAuthorityV1>,
+    process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
 }
 
 impl std::fmt::Debug for RuntimeManagedCommandExecutionRouteV1 {
@@ -895,7 +912,17 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             planner,
             broker,
             execution_temp_authority: Arc::new(ExecutionTempAuthorityV1::new(execution_temp_root)),
+            process_inventory: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_process_inventory(
+        mut self,
+        process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    ) -> Self {
+        self.process_inventory = Some(process_inventory);
+        self
     }
 
     fn command_digest(request: &ExecutionRequest) -> CanonicalHash {
@@ -1062,10 +1089,15 @@ impl RuntimeManagedCommandExecutionRouteV1 {
                 terminal_enforcement,
             ),
         );
+        let process_inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or(sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable)?;
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
             execution_temp.binding().root.clone(),
         )
+        .with_process_inventory(Arc::clone(process_inventory))
         .with_terminal_launcher(launcher);
         wrap_persistent_launch(
             service.start_persistent(bundle, managed_request).await,
@@ -1159,10 +1191,15 @@ impl RuntimeManagedCommandExecutionRouteV1 {
                 enforcement,
             ),
         );
+        let process_inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or_else(|| anyhow!("authority process inventory unavailable"))?;
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
             execution_temp.binding().root.clone(),
         )
+        .with_process_inventory(Arc::clone(process_inventory))
         .with_code_intel_launcher(launcher);
         let mut process = wrap_persistent_launch(
             service.start_persistent(bundle, managed_request).await,
@@ -1299,10 +1336,15 @@ impl RuntimeManagedCommandExecutionRouteV1 {
                 cwd_subject_ref,
             ),
         );
+        let process_inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or_else(|| anyhow!("authority process inventory unavailable"))?;
         let service = sigil_sandbox::managed::SandboxManagedExecutionServiceV1::new(
             Arc::clone(&self.planner),
             execution_temp.binding().root.clone(),
         )
+        .with_process_inventory(Arc::clone(process_inventory))
         .with_one_shot_launcher(launcher);
         let managed_result = service.execute_once(bundle, managed_request).await;
         let mut managed_receipt = match managed_result {
@@ -1915,6 +1957,11 @@ mod tests {
         AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
     };
 
+    fn test_process_inventory() -> Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>
+    {
+        Arc::new(sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default())
+    }
+
     #[test]
     fn r71_runtime_compose_holds_only_pathless_ports() {
         let storage = Arc::new(AuthorityManagedStorageServiceV1::new(
@@ -1957,7 +2004,8 @@ mod tests {
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             execution_temp.path().to_path_buf(),
-        );
+        )
+        .with_process_inventory(test_process_inventory());
         let mut environment = std::collections::BTreeMap::new();
         environment.insert("TMPDIR".to_owned(), "/ambient-override".to_owned());
         environment.insert("HOME".to_owned(), "/ambient-home".to_owned());
@@ -2020,7 +2068,8 @@ mod tests {
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             execution_temp.path().to_path_buf(),
-        );
+        )
+        .with_process_inventory(test_process_inventory());
         let io = route
             .launch(sigil_code_intel::LanguageServerLaunchRequestV1 {
                 server_name: "fake-lsp".to_owned(),
@@ -2059,7 +2108,8 @@ mod tests {
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             execution_temp.path().to_path_buf(),
-        );
+        )
+        .with_process_inventory(test_process_inventory());
         let mut handle = route
             .start_persistent(ManagedTerminalStartRequestV1 {
                 program: "/bin/sh".to_owned(),
@@ -2108,7 +2158,8 @@ mod tests {
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             execution_temp.path().to_path_buf(),
-        );
+        )
+        .with_process_inventory(test_process_inventory());
         let mut handle = route
             .start_persistent(ManagedTerminalStartRequestV1 {
                 program: "/bin/sh".to_owned(),
@@ -2168,13 +2219,16 @@ mod tests {
         let root = tempfile::tempdir().expect("workspace");
         let artifact_root = tempfile::tempdir().expect("artifacts");
         let execution_temp = tempfile::tempdir().expect("execution temp");
-        let route = Arc::new(RuntimeManagedCommandExecutionRouteV1::new(
-            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-            )),
-            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
-            execution_temp.path().to_path_buf(),
-        ));
+        let route = Arc::new(
+            RuntimeManagedCommandExecutionRouteV1::new(
+                Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                    crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+                )),
+                Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+                execution_temp.path().to_path_buf(),
+            )
+            .with_process_inventory(test_process_inventory()),
+        );
         let manager = sigil_tools_builtin::TerminalProcessManager::new_with_artifact_root(
             root.path(),
             artifact_root.path(),

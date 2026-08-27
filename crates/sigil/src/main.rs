@@ -132,6 +132,8 @@ enum Commands {
     Doctor {
         #[arg(long, value_enum, default_value = "text")]
         output: DoctorOutput,
+        #[command(subcommand)]
+        command: Option<DoctorCommand>,
     },
     /// Emit typed JSON Intent Stack automation records for one exact durable session.
     Intent {
@@ -227,6 +229,16 @@ enum DoctorOutput {
     #[default]
     Text,
     Json,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
+enum DoctorCommand {
+    /// Recover a failed authority journal into fresh storage roots configured in sigil.toml.
+    ///
+    /// The configured state, cache, and scratch roots must already be distinct, empty,
+    /// owner-only directories. The command prints an operation-bound challenge and changes
+    /// authority epoch only after that exact challenge is typed back.
+    RecoverAuthority,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -462,7 +474,12 @@ async fn run_main(cli: Cli) -> Result<u8> {
                 build.update_metadata(),
             )?;
         }
-        Commands::Doctor { output } => doctor_command(&config_path, &cwd, output)?,
+        Commands::Doctor { output, command } => match command {
+            Some(DoctorCommand::RecoverAuthority) => {
+                authority_recovery_command(&config_path, &cwd)?
+            }
+            None => doctor_command(&config_path, &cwd, output)?,
+        },
         Commands::Intent { session, command } => {
             let exit = intent_cli::execute_intent_command(&config_path, &cwd, &session, command)
                 .write_json();
@@ -711,6 +728,33 @@ fn doctor_command(config_path: &Path, launch_cwd: &Path, output: DoctorOutput) -
             build_cli_doctor_support_report(config_path, launch_cwd)?.to_pretty_json()?
         ),
     }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn authority_recovery_command(config_path: &Path, launch_cwd: &Path) -> Result<()> {
+    let summary = sigil_runtime::doctor::recover_authority_bootstrap_with_confirmation(
+        config_path,
+        launch_cwd,
+        |challenge| {
+            eprintln!(
+                "Authority recovery will make the failed epoch inert and activate the fresh storage roots in the current config.\nType this exact challenge to continue:\n{challenge}"
+            );
+            let mut supplied = String::new();
+            std::io::stdin()
+                .read_line(&mut supplied)
+                .map_err(|error| error.to_string())?;
+            Ok(supplied)
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    println!(
+        "authority recovery complete: epoch {} -> {}, receipt={}, reconciled={}",
+        summary.old_authority_epoch,
+        summary.new_authority_epoch,
+        summary.receipt_hash,
+        summary.reconciled_after_crash
+    );
     Ok(())
 }
 

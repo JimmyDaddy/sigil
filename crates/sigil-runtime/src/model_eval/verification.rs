@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, anyhow, bail};
 use sigil_kernel::{
     CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    CompletionCriteria, ControlEntry, EvidenceScope, JsonlSessionStore, ReceiptStatus, RootConfig,
+    CompletionCriteria, ControlEntry, EvidenceScope, JsonlSessionStore, ReceiptStatus,
     SandboxProfileRequirement, Session, ToolEffect, TrustedCheckSpec, VerificationAutoRunPolicy,
     VerificationCheckRunRequest, VerificationPolicy, VerificationPolicyChangedEntry,
     VerificationRecordedEntry, VerificationScope, VerificationVerdict, WorkspaceTrust,
@@ -40,20 +40,10 @@ pub async fn verify_model_eval_run(
         });
     }
 
-    let root_config = RootConfig::load(config_path)?;
-    let paths = crate::resolve_sigil_paths(
-        &root_config.storage,
-        &root_config.session,
-        &fixture.workspace_root,
-    );
-    let execution_port =
-        crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1::new(
-            std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-            )),
-            std::sync::Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
-            paths.scratch_root,
-        );
+    let boot =
+        crate::r71_authority_composition::boot_current_schema(config_path, &fixture.workspace_root)
+            .map_err(|error| anyhow!("model-eval authority boot failed: {error}"))?;
+    let execution_port = std::sync::Arc::clone(&boot.composition().command_execution);
     let store = JsonlSessionStore::new(session_path)?;
     let mut session = Session::load_from_store(provider, model, store)?;
     let scope = EvidenceScope::Run(run_id.to_owned());
@@ -125,7 +115,7 @@ pub async fn verify_model_eval_run(
     for trusted_check in &trusted_checks {
         let recorded = run_verification_check(
             &mut session,
-            &execution_port,
+            execution_port.as_ref(),
             VerificationCheckRunRequest {
                 workspace_root: fixture.workspace_root.clone(),
                 scope: scope.clone(),

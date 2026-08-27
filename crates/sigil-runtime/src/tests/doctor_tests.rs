@@ -14,6 +14,71 @@ use super::*;
 use crate::doctor::mcp::command_status_with_search_path;
 
 #[test]
+fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let temp = tempdir()?;
+    let home = temp.path().join("home");
+    fs::create_dir(&home)?;
+    let _home = crate::test_env::EnvScope::set("HOME", &home);
+    let config_path = temp.path().join("sigil.toml");
+    let state_a = temp.path().join("state-a");
+    let cache_a = temp.path().join("cache-a");
+    fs::create_dir(&state_a)?;
+    fs::create_dir(&cache_a)?;
+    let config = |state: &Path, cache: &Path| {
+        format!(
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
+            state.display(),
+            cache.display(),
+        )
+    };
+    fs::write(&config_path, config(&state_a, &cache_a))?;
+    crate::r71_authority_composition::boot_current_schema(&config_path, temp.path())?;
+
+    let corrupt_journal = state_a.join("authority-resources.journal.json");
+    fs::write(&corrupt_journal, b"{corrupt-authority-journal")?;
+    let failed =
+        match crate::r71_authority_composition::boot_current_schema(&config_path, temp.path()) {
+            Ok(_) => panic!("corrupt journal must fail closed and record evidence"),
+            Err(error) => error,
+        };
+    assert!(
+        failed
+            .to_string()
+            .contains("durable authority journal failed")
+    );
+
+    let state_b = temp.path().join("state-b");
+    let cache_b = temp.path().join("cache-b");
+    fs::create_dir(&state_b)?;
+    fs::create_dir(&cache_b)?;
+    fs::write(&config_path, config(&state_b, &cache_b))?;
+    let root_config = sigil_kernel::RootConfig::load(&config_path)?;
+    let workspace = sigil_kernel::resolve_workspace_root(
+        &config_path,
+        temp.path(),
+        &root_config.workspace.root,
+    );
+    let fresh_paths =
+        crate::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
+    fs::create_dir_all(&fresh_paths.scratch_root)?;
+
+    let summary =
+        recover_authority_bootstrap_with_confirmation(&config_path, temp.path(), |challenge| {
+            Ok(challenge.to_owned())
+        })
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(summary.old_authority_epoch, 1);
+    assert_eq!(summary.new_authority_epoch, 2);
+    assert!(!summary.reconciled_after_crash);
+    assert!(state_b.join("authority-resources.journal.json").is_file());
+    assert_eq!(fs::read(&corrupt_journal)?, b"{corrupt-authority-journal");
+    let store = sigil_resource_authority::AuthorityBootstrapStoreV1::for_config_path(&config_path)?;
+    assert_eq!(store.authority_epoch(), 2);
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_current_plan_review_compatibility_without_mutating_sessions() -> Result<()> {
     let temp = tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session-current-plan.jsonl"))?;

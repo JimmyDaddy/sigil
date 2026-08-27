@@ -70,6 +70,7 @@ fn env_hash(env: &BTreeMap<String, String>) -> CanonicalHash {
 pub struct SandboxManagedExecutionServiceV1 {
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     execution_temp_root: PathBuf,
+    process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
     one_shot_launcher: Option<Arc<dyn ManagedOneShotLaunchServiceV1>>,
     terminal_launcher: Option<Arc<dyn ManagedTerminalLaunchServiceV1>>,
     extension_launcher: Option<Arc<dyn ManagedExtensionLaunchServiceV1>>,
@@ -427,11 +428,23 @@ impl SandboxManagedExecutionServiceV1 {
         Self {
             planner,
             execution_temp_root,
+            process_inventory: None,
             one_shot_launcher: None,
             terminal_launcher: None,
             extension_launcher: None,
             code_intel_launcher: None,
         }
+    }
+
+    /// Attaches the authority-owned durable process inventory. Production launch routes must
+    /// provide it; absence keeps physical spawn fail closed.
+    #[must_use]
+    pub fn with_process_inventory(
+        mut self,
+        inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    ) -> Self {
+        self.process_inventory = Some(inventory);
+        self
     }
 
     #[must_use]
@@ -840,6 +853,26 @@ async fn poll_termination(child: &mut Child, max_runtime_ms: u64) -> ProcessTerm
     }
 }
 
+fn terminate_reap_and_settle(
+    child: &mut Child,
+    process_owner: &sigil_process::ProcessTreeOwnerGuard,
+    inventory: &dyn sigil_resource_authority::AuthorityProcessInventoryPortV1,
+    claim: &mut Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
+) -> Result<(), ManagedExecutionErrorV1> {
+    let _ = process_owner.terminate();
+    let _ = child.kill();
+    child
+        .wait()
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+    inventory
+        .settle_spawn(
+            claim
+                .take()
+                .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+        )
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)
+}
+
 /// Per-channel capped retained buffer plus truncation observation.
 #[derive(Default)]
 struct CapState {
@@ -944,27 +977,122 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         if request.limits.pty_required || request.capture.pty {
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
+        if request.limits.max_runtime_ms == 0 {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
         let prepared = self.prepare(&bundle, &request)?;
         let Some(launcher) = &self.one_shot_launcher else {
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         };
-        let mut child = launcher.launch(&request, &prepared.env)?;
+        let inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let claim = inventory
+            .prepare_spawn(prepared.attempt_id.as_str())
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let mut child = match launcher.launch(&request, &prepared.env) {
+            Ok(child) => child,
+            Err(error) => {
+                inventory
+                    .settle_spawn(claim)
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                return Err(error);
+            }
+        };
+        if inventory.attach_spawn(&claim, child.id()).is_err() {
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = inventory.settle_spawn(claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        }
+        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
+            Ok(owner) => owner,
+            Err(_) => {
+                let _ = child.kill();
+                if child.wait().is_ok() {
+                    let _ = inventory.settle_spawn(claim);
+                }
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let mut claim = Some(claim);
         let cap = request.limits.max_output_bytes;
-        let stdout_pipe = child
-            .stdout
-            .take()
-            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
-        let stderr_pipe = child
-            .stderr
-            .take()
-            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let stdout_pipe = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    &process_owner,
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let stderr_pipe = match child.stderr.take() {
+            Some(pipe) => pipe,
+            None => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    &process_owner,
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
         let mut stdout_pipe = stdout_pipe;
         let mut stderr_pipe = stderr_pipe;
-        let stdout_outcome = bounded_read(&mut stdout_pipe, cap)
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-        let stderr_outcome = bounded_read(&mut stderr_pipe, cap)
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        let stdout_outcome = match bounded_read(&mut stdout_pipe, cap) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    &process_owner,
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
+        };
+        let stderr_outcome = match bounded_read(&mut stderr_pipe, cap) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    &process_owner,
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
+        };
         let termination = poll_termination(&mut child, request.limits.max_runtime_ms).await;
+        if matches!(termination, ProcessTerminationV1::OutcomeUncertain { .. }) {
+            let _ = process_owner.terminate();
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                inventory
+                    .settle_spawn(
+                        claim
+                            .take()
+                            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+                    )
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+            } else {
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
+        } else {
+            inventory
+                .settle_spawn(
+                    claim
+                        .take()
+                        .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+                )
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
         let process_receipt = process_receipt_from(
             &prepared,
             termination,
@@ -994,6 +1122,10 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             return Err(ManagedExecutionErrorV1::AdmissionMismatch);
         }
         let prepared = self.prepare(&bundle, &request)?;
+        let inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
         if request.limits.pty_required || request.capture.pty {
             if is_extension || is_code_intel {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
@@ -1004,24 +1136,47 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             let Some(launcher) = &self.terminal_launcher else {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             };
-            let launch = launcher.launch_pty(&request, &prepared.env, size)?;
-            return self.start_persistent_pty(prepared, launch, request.limits.max_output_bytes);
+            let claim = inventory
+                .prepare_spawn(prepared.attempt_id.as_str())
+                .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+            let launch = match launcher.launch_pty(&request, &prepared.env, size) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    inventory
+                        .settle_spawn(claim)
+                        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                    return Err(error);
+                }
+            };
+            return self.start_persistent_pty(
+                prepared,
+                launch,
+                request.limits.max_output_bytes,
+                Arc::clone(inventory),
+                claim,
+            );
         }
-        let mut child = if is_extension {
+        let claim = inventory
+            .prepare_spawn(prepared.attempt_id.as_str())
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let launched = if is_extension {
             let Some(launcher) = &self.extension_launcher else {
+                let _ = inventory.settle_spawn(claim);
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             };
-            launcher.launch(&request, &prepared.env)?
+            launcher.launch(&request, &prepared.env)
         } else if is_code_intel {
             let Some(launcher) = &self.code_intel_launcher else {
+                let _ = inventory.settle_spawn(claim);
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             };
-            launcher.launch(&request, &prepared.env)?
+            launcher.launch(&request, &prepared.env)
         } else if let Some(launcher) = &self.terminal_launcher {
-            launcher.launch(&request, &prepared.env)?
+            launcher.launch(&request, &prepared.env)
         } else {
             #[cfg(not(test))]
             {
+                let _ = inventory.settle_spawn(claim);
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
             #[cfg(test)]
@@ -1037,9 +1192,25 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                 sigil_process::configure_process_tree(&mut command);
                 command
                     .spawn()
-                    .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?
+                    .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
             }
         };
+        let mut child = match launched {
+            Ok(child) => child,
+            Err(error) => {
+                inventory
+                    .settle_spawn(claim)
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                return Err(error);
+            }
+        };
+        if inventory.attach_spawn(&claim, child.id()).is_err() {
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = inventory.settle_spawn(claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        }
         let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
             Ok(owner) => owner,
             Err(_) => {
@@ -1054,7 +1225,9 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             None => {
                 let _ = process_owner.terminate();
                 let _ = child.kill();
-                let _ = child.wait();
+                if child.wait().is_ok() {
+                    let _ = inventory.settle_spawn(claim);
+                }
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
         };
@@ -1063,7 +1236,9 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             None => {
                 let _ = process_owner.terminate();
                 let _ = child.kill();
-                let _ = child.wait();
+                if child.wait().is_ok() {
+                    let _ = inventory.settle_spawn(claim);
+                }
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
         };
@@ -1098,6 +1273,8 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             prepared,
             finalizing: Arc::new(AtomicBool::new(false)),
             cancelled: Arc::new(AtomicBool::new(false)),
+            process_inventory: Arc::clone(inventory),
+            process_claim: Some(claim),
         };
         Ok(Box::new(handle))
     }
@@ -1109,14 +1286,37 @@ impl SandboxManagedExecutionServiceV1 {
         prepared: PreparedLocalRunV1,
         launch: ManagedPtyLaunchV1,
         cap: u64,
+        process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+        process_claim: sigil_resource_authority::AuthorityProcessInventoryClaimV1,
     ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
         let process_id = launch.child.process_id();
-        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(process_id) {
+        let Some(process_id) = process_id else {
+            let mut child = launch.child;
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = process_inventory.settle_spawn(process_claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        };
+        if process_inventory
+            .attach_spawn(&process_claim, process_id)
+            .is_err()
+        {
+            let mut child = launch.child;
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = process_inventory.settle_spawn(process_claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        }
+        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(process_id)) {
             Ok(owner) => owner,
             Err(_) => {
                 let mut child = launch.child;
                 let _ = child.kill();
-                let _ = child.wait();
+                if child.wait().is_ok() {
+                    let _ = process_inventory.settle_spawn(process_claim);
+                }
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
         };
@@ -1142,6 +1342,8 @@ impl SandboxManagedExecutionServiceV1 {
             attempt_id: prepared.attempt_id.clone(),
             prepared,
             cancelled: Arc::new(AtomicBool::new(false)),
+            process_inventory,
+            process_claim: Some(process_claim),
         };
         Ok(Box::new(handle))
     }
@@ -1160,6 +1362,8 @@ struct LocalPersistentProcessHandleV1 {
     prepared: PreparedLocalRunV1,
     finalizing: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    process_claim: Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
 }
 
 struct LocalPersistentOutputStreamV1 {
@@ -1286,7 +1490,7 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
         self.finalizing.store(true, Ordering::SeqCst);
-        let termination = {
+        let (termination, reaped) = {
             let mut guard = self
                 .child
                 .lock()
@@ -1294,14 +1498,26 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
             match guard.wait() {
                 Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
                     let _ = status;
-                    ProcessTerminationV1::Cancelled
+                    (ProcessTerminationV1::Cancelled, true)
                 }
-                Ok(status) => classify_status(status),
-                Err(_) => ProcessTerminationV1::OutcomeUncertain {
-                    evidence_digest: zero_hash(),
-                },
+                Ok(status) => (classify_status(status), true),
+                Err(_) => (
+                    ProcessTerminationV1::OutcomeUncertain {
+                        evidence_digest: zero_hash(),
+                    },
+                    false,
+                ),
             }
         };
+        if reaped {
+            let claim = self
+                .process_claim
+                .take()
+                .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
+            self.process_inventory
+                .settle_spawn(claim)
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
         // Drain whatever the pipes still hold so EOF markers land (bounded by pipe content).
         if let Some(mut rx) = self.frame_rx.take() {
             while let Some(frame) = rx.recv().await {
@@ -1381,6 +1597,8 @@ struct LocalPersistentPtyProcessHandleV1 {
     attempt_id: PhysicalAttemptId,
     prepared: PreparedLocalRunV1,
     cancelled: Arc<AtomicBool>,
+    process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    process_claim: Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
 }
 
 #[async_trait]
@@ -1517,7 +1735,7 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
     async fn wait_and_finalize(
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
-        let termination = {
+        let (termination, reaped) = {
             let mut child = self
                 .child
                 .lock()
@@ -1525,14 +1743,26 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
             match child.wait() {
                 Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
                     let _ = status;
-                    ProcessTerminationV1::Cancelled
+                    (ProcessTerminationV1::Cancelled, true)
                 }
-                Ok(status) => classify_pty_status(status),
-                Err(_) => ProcessTerminationV1::OutcomeUncertain {
-                    evidence_digest: zero_hash(),
-                },
+                Ok(status) => (classify_pty_status(status), true),
+                Err(_) => (
+                    ProcessTerminationV1::OutcomeUncertain {
+                        evidence_digest: zero_hash(),
+                    },
+                    false,
+                ),
             }
         };
+        if reaped {
+            let claim = self
+                .process_claim
+                .take()
+                .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
+            self.process_inventory
+                .settle_spawn(claim)
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
         // Closing the master releases the PTY reader after the child has been reaped.
         self.master
             .lock()
@@ -1780,6 +2010,9 @@ mod tests {
             Arc::new(TestPlannerV1 { isolation }),
             root.to_path_buf(),
         )
+        .with_process_inventory(Arc::new(
+            sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default(),
+        ))
         .with_one_shot_launcher(Arc::new(CommandManagedOneShotLaunchServiceV1::new(
             root.to_path_buf(),
             OpaquePermissionSubjectRef::new("subj-1".to_owned()),

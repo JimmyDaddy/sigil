@@ -18,6 +18,7 @@ pub mod journal;
 pub mod lease;
 pub mod maintenance;
 pub mod native_save;
+pub mod process_inventory;
 pub mod provider_registry;
 pub mod quota;
 pub mod reconcile;
@@ -43,6 +44,12 @@ pub use journal::{JournalErrorV1, ResourceJournalEventV1, ResourceJournalHeaderV
 pub use lease::{
     LeaseTransitionErrorV1, ManagedGenerationRecordV1, ManagedLeaseHandleV1,
     ResourceGenerationStateV1,
+};
+#[cfg(feature = "test-support")]
+pub use process_inventory::InMemoryAuthorityProcessInventoryV1;
+pub use process_inventory::{
+    AuthorityManagedProcessInventoryV1, AuthorityProcessInventoryClaimV1,
+    AuthorityProcessInventoryErrorV1, AuthorityProcessInventoryPortV1,
 };
 pub use quota::{QuotaBookV1, QuotaErrorV1, QuotaReservationV1};
 pub use spawn_protocol::{PreparedSandboxLaunchV1, SandboxBoundExecutionLeaseV1};
