@@ -80,6 +80,10 @@ esac
 # Every qualification step runs under a newly-created HOME. This keeps the authority bootstrap
 # namespace, config, state and cache writes out of the operator's real user directory. The marker
 # is checked before cleanup so a future edit cannot accidentally turn this into broad deletion.
+qualification_original_home="${HOME:-}"
+[[ -n "$qualification_original_home" ]] || { echo "HOME is required for qualification" >&2; exit 1; }
+qualification_rustup_home="${RUSTUP_HOME:-$qualification_original_home/.rustup}"
+qualification_cargo_home="${CARGO_HOME:-$qualification_original_home/.cargo}"
 qualification_home="$(mktemp -d -t sigil-r71-qualification-home-XXXXXX)"
 qualification_home_marker="$qualification_home/.sigil-r71-qualification-home"
 touch "$qualification_home_marker"
@@ -103,6 +107,8 @@ cleanup_qualification_home() {
 trap cleanup_qualification_home EXIT
 export HOME="$qualification_home"
 export USERPROFILE="$qualification_home"
+export RUSTUP_HOME="$qualification_rustup_home"
+export CARGO_HOME="$qualification_cargo_home"
 export XDG_CONFIG_HOME="$qualification_home/.config"
 export XDG_STATE_HOME="$qualification_home/.local/state"
 export XDG_CACHE_HOME="$qualification_home/.cache"
