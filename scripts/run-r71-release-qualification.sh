@@ -111,6 +111,9 @@ cleanup_qualification_home() {
     qualification_home_cleaned=1
   else
     echo "qualification HOME cleanup left unexpected residue: $qualification_home" >&2
+    find "$qualification_home" -mindepth 1 -maxdepth 4 -print 2>/dev/null \
+      | LC_ALL=C sort \
+      | head -50 >&2 || true
     return 1
   fi
 }
@@ -120,6 +123,10 @@ export USERPROFILE="$qualification_home"
 export RUSTUP_HOME="$qualification_rustup_home"
 export CARGO_HOME="$qualification_cargo_home"
 export COREPACK_HOME="$qualification_corepack_home"
+# VsDevCmd starts the vctip telemetry helper on Windows unless explicitly disabled. The helper can
+# outlive Cargo and keep the isolated qualification profile active after every test has passed.
+# Prevent it at process creation instead of killing an unowned machine-global process in cleanup.
+export VSCMD_SKIP_SENDTELEMETRY=1
 # Some product-surface fixtures intentionally exercise process-global environment seams. Keep the
 # required release qualification deterministic while the tests share one isolated HOME.
 export RUST_TEST_THREADS=1

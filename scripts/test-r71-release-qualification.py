@@ -86,12 +86,14 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn('export SIGIL_R71_BOOTSTRAP_ISOLATED=1', wrapper)
         self.assertIn('qualification_corepack_home="${COREPACK_HOME:-$qualification_original_home/.cache/node/corepack}"', wrapper)
         self.assertIn('export COREPACK_HOME="$qualification_corepack_home"', wrapper)
+        self.assertIn('export VSCMD_SKIP_SENDTELEMETRY=1', wrapper)
         self.assertIn('export RUST_TEST_THREADS=1', wrapper)
         self.assertIn('qualification_home_marker="$qualification_home/.sigil-r71-qualification-home"', wrapper)
         self.assertIn('refusing qualification HOME cleanup without ownership marker', wrapper)
         self.assertIn('for qualification_cleanup_pass in 1 2 3', wrapper)
         self.assertIn('-delete 2>/dev/null || true', wrapper)
         self.assertIn('qualification HOME cleanup left unexpected residue', wrapper)
+        self.assertIn('find "$qualification_home" -mindepth 1 -maxdepth 4 -print', wrapper)
         self.assertIn('"bootstrap_root_residue_count_before_cleanup"', wrapper)
 
 
