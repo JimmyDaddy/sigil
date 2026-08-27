@@ -97,12 +97,21 @@ cleanup_qualification_home() {
     echo "refusing qualification HOME cleanup without ownership marker" >&2
     return
   fi
-  find "$qualification_home" -depth \( -type f -o -type l -o -type p -o -type s \) -delete
-  find "$qualification_home" -depth -type d -empty -delete
+  # Windows may create and remove INetCache compatibility directories while `find` is walking
+  # the isolated profile. Retry the same marker-bounded cleanup so a disappeared child is not
+  # mistaken for a qualification failure; the exact root must still be gone after the retries.
+  for qualification_cleanup_pass in 1 2 3; do
+    find "$qualification_home" -depth \( -type f -o -type l -o -type p -o -type s \) -delete 2>/dev/null || true
+    find "$qualification_home" -depth -type d -empty -delete 2>/dev/null || true
+    if [[ ! -e "$qualification_home" ]]; then
+      break
+    fi
+  done
   if [[ ! -e "$qualification_home" ]]; then
     qualification_home_cleaned=1
   else
     echo "qualification HOME cleanup left unexpected residue: $qualification_home" >&2
+    return 1
   fi
 }
 trap cleanup_qualification_home EXIT
