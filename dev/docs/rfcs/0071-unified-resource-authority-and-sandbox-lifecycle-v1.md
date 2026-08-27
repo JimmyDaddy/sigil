@@ -1,12 +1,12 @@
 # RFC-0071：Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1
 
-状态：Qualification Candidate / Not Frozen（2026-08-27；R71.9q authority-owned process inventory 与真实 operator recovery 已完成，等待最终 exact-SHA local/five-platform qualification）
+状态：Implemented / Frozen（2026-08-28；R71.9q exact-SHA local full 与 fixed-candidate five-platform hosted qualification 已通过）
 
 > 当前审查覆盖、逐项回应与历史 exact-SHA evidence 见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十三轮曾在 `441243dfdffaaba27ea5a59225d64c6f4405387c` 冻结；第三十四轮真实用户 journal 又暴露 pending source-bound grant rollover、sequence-only broker proof 重用、legacy marker alias 与多 composer snapshot 覆盖缺陷。第三十五轮 session `70c1896d-02a8-4c62-b273-3e43aeeb95aa` 进一步证明：shipping composition 创建空 borrowed-subject registry，却没有 production workspace registration/onboarding；plan-review child/finalizer 也没有 authority-managed ArtifactStaging/ArtifactStore resource bundle。现有 full gate 使用忽略真实 `ToolContext` 的 inspection fixture，无法证明实际 `ls/grep/read_file` 产品链。第三十四轮 qualification candidate 判定和更早 freeze 均被本段 supersede；完成 R71.9 implementation、真实 current-schema E2E 与新 clean exact-SHA full/five-platform qualification 前不得恢复 Candidate/Frozen，也不得启动或继续 RFC-0070 implementation。
 
 创建日期：2026-08-23
 
-修订日期：2026-08-26
+修订日期：2026-08-28
 
 依赖：
 
@@ -10761,3 +10761,13 @@ normal current-schema boot 在同一 publication transaction 内初始化/验证
 定向证据覆盖 durable `Prepared → Attached → Settled` 阻塞语义、live process rejection、corrupt journal failed-boot evidence、config切换、interactive authorization、新 epoch activation与 post-recovery real boot，以及 managed one-shot/PTY/non-PTY/extension/code-intel/verification routes。该实现进入 `Qualification Candidate / Not Frozen`；最终状态仍必须绑定新的 clean exact SHA，并通过 local full 与固定五平台 hosted qualification，不能继承 `0103e30a` 的证据。
 
 R71.9q 的两轮独立审计还关闭了四个跨模块边界：model-eval 必须复用 production composition；fresh-root receipt/首次 boot 必须绑定目录 identity 并拒绝 roots alias；execute 必须在 transaction lock 内重读 pending boot-failure evidence；process inventory 的“首次 cutover”与“durable state 丢失”必须可区分。最后一项由 authority config generation schema v2 的 `process_inventory_required` 表达：旧 schema v1 只允许一次锁内 inventory+marker 初始化，随后升级并持久声明 required；schema v2 后任一或全部 inventory object 缺失都 fail closed，不能重建空清单。第二轮审计后未发现剩余 P1/P2 implementation finding，下一状态转换只取决于同一 clean exact SHA 的 local full 和固定五平台 hosted qualification。
+
+### R71.9q final qualification and freeze attestation（2026-08-28）
+
+R71.9q 的最终 qualified implementation candidate 为 `ec5459d829e086fbb73f090dcb3201f649d99d7b`，base 为 `44d043517d1893ff1043f5597aa71d31b527f16a`。candidate 先通过 clean exact-SHA local full：macOS Seatbelt、`30/30` steps、`228/228` fault binding、`dirty=false`；证据 `.repo-local-dev/r71-evidence/ec5459d8-r719q-final/qualification.json` 的 SHA-256 为 `659dbc125bc2cb190217dd2470d808f30eb51bc6a62c3dc04bd3ea525afb417b`。
+
+fixed `r71-release-candidate` 已通过 `--force-with-lease` 精确指向该 candidate，随后 hosted run `33110285888` 五个 required jobs 全部 success：[GitHub Actions run](https://github.com/JimmyDaddy/sigil/actions/runs/33110285888)。jobs 为 toolchain-offline `98651014991`、docker-declared `98651015212`、windows-restricted `98651015251`、macos-seatbelt `98651015271`、linux-bubblewrap `98651015308`。五份 hosted evidence 均验证为同一 candidate、`result=passed`、`228` fault cases、`dirty=false`、`bootstrap_root_isolated=true`；artifact SHA-256 记录在 execution plan 与 handoff 中。
+
+历史 failed candidate/run（包括 Windows cleanup race、Linux hosted clippy 暴露的 portable mask、以及其后的修复前候选）继续作为不可变审计事实保留，未被继承为资格。真实 `/Users/jimmydaddy/.sigil/authority-bootstrap-v1` 的 `301` 个 opaque namespace 未被 qualification 删除、GC 或 rewrite；资格 wrapper 使用 marker-owned temporary HOME。由此 RFC-0071 状态正式为 **Implemented / Frozen**。RFC-0070 的前置条件已清除，但 RFC-0070 实施不属于本 RFC，本次未启动。
+
+本节后的 docs-only 收尾 commit 只同步 review、handoff、execution plan 与 RFC 状态，不改变 qualified implementation SHA。若后续修改 R71.9q production code，必须以新 exact SHA 从 local full 开始并重新取得 hosted evidence。

@@ -3,7 +3,7 @@
 > Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
 > no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
 
-> RFC-0071 qualification-candidate snapshot (2026-08-26): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. The previously frozen SHA was superseded by the post-freeze pending-admission repair: durable admissions now use exact journal binding, broker identities are process-unique, legacy marker aliases are retained and terminally quarantined without guessed selection, and file-journal appends reject stale snapshots. A new exact-SHA full/five-platform qualification is required before this snapshot is frozen again.
+> RFC-0071 final frozen snapshot (2026-08-28): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. The post-freeze pending-admission, bootstrap recovery, process-inventory, delete-recovery, Windows cleanup and cross-platform portability findings were closed in the final candidate `ec5459d829e086fbb73f090dcb3201f649d99d7b`, which passed exact-SHA local full and fixed five-platform hosted qualification. The earlier qualification-candidate snapshot and all older frozen claims remain historical and are superseded by this exact qualified object.
 
 ## 1. 背景
 
@@ -2868,3 +2868,9 @@ normal boot 对 journal composition failure 写入 `boot-failure-evidence.json`�
 所有 production managed routes由 current boot composition注入同一 durable inventory；model-eval verification也复用 boot composition route。`InMemoryAuthorityProcessInventoryV1` 位于显式 `test-support` feature，shipping dependency graph中不存在。该设计保持 Resource Authority 负责 durable ownership/inventory，sandbox负责 physical spawn/kill/reap，runtime只负责编排，CLI只负责 exact operator confirmation。
 
 process inventory 的首次引入不是根据“文件不存在”永久猜测。authority config generation schema v2 持久声明 `process_inventory_required`：旧 schema v1 只允许在 bootstrap publication lock 内先发布空 snapshot 和 requirement marker，再升级 generation record；任一步 crash 都可按 v1 继续完成。schema v2 生效后，snapshot 或 marker 任一/全部缺失均作为 durable authority state loss fail closed，不得重建空 inventory。fresh-root selection 同时绑定 canonical paths 与目录 identity，operator authorize/execute 在共享 transaction 内重读 pending failure evidence和 inventory frontier，从而关闭升级、目录替换和 evidence resolution 的 TOCTOU。
+
+### R71.9q final qualification and freeze attestation（2026-08-28）
+
+最终 qualified implementation candidate 为 `ec5459d829e086fbb73f090dcb3201f649d99d7b`，base 为 `44d043517d1893ff1043f5597aa71d31b527f16a`。该 SHA 的 macOS Seatbelt local full 为 `30/30` steps、`228/228` fault binding、`dirty=false`；fixed `r71-release-candidate` 随后完成 five-platform hosted run `33110285888`，toolchain-offline、docker-declared、windows-restricted、macos-seatbelt、linux-bubblewrap 五个 required jobs 全部 success。local evidence SHA-256 为 `659dbc125bc2cb190217dd2470d808f30eb51bc6a62c3dc04bd3ea525afb417b`；五份 hosted evidence 均绑定同一 candidate、`passed`、`228` fault cases、`dirty=false`、`bootstrap_root_isolated=true`。
+
+R71.9q 现正式为 `Implemented / Frozen`。历史失败 candidate/run 继续作为审计事实保留，不继承为资格；真实用户 bootstrap namespace 未被 qualification 删除、GC 或 rewrite。后续若修改 production code，必须以新 exact SHA 重新执行 local full 与五平台 hosted qualification。
