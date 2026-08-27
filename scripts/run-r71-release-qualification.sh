@@ -87,11 +87,18 @@ qualification_rustup_home="${RUSTUP_HOME:-$qualification_original_home/.rustup}"
 qualification_cargo_home="${CARGO_HOME:-$qualification_original_home/.cargo}"
 qualification_corepack_home="${COREPACK_HOME:-$qualification_original_home/.cache/node/corepack}"
 qualification_windows_vctip_baseline=""
-if [[ "$platform" == "windows" && "${GITHUB_ACTIONS:-}" == "true" ]]; then
+qualification_home_windows=""
+if [[ "$platform" == "windows" ]]; then
   command -v powershell.exe >/dev/null || {
-    echo "powershell.exe is required to track Windows qualification helpers" >&2
+    echo "powershell.exe is required for Windows qualification cleanup" >&2
     exit 1
   }
+  command -v cygpath >/dev/null || {
+    echo "cygpath is required to bind the Windows qualification HOME" >&2
+    exit 1
+  }
+fi
+if [[ "$platform" == "windows" && "${GITHUB_ACTIONS:-}" == "true" ]]; then
   qualification_windows_vctip_baseline="$(
     # shellcheck disable=SC2016 # This single-quoted argument is PowerShell source; Bash must not expand it.
     powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
@@ -103,6 +110,14 @@ export SIGIL_R71_QUALIFICATION_VCTIP_BASELINE="$qualification_windows_vctip_base
 qualification_home="$(mktemp -d -t sigil-r71-qualification-home-XXXXXX)"
 qualification_home_marker="$qualification_home/.sigil-r71-qualification-home"
 touch "$qualification_home_marker"
+if [[ "$platform" == "windows" ]]; then
+  qualification_home_windows="$(cygpath -w "$qualification_home" | tr -d '\r\n')"
+  [[ -n "$qualification_home_windows" ]] || {
+    echo "failed to convert qualification HOME to a Windows path" >&2
+    exit 1
+  }
+  export SIGIL_R71_QUALIFICATION_HOME_WINDOWS="$qualification_home_windows"
+fi
 qualification_home_cleaned=0
 settle_qualification_windows_helpers() {
   if [[ "$platform" != "windows" || "${GITHUB_ACTIONS:-}" != "true" ]]; then
@@ -133,12 +148,18 @@ cleanup_qualification_home() {
     echo "failed to settle Windows qualification helpers" >&2
     return 1
   fi
+  if ! cleanup_windows_qualification_home; then
+    echo "failed to remove Windows qualification HOME with the bounded PowerShell cleanup" >&2
+    return 1
+  fi
   # Windows may create and remove INetCache compatibility directories while `find` is walking
   # the isolated profile. Retry the same marker-bounded cleanup so a disappeared child is not
   # mistaken for a qualification failure; the exact root must still be gone after the retries.
   for _qualification_cleanup_pass in 1 2 3; do
-    find "$qualification_home" -depth \( -type f -o -type l -o -type p -o -type s \) -delete 2>/dev/null || true
-    find "$qualification_home" -depth -type d -empty -delete 2>/dev/null || true
+    if [[ -e "$qualification_home" ]]; then
+      find "$qualification_home" -depth \( -type f -o -type l -o -type p -o -type s \) -delete 2>/dev/null || true
+      find "$qualification_home" -depth -type d -empty -delete 2>/dev/null || true
+    fi
     if [[ ! -e "$qualification_home" ]]; then
       break
     fi
@@ -152,6 +173,45 @@ cleanup_qualification_home() {
       | head -50 >&2 || true
     return 1
   fi
+}
+cleanup_windows_qualification_home() {
+  if [[ "$platform" != "windows" ]]; then
+    return
+  fi
+  # Git Bash `find -delete` does not reliably remove the empty Windows compatibility-directory
+  # chain created under INetCache. Use PowerShell literal paths, but keep the same exact marker
+  # ownership proof and refuse to continue if a later pass no longer has that proof.
+  # shellcheck disable=SC2016 # This single-quoted argument is PowerShell source; Bash must not expand it.
+  powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
+    '$ErrorActionPreference = "Stop";
+      $root = [IO.Path]::GetFullPath($env:SIGIL_R71_QUALIFICATION_HOME_WINDOWS);
+      $marker = Join-Path $root ".sigil-r71-qualification-home";
+      function Assert-QualificationHomeMarker {
+        $item = Get-Item -LiteralPath $marker -Force -ErrorAction Stop;
+        if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+          throw "qualification HOME ownership marker is not a regular file: $marker";
+        }
+      }
+      if (-not (Test-Path -LiteralPath $root -PathType Any)) { exit 0 }
+      Assert-QualificationHomeMarker;
+      $lastError = $null;
+      for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        try {
+          @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop |
+            Where-Object { $_.FullName -ne $marker } |
+            Sort-Object FullName -Descending) |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -Recurse -ErrorAction Stop };
+          if (-not (Test-Path -LiteralPath $root -PathType Any)) { exit 0 }
+          Assert-QualificationHomeMarker;
+          Remove-Item -LiteralPath $root -Force -Recurse -ErrorAction Stop;
+          if (-not (Test-Path -LiteralPath $root -PathType Any)) { exit 0 }
+        } catch {
+          $lastError = $_;
+        }
+        Start-Sleep -Milliseconds 250;
+      }
+      if ($lastError) { throw $lastError }
+      throw "qualification HOME cleanup left Windows residue: $root"'
 }
 trap cleanup_qualification_home EXIT
 export HOME="$qualification_home"
