@@ -5,6 +5,11 @@
 
 > RFC-0071 final frozen snapshot (2026-08-28): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. The post-freeze pending-admission, bootstrap recovery, process-inventory, delete-recovery, Windows cleanup and cross-platform portability findings were closed in the final candidate `ec5459d829e086fbb73f090dcb3201f649d99d7b`, which passed exact-SHA local full and fixed five-platform hosted qualification. The earlier qualification-candidate snapshot and all older frozen claims remain historical and are superseded by this exact qualified object.
 
+> RFC-0070 R70.0 baseline (2026-08-28): the post-R71 TUI migration boundary is recorded in
+> `dev/governance/r70-command-event-migration-v1.toml`. This slice does not move authority ownership or
+> split packages; it freezes the production protocol discovery set and measures the existing projection/layout/
+> render/present path before R70.1 introduces `CommittedPresentation`.
+
 ## 1. 背景
 
 `sigil` 是一个基于 Rust 的 AI coding agent：内核复用、前端可插拔，

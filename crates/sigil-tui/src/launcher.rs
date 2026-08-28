@@ -50,7 +50,6 @@ use sigil_runtime::support::SupportBuildInfo;
 #[cfg(not(test))]
 use sigil_updater::BuildMetadata;
 
-#[cfg(not(test))]
 use crate::ui;
 use crate::{
     app::{AppAction, AppState},
@@ -435,6 +434,7 @@ fn finalize_terminal_presentation<B: Backend>(terminal: &mut Terminal<B>) -> Res
     // time out once the application loop has stopped. Exit cleanup must be write-only.
     backend.clear()?;
     backend.set_cursor_position(Position::ORIGIN)?;
+    let _phase_timing = crate::phase_timing::PhaseTimer::new("terminal_flush");
     backend.flush()
 }
 
@@ -565,10 +565,7 @@ async fn run_app(
         }
 
         if dirty {
-            terminal.draw(|frame| {
-                latest_frame_area = frame.area();
-                ui::render(frame, app);
-            })?;
+            render_timed_frame(terminal, app, &mut latest_frame_area)?;
             let _ = app.maybe_start_automatic_update_check();
             let _ = app.acknowledge_active_egress_disclosure_frame();
             last_spinner_tick = spinner_tick;
@@ -743,6 +740,19 @@ fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) 
         frame_area
     };
     LayoutSnapshot::from_app(screen, app)
+}
+
+fn render_timed_frame<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut AppState,
+    latest_frame_area: &mut Rect,
+) -> Result<(), B::Error> {
+    let _phase_timing = crate::phase_timing::PhaseTimer::new("terminal_present");
+    terminal.draw(|frame| {
+        *latest_frame_area = frame.area();
+        ui::render(frame, app);
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

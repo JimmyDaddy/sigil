@@ -34,6 +34,7 @@ const FOOTER_GIT_MIN_WIDTH: u16 = 12;
 const FOOTER_SECTION_GAP: u16 = 1;
 
 pub fn render(frame: &mut Frame, app: &AppState) {
+    let _phase_timing = crate::phase_timing::PhaseTimer::new("render");
     app.begin_egress_disclosure_frame();
     let theme = theme::resolve_for_app(app);
     if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {

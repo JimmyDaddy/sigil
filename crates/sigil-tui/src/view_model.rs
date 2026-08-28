@@ -29,6 +29,7 @@ pub(crate) struct UiViewModel {
 
 impl UiViewModel {
     pub(crate) fn from_app(app: &AppState) -> Self {
+        let _phase_timing = crate::phase_timing::PhaseTimer::new("app_projection");
         Self {
             info_rail: InfoRailViewModel::from_app(app),
             composer: ComposerViewModel::from_app(app),

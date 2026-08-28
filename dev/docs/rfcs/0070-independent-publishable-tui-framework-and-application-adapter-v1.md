@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：Proposed（已按 2026-08-23 architecture review 修订并通过独立只读复核；等待正式冻结决策，尚未实施）
+状态：R70.0 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；当前仅实施 R70.0 基线 slice）
 
 创建日期：2026-08-23
 
@@ -2875,3 +2875,28 @@ R70.x
 - `src/traits/focusable.rs:72-135`：未与manager完整贯通的focus metadata；
 - `src/theme.rs:31-231`：semantic palette与显式widget theme；
 - `src/components/scrollable_content.rs:212-220,390-400`：visible slice但非variable-height virtualization。
+
+## 31. 实施记录
+
+### R70.0：冻结基线、能力清单与 profiler（2026-08-28）
+
+- implementation commit：`rfc-0070(R70.0): establish post-R71 TUI baseline`；基线提交为
+  `c3b3982388e8e97a19ac1adb3576b6f8063d806f`，R71 qualified implementation candidate 为
+  `ec5459d829e086fbb73f090dcb3201f649d99d7b`。
+- moved authority：没有移动 Resource Authority、Sandbox 或 permission/resource/recovery owner；本 slice
+  只冻结其 kernel public contract，并把后续 application migration 的生产 enum 边界登记到
+  `dev/governance/r70-command-event-migration-v1.toml`。
+- deleted legacy path：没有提前删除 runner、`AppState` 或 click-time layout；这些是 R70.1/R70.6 的明确后续
+  删除项。
+- behavior parity evidence：`scripts/tui-mouse-smoke.sh` 现在产生稳定 check ID、自动/半自动模式和可审计 Markdown
+  matrix；`scripts/check-r70-baseline.sh` 对 R71 handoff、冻结 contract digest、fixture 和生产 enum 做 fail-closed
+  exact join。当前 R71 recovery action、Worker/App/Surface protocol 共发现并显式登记 `274/274` variants。
+- benchmark before/after：R70.0 临时 profiler 已接入 production TUI present helper；以
+  `SIGIL_R70_PHASE_TIMINGS=1 scripts/profile-r70-tui-baseline.sh` 生成 raw logs 与 phase report，当前样本覆盖
+  `app_projection`、`layout_snapshot`、`render`、`terminal_present`。该 report 是 R70.1 之前的 baseline，不是
+  性能改进声明。
+- tests/gates run：`cargo fmt --all --check`、R70 baseline checker、R70 migration unit tests、production present
+  timing probe、两个 targeted TUI tests 通过。
+- remaining deviations / expiry：R70.0 仍未完成全部长期 Done 条件；`CommittedPresentation`、public package split、
+  application contract、100k cold-cache benchmark 和 legacy runner removal 保留给 R70.1-R70.8。临时 phase
+  instrumentation 的 expiry 为 R70.1 完成时，届时必须迁移或删除，不能成为永久性能接口。

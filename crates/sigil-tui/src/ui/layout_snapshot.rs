@@ -240,6 +240,7 @@ pub(crate) fn live_transcript_rows_for_app(screen: Rect, app: &AppState) -> usiz
 
 impl LayoutSnapshot {
     pub fn from_app(screen: Rect, app: &AppState) -> Self {
+        let _phase_timing = crate::phase_timing::PhaseTimer::new("layout_snapshot");
         if app.is_setup_mode() {
             let mut snapshot = Self::single(screen, LayoutMode::Setup);
             snapshot.setup_hit_areas = setup_hit_areas(screen, app);

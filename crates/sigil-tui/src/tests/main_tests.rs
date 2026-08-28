@@ -27,7 +27,7 @@ use super::{
     apply_mouse_outcome, build_initial_app, drain_worker_messages, enter_terminal_presentation,
     external_launch_plan, finalize_terminal_presentation, flush_pending_worker_commands,
     leave_terminal_presentation, mouse_layout_snapshot, next_mouse_capture_action,
-    next_wake_deadline, process_app_action, process_app_action_with_spawner,
+    next_wake_deadline, process_app_action, process_app_action_with_spawner, render_timed_frame,
     render_tui_exit_resume_hint, restart_worker_after_session_transition,
     restore_initial_session_from_disk,
 };
@@ -203,6 +203,18 @@ fn terminal_finalization_clears_the_frame_and_parks_the_cursor_at_origin() {
             .all(|cell| cell.symbol() == " "),
         "no stale TUI cells may remain before the resume hint or a fatal error is printed"
     );
+}
+
+#[test]
+fn timed_frame_path_uses_the_production_present_helper() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    let mut frame_area = Rect::default();
+
+    render_timed_frame(&mut terminal, &mut app, &mut frame_area)?;
+
+    assert_eq!(frame_area, Rect::new(0, 0, 80, 24));
+    Ok(())
 }
 
 #[test]
