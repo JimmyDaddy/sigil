@@ -3090,3 +3090,12 @@ R70.x
   conformance、所有 shared command 的四表面 conformance、cold-cache 100k page e2e 与完整 migration manifest
   gate 仍需继续完成。TUI ACK 已进入 durable managed writer，但 HTTP/Desktop/CLI 还未全部复用该 delivery
   journal。R70.5 package split 不得在这些条件未满足前开始。
+- TUI queue mutation cutover：`37dbbfd4` 将 application contract 扩展为 queue projection、共享
+  queue-generation token 与 typed move action；runtime projection 从 durable conversation queue records 重建
+  paused/items/status/dispatchable 状态。TUI production main-thread 的 enqueue、edit、cancel、move、pause/resume
+  先通过 generation-bound `ApplicationClient` 与 runtime reservation service，再由 worker executor 发出原有
+  typed worker command；未有 worker terminal domain receipt 时保持 `Uncertain`。HTTP 复用相同 generation encoder。
+  HTTP 无 anchor 的 Move、TUI 非主线程 target、reorder/interrupt 等不能无损映射的路径维持 typed rejection 或
+  明确 legacy adapter 边界。application/runtime/HTTP/TUI 回归与四包 strict clippy 通过（TUI `1720/1720`，3
+  ignored）。该 slice 只关闭主线程 queue mutation 子集；TUI task/agent target、promote/send-now、剩余旧动作、
+  HTTP compaction preview、四表面 conformance 与完整 migration manifest 仍未闭合。
