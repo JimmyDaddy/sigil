@@ -11,9 +11,9 @@ use std::{
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sigil_kernel::{
-    SessionRef, project_conversation_prompt_for_persistence, safe_persistence_text,
-};
+#[cfg(test)]
+use sigil_kernel::project_conversation_prompt_for_persistence;
+use sigil_kernel::{SessionRef, safe_persistence_text};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -1371,25 +1371,73 @@ impl HttpSessionRunRegistry {
         }
         validate_conversation_queue_command(&command.payload)?;
 
-        let request = HttpReservedCommand::queue(session_id, &command)?;
-        let reservation =
-            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
-                HttpCommandClaim::Execute(reservation) => reservation,
-                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_queue(),
-            };
-        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-        let action = command.payload.action.kind();
-        let expected_generation = command.payload.expected_generation.clone();
+        #[cfg(not(test))]
+        {
+            let client = self.application_client(session_id, &command.client_id)?;
+            self.command_conversation_queue_via_application(session_id, command, client)
+        }
+        #[cfg(test)]
+        if let Ok(client) = self.application_client(session_id, &command.client_id) {
+            return self.command_conversation_queue_via_application(session_id, command, client);
+        }
+
+        #[cfg(test)]
+        {
+            let request = HttpReservedCommand::queue(session_id, &command)?;
+            let reservation =
+                match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                    HttpCommandClaim::Execute(reservation) => reservation,
+                    HttpCommandClaim::Wait(reservation) => return reservation.wait_for_queue(),
+                };
+            let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+            let result = self.command_conversation_queue_effect(
+                session_id,
+                &command.command_id,
+                &command.client_id,
+                &command.payload,
+                command.correlation_id.as_deref(),
+            );
+            completion.complete(HttpCommandCompletion::Queue(Box::new(result.clone())))?;
+            result
+        }
+    }
+
+    pub(crate) fn command_conversation_queue_from_application(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        client_id: &str,
+        request: HttpConversationQueueCommandRequest,
+        correlation_id: Option<String>,
+    ) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
+        validate_conversation_queue_command(&request)?;
+        self.command_conversation_queue_effect(
+            session_id,
+            command_id,
+            client_id,
+            &request,
+            correlation_id.as_deref(),
+        )
+    }
+
+    fn command_conversation_queue_effect(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        client_id: &str,
+        request: &HttpConversationQueueCommandRequest,
+        correlation_id: Option<&str>,
+    ) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
+        let action = request.action.kind();
+        let expected_generation = request.expected_generation.clone();
         let is_interrupt = matches!(
-            command.payload.action,
+            &request.action,
             HttpConversationQueueCommandAction::InterruptAndRunNext { .. }
         );
         let queue_command_lock = self.queue_command_lock(session_id);
-        let queue_command_guard = Some(
-            queue_command_lock
-                .lock()
-                .expect("per-session queue command lock should not be poisoned"),
-        );
+        let queue_command_guard = queue_command_lock
+            .lock()
+            .expect("per-session queue command lock should not be poisoned");
         let result = (|| {
             let (session, foreground_owner, queue_session_guard) = {
                 let mut state = self.lock_state();
@@ -1426,10 +1474,9 @@ impl HttpSessionRunRegistry {
                     },
                 )
             };
-            // Held until the closure ends so the per-session queue mutation lock stays exclusive.
             let _queue_session_guard = queue_session_guard;
 
-            let interrupt_owner = match &command.payload.action {
+            let interrupt_owner = match &request.action {
                 HttpConversationQueueCommandAction::InterruptAndRunNext {
                     foreground_run_id,
                     foreground_owner_revision,
@@ -1448,9 +1495,9 @@ impl HttpSessionRunRegistry {
             };
 
             let driver_command = HttpConversationQueueDriverCommand {
-                command_id: command.command_id.clone(),
-                client_id: command.client_id.clone(),
-                request: command.payload.clone(),
+                command_id: command_id.to_owned(),
+                client_id: client_id.to_owned(),
+                request: request.clone(),
             };
             let queue = catch_unwind(AssertUnwindSafe(|| {
                 self.driver.mutate_conversation_queue(
@@ -1465,32 +1512,96 @@ impl HttpSessionRunRegistry {
             })?
             .map_err(queue_driver_registry_error)?;
 
-            // InterruptAndRunNext is non-destructive: the foreground run is never cancelled.
-            // The head queue item is delivered by the kernel's safe-point injection while the
-            // run continues, or by the next idle dispatch after it finishes.
-
             Ok(HttpConversationQueueCommandReceipt {
-                command_id: command.command_id.clone(),
-                client_id: command.client_id.clone(),
-                session_id: command.session_id.clone(),
+                command_id: command_id.to_owned(),
+                client_id: client_id.to_owned(),
+                session_id: session_id.to_owned(),
                 action,
-                expected_generation: expected_generation.clone(),
+                expected_generation,
                 generation: queue.generation.clone(),
                 interrupt_owner,
                 queue,
-                correlation_id: command.correlation_id.clone(),
+                correlation_id: correlation_id.map(str::to_owned),
                 replayed: false,
             })
         })();
         drop(queue_command_guard);
-        completion.complete(HttpCommandCompletion::Queue(Box::new(result.clone())))?;
 
         if result.is_ok() && !is_interrupt {
-            // Queue state is already durable and replayable. Scheduler admission is intentionally
-            // best-effort and will be retried after release, resume, reopen, or a later mutation.
             let _ = self.schedule_next_queued_run(session_id);
         }
         result
+    }
+
+    fn command_conversation_queue_via_application(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
+        client: crate::application_bridge::HttpApplicationClient,
+    ) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
+        client.refresh().map_err(application_registry_error)?;
+        let (expected_generation, action) =
+            crate::application_bridge::application_queue_command(&command.payload)
+                .map_err(application_registry_error)?;
+        let receipt = client
+            .execute(
+                &command.command_id,
+                sigil_application::ApplicationCommand::Conversation(
+                    sigil_application::ConversationCommand::Queue {
+                        expected_generation,
+                        action,
+                    },
+                ),
+            )
+            .map_err(application_registry_error)?;
+        let replayed = match receipt {
+            sigil_application::ApplicationCommandReceipt::Uncertain(_) => false,
+            sigil_application::ApplicationCommandReceipt::ReplayedUncertain(_) => true,
+            sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application conversation queue",
+                    run_id: session_id.to_owned(),
+                    message: rejection.reason,
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
+                return Err(HttpRegistryError::CommandKeyConflict {
+                    session_id: command.session_id,
+                    client_id: command.client_id,
+                    command_id: command.command_id,
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::InFlight(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application conversation queue",
+                    run_id: session_id.to_owned(),
+                    message: "application conversation queue command is already in flight"
+                        .to_owned(),
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::Settled(_)
+            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application conversation queue",
+                    run_id: session_id.to_owned(),
+                    message: "application conversation queue returned an invalid settled receipt"
+                        .to_owned(),
+                });
+            }
+        };
+        let queue = self.conversation_queue(session_id)?;
+        Ok(HttpConversationQueueCommandReceipt {
+            command_id: command.command_id,
+            client_id: command.client_id,
+            session_id: command.session_id,
+            action: command.payload.action.kind(),
+            expected_generation: command.payload.expected_generation,
+            generation: queue.generation.clone(),
+            interrupt_owner: self.session_foreground_owner(session_id)?,
+            queue,
+            correlation_id: command.correlation_id,
+            replayed,
+        })
     }
 
     /// Admits and starts the next queue-owned foreground run without using the public run route.
@@ -4242,6 +4353,7 @@ impl HttpCommandKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum HttpCommandKind {
     #[cfg(test)]
     Start,
@@ -4392,6 +4504,7 @@ impl HttpReservedCommand {
         Self::new(HttpCommandKind::IntentDrop, &[path_session_id], command)
     }
 
+    #[cfg(test)]
     fn queue(
         path_session_id: &str,
         command: &HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
@@ -5031,6 +5144,7 @@ impl HttpCommandReservation {
         }
     }
 
+    #[cfg(test)]
     fn wait_for_queue(&self) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
         match self.wait() {
             HttpCommandCompletion::Queue(result) => {
@@ -5600,6 +5714,7 @@ fn update_command_fingerprint_part(hasher: &mut Sha256, part: &[u8]) {
 /// one durable identity. A user correction must therefore use a fresh command id; retaining a raw
 /// or reversibly keyed exact-prompt digest in the durable command store would violate the queue's
 /// process-local material boundary.
+#[cfg(test)]
 fn secret_safe_queue_command_fingerprint_payload(
     command: &HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
 ) -> Result<Vec<u8>, HttpRegistryError> {

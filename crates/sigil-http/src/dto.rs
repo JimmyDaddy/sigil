@@ -2740,6 +2740,7 @@ pub struct HttpConversationQueueCommandReceipt {
 }
 
 impl HttpConversationQueueCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

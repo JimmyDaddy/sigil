@@ -14,17 +14,17 @@ use sha2::{Digest, Sha256};
 use sigil_application::{
     ApplicationApprovalDecision, ApplicationApprovalResolution, ApplicationClient,
     ApplicationCommand, ApplicationCommandId, ApplicationCommandReceipt, ApplicationCommandRequest,
-    ApplicationError, ApplicationPermissionMode, ApplicationPort, ApplicationReasoningEffort,
-    ApplicationScope, AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId,
-    PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId, ProjectionPage, RunCommand,
-    RunStartOptions, SessionScopeId, StablePageCursor,
+    ApplicationError, ApplicationPermissionMode, ApplicationPort, ApplicationQueueAction,
+    ApplicationQueueItemKind, ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject,
+    ConversationCommand, HostConnectionInstanceId, PageAnchor, PageDirection, PageQueryFingerprint,
+    PageRequestId, ProjectionPage, RunCommand, RunStartOptions, SessionScopeId, StablePageCursor,
 };
 use sigil_runtime::{
     ManagedApplicationReservationStore, RuntimeApplicationDeliveryAckStore,
     RuntimeApplicationDeliveryAcker, RuntimeApplicationDispatch,
     RuntimeApplicationReservationStore, RuntimeApplicationService, RuntimeSessionProjectionBinding,
 };
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, RuntimeFlavor};
 
 use crate::{HttpRunDriverError, HttpSessionRunRegistry, HttpSessionSnapshot};
 
@@ -84,10 +84,20 @@ pub struct HttpApplicationClient {
 }
 
 impl HttpApplicationClient {
+    fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
+        if let Ok(handle) = Handle::try_current()
+            && matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread)
+        {
+            tokio::task::block_in_place(|| self.runtime.block_on(future))
+        } else {
+            self.runtime.block_on(future)
+        }
+    }
+
     pub(crate) fn refresh(
         &self,
     ) -> Result<sigil_application::ApplicationProjection, ApplicationError> {
-        self.runtime.block_on(self.client.refresh())
+        self.block_on(self.client.refresh())
     }
 
     pub(crate) fn execute(
@@ -96,8 +106,7 @@ impl HttpApplicationClient {
         command: ApplicationCommand,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
         let command_id = ApplicationCommandId::new(command_id.to_owned())?;
-        self.runtime
-            .block_on(self.client.execute_with_id(command_id, command))
+        self.block_on(self.client.execute_with_id(command_id, command))
     }
 
     pub(crate) fn page(
@@ -119,7 +128,7 @@ impl HttpApplicationClient {
         let request_id =
             PageRequestId::new(format!("http-application-page-{}", uuid::Uuid::new_v4()))?;
         let query = PageQueryFingerprint::new("application-transcript")?;
-        self.runtime.block_on(self.client.page(
+        self.block_on(self.client.page(
             request_id,
             self.source_generation,
             query,
@@ -352,7 +361,20 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommand
         &self,
         request: ApplicationCommandRequest,
     ) -> BoxFuture<'static, Result<RuntimeApplicationDispatch, ApplicationError>> {
-        let result = self.dispatch_sync(&request);
+        let result = if Handle::try_current().is_ok() {
+            // The HTTP driver is a synchronous adapter, while a few production operations
+            // legitimately bridge into its composition runtime with `Handle::block_on`. Run the
+            // adapter off the Tokio worker so those nested runtime calls cannot panic or stall the
+            // application service's executor.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.dispatch_sync(&request))
+                    .join()
+                    .unwrap_or(Err(ApplicationError::Unavailable))
+            })
+        } else {
+            self.dispatch_sync(&request)
+        };
         Box::pin(async move { result })
     }
 }
@@ -399,6 +421,49 @@ impl HttpApplicationCommandExecutor {
                     reason: "HTTP run start requires explicit typed run options".to_owned(),
                 },
             )),
+            ApplicationCommand::Conversation(ConversationCommand::Queue {
+                expected_generation,
+                action,
+            }) => {
+                let queue = match self.registry.command_conversation_queue_from_application(
+                    &self.session_id,
+                    request.envelope.command_id.as_str(),
+                    request.admission.principal.as_str(),
+                    crate::HttpConversationQueueCommandRequest {
+                        expected_generation: crate::HttpConversationQueueGeneration(
+                            expected_generation.as_str().to_owned(),
+                        ),
+                        action: crate::application_bridge::http_queue_request_action(action)?,
+                    },
+                    request
+                        .envelope
+                        .correlation_id
+                        .as_ref()
+                        .map(|id| id.to_string()),
+                ) {
+                    Ok(queue) => queue,
+                    Err(error) => {
+                        return Ok(RuntimeApplicationDispatch::Rejected(
+                            sigil_application::CommandRejection {
+                                kind: "http_conversation_queue_rejected".to_owned(),
+                                reason: error.to_string(),
+                            },
+                        ));
+                    }
+                };
+                let fingerprint = sigil_application::command_fingerprint(request)?;
+                Ok(RuntimeApplicationDispatch::Uncertain(
+                    sigil_application::UncertainCommandReceipt {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        reservation_fingerprint: fingerprint,
+                        recovery_binding: format!(
+                            "http-queue:{}",
+                            hex_binding_component(queue.generation.0.as_str())
+                        ),
+                    },
+                ))
+            }
             ApplicationCommand::Run(RunCommand::Cancel { binding, reason }) => {
                 if binding.trim().is_empty() {
                     return Err(ApplicationError::InvalidRequest(
@@ -516,34 +581,48 @@ impl HttpApplicationCommandExecutor {
                         "user input binding is empty".to_owned(),
                     ));
                 }
-                let receipt = self
-                    .registry
-                    .user_input_decision_from_application(
-                        &self.session_id,
-                        binding,
-                        request.envelope.command_id.as_str(),
-                        request.admission.principal.as_str(),
-                        crate::HttpUserInputDecisionRequest {
-                            generation: *generation,
-                            expected_request_hash: expected_request_hash.as_str().to_owned(),
-                            decision: decision.clone(),
-                            permission_mode: permission_mode.map(|mode| match mode {
-                                ApplicationPermissionMode::ReadOnly => {
-                                    crate::HttpPermissionMode::ReadOnly
-                                }
-                                ApplicationPermissionMode::Manual => {
-                                    crate::HttpPermissionMode::Manual
-                                }
-                                ApplicationPermissionMode::AutoEdit => {
-                                    crate::HttpPermissionMode::AutoEdit
-                                }
-                                ApplicationPermissionMode::DangerFullAccess => {
-                                    crate::HttpPermissionMode::DangerFullAccess
-                                }
-                            }),
-                        },
-                    )
-                    .map_err(|_| ApplicationError::Unavailable)?;
+                let receipt = match self.registry.user_input_decision_from_application(
+                    &self.session_id,
+                    binding,
+                    request.envelope.command_id.as_str(),
+                    request.admission.principal.as_str(),
+                    crate::HttpUserInputDecisionRequest {
+                        generation: *generation,
+                        expected_request_hash: expected_request_hash.as_str().to_owned(),
+                        decision: decision.clone(),
+                        permission_mode: permission_mode.map(|mode| match mode {
+                            ApplicationPermissionMode::ReadOnly => {
+                                crate::HttpPermissionMode::ReadOnly
+                            }
+                            ApplicationPermissionMode::Manual => crate::HttpPermissionMode::Manual,
+                            ApplicationPermissionMode::AutoEdit => {
+                                crate::HttpPermissionMode::AutoEdit
+                            }
+                            ApplicationPermissionMode::DangerFullAccess => {
+                                crate::HttpPermissionMode::DangerFullAccess
+                            }
+                        }),
+                    },
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(crate::HttpRegistryError::DriverRejected { message, .. }) => {
+                        return Ok(RuntimeApplicationDispatch::Rejected(
+                            sigil_application::CommandRejection {
+                                kind: "http_user_input_rejected".to_owned(),
+                                reason: message,
+                            },
+                        ));
+                    }
+                    Err(crate::HttpRegistryError::UserInputStale) => {
+                        return Ok(RuntimeApplicationDispatch::Rejected(
+                            sigil_application::CommandRejection {
+                                kind: "http_user_input_stale".to_owned(),
+                                reason: "user input request is stale".to_owned(),
+                            },
+                        ));
+                    }
+                    Err(_) => return Err(ApplicationError::Unavailable),
+                };
                 let continuation = receipt.continuation_run_id.as_deref().unwrap_or_default();
                 let fingerprint = sigil_application::command_fingerprint(request)?;
                 Ok(RuntimeApplicationDispatch::Uncertain(
@@ -568,6 +647,156 @@ impl HttpApplicationCommandExecutor {
             )),
         }
     }
+}
+
+pub(crate) fn application_queue_command(
+    request: &crate::HttpConversationQueueCommandRequest,
+) -> Result<(sigil_application::SafeText, ApplicationQueueAction), ApplicationError> {
+    let expected_generation =
+        sigil_application::SafeText::new(request.expected_generation.0.clone())?;
+    let action = application_queue_action(&request.action)?;
+    Ok((expected_generation, action))
+}
+
+fn application_queue_action(
+    action: &crate::HttpConversationQueueCommandAction,
+) -> Result<ApplicationQueueAction, ApplicationError> {
+    let safe = |value: &str| sigil_application::SafeText::new(value.to_owned());
+    Ok(match action {
+        crate::HttpConversationQueueCommandAction::Enqueue {
+            prompt,
+            kind,
+            reasoning_effort,
+        } => ApplicationQueueAction::Enqueue {
+            prompt: safe(prompt)?,
+            kind: match kind {
+                crate::HttpConversationQueueItemKind::Chat => ApplicationQueueItemKind::Chat,
+                crate::HttpConversationQueueItemKind::PlanPrompt => {
+                    ApplicationQueueItemKind::PlanPrompt
+                }
+                crate::HttpConversationQueueItemKind::AgentMention => {
+                    ApplicationQueueItemKind::AgentMention
+                }
+                crate::HttpConversationQueueItemKind::AgentMessage => {
+                    ApplicationQueueItemKind::AgentMessage
+                }
+                crate::HttpConversationQueueItemKind::Unknown => ApplicationQueueItemKind::Unknown,
+            },
+            reasoning_effort: reasoning_effort.map(|effort| match effort {
+                crate::HttpReasoningEffort::Low => ApplicationReasoningEffort::Low,
+                crate::HttpReasoningEffort::Medium => ApplicationReasoningEffort::Medium,
+                crate::HttpReasoningEffort::High => ApplicationReasoningEffort::High,
+                crate::HttpReasoningEffort::Max => ApplicationReasoningEffort::Max,
+            }),
+        },
+        crate::HttpConversationQueueCommandAction::Edit {
+            entry_id,
+            prompt,
+            reasoning_effort,
+        } => ApplicationQueueAction::Edit {
+            entry_id: safe(entry_id)?,
+            prompt: safe(prompt)?,
+            reasoning_effort: reasoning_effort.map(|effort| match effort {
+                crate::HttpReasoningEffort::Low => ApplicationReasoningEffort::Low,
+                crate::HttpReasoningEffort::Medium => ApplicationReasoningEffort::Medium,
+                crate::HttpReasoningEffort::High => ApplicationReasoningEffort::High,
+                crate::HttpReasoningEffort::Max => ApplicationReasoningEffort::Max,
+            }),
+        },
+        crate::HttpConversationQueueCommandAction::Remove { entry_id } => {
+            ApplicationQueueAction::Remove {
+                entry_id: safe(entry_id)?,
+            }
+        }
+        crate::HttpConversationQueueCommandAction::Reorder {
+            entry_id,
+            after_entry_id,
+        } => ApplicationQueueAction::Reorder {
+            entry_id: safe(entry_id)?,
+            after_entry_id: after_entry_id
+                .as_ref()
+                .map(|value| safe(value))
+                .transpose()?,
+        },
+        crate::HttpConversationQueueCommandAction::Pause => ApplicationQueueAction::Pause,
+        crate::HttpConversationQueueCommandAction::Resume => ApplicationQueueAction::Resume,
+        crate::HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id,
+            foreground_owner_revision,
+        } => ApplicationQueueAction::InterruptAndRunNext {
+            foreground_run_id: safe(foreground_run_id)?,
+            foreground_owner_revision: safe(foreground_owner_revision)?,
+        },
+    })
+}
+
+fn http_queue_request_action(
+    action: &ApplicationQueueAction,
+) -> Result<crate::HttpConversationQueueCommandAction, ApplicationError> {
+    let safe = |value: &sigil_application::SafeText| value.as_str().to_owned();
+    Ok(match action {
+        ApplicationQueueAction::Enqueue {
+            prompt,
+            kind,
+            reasoning_effort,
+        } => crate::HttpConversationQueueCommandAction::Enqueue {
+            prompt: safe(prompt),
+            kind: match kind {
+                ApplicationQueueItemKind::Chat => crate::HttpConversationQueueItemKind::Chat,
+                ApplicationQueueItemKind::PlanPrompt => {
+                    crate::HttpConversationQueueItemKind::PlanPrompt
+                }
+                ApplicationQueueItemKind::AgentMention => {
+                    crate::HttpConversationQueueItemKind::AgentMention
+                }
+                ApplicationQueueItemKind::AgentMessage => {
+                    crate::HttpConversationQueueItemKind::AgentMessage
+                }
+                ApplicationQueueItemKind::Unknown => crate::HttpConversationQueueItemKind::Unknown,
+            },
+            reasoning_effort: reasoning_effort.map(|effort| match effort {
+                ApplicationReasoningEffort::Low => crate::HttpReasoningEffort::Low,
+                ApplicationReasoningEffort::Medium => crate::HttpReasoningEffort::Medium,
+                ApplicationReasoningEffort::High => crate::HttpReasoningEffort::High,
+                ApplicationReasoningEffort::Max => crate::HttpReasoningEffort::Max,
+            }),
+        },
+        ApplicationQueueAction::Edit {
+            entry_id,
+            prompt,
+            reasoning_effort,
+        } => crate::HttpConversationQueueCommandAction::Edit {
+            entry_id: safe(entry_id),
+            prompt: safe(prompt),
+            reasoning_effort: reasoning_effort.map(|effort| match effort {
+                ApplicationReasoningEffort::Low => crate::HttpReasoningEffort::Low,
+                ApplicationReasoningEffort::Medium => crate::HttpReasoningEffort::Medium,
+                ApplicationReasoningEffort::High => crate::HttpReasoningEffort::High,
+                ApplicationReasoningEffort::Max => crate::HttpReasoningEffort::Max,
+            }),
+        },
+        ApplicationQueueAction::Remove { entry_id } => {
+            crate::HttpConversationQueueCommandAction::Remove {
+                entry_id: safe(entry_id),
+            }
+        }
+        ApplicationQueueAction::Reorder {
+            entry_id,
+            after_entry_id,
+        } => crate::HttpConversationQueueCommandAction::Reorder {
+            entry_id: safe(entry_id),
+            after_entry_id: after_entry_id.as_ref().map(safe),
+        },
+        ApplicationQueueAction::Pause => crate::HttpConversationQueueCommandAction::Pause,
+        ApplicationQueueAction::Resume => crate::HttpConversationQueueCommandAction::Resume,
+        ApplicationQueueAction::InterruptAndRunNext {
+            foreground_run_id,
+            foreground_owner_revision,
+        } => crate::HttpConversationQueueCommandAction::InterruptAndRunNext {
+            foreground_run_id: safe(foreground_run_id),
+            foreground_owner_revision: safe(foreground_owner_revision),
+        },
+    })
 }
 
 fn approval_route_token(route: crate::HttpApprovalRouteState) -> &'static str {

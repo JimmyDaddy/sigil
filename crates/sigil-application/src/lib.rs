@@ -157,6 +157,10 @@ pub enum ConversationCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options: Option<Box<RunStartOptions>>,
     },
+    Queue {
+        expected_generation: SafeText,
+        action: ApplicationQueueAction,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +223,45 @@ pub struct RunStartOptions {
     pub agent: Option<ApplicationAgentBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_continuation: Option<ApplicationTaskContinuation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationQueueItemKind {
+    Chat,
+    PlanPrompt,
+    AgentMention,
+    AgentMessage,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationQueueAction {
+    Enqueue {
+        prompt: SafeText,
+        kind: ApplicationQueueItemKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<ApplicationReasoningEffort>,
+    },
+    Edit {
+        entry_id: SafeText,
+        prompt: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<ApplicationReasoningEffort>,
+    },
+    Remove {
+        entry_id: SafeText,
+    },
+    Reorder {
+        entry_id: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_entry_id: Option<SafeText>,
+    },
+    Pause,
+    Resume,
+    InterruptAndRunNext {
+        foreground_run_id: SafeText,
+        foreground_owner_revision: SafeText,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +400,11 @@ impl ApplicationCommand {
             Self::Conversation(ConversationCommand::SubmitPrompt { .. }) => CommandPolicy {
                 lane: CommandLane::Interactive,
                 settlement: EffectSettlementClass::ExternalOrWorkspaceEffect,
+                requires_session: true,
+            },
+            Self::Conversation(ConversationCommand::Queue { .. }) => CommandPolicy {
+                lane: CommandLane::Interactive,
+                settlement: EffectSettlementClass::AtomicDurableMutation,
                 requires_session: true,
             },
             Self::Run(RunCommand::Cancel { .. } | RunCommand::Pause { .. })

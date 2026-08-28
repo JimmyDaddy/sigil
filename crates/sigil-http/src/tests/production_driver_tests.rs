@@ -9,8 +9,9 @@ use std::{
 
 use async_trait::async_trait;
 use sigil_application::{
-    ApplicationCommand, ApplicationCommandReceipt, ApplicationPermissionMode, ConversationCommand,
-    McpCommand, RunStartOptions, SafeText,
+    ApplicationCommand, ApplicationCommandReceipt, ApplicationPermissionMode,
+    ApplicationQueueAction, ApplicationQueueItemKind, ConversationCommand, McpCommand,
+    RunStartOptions, SafeText,
 };
 use sigil_kernel::{
     AgentRole, ApprovalMode, AssistantMessageKind, CandidateCheck, CheckCommand,
@@ -259,46 +260,68 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
         .expect("session should bind");
+    let queue_generation = registry
+        .conversation_queue(&session.id)
+        .expect("queue should be readable")
+        .generation
+        .0;
     let client = registry
         .application_client(&session.id, "http-application-test")
         .expect("application client should bind");
-    let (projection, page, receipt, start_receipt) = tokio::task::spawn_blocking(move || {
-        let projection = client
-            .refresh()
-            .expect("application projection should refresh");
-        let page = client
-            .page(None, 1)
-            .expect("application page should use the same frontier");
-        let receipt = client
-            .execute(
-                "application-unsupported-command",
-                ApplicationCommand::Mcp(McpCommand::Refresh {
-                    binding: "test-server".to_owned(),
-                }),
-            )
-            .expect("unsupported command should receive a typed rejection");
-        let start_receipt = client
-            .execute(
-                "application-start-test",
-                ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
-                    prompt: Some(SafeText::new("start through application port").expect("prompt")),
-                    options: Some(Box::new(RunStartOptions {
-                        permission_mode: ApplicationPermissionMode::Manual,
-                        model: None,
-                        route_recovery_binding: None,
-                        reasoning_effort: None,
-                        reasoning_effort_binding: None,
-                        skill: None,
-                        agent: None,
-                        task_continuation: None,
-                    })),
-                }),
-            )
-            .expect("run start should receive a durable uncertain receipt");
-        (projection, page, receipt, start_receipt)
-    })
-    .await
-    .expect("blocking application client task should complete");
+    let (projection, page, receipt, start_receipt, queue_receipt) =
+        tokio::task::spawn_blocking(move || {
+            let projection = client
+                .refresh()
+                .expect("application projection should refresh");
+            let page = client
+                .page(None, 1)
+                .expect("application page should use the same frontier");
+            let receipt = client
+                .execute(
+                    "application-unsupported-command",
+                    ApplicationCommand::Mcp(McpCommand::Refresh {
+                        binding: "test-server".to_owned(),
+                    }),
+                )
+                .expect("unsupported command should receive a typed rejection");
+            let start_receipt = client
+                .execute(
+                    "application-start-test",
+                    ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                        prompt: Some(
+                            SafeText::new("start through application port").expect("prompt"),
+                        ),
+                        options: Some(Box::new(RunStartOptions {
+                            permission_mode: ApplicationPermissionMode::Manual,
+                            model: None,
+                            route_recovery_binding: None,
+                            reasoning_effort: None,
+                            reasoning_effort_binding: None,
+                            skill: None,
+                            agent: None,
+                            task_continuation: None,
+                        })),
+                    }),
+                )
+                .expect("run start should receive a durable uncertain receipt");
+            let queue_receipt = client
+                .execute(
+                    "application-queue-test",
+                    ApplicationCommand::Conversation(ConversationCommand::Queue {
+                        expected_generation: SafeText::new(queue_generation).expect("generation"),
+                        action: ApplicationQueueAction::Enqueue {
+                            prompt: SafeText::new("queue through application port")
+                                .expect("queue prompt"),
+                            kind: ApplicationQueueItemKind::Chat,
+                            reasoning_effort: None,
+                        },
+                    }),
+                )
+                .expect("queue mutation should receive a durable uncertain receipt");
+            (projection, page, receipt, start_receipt, queue_receipt)
+        })
+        .await
+        .expect("blocking application client task should complete");
 
     assert_eq!(
         projection.scope.session.as_ref().map(ToString::to_string),
@@ -314,6 +337,10 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
             .recovery_binding
             .starts_with("http-run-start:")
     );
+    let ApplicationCommandReceipt::Uncertain(queue_receipt) = queue_receipt else {
+        panic!("queue mutation should be represented as an uncertain application receipt");
+    };
+    assert!(queue_receipt.recovery_binding.starts_with("http-queue:"));
 }
 
 #[tokio::test]
