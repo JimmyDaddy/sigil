@@ -2965,7 +2965,8 @@ R70.x
   `efc7851b`（`rfc-0070(R70.4): consume durable application outbox in projection`）、`b5c0a37e`
   （`rfc-0070(R70.4): route TUI through application port`）与 `8608d6aa`
   （`rfc-0070(R70.4): cut over HTTP reservations to application authority`），以及 `ffc3df4e`
-  （`rfc-0070(R70.4): stream bounded transcript pages`）。
+  （`rfc-0070(R70.4): stream bounded transcript pages`），以及 `f44d8c10`
+  （`rfc-0070(R70.4): journal application command reservations`）。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -2982,6 +2983,10 @@ R70.x
   ordinary clone/serialization。runtime projection binding 从现有 durable session query 与完整 durable public
   outbox（按 stream sequence 排序，不受 adapter delivery receipt 影响）生成 bounded、path-free snapshot/page，并
   使用 opaque before cursor；outbox delivery 只表示传输进度，不会从状态历史中删除事件。
+- reservation journal：`f44d8c10` 将 application-control reservation 从 whole-file replacement 收敛为可重放
+  JSONL journal；每个 reserve、dispatch marker 和 terminal receipt 都在 effect 前按顺序持久化，旧 v1 snapshot
+  只在首次重开时迁移，重复记录可安全重放，孤立 transition、指纹冲突和终态改写 fail-closed。dispatch marker
+  写入失败时会尽力将已存在的 reservation settlement 为显式 `Uncertain`，避免永久卡在无恢复语义的 `Reserved`。
 - TUI adapter：生产 launcher 为每个 worker 绑定 runtime `ApplicationPort`，用同一 application scope/frontier
   刷新 projection；prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application reservation
   service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造 `Settled`；
