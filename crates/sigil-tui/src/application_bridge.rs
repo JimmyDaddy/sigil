@@ -14,7 +14,7 @@ use sigil_application::{
     ApplicationError, ApplicationPort, ApplicationProjection, ApplicationQueueAction,
     ApplicationQueueItemKind, ApplicationQueueMoveDirection, ApplicationQueueTarget,
     ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject, ConversationCommand,
-    HostConnectionInstanceId, McpCommand, RunCommand,
+    HostConnectionInstanceId, McpCommand, RunCommand, UserInputCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -81,6 +81,7 @@ impl TuiApplicationSession {
                     server_name: Some(_),
                 }
                 | AppAction::RefreshMcpServer { .. }
+                | AppAction::SubmitUserInputDecision { .. }
                 | AppAction::QueueConversationInput { .. }
                 | AppAction::CancelQueuedConversationInput { .. }
                 | AppAction::EditQueuedConversationInput { .. }
@@ -145,6 +146,21 @@ impl TuiApplicationSession {
                     binding: server_name.clone(),
                 }))
             }
+            AppAction::SubmitUserInputDecision {
+                command_id: _,
+                request_id,
+                generation,
+                expected_request_hash,
+                decision,
+            } => Some(ApplicationCommand::UserInput(UserInputCommand::Resolve {
+                binding: request_id.clone(),
+                generation: *generation,
+                expected_request_hash: sigil_application::SafeText::new(
+                    expected_request_hash.clone(),
+                )?,
+                decision: decision.clone(),
+                permission_mode: None,
+            })),
             AppAction::QueueConversationInput {
                 prompt,
                 kind,
@@ -261,9 +277,17 @@ impl TuiApplicationSession {
         let Some(command) = command else {
             return Ok(None);
         };
-        Ok(Some(futures::executor::block_on(
-            self.client.execute(command),
-        )?))
+        let receipt = match action {
+            AppAction::SubmitUserInputDecision {
+                command_id: Some(command_id),
+                ..
+            } => futures::executor::block_on(self.client.execute_with_id(
+                sigil_application::ApplicationCommandId::new(command_id.clone())?,
+                command,
+            ))?,
+            _ => futures::executor::block_on(self.client.execute(command))?,
+        };
+        Ok(Some(receipt))
     }
 }
 
@@ -498,6 +522,19 @@ impl TuiWorkerCommandExecutor {
                     server_name: binding.clone(),
                 }
             }
+            ApplicationCommand::UserInput(UserInputCommand::Resolve {
+                binding,
+                generation,
+                expected_request_hash,
+                decision,
+                permission_mode: _,
+            }) => WorkerCommand::SubmitUserInputDecision {
+                command_id: Some(request.envelope.command_id.as_str().to_owned()),
+                request_id: binding.clone(),
+                generation: *generation,
+                expected_request_hash: expected_request_hash.as_str().to_owned(),
+                decision: decision.clone(),
+            },
             ApplicationCommand::Conversation(ConversationCommand::Queue { action, .. }) => {
                 match action {
                     ApplicationQueueAction::Enqueue {
