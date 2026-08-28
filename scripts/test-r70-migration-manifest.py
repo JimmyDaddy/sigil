@@ -21,11 +21,13 @@ class R70MigrationManifestTests(unittest.TestCase):
     def test_closed_scope_discovers_all_frozen_production_variants(self) -> None:
         rows = MODULE.discover()
         keys = {(row["source_enum"], row["source_variant"]) for row in rows}
-        self.assertEqual(len(rows), 274)
-        self.assertEqual(len(keys), 274)
+        self.assertEqual(len(rows), 276)
+        self.assertEqual(len(keys), 276)
         self.assertIn(("WorkerCommand", "SubmitPrompt"), keys)
         self.assertIn(("WorkerMessage", "RunFailed"), keys)
         self.assertIn(("AppAction", "ConfigSaved"), keys)
+        self.assertIn(("AppAction", "PersistConfiguration"), keys)
+        self.assertIn(("AppAction", "PreviewSessionRetention"), keys)
         self.assertIn(("ResourceRecoveryActionV1", "SelectFreshAuthorityEpoch"), keys)
         self.assertIn(("DesktopRecoveryAction", "ShowDetails"), keys)
 
