@@ -3000,6 +3000,8 @@ R70.x
   随机 epoch 变化而制造第二个 reservation namespace。prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application
   reservation service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造
   `Settled`；未有无损 V1 payload 的旧动作仍保留在迁移期 adapter，不能把 R70.4 误记为最终闭合。
+- `aa177ba3`（`rfc-0070(R70.4): retain TUI application client epoch`）固定上述 client identity：epoch 从
+  application/session scope 稳定派生，避免 reconnect retry 因随机 epoch 形成第二个 command reservation namespace。
 - HTTP adapter：生产 command store 在 `ApplicationControlLog` 的独占 managed namespace 中完成 legacy
   identity/terminal/unfinished/aborted tombstone 导入；旧 compatibility file 只有在 managed snapshot 成功替换
   后才退役，重启会优先 managed state 并重试旧文件退役。HTTP command registry 的 domain execution 仍需后续
