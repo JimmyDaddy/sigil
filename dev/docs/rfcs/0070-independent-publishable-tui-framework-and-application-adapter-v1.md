@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.0 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；当前仅实施 R70.0 基线 slice）
+状态：R70.1 Complete / R70.2 Pending（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.1 已完成 committed presentation slice）
 
 创建日期：2026-08-23
 
@@ -2900,3 +2900,23 @@ R70.x
 - remaining deviations / expiry：R70.0 仍未完成全部长期 Done 条件；`CommittedPresentation`、public package split、
   application contract、100k cold-cache benchmark 和 legacy runner removal 保留给 R70.1-R70.8。临时 phase
   instrumentation 的 expiry 为 R70.1 完成时，届时必须迁移或删除，不能成为永久性能接口。
+
+### R70.1：提交式 presentation 与 terminal fault state（2026-08-28）
+
+- implementation commit：待本 slice 提交后记录；基线为 R70.0 evidence follow-up `df34e740f90eab20f4c2ba892d8e18e829b2f12a`。
+- moved authority：没有移动 Resource Authority、Sandbox、permission 或 worker/resource owner；本 slice 只在
+  `sigil-tui` 内建立 terminal presentation owner。
+- delivered：新增 `PresentationSession`，为每个 frame 分配不可复用的 generation/attempt/terminal epoch；同一
+  `Terminal::draw` callback 生成 `LayoutSnapshot`、渲染 cell buffer，并只在 backend draw/flush 成功且
+  `TrustedPresentReceipt` 匹配后发布 `CommittedPresentation`。`NotStarted` 保留上一个 committed frame，首帧
+  no-op 可重试；`IndeterminateAfterIo` poison session，鼠标在无 committed frame 或 poisoned 状态下 fail-closed。
+- deleted legacy path：生产 launcher 不再在 mouse event 时间调用 `LayoutSnapshot::from_app` 或读取当前
+  `AppState` 重建 geometry；旧 helper 仅保留给既有单元测试，后续 R70.3 renderer/adapter split 时删除。
+- behavior parity：`AppState`、`AppAction`、worker protocol 与现有 modal/focus/mouse handling 未改语义；新的
+  `handle_committed_mouse_event` 只把 immutable committed layout 传给原有 action handler。
+- tests/gates run：`cargo fmt --all --check`、`cargo check -p sigil-tui`、
+  `cargo test -p sigil-tui --lib presentation::tests -- --nocapture`（4 passed）、
+  `cargo test -p sigil-tui --lib timed_frame_path_uses_the_production_present_helper -- --nocapture`（1 passed）。
+- remaining deviations：R70.1 尚未完成 full-resync backend、normalized input、framework package split、
+  application contract、renderer decoupling 与旧 runner removal；这些继续由 R70.2-R70.8 交付，不能将本 slice
+  解释为 RFC-0070 总体完成。

@@ -15,6 +15,15 @@ pub(super) struct ToolCardMouseAnchor {
 }
 
 impl AppState {
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn handle_committed_mouse_event(
+        &mut self,
+        input: crate::mouse::MouseInput,
+        presentation: &crate::presentation::CommittedPresentation,
+    ) -> Result<crate::mouse::AppMouseOutcome> {
+        self.handle_mouse_event(input, presentation.layout())
+    }
+
     pub fn handle_mouse_event(
         &mut self,
         input: crate::mouse::MouseInput,

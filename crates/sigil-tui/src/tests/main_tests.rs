@@ -31,6 +31,7 @@ use super::{
     render_tui_exit_resume_hint, restart_worker_after_session_transition,
     restore_initial_session_from_disk,
 };
+use crate::presentation::PresentationSession;
 
 fn test_config() -> RootConfig {
     RootConfig {
@@ -209,11 +210,18 @@ fn terminal_finalization_clears_the_frame_and_parks_the_cursor_at_origin() {
 fn timed_frame_path_uses_the_production_present_helper() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
-    let mut frame_area = Rect::default();
+    let mut presentation = PresentationSession::new();
 
-    render_timed_frame(&mut terminal, &mut app, &mut frame_area)?;
+    render_timed_frame(&mut terminal, &mut app, &mut presentation)?;
 
-    assert_eq!(frame_area, Rect::new(0, 0, 80, 24));
+    assert_eq!(
+        presentation
+            .current()
+            .expect("successful draw should commit a frame")
+            .frame()
+            .area(),
+        Rect::new(0, 0, 80, 24)
+    );
     Ok(())
 }
 

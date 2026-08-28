@@ -35,11 +35,9 @@ use crossterm::{
 use futures::StreamExt;
 #[cfg(not(test))]
 use ratatui::backend::CrosstermBackend;
-use ratatui::{
-    Terminal,
-    backend::Backend,
-    layout::{Position, Rect},
-};
+#[cfg(test)]
+use ratatui::layout::Rect;
+use ratatui::{Terminal, backend::Backend, layout::Position};
 #[cfg(not(test))]
 use sigil_kernel::TerminalKeyboardEnhancement;
 #[cfg(not(test))]
@@ -56,6 +54,7 @@ use crate::{
     attention::AttentionController,
     clipboard::{self, ClipboardCopyOutcome},
     mouse::AppMouseOutcome,
+    presentation::PresentationSession,
     runner::{self, WorkerCommand, WorkerMessage},
     ui::LayoutSnapshot,
 };
@@ -509,7 +508,7 @@ async fn run_app(
     let mut terminal_events = EventStream::new();
     let mut needs_render = true;
     let mut last_spinner_tick = live_spinner_tick();
-    let mut latest_frame_area = Rect::default();
+    let mut presentation = PresentationSession::new();
     let mut attention =
         AttentionController::from_current_process(app.terminal_notification_config());
 
@@ -554,7 +553,6 @@ async fn run_app(
             }
         }
 
-        let size = terminal.size()?;
         terminal.autoresize()?;
         let frame_area = terminal.get_frame().area();
         dirty |= app.set_terminal_size(frame_area.width, frame_area.height);
@@ -565,7 +563,7 @@ async fn run_app(
         }
 
         if dirty {
-            render_timed_frame(terminal, app, &mut latest_frame_area)?;
+            render_timed_frame(terminal, app, &mut presentation)?;
             let _ = app.maybe_start_automatic_update_check();
             let _ = app.acknowledge_active_egress_disclosure_frame();
             last_spinner_tick = spinner_tick;
@@ -635,8 +633,7 @@ async fn run_app(
                         app,
                         worker,
                         &mut needs_render,
-                        latest_frame_area,
-                        size.into(),
+                        &presentation,
                         crossterm_event,
                         &mut attention,
                         spawn_worker,
@@ -672,8 +669,7 @@ fn process_terminal_event<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     needs_render: &mut bool,
-    latest_frame_area: Rect,
-    terminal_size: Rect,
+    presentation: &PresentationSession,
     crossterm_event: CrosstermEvent,
     attention: &mut AttentionController,
     spawn_worker: F,
@@ -688,8 +684,13 @@ where
             Ok(true)
         }
         CrosstermEvent::Mouse(mouse) => {
-            let layout = mouse_layout_snapshot(latest_frame_area, terminal_size, app);
-            let outcome = app.handle_mouse_event(mouse.into(), &layout)?;
+            let Some(committed) = presentation.current() else {
+                // There is no safe coordinate authority before the first successful frame or
+                // while the terminal epoch is poisoned. The owner loop will either present a
+                // fresh frame or terminate after a present fault.
+                return Ok(false);
+            };
+            let outcome = app.handle_committed_mouse_event(mouse.into(), committed)?;
             *needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
             Ok(false)
         }
@@ -733,6 +734,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) -> LayoutSnapshot {
     let screen = if frame_area.width == 0 || frame_area.height == 0 {
         Rect::new(0, 0, terminal_size.width, terminal_size.height)
@@ -745,13 +747,40 @@ fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) 
 fn render_timed_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut AppState,
-    latest_frame_area: &mut Rect,
-) -> Result<(), B::Error> {
+    presentation: &mut PresentationSession,
+) -> Result<()> {
     let _phase_timing = crate::phase_timing::PhaseTimer::new("terminal_present");
-    terminal.draw(|frame| {
-        *latest_frame_area = frame.area();
+    let generation = presentation
+        .begin_prepare()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let attempt = presentation
+        .begin_present(generation)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let mut prepared = None;
+    let draw_result = terminal.draw(|frame| {
+        // Layout, cell output, and the interaction facts are captured by this one render
+        // transaction. Input never reconstructs this layout from the mutable AppState.
+        let layout = std::sync::Arc::new(LayoutSnapshot::from_app(frame.area(), app));
         ui::render(frame, app);
-    })?;
+        prepared = Some((frame.area(), layout, frame.buffer_mut().clone()));
+    });
+    if let Err(error) = draw_result {
+        presentation
+            .fail_after_io(generation, attempt, error.to_string())
+            .map_err(|state_error| anyhow::anyhow!(state_error))?;
+        return Err(anyhow::anyhow!("terminal present failed: {error}"));
+    }
+    let Some((area, layout, surface)) = prepared else {
+        presentation
+            .fail_after_io(generation, attempt, "terminal draw callback did not run")
+            .map_err(|state_error| anyhow::anyhow!(state_error))?;
+        return Err(anyhow::anyhow!(
+            "terminal present failed: draw callback did not run"
+        ));
+    };
+    presentation
+        .finish_draw(generation, attempt, area, surface, layout)
+        .map_err(|error| anyhow::anyhow!(error))?;
     Ok(())
 }
 
