@@ -1,0 +1,38 @@
+name: sigil-tui preview packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the three 0.1.0 preview packages after dry-run checks
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "sigil-tui-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sigil-tui-preview
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run preview package gate
+        run: bash scripts/run-r70-preview-package-gate.sh
+      - name: Publish core
+        if: ${{ inputs.publish == true }}
+        run: cargo publish --locked -p sigil-tui-core
+      - name: Publish Ratatui adapter
+        if: ${{ inputs.publish == true }}
+        run: cargo publish --locked -p sigil-tui-ratatui
+      - name: Publish facade
+        if: ${{ inputs.publish == true }}
+        run: cargo publish --locked -p sigil-tui

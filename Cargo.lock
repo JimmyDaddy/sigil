@@ -5899,7 +5899,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tui"
-version = "0.0.1-beta.4"
+version = "0.1.0"
 dependencies = [
  "sigil-tui-core",
  "sigil-tui-ratatui",
@@ -5915,7 +5915,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tui-core"
-version = "0.0.1-beta.4"
+version = "0.1.0"
 
 [[package]]
 name = "sigil-tui-host"
@@ -5955,7 +5955,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tui-ratatui"
-version = "0.0.1-beta.4"
+version = "0.1.0"
 dependencies = [
  "ratatui",
  "sigil-tui-core",
