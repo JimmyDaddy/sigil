@@ -3130,3 +3130,10 @@ R70.x
   library strict clippy 通过；all-target strict clippy 仍被本 slice 之外既有
   `sigil-http/src/registry.rs:3344` redundant-closure warning 阻断。该 slice 只关闭 TUI recovery dispatch seam；configuration CAS、verification/maintenance、
   terminal、HTTP compaction preview、四表面 conformance 与完整 migration manifest 仍未闭合。
+- verification follow-up：`802c8d00` 将 TUI changed-files diagnostics、mutation-artifact cleanup/delete、verification
+  approval/sandbox/rerun 与 integration review/accept 加入 typed `VerificationCommand`；TUI production 先经过
+  ApplicationPort reservation，再在 worker edge 还原为既有 typed worker command，application 层不复制 artifact
+  lifecycle authority。application `6/6`、verification flow `5/5`、command dispatch `12/12`、worker bridge `104/104`
+  与 production-library strict clippy 通过；all-target strict clippy 仍受上述 slice 外的 HTTP test-target warning
+  阻断。configuration/session lifecycle、terminal、HTTP compaction preview、四表面 conformance 与完整 migration
+  manifest 仍开放。
