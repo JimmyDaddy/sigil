@@ -6,11 +6,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sigil_application::{
-    ApplicationClient, ApplicationCommand, ApplicationCommandReceipt, ApplicationError,
-    ApplicationPort, ApplicationProjection,
+    ApplicationClient, ApplicationCommand, ApplicationCommandId, ApplicationCommandReceipt,
+    ApplicationError, ApplicationPort, ApplicationProjection, ApplicationScope,
+    HostConnectionInstanceId,
 };
 use sigil_tui::{App, CoreError, Damage, InputEvent, NodeKey, Rect, Surface, Text, UpdateOutcome};
 
@@ -26,7 +27,7 @@ pub enum TuiApplicationAction {
 /// authority remain outside this package.
 pub struct TuiApplicationAdapter {
     client: ApplicationClient,
-    projection: Option<ApplicationProjection>,
+    projection: Mutex<Option<ApplicationProjection>>,
 }
 
 impl std::fmt::Debug for TuiApplicationAdapter {
@@ -34,25 +35,60 @@ impl std::fmt::Debug for TuiApplicationAdapter {
         formatter
             .debug_struct("TuiApplicationAdapter")
             .field("client", &self.client)
-            .field("projection", &self.projection.is_some())
+            .field(
+                "projection",
+                &self
+                    .projection
+                    .lock()
+                    .map(|projection| projection.is_some())
+                    .unwrap_or(false),
+            )
             .finish()
     }
 }
 
 impl TuiApplicationAdapter {
+    /// Creates the product adapter from the host-provided application port and identity.
+    ///
+    /// The host supplies the port and scope, but the application adapter owns the client binding;
+    /// callers do not need to construct or retain a parallel `ApplicationClient`.
+    pub fn from_port(
+        port: Arc<dyn ApplicationPort>,
+        scope: ApplicationScope,
+        observer_generation: u64,
+        client_epoch: u64,
+        connection_instance: HostConnectionInstanceId,
+    ) -> Result<Self, ApplicationError> {
+        Ok(Self::new(ApplicationClient::new(
+            port,
+            scope,
+            observer_generation,
+            client_epoch,
+            connection_instance,
+        )?))
+    }
+
     pub fn new(client: ApplicationClient) -> Self {
         Self {
             client,
-            projection: None,
+            projection: Mutex::new(None),
         }
     }
 
-    pub async fn refresh(&mut self) -> Result<&ApplicationProjection, ApplicationError> {
-        self.projection = Some(self.client.refresh().await?);
-        Ok(self
+    pub async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
+        let projection = self.client.refresh().await?;
+        *self
             .projection
-            .as_ref()
-            .expect("projection was just stored"))
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)? = Some(projection.clone());
+        Ok(projection)
+    }
+
+    pub fn current_projection(&self) -> Result<Option<ApplicationProjection>, ApplicationError> {
+        self.projection
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)
+            .map(|projection| projection.clone())
     }
 
     pub async fn execute(
@@ -62,8 +98,12 @@ impl TuiApplicationAdapter {
         self.client.execute(command).await
     }
 
-    pub fn projection(&self) -> Option<&ApplicationProjection> {
-        self.projection.as_ref()
+    pub async fn execute_with_id(
+        &self,
+        command_id: ApplicationCommandId,
+        command: ApplicationCommand,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        self.client.execute_with_id(command_id, command).await
     }
 }
 
@@ -85,16 +125,21 @@ impl App for TuiApplicationAdapter {
 
     fn build_surface(&self, viewport: Rect, generation: u64) -> Result<Surface, CoreError> {
         let mut surface = Surface::new(viewport, generation)?;
-        let status = self
+        let (status, active_terminals) = self
             .projection
-            .as_ref()
-            .map(|projection| projection.session.status.as_str())
-            .unwrap_or("not-loaded");
-        let active_terminals = self
-            .projection
-            .as_ref()
-            .map(|projection| projection.terminal.active_task_count)
-            .unwrap_or(0);
+            .lock()
+            .map_err(|_| CoreError::InvalidValue("application projection lock is poisoned"))
+            .map(|projection| {
+                projection
+                    .as_ref()
+                    .map(|projection| {
+                        (
+                            projection.session.status.as_str().to_owned(),
+                            projection.terminal.active_task_count,
+                        )
+                    })
+                    .unwrap_or_else(|| ("not-loaded".to_owned(), 0))
+            })?;
         surface.push_text(
             NodeKey::new("application.status")?,
             Rect::new(viewport.x, viewport.y, viewport.width, 1),

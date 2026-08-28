@@ -14,16 +14,16 @@ use anyhow::{Context, Result, anyhow};
 use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
 use sigil_application::{
-    AgentCommand, ApplicationClient, ApplicationCommand, ApplicationCommandReceipt,
-    ApplicationCommandRequest, ApplicationError, ApplicationPermissionMode, ApplicationPort,
-    ApplicationProjection, ApplicationQueueAction, ApplicationQueueItemKind,
-    ApplicationQueueMoveDirection, ApplicationQueueTarget, ApplicationReasoningEffort,
-    ApplicationRecoveryAction, ApplicationScope, ApplicationTerminalTaskIdentity,
-    AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId, McpCommand,
-    PlanTaskCommand, RunCommand, SessionCommand, SessionItemId, SessionMaintenanceOperation,
-    UserInputCommand, VerificationCommand,
+    AgentCommand, ApplicationCommand, ApplicationCommandReceipt, ApplicationCommandRequest,
+    ApplicationError, ApplicationPermissionMode, ApplicationPort, ApplicationProjection,
+    ApplicationQueueAction, ApplicationQueueItemKind, ApplicationQueueMoveDirection,
+    ApplicationQueueTarget, ApplicationReasoningEffort, ApplicationRecoveryAction,
+    ApplicationScope, ApplicationTerminalTaskIdentity, AuthenticatedSubject, ConversationCommand,
+    HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand, SessionCommand,
+    SessionItemId, SessionMaintenanceOperation, UserInputCommand, VerificationCommand,
 };
 use sigil_kernel::ReasoningEffort;
+use sigil_tui_app::TuiApplicationAdapter;
 
 use crate::{
     app::{AppAction, ConfigurationSaveRequest},
@@ -33,7 +33,7 @@ use crate::{
 /// A TUI-local application client.  It caches only the latest bounded frontier/projection needed
 /// to construct a CAS-bound command; paths and physical authority objects remain in the runtime.
 pub(crate) struct TuiApplicationSession {
-    client: ApplicationClient,
+    application: TuiApplicationAdapter,
     reasoning_effort: ApplicationReasoningEffort,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
@@ -67,7 +67,7 @@ impl std::fmt::Debug for TuiApplicationSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TuiApplicationSession")
-            .field("client", &self.client)
+            .field("application", &self.application)
             .finish()
     }
 }
@@ -90,7 +90,7 @@ impl TuiApplicationSession {
         mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
     ) -> Result<Self, ApplicationError> {
         Ok(Self {
-            client: ApplicationClient::new(
+            application: TuiApplicationAdapter::from_port(
                 port,
                 scope,
                 observer_generation,
@@ -213,7 +213,7 @@ impl TuiApplicationSession {
     }
 
     pub(crate) async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
-        self.client.refresh().await
+        self.application.refresh().await
     }
 
     /// Converts only commands with a lossless V1 application representation.  Unsupported TUI
@@ -296,7 +296,7 @@ impl TuiApplicationSession {
             return Ok(None);
         }
         let latest = self
-            .client
+            .application
             .current_projection()?
             .ok_or(ApplicationError::Unavailable)?;
         let command = match action {
@@ -957,11 +957,11 @@ impl TuiApplicationSession {
             AppAction::SubmitUserInputDecision {
                 command_id: Some(command_id),
                 ..
-            } => futures::executor::block_on(self.client.execute_with_id(
+            } => futures::executor::block_on(self.application.execute_with_id(
                 sigil_application::ApplicationCommandId::new(command_id.clone())?,
                 command,
             ))?,
-            _ => futures::executor::block_on(self.client.execute(command))?,
+            _ => futures::executor::block_on(self.application.execute(command))?,
         };
         Ok(Some(receipt))
     }

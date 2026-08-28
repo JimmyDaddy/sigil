@@ -5939,6 +5939,7 @@ dependencies = [
  "sigil-runtime",
  "sigil-tools-builtin",
  "sigil-tui",
+ "sigil-tui-app",
  "sigil-updater",
  "syntect",
  "tempfile",

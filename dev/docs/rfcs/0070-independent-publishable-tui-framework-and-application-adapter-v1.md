@@ -3292,3 +3292,14 @@ R71 runtime 的 lossless recovery surface facade 已迁入 `sigil-application`�
 真实用户验证仍需由 release operator 提供 evidence 后才可删除内部 host implementation 并将 RFC 标为
 Implemented/Frozen。`scripts/check-r70-release-cycle-validation.py --evidence <record.json>` 对该外部证据
 执行 fail-closed 校验；本 RFC 当前仍为 R70.8 In Progress。
+### R70.6 production application-adapter follow-up（2026-08-28）
+
+本 follow-up 修复了 package boundary 已存在但生产接线仍绕过 `sigil-tui-app` 的缺口。`sigil-tui-host`
+现在显式依赖 `sigil-tui-app`；其 production application bridge 通过 `TuiApplicationAdapter::from_port`
+创建并持有 application client，refresh、projection lookup、command execute/execute-with-id 均经由该 adapter
+进入 `sigil-application` port。host 仍只在 composition edge 持有 worker/runtime/physical bindings，未将这些类型
+下沉到 app package。
+
+提交：`rfc-0070(R70.6): route production TUI through the application adapter`。验证包括 host ownership checker、
+host ownership unit、`sigil-tui-app` library tests、`sigil-tui-host` compile、fmt 与 diff check；R70.8 external
+release-cycle/user validation 仍未被本地代码接线冒充。

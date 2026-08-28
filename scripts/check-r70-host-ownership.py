@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -38,6 +39,23 @@ def main() -> int:
     for forbidden in ("sigil-runtime", "sigil-kernel", "sigil-tools-builtin", "sigil-updater"):
         if forbidden in app_manifest:
             errors.append(f"sigil-tui-app declares forbidden host dependency {forbidden}")
+
+    host_manifest = tomllib.loads(
+        (ROOT / "crates/sigil-tui/Cargo.toml").read_text(encoding="utf-8")
+    )
+    host_dependencies = host_manifest.get("dependencies", {})
+    if "sigil-tui-app" not in host_dependencies:
+        errors.append("production TUI host must depend on sigil-tui-app")
+
+    application_bridge = (ROOT / "crates/sigil-tui/src/application_bridge.rs").read_text(
+        encoding="utf-8"
+    )
+    if "sigil_tui_app::TuiApplicationAdapter" not in application_bridge:
+        errors.append("production TUI application bridge must use TuiApplicationAdapter")
+    if "TuiApplicationAdapter::from_port" not in application_bridge:
+        errors.append("production TUI application bridge must create its adapter from the host port")
+    if "ApplicationClient::new" in application_bridge:
+        errors.append("production TUI application bridge must not construct a parallel ApplicationClient")
 
     application_sources = ROOT / "crates/sigil-application/src"
     for source in application_sources.rglob("*.rs"):
