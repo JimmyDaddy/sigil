@@ -3386,3 +3386,14 @@ PR qualification 暴露 `scripts/test-run-evals.py` 向 fake model-eval binary �
 读取 `SIGIL_MODEL_EVAL_BIN`，fixture 却设置未被读取的 `SIGIL_BIN`，使 CI 错误地执行真实 model-eval 并失败。
 测试现已改为注入 runner 的正式 override，且本地 contract test `1 passed`。该修复只纠正测试 harness 与生产
 runner 的既有接口不一致，不放宽 acceptance；PR CI 需要在新 commit 上重新验证。
+
+### R70.8 physical test-layout gate closure（2026-08-29）
+
+PR CI 随后发现 physical Rust test-layout gate 在 `origin/main` 已存在 inline test backlog，且 R70/R71 新增模块
+进一步扩大了失败面。为保持该 gate 的原始含义，没有改成 allowlist、changed-file-only 或跳过检查；仓库内 65 个
+`#[cfg(test)] mod tests` 已迁移到各自源模块的 `tests/*_tests.rs` sibling，并由 `#[path] mod tests;` 保持原有
+父模块私有可见性和测试配置边界。`check-test-layout.py`、其 3 个 contract tests、`cargo check --locked
+--workspace --all-targets` 与 `cargo test --locked --workspace --all-targets --no-fail-fast` 均通过。
+
+该 slice 只修复 CI gate 的真实测试布局缺口，不改变生产行为，也不伪造 R70.8 所需的 crates.io preview、release
+cycle 或 user-validation evidence；R70.8 在这些外部条件完成前继续保持 In Progress。

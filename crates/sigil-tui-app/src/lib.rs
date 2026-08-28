@@ -159,11 +159,5 @@ impl App for TuiApplicationAdapter {
 pub fn application_port_type_marker(_port: Arc<dyn ApplicationPort>) {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adapter_builds_a_bounded_surface_without_host_dependencies() {
-        let _ = TuiApplicationAction::Refresh;
-    }
-}
+#[path = "tests/lib_tests.rs"]
+mod tests;
