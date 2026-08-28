@@ -79,11 +79,13 @@ const SPINNER_FRAME_MILLIS: u128 = 120;
 type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     run_tui_with_build_info(config, SupportBuildInfo::unknown())
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui_with_build_info(
     config: Option<PathBuf>,
     build_info: SupportBuildInfo,
@@ -106,11 +108,13 @@ pub fn run_tui_with_build_context(
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui_resume(config: Option<PathBuf>, session_selector: Option<String>) -> Result<()> {
     run_tui_resume_with_build_info(config, session_selector, SupportBuildInfo::unknown())
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui_resume_with_build_info(
     config: Option<PathBuf>,
     session_selector: Option<String>,

@@ -1102,7 +1102,7 @@ fn compose_current_boot_authority_locked(
         Arc::clone(&process_inventory),
     )
     .map_err(BootAuthorityErrorV1::Composition)?;
-    let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
+    let recovery = sigil_application::ApplicationResourceRecoveryFacadeV1::new();
     let first = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate_current_schema(
         instance_id.clone(),
         application_generation,
@@ -1280,7 +1280,7 @@ mod tests {
         RuntimeExecutionSeamV1, RuntimeFileAccessSeamV1, RuntimeGlobalCutoverV1,
         probe_mandatory_adapters,
     };
-    use crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1;
+    use sigil_application::ApplicationResourceRecoveryFacadeV1;
     use sigil_kernel::cutover_manifest::MandatoryAdapterKindV1;
 
     fn write_r71_boot_config(config: &Path) {
@@ -1397,7 +1397,7 @@ mod tests {
             .storage_writer
             .finalize(lease)
             .expect("finalize");
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let probes = probe_mandatory_adapters(
             &composition.services,
             &recovery,
@@ -1962,7 +1962,7 @@ mod tests {
             &[Ch::SessionLog],
         )
         .expect("first composition");
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let first_probes = probe_mandatory_adapters(
             &first.services,
             &recovery,

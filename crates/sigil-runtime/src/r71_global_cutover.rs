@@ -29,7 +29,7 @@ use sigil_kernel::resource_recovery::ResourceBlockerAdmissionKeyV1;
 use sigil_kernel::resource_recovery_surface::ResourceRecoverySurfaceContractV1;
 
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
-use crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1;
+use sigil_application::ApplicationResourceRecoveryFacadeV1;
 
 /// Actual execution seam kind the runtime surface was composed with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +191,7 @@ fn storage_family_probe(
 /// never claim a seam the composition does not hold.
 pub fn probe_mandatory_adapters(
     services: &RuntimeManagedResourceServicesV1,
-    recovery: &RuntimeResourceRecoveryFacadeV1,
+    recovery: &ApplicationResourceRecoveryFacadeV1,
     cutover_manifest_hash: CanonicalHash,
     application_generation: u64,
 ) -> Vec<AdapterReadinessProbeV1> {
@@ -356,7 +356,7 @@ impl RuntimeGlobalCutoverV1 {
         application_generation: u64,
         authority_generation: AuthorityGeneration,
         services: &RuntimeManagedResourceServicesV1,
-        recovery: &RuntimeResourceRecoveryFacadeV1,
+        recovery: &ApplicationResourceRecoveryFacadeV1,
     ) -> Self {
         let mut manifest = CutoverManifestV1 {
             schema_version: 1,
@@ -388,7 +388,7 @@ impl RuntimeGlobalCutoverV1 {
         application_generation: u64,
         authority_generation: AuthorityGeneration,
         services: &RuntimeManagedResourceServicesV1,
-        recovery: &RuntimeResourceRecoveryFacadeV1,
+        recovery: &ApplicationResourceRecoveryFacadeV1,
         selected_epoch: StartupEpochV1,
     ) -> Self {
         if selected_epoch == StartupEpochV1::NewCurrentSchema {
@@ -424,7 +424,7 @@ impl RuntimeGlobalCutoverV1 {
         application_generation: u64,
         authority_generation: AuthorityGeneration,
         services: &RuntimeManagedResourceServicesV1,
-        recovery: &RuntimeResourceRecoveryFacadeV1,
+        recovery: &ApplicationResourceRecoveryFacadeV1,
         selected_epoch: StartupEpochV1,
     ) -> Self {
         Self::evaluate_for_test(
@@ -787,7 +787,7 @@ mod tests {
     #[test]
     fn resource_global_cutover_shadow_surface_fails_closed_on_new_epoch() {
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-shadow",
             1,
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn resource_global_cutover_extension_probe_reflects_real_seam() {
         let mut services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let before = RuntimeGlobalCutoverV1::evaluate(
             "inst-ext-before",
             1,
@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn resource_global_cutover_legacy_epoch_requires_no_probes() {
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-legacy",
             1,
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn resource_global_cutover_storage_roundtrip_probe_is_real() {
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         // Empty grant table: every storage family probe must fail (service says mismatch).
         let probes = probe_mandatory_adapters(
             &services,
@@ -982,7 +982,7 @@ mod tests {
             ))
             .expect("register");
         let services = shadow_services_with_table(mock_issuer(), table);
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let probes = probe_mandatory_adapters(
             &services,
             &recovery,
@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn resource_global_cutover_manifest_is_content_addressed() {
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let a = RuntimeGlobalCutoverV1::evaluate(
             "inst-ca",
             1,
@@ -1047,7 +1047,7 @@ mod tests {
         use crate::application_run::ApplicationRunServices;
 
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-boot",
             1,
@@ -1120,7 +1120,7 @@ mod tests {
             file_access,
             RuntimeFileAccessSeamV1::AuthorityBacked,
         );
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-sandbox",
             1,
@@ -1163,7 +1163,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cutover-manifest.json");
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-persist",
             1,
@@ -1185,7 +1185,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cutover-manifest.json");
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-tamper",
             1,
@@ -1212,7 +1212,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cutover-manifest.json");
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let first = RuntimeGlobalCutoverV1::evaluate(
             "inst-forward",
             1,
@@ -1245,7 +1245,7 @@ mod tests {
     #[test]
     fn resource_global_cutover_legacy_decision_is_content_addressed() {
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let _ = (&services, &recovery);
         let a = RuntimeGlobalCutoverV1::legacy_decision("inst-legacy-dec", 1, authority());
         let b = RuntimeGlobalCutoverV1::legacy_decision("inst-legacy-dec", 1, authority());
@@ -1344,7 +1344,7 @@ mod tests {
         ));
         // A new-epoch binary opening the same legacy session is refused before any store open.
         let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let new_epoch = RuntimeGlobalCutoverV1::evaluate(
             "inst-new",
             1,
@@ -1455,7 +1455,7 @@ mod tests {
                 .with_optional_borrowed_release_output(Some(release_output));
             composition
         };
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
+        let recovery = ApplicationResourceRecoveryFacadeV1::new();
         let cutover = RuntimeGlobalCutoverV1::evaluate(
             "inst-full",
             1,

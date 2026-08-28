@@ -1,8 +1,9 @@
-//! RFC-0071 section 9.4 / R71.4: runtime transitional application-facing facade.
+//! Application-facing projection of the kernel-owned resource recovery surface.
 //!
-//! Projects the kernel-owned ResourceRecoverySurfaceContractV1 losslessly to TUI/Desktop/CLI/HTTP.
-//! This facade owns no second durable state, canonical hash or recovery policy; it is the
-//! transitional edge that RFC-0070 R70.4/R70.6 replaces mechanically.
+//! This module is deliberately stateless. It does not own a recovery policy, durable state,
+//! canonical schema, physical resource, or transport. It validates and round-trips the exact
+//! kernel contract so product surfaces can use the application boundary without a runtime
+//! transitional facade.
 
 use sigil_kernel::resource::{CanonicalHash, OpaqueBlockerId};
 use sigil_kernel::resource_recovery_surface::{
@@ -23,32 +24,31 @@ fn canonical_binding_hash(
     format!("sha256:{}", sigil_kernel::sha256_hex(&encoded))
 }
 
-/// Facade query result: a lossless projection plus the exact action envelope round trip.
+/// Lossless application projection plus the exact action envelope round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceRecoverySurfaceProjectionV1 {
     pub contract: ResourceRecoverySurfaceContractV1,
     pub projection_hash: String,
 }
 
-/// Facade dispatch result: the surface returns exactly the envelope it received.
+/// Application dispatch result for an envelope accepted by the projection binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceRecoveryDispatchV1 {
     pub accepted_envelope: ResourceRecoveryActionEnvelopeV1,
     pub binding_hash: String,
 }
 
-/// Transitional facade: kernel contract in/out, no transport or physical type.
+/// Stateless application boundary for the kernel recovery surface.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct RuntimeResourceRecoveryFacadeV1;
+pub struct ApplicationResourceRecoveryFacadeV1;
 
-impl RuntimeResourceRecoveryFacadeV1 {
+impl ApplicationResourceRecoveryFacadeV1 {
     pub const fn new() -> Self {
         Self
     }
 
     /// Creates the transport-neutral action emitted for a corrupt authority bootstrap. Product
-    /// surfaces may render/return this envelope, but no surface receives a path or recovery
-    /// credential; the independent doctor service validates the eventual operator confirmation.
+    /// surfaces may render/return this envelope, but no surface receives a path or credential.
     #[must_use]
     pub fn bootstrap_recovery_action(
         blocker_id: OpaqueBlockerId,
@@ -61,9 +61,7 @@ impl RuntimeResourceRecoveryFacadeV1 {
         }
     }
 
-    /// Lossless projection: validates the kernel contract and binds the projection to its exact
-    /// canonical bytes. The hash is correlation metadata only; authorization remains owned by
-    /// the kernel action envelope.
+    /// Validates the kernel contract and binds the projection to its exact canonical bytes.
     pub fn project(
         &self,
         contract: ResourceRecoverySurfaceContractV1,
@@ -78,8 +76,7 @@ impl RuntimeResourceRecoveryFacadeV1 {
         })
     }
 
-    /// Dispatch: a surface sends back the exact envelope; the facade verifies it is the one it
-    /// received (binding equality), and never interprets or re-hashes it.
+    /// Accepts only the exact envelope attached to the projected contract.
     pub fn dispatch(
         &self,
         projected: &ResourceRecoverySurfaceProjectionV1,
@@ -99,7 +96,7 @@ impl RuntimeResourceRecoveryFacadeV1 {
     }
 }
 
-/// Facade error classification (closed).
+/// Closed error classification for the application recovery boundary.
 pub mod facade_error {
     #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
     pub enum FacadeErrorV1 {
@@ -161,8 +158,8 @@ mod tests {
     }
 
     #[test]
-    fn r71_facade_projects_and_dispatches_losslessly() {
-        let facade = RuntimeResourceRecoveryFacadeV1::new();
+    fn application_facade_projects_and_dispatches_losslessly() {
+        let facade = ApplicationResourceRecoveryFacadeV1::new();
         let projected = facade.project(sample_contract()).expect("project");
         let returned = projected
             .contract
@@ -177,8 +174,8 @@ mod tests {
     }
 
     #[test]
-    fn r71_facade_rejects_alien_envelope() {
-        let facade = RuntimeResourceRecoveryFacadeV1::new();
+    fn application_facade_rejects_alien_envelope() {
+        let facade = ApplicationResourceRecoveryFacadeV1::new();
         let projected = facade.project(sample_contract()).expect("project");
         let alien = ResourceRecoveryActionEnvelopeV1 {
             blocker_id: OpaqueBlockerId::new("other".to_owned()),
@@ -193,8 +190,8 @@ mod tests {
     }
 
     #[test]
-    fn r71_facade_hashes_contract_and_binding_content_not_schema_only() {
-        let facade = RuntimeResourceRecoveryFacadeV1::new();
+    fn application_facade_hashes_contract_and_binding_content_not_schema_only() {
+        let facade = ApplicationResourceRecoveryFacadeV1::new();
         let first = facade.project(sample_contract()).expect("first project");
         let mut changed = sample_contract();
         changed.blocker.as_mut().expect("blocker").frontier_hash =

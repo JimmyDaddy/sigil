@@ -154,7 +154,6 @@ pub mod provider_status;
 pub mod r71_authority_composition;
 pub mod r71_global_cutover;
 pub mod r71_shadow_planner;
-pub mod resource_recovery_surface;
 pub mod runtime_records_projection;
 pub mod session_control;
 pub mod session_lifecycle;

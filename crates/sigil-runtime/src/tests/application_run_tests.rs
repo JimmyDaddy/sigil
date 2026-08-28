@@ -6398,7 +6398,7 @@ async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()>
         planner,
         &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
     )?;
-    let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
+    let recovery = sigil_application::ApplicationResourceRecoveryFacadeV1::new();
     let cutover = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
         "inst-apprun-authority",
         1,

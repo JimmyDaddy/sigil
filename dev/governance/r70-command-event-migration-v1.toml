@@ -399,3 +399,33 @@ label = "Scroll sensitivity feels correct"
 mode = "semi-automated"
 
 # explicit mapping rows: 274
+
+[[legacy_retirement]]
+symbol = "sigil-tui-host::runner"
+status = "verified-retire"
+replacement = "sigil-tui-app + sigil-application"
+evidence = "scripts/check-r70-legacy-retirement.py"
+
+[[legacy_retirement]]
+symbol = "sigil-tui-host::ui::LayoutSnapshot"
+status = "verified-retire"
+replacement = "sigil-tui-framework::CommittedPresentation"
+evidence = "scripts/check-r70-legacy-retirement.py"
+
+[[legacy_retirement]]
+symbol = "sigil-tui-host::app::AppState"
+status = "verified-retire"
+replacement = "sigil-tui-app::ApplicationClient + sigil-tui::App"
+evidence = "scripts/check-r70-legacy-retirement.py"
+
+[[legacy_retirement]]
+symbol = "sigil-tui-host::theme::ThemePalette"
+status = "verified-retire"
+replacement = "sigil-tui::SemanticTheme"
+evidence = "scripts/check-r70-legacy-retirement.py"
+
+[[legacy_retirement]]
+symbol = "sigil-runtime::resource_recovery_surface"
+status = "verified-retire"
+replacement = "sigil-application::ApplicationResourceRecoveryFacadeV1"
+evidence = "scripts/check-r70-legacy-retirement.py"

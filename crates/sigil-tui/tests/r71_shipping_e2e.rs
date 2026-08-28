@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use sigil_kernel::RootConfig;
-use sigil_tui_host::{app::AppState, launcher};
+use sigil_tui_host::{AppState, install_current_boot_transaction};
 
 fn fixture() -> Result<(tempfile::TempDir, std::path::PathBuf, RootConfig)> {
     let temp = tempfile::tempdir()?;
@@ -55,7 +55,7 @@ fn production_launcher_replacement_keeps_session_runtime_config() -> Result<()> 
         )?,
     )?;
 
-    let returned = launcher::install_current_boot_transaction(
+    let returned = install_current_boot_transaction(
         &mut app,
         &config_path,
         Some(session_route),

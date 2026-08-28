@@ -17,6 +17,12 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod resource_recovery;
+pub use resource_recovery::{
+    ApplicationResourceRecoveryFacadeV1, ResourceRecoveryDispatchV1,
+    ResourceRecoverySurfaceProjectionV1,
+};
+
 pub use sigil_kernel::resource_recovery_surface::{
     PublicRecoveryBlockerV2, RESOURCE_RECOVERY_SURFACE_SCHEMA_VERSION, ResourceEffectReceiptViewV1,
     ResourceRecoveryActionEnvelopeV1, ResourceRecoveryActionV1, ResourceRecoveryDomainV1,

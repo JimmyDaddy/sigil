@@ -3,6 +3,8 @@ name = "sigil-tui-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
+description = "Internal Sigil TUI composition host"
 
 [lib]
 name = "sigil_tui_host"
