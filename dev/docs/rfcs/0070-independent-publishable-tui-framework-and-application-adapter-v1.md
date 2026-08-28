@@ -3020,6 +3020,11 @@ R70.x
   scope、run/task identity 与 expected generation 均保持不透明且有界。application `7/7`、TUI package check、
   application/TUI strict library clippy 与 diff check 通过；terminal PTY 生命周期、configuration save/reboot、
   四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route TUI session maintenance through application port`（`df28fe0d`）将 session inspect、fork、
+  export、pin、delete preview/apply 与 retention apply 收敛为 typed `SessionCommand::Maintain`。application payload
+  只携带 opaque `SessionItemId`、request id 与明确 operation，真实路径、fork route、delete/retention preview 仅由
+  TUI adapter 私有 resolver 保留。application/TUI package check 与 production-library strict clippy 通过；
+  configuration save/reboot、terminal PTY lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
