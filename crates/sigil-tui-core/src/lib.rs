@@ -190,6 +190,167 @@ fn bounded_text(value: String) -> Result<String, CoreError> {
     Ok(value)
 }
 
+/// A bounded resident window over a larger logical sequence.
+///
+/// The owner supplies the resident items; this type never loads, pages, or performs I/O. The
+/// generation-scoped IDs prevent an old viewport item from being mistaken for a new one after a
+/// projection refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualSequence<T> {
+    pub generation: u64,
+    pub first_item: usize,
+    pub total_items: usize,
+    pub items: Vec<T>,
+    pub item_ids: Vec<SurfaceItemId>,
+}
+
+impl<T> VirtualSequence<T> {
+    pub fn new(generation: u64, first_item: usize, total_items: usize, items: Vec<T>) -> Self {
+        let item_ids = (0..items.len())
+            .map(|offset| SurfaceItemId {
+                generation,
+                ordinal: first_item.saturating_add(offset),
+            })
+            .collect();
+        Self {
+            generation,
+            first_item,
+            total_items: total_items.max(first_item.saturating_add(items.len())),
+            items,
+            item_ids,
+        }
+    }
+
+    pub fn resident_len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_bounded_by(&self, max_resident_items: usize) -> bool {
+        self.items.len() <= max_resident_items
+            && self.total_items >= self.first_item.saturating_add(self.items.len())
+            && self.item_ids.len() == self.items.len()
+            && self.item_ids.iter().enumerate().all(|(offset, id)| {
+                id.generation == self.generation
+                    && id.ordinal == self.first_item.saturating_add(offset)
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SurfaceItemId {
+    pub generation: u64,
+    pub ordinal: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportAnchor {
+    pub item_id: SurfaceItemId,
+    pub intra_item_row: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionPageRequest {
+    pub request_id: u64,
+    pub generation: u64,
+    pub first_item: usize,
+    pub item_count: usize,
+}
+
+/// O(log N) prefix-sum index for variable-height virtual items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeightIndex {
+    heights: Vec<u32>,
+    tree: Vec<u64>,
+}
+
+impl HeightIndex {
+    pub fn with_estimate(item_count: usize, estimated_height: u32) -> Self {
+        let mut index = Self {
+            heights: vec![estimated_height.max(1); item_count],
+            tree: vec![0; item_count.saturating_add(1)],
+        };
+        for item in 0..item_count {
+            index.add_tree(item, u64::from(estimated_height.max(1)));
+        }
+        index
+    }
+
+    pub fn len(&self) -> usize {
+        self.heights.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.heights.is_empty()
+    }
+
+    pub fn total_height(&self) -> u64 {
+        self.prefix_height(self.len())
+    }
+
+    pub fn height(&self, item: usize) -> Option<u32> {
+        self.heights.get(item).copied()
+    }
+
+    pub fn set_height(&mut self, item: usize, height: u32) -> Option<u32> {
+        let previous = *self.heights.get(item)?;
+        let height = height.max(1);
+        if previous != height {
+            self.heights[item] = height;
+            if height > previous {
+                self.add_tree(item, u64::from(height - previous));
+            } else {
+                self.subtract_tree(item, u64::from(previous - height));
+            }
+        }
+        Some(previous)
+    }
+
+    pub fn prefix_height(&self, item_count: usize) -> u64 {
+        let mut index = item_count.min(self.len());
+        let mut total = 0;
+        while index > 0 {
+            total += self.tree[index];
+            index &= index - 1;
+        }
+        total
+    }
+
+    /// Locate the item containing a logical row offset and return its intra-item row.
+    pub fn locate_row(&self, row: u64) -> Option<(usize, u32)> {
+        if row >= self.total_height() || self.heights.is_empty() {
+            return None;
+        }
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.prefix_height(middle.saturating_add(1)) <= row {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        let item = low.min(self.len().saturating_sub(1));
+        Some((item, (row - self.prefix_height(item)) as u32))
+    }
+
+    fn add_tree(&mut self, item: usize, value: u64) {
+        let mut index = item.saturating_add(1);
+        while index < self.tree.len() {
+            self.tree[index] = self.tree[index].saturating_add(value);
+            index += index & index.wrapping_neg();
+        }
+    }
+
+    fn subtract_tree(&mut self, item: usize, value: u64) {
+        let mut index = item.saturating_add(1);
+        while index < self.tree.len() {
+            self.tree[index] = self.tree[index].saturating_sub(value);
+            index += index & index.wrapping_neg();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Damage(u8);
 

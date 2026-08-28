@@ -1,12 +1,64 @@
 #![forbid(unsafe_code)]
 
 use ratatui::{
-    Terminal, backend::Backend, layout::Rect as RatatuiRect, text::Line, widgets::Paragraph,
+    Terminal,
+    backend::Backend,
+    buffer::Buffer,
+    layout::Rect as RatatuiRect,
+    text::Line,
+    widgets::{Paragraph, Widget},
 };
 use sigil_tui_core::{
     CommittedPresentation, PresentFault, PresentNotStarted, PresentOutcome, Rect,
     TrustedPresentReceipt,
 };
+
+/// Ratatui-native scratch renderer for one bounded framework surface.
+///
+/// The buffer is owned by this adapter and is never exposed through the core package. Scissoring
+/// happens before a widget is rendered, so custom widgets cannot paint outside their assignment.
+#[derive(Debug)]
+pub struct ScratchRenderContext {
+    bounds: RatatuiRect,
+    scissor: RatatuiRect,
+    buffer: Buffer,
+}
+
+impl ScratchRenderContext {
+    pub fn new(bounds: RatatuiRect, scissor: RatatuiRect) -> Self {
+        let scissor = bounds.intersection(scissor);
+        Self {
+            bounds,
+            scissor,
+            buffer: Buffer::empty(bounds),
+        }
+    }
+
+    pub fn bounds(&self) -> RatatuiRect {
+        self.bounds
+    }
+
+    pub fn scissor(&self) -> RatatuiRect {
+        self.scissor
+    }
+
+    pub fn render_widget<W: Widget>(&mut self, area: RatatuiRect, widget: W) -> bool {
+        let area = self.scissor.intersection(area);
+        if area.width == 0 || area.height == 0 {
+            return false;
+        }
+        widget.render(area, &mut self.buffer);
+        true
+    }
+
+    pub fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+
+    pub fn into_buffer(self) -> Buffer {
+        self.buffer
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalEpoch(u64);
@@ -100,5 +152,22 @@ impl Renderer {
 
     pub fn viewport_from(area: RatatuiRect) -> Rect {
         Rect::new(area.x, area.y, area.width, area.height)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{layout::Rect, widgets::Block};
+
+    use super::ScratchRenderContext;
+
+    #[test]
+    fn scratch_context_scissors_custom_widgets_to_assigned_bounds() {
+        let mut context = ScratchRenderContext::new(Rect::new(4, 3, 5, 2), Rect::new(0, 0, 20, 20));
+        assert_eq!(context.bounds(), Rect::new(4, 3, 5, 2));
+        assert_eq!(context.scissor(), Rect::new(4, 3, 5, 2));
+        assert!(context.render_widget(Rect::new(0, 0, 20, 20), Block::default()));
+        assert_eq!(context.buffer().area, Rect::new(4, 3, 5, 2));
+        assert!(!context.render_widget(Rect::new(0, 0, 0, 0), Block::default()));
     }
 }
