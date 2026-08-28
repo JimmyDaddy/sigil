@@ -2975,7 +2975,8 @@ R70.x
   既有 HTTP `/runs/{run_id}/cancel` production route 切换到同一 ApplicationPort durable reservation，
   legacy envelope reservation 仅保留在 `cfg(test)` 合成 driver 兼容路径；`bdcd44a4`
   （`rfc-0070(R70.4): cut over HTTP run starts`）再将 production run-start route 切换到同一
-  ApplicationClient 与 durable reservation。
+  ApplicationClient 与 durable reservation；`52b7724b`（`rfc-0070(R70.4): cut over HTTP approval decisions`）
+  将 production approval decision route 也切换到同一 application reservation 与 typed guard。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -3028,6 +3029,11 @@ R70.x
   legacy HTTP command-store reservation。普通 prompt 与 task continuation 同时存在或同时缺失都会被
   fail-closed 拒绝；真实 production driver application-client regression 覆盖了 start 的 uncertain
   recovery binding。
+- HTTP approval cutover：`52b7724b` 让 production approval command route 通过同一 host-bound
+  ApplicationClient 与 application reservation；approval request identity、tool/policy hash、expiry、decision、
+  family pattern 和 reason 由 provider-neutral `ApplicationApprovalResolution` 承载，执行前重新绑定到
+  HTTP registry 的 exact approval guard。旧 HTTP command-store approval reservation 仅保留给 `cfg(test)` 合成
+  driver，uncertain delivery 通过 `Uncertain`/`ReplayedUncertain` recovery binding 返回。
 - snapshot-feed：`OpenProjectionRequest` 可携带 resume frontier；runtime 以 durable session stream sequence 为
   application frontier，在 bounded feed 中逐 record 生成 scope/generation/digest/前后 frontier 一致的
   `ProjectionReplaced` event。outbox projection 保留 durable record order，不再用跨 run 不唯一的 run-local sequence
@@ -3052,7 +3058,7 @@ R70.x
 - remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
   HTTP reservation cutover、HTTP 首个 application bridge 与 resumable snapshot-feed 基础已分别落地，但不关闭
   R70.4。TUI 尚有未迁移旧动作，HTTP 既有 start/approval/user-input/queue/recovery 等 command routes 尚未
-  完全收敛到同一 application service；HTTP 新 bridge 当前已对 start/cancel 提供无损执行映射，其余 typed command
+  完全收敛到同一 application service；HTTP 新 bridge 当前已对 start/cancel/approval 提供无损执行映射，其余 typed command
   明确拒绝。feed 的跨 surface ACK/restart
   conformance、所有 shared command 的四表面 conformance、cold-cache 100k page e2e 与完整 migration manifest
   gate 仍需继续完成。TUI ACK 已进入 durable managed writer，但 HTTP/Desktop/CLI 还未全部复用该 delivery
