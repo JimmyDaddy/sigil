@@ -3001,6 +3001,11 @@ R70.x
   `SessionItemId`，真实 session path 与可选 attachment-recovery binding 由 TUI adapter 私有 resolver 保留。
   application `6/6`、TUI session `169/169`（`2 ignored`）、package check 与 production-library strict clippy 通过；
   configuration save/reboot、terminal lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route TUI attachments through application port`（本轮切片）新增无损
+  `SubmitPromptWithAttachments` application command，复用 kernel image-attachment contract；TUI worker edge
+  还原既有 typed attachment command，provider/runtime ownership 不变。application `6/6`、package check、TUI
+  定向测试、strict library clippy 与 diff check 通过；configuration、terminal lifecycle、四表面 conformance
+  与完整 R70.4 exit gate 仍未闭合。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
