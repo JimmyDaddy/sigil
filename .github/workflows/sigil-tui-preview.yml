@@ -27,12 +27,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run preview package gate
         run: bash scripts/run-r70-preview-package-gate.sh
+      - name: Check crates.io publish credential
+        if: ${{ inputs.publish == true }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: test -n "$CARGO_REGISTRY_TOKEN"
       - name: Publish core
         if: ${{ inputs.publish == true }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked -p sigil-tui-core
+      - name: Wait for core index visibility
+        if: ${{ inputs.publish == true }}
+        run: python3 scripts/wait-for-crates-io-version.py --name sigil-tui-core --version 0.1.0
       - name: Publish Ratatui adapter
         if: ${{ inputs.publish == true }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked -p sigil-tui-ratatui
+      - name: Wait for Ratatui adapter index visibility
+        if: ${{ inputs.publish == true }}
+        run: python3 scripts/wait-for-crates-io-version.py --name sigil-tui-ratatui --version 0.1.0
       - name: Publish facade
         if: ${{ inputs.publish == true }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked -p sigil-tui

@@ -3369,3 +3369,13 @@ session action 与 first-run command 被错误地报告为 application service u
 现在会在切换到 managed leaf 后同步采用同一确定性 path identity，确保 worker、application projection 和 UI
 共享同一 session scope。真实 TUI session-action export 与 first-run provider fixture 已通过；R70.8 的真实
 preview 发布、release cycle 和用户验证仍待外部 evidence。
+
+### R70.8 preview release-train hardening（2026-08-28）
+
+Preview workflow 现在在显式 publish 模式下要求 `CARGO_REGISTRY_TOKEN`，并按 core → Ratatui adapter → facade
+顺序发布后等待 crates.io registry API 确认前置版本可见，再继续下游 package。新增的
+`scripts/wait-for-crates-io-version.py` 对 crate/version、请求超时与总等待时间做有界校验，且有无网络的重试
+单测；避免 registry index propagation 延迟把一个可用的发布 train 错误判为依赖缺失。
+
+本轮仍未执行真实发布、release cycle 或用户验证，也未生成外部 evidence；因此 R70.8 继续为 In Progress，
+不得将本地 preview dry-run 当作 RFC 的 published preview。
