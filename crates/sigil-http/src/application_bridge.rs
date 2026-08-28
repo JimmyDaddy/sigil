@@ -467,15 +467,6 @@ impl HttpApplicationCommandExecutor {
                 ))
             }
             ApplicationCommand::Conversation(ConversationCommand::Recovery { action }) => {
-                if matches!(action, ApplicationRecoveryAction::PrepareCompaction { .. }) {
-                    return Ok(RuntimeApplicationDispatch::Rejected(
-                        sigil_application::CommandRejection {
-                            kind: "http_recovery_preview_required".to_owned(),
-                            reason: "compaction preparation remains on the preview boundary"
-                                .to_owned(),
-                        },
-                    ));
-                }
                 let receipt = match self
                     .registry
                     .command_conversation_recovery_from_application(

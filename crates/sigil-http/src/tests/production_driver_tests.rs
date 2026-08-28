@@ -328,7 +328,7 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                         },
                     }),
                 )
-                .expect("recovery command should receive a typed rejection");
+                .expect("stale recovery binding should receive a typed rejection");
             (
                 projection,
                 page,
@@ -362,11 +362,7 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
     let ApplicationCommandReceipt::Rejected(recovery_rejection) = recovery_receipt else {
         panic!("invalid recovery binding should be represented as a typed rejection");
     };
-    assert!(
-        recovery_rejection.reason.contains("preview boundary"),
-        "unexpected recovery rejection: {}",
-        recovery_rejection.reason
-    );
+    assert!(!recovery_rejection.reason.contains("preview boundary"));
 }
 
 #[tokio::test]
