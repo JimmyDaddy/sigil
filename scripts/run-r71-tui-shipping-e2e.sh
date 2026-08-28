@@ -25,9 +25,9 @@ run() {
   echo "PASS(tui-shipping/$label): $summary"
 }
 
-run current-schema-boot cargo test --locked -p sigil-tui --test r71_shipping_e2e \
+run current-schema-boot cargo test --locked -p sigil-tui-app --test r71_shipping_e2e \
   production_boot_current_schema_uses_real_authority_transaction -- --format terse
-run launcher-production-replacement cargo test --locked -p sigil-tui --test r71_shipping_e2e \
+run launcher-production-replacement cargo test --locked -p sigil-tui-app --test r71_shipping_e2e \
   production_launcher_replacement_keeps_session_runtime_config -- --format terse
 run delete-reconciliation cargo test --locked -p sigil-resource-authority --lib r71_f_del -- --format terse
 echo "r71-tui-shipping-e2e: current-schema boot, authority file receipts, replacement and delete fixtures passed"

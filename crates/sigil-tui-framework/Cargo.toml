@@ -1,0 +1,21 @@
+[package]
+name = "sigil-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sigil-tui-core = { path = "../sigil-tui-core" }
+sigil-tui-ratatui = { path = "../sigil-tui-ratatui" }
+
+[features]
+default = ["crossterm"]
+crossterm = []
+serde = []
+syntax = []
+image = []
+tracing = []
+test-util = []
+
+[lints]
+workspace = true

@@ -1,8 +1,11 @@
 [package]
-name = "sigil-tui"
+name = "sigil-tui-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[lib]
+name = "sigil_tui"
 
 [dependencies]
 anyhow.workspace = true
@@ -23,6 +26,7 @@ tokio.workspace = true
 url.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-application = { path = "../sigil-application" }
+sigil-tui = { package = "sigil-tui", path = "../sigil-tui-framework" }
 sigil-runtime = { path = "../sigil-runtime" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 sigil-updater = { path = "../sigil-updater" }

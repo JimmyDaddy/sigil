@@ -14,7 +14,7 @@ tests=(
 for test_name in "${tests[@]}"; do
   log_path="$OUTPUT_DIR/${test_name}.log"
   echo "profiling $test_name -> $log_path"
-  SIGIL_TUI_PHASE_TIMINGS=1 cargo test -p sigil-tui --lib "$test_name" -- --nocapture >"$log_path" 2>&1
+  SIGIL_TUI_PHASE_TIMINGS=1 cargo test -p sigil-tui-app --lib "$test_name" -- --nocapture >"$log_path" 2>&1
 done
 
 python3 - "$OUTPUT_DIR" <<'PY'

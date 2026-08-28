@@ -353,7 +353,7 @@ async fn run_main(cli: Cli) -> Result<u8> {
         return Ok(0);
     }
     let Some(command) = cli.command else {
-        sigil_tui::launcher::run_tui_with_build_context(
+        sigil_tui_app::launcher::run_tui_with_build_context(
             cli.config,
             build.into(),
             build.update_metadata(),
@@ -467,7 +467,7 @@ async fn run_main(cli: Cli) -> Result<u8> {
             return Ok(u8::try_from(code).expect("machine exit codes must fit in u8"));
         }
         Commands::Resume { session } => {
-            sigil_tui::launcher::run_tui_resume_with_build_context(
+            sigil_tui_app::launcher::run_tui_resume_with_build_context(
                 cli.config,
                 session,
                 build.into(),
@@ -768,7 +768,9 @@ fn build_cli_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
         config_path,
         launch_cwd,
         DoctorReportOptions {
-            appearance_checks: Some(&sigil_tui::appearance_diagnostics::appearance_doctor_checks),
+            appearance_checks: Some(
+                &sigil_tui_app::appearance_diagnostics::appearance_doctor_checks,
+            ),
             ..DoctorReportOptions::default()
         },
     )

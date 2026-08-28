@@ -389,7 +389,7 @@ else
   for package in sigil-kernel sigil-resource-authority sigil-sandbox sigil-process-observer sigil-tools-builtin sigil-runtime sigil-mcp; do
     run_step "targeted-$package" cargo test --locked -p "$package"
   done
-  run_step cross-surface-tui cargo test --locked -p sigil-tui
+  run_step cross-surface-tui cargo test --locked -p sigil-tui-app
   run_step cross-surface-http cargo test --locked -p sigil-http
   run_step cross-surface-desktop cargo test --locked -p sigil-desktop
   run_step cross-surface-cli cargo test --locked -p sigil

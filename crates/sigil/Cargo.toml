@@ -20,7 +20,7 @@ uuid.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-http = { path = "../sigil-http" }
 sigil-runtime = { path = "../sigil-runtime" }
-sigil-tui = { path = "../sigil-tui" }
+sigil-tui-app = { package = "sigil-tui-app", path = "../sigil-tui" }
 sigil-updater = { path = "../sigil-updater" }
 
 [dev-dependencies]
