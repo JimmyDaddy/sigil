@@ -3240,3 +3240,9 @@ R70.x
   现同时验证 app adapter 的 allowlist 与 public source markers；metadata、topology、app/host/sigil check 通过。
   这完成 package identity 的可执行基线，但 host 内旧 renderer/runner 尚未全部下沉，R70.5/R70.6 exit gate 与
   R70.4 full gate 仍未关闭。
+
+- R70.5 framework primitives follow-up：`sigil-tui-core` 新增 application-neutral `SemanticTheme`/`ThemeRole`/
+  `ThemeColor` 与 `InputEvent::validate` bounded contract，facade/prelude 重导出 theme primitives，独立
+  `sigil-tui-app` adapter 在处理输入前执行相同 input validation。core、facade、app tests、fmt、package topology
+  与 host check 通过；Sigil-specific Crossterm decoder/Ratatui palette 仍属于 host adapter，R70.5 full module
+  migration 和 R70.6 runner extraction 仍需继续。
