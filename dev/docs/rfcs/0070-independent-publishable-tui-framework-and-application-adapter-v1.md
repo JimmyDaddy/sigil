@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.2 Complete / R70.3 Pending（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.2 已完成 normalized input/damage/host-effects slice）
+状态：R70.3 Complete / R70.4 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.3 已完成 owned surface renderer boundary、bounded virtualization primitives 与 UAX #9 text mapping）
 
 创建日期：2026-08-23
 
@@ -2942,3 +2942,19 @@ R70.x
   测试、clipboard/external host 行为测试、`git diff --check` 通过。
 - remaining deviations：R70.2 尚未交付 renderer-only SurfaceModel、virtualization/UAX #9、`sigil-application`
   contract、public package split、runner 下沉或 release qualification；这些继续由 R70.3-R70.8 完成。
+
+### R70.3：SurfaceModel renderer boundary、bounded virtualization 与 Unicode text（2026-08-28）
+
+- implementation commit：`7c129a02`（`rfc-0070(R70.3): render from owned surface snapshots`）。
+- 生产 terminal draw 在一次 `Terminal::draw` 中创建 owned `SurfaceModel`，renderer 入口只消费快照与
+  `SurfaceState`；egress disclosure 的 presentation acknowledgement 仍由 launcher 在 draw 成功后执行。
+- `surface_adapter` 集中 `AppState -> surface` projection；renderer-facing config/status 只使用 bounded label，
+  不把 authority `PathBuf` 带入 SurfaceModel；approval scroll、generation-scoped item ID、UAX #9 bidi map 已
+  纳入该边界。
+- framework bridge 增加 bounded `RenderContext`/scratch `Buffer`、variable-height prefix index、
+  `ViewportAnchor` 与 `ProjectionPageRequest` DTO；100k resident-bound、height lookup、clip 与 logical/visual
+  mapping 测试通过。完整 application page source 仍留给 R70.4，未将当前 viewport rows 误报为 cold-cache paging。
+- tests/gates：`cargo fmt --all --check`、`cargo check -p sigil-tui`、strict clippy、完整 TUI lib
+  `1718 passed / 3 ignored`、surface/UAX #9 targeted tests、`git diff --check`。
+- moved authority：没有移动 R71 Resource Authority/Sandbox、permission、worker 或 runtime owner；下一 slice 是
+  独立 `sigil-application` contract 与 fake application，R70.4-R70.8 仍未完成。
