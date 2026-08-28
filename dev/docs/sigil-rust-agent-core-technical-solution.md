@@ -10,6 +10,19 @@
 > split packages; it freezes the production protocol discovery set and measures the existing projection/layout/
 > render/present path before R70.1 introduces `CommittedPresentation`.
 
+> RFC-0070 current package snapshot (2026-08-28): R70.4 application ports, R70.5 public framework packages,
+> R70.6 host ownership and R70.7 preview package qualification are implemented. R70.8 has retired the public
+> compatibility paths and moved the lossless resource-recovery projection from runtime into `sigil-application`.
+> The internal host still owns the product renderer/worker implementation until a published preview has completed
+> one real release cycle and user validation; that evidence is a separate release gate and is not implied by local
+> package tests.
+
+R70.8 compatibility note：上文的 `sigil-tui` package tree 已拆成 public framework 与内部
+`sigil-tui-host`；后者的 runner、AppState、legacy LayoutSnapshot 和 platform effects 不是 public
+framework contract。R70.8 还将 kernel recovery surface 的无状态 lossless facade 迁入
+`sigil-application`，runtime 不再发布 R71 transitional recovery module。真实发布周期与用户验证仍由
+独立 evidence gate 记录，不能由本地 package test 代替。
+
 ## 1. 背景
 
 `sigil` 是一个基于 Rust 的 AI coding agent：内核复用、前端可插拔，
@@ -245,6 +258,14 @@ sigil/
       src/
         lib.rs
         tests/lib_tests.rs
+    sigil-application/
+      src/
+        lib.rs
+        resource_recovery.rs
+    sigil-tui-core/          # publishable application-neutral primitives
+    sigil-tui-ratatui/       # publishable Ratatui adapter
+    sigil-tui-framework/     # publishable `sigil-tui` facade
+    sigil-tui-app/           # non-publishable thin application adapter
     sigil-http/
       src/
         auth.rs
@@ -316,7 +337,12 @@ sigil/
 - `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。历史session reopen只接受catalog提供的relative ref与expected durable id，并由runtime重新验证lifecycle/JSONL truth；SQLite projection不能授权resume。artifact page route 必须 authenticated、typed、session/source-bound、hash-verified 且 endpoint cap 固定，response/error 均不包含物理路径。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`update`、`serve` 和隐藏 provider 调试命令保留为显式自动化/高级入口，不承担最终产品心智；`update check` 只发现更新，`update apply --yes` 只对已准入 standalone archive 执行替换，包管理器安装仅返回 owner command；`serve` 当前通过共享 runtime application service 启动 loopback-only、bearer-authenticated HTTP/SSE listener，支持 durable replay、live event、approval/cancel 与 graceful drain，不提供 remote bind 或 multi-user daemon 语义。`sigil-desktop`已按workspace监管单独的`serve`进程，通过单行版本化JSON/鉴权`server-info`完成bootstrap，并用stdin owner pipe与process-tree fallback拥有child lifecycle；诊断事实由 `sigil-runtime` 提供，避免 CLI、TUI与desktop各写一套判断。R71 current-schema doctor/support 进一步直接投影 kernel-owned `CutoverSurfaceStatusV1`，四个表面共享 epoch/authority/blocker 语义；headless admission 在 kernel 统一区分 `approval_required` 与 `confirmation_required`，session grant 不得替代 confirmation；lossy pipeline 的 final-stage exit code 不会被升级为 verification passed。
 - `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke，并为可独立替换的官方归档写入 `github-release` 分发 marker；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs，npm launcher 再覆盖 install-source marker 以保留包管理器 ownership；`scripts/release-doctor.mjs` 绑定 tag、Cargo/Desktop/Tauri/Cargo.lock/changelog、remote main/tag 与 exact-SHA CI；`scripts/release-candidate.mjs` 冻结 tag commit、候选 asset inventory/size/SHA-256；macOS Desktop 使用 append-only 公证账本把 build+submit、单次 status、offline finalize 与 upload 分离，每个 attempt 绑定 tag/commit/Team/profile label/目标架构/不可变 submission SHA-256，Apple 原始响应原子落盘，缺失 ID 只能唯一 history reconciliation 或显式 orphan 后重提；`scripts/upload-desktop-macos-release.sh` 是签名双架构 Desktop 进入 draft 的唯一 maintainer 入口，并复验 finalized ledger，默认拒绝替换不同字节。`.github/workflows/release.yml` 只在 tag push 时构建一次多平台 TUI archive、生成 provenance、准备 npm tarball 和 draft Release；显式 publish 不再重编，而是按 candidate manifest 复用原 tarball，先验证双架构 macOS Desktop DMG、updater archive、checksum 与 signature，冻结 `latest.json`，再公开 immutable Release、通过 npm Trusted Publisher 按 platform-first/root-last 发布、部署 Pages updater endpoint，并由独立 job 使用仅限 `JimmyDaddy/homebrew-sigil` 的 SSH deploy key同步 tap。主 workflow 在 npm 发布后通过 `repository_dispatch` 启动有界等待的公开 npm/GitHub/Desktop/Pages/Homebrew smoke；`release.published` 另行覆盖非 `GITHUB_TOKEN` 触发的人工发布。crates.io package name 决策仍是 release-management 工作。
-- `sigil-tui`：并列一等产品表面中的终端实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；`app/state.rs` 承载 runtime、composer、approval、session browser 以及 timeline presentation、review/checkpoint、agent panel、egress disclosure 等私有领域 bundle，根 `AppState` 只为兼容保留公开 timeline/event/scroll 字段和顶层编排状态；`runner/worker_loop.rs` 只保留 worker façade，私有 `WorkerLoopState` 统一持有 session/run/compaction/refresh/agent 状态，scheduler 通过统一 `WorkerEvent` inbox 阻塞等待 command、typed completion、durable projection 与 supervisor wake，只在存在 MCP/terminal 等真实 deadline 时使用 nearest-deadline timeout；七个 advancement function 与穷尽 public-command 到 domain-typed-command classifier/handler 分别承担确定性 safe-point 推进和路由。session scheduler 的 queue、TaskGuidance、continuation、terminal 与 usage/readiness 热查询读取 kernel active-session 增量 projection，并以 durable frontier/CAS 保持最终写入权威；switch/new-session/local-session fork/checkpoint fork 复用一个 session transition，替换 projection observer generation，并在 foreground 或 detached background run 存在时 fail-closed，同时按目标 session 重建 agent supervisor 与模型可见 agent-tool surface。终端运行时采用 alternate-screen 全屏模型，Ratatui 是当前应用帧的唯一物理输出所有者；启动不读取 cursor position，也不把 transcript 写入 terminal 原生 scrollback。异步 `EventStream` 是输入的唯一读取者，主 transcript、child transcript、composer、status、modal 与 info rail 全部在同一个应用帧和坐标系内渲染。历史浏览只由 `AppState` 的 bounded timeline render store、虚拟 scroll offset 与 logical content anchor 管理；PageUp/Ctrl-Home/滚轮、新输出、height resize、width reflow 和 info-rail 显隐都必须重投影同一锚点，不能维护第二套物理 frontier/seed/rebase 状态。每次 resize 由 fullscreen autoresize 重建 viewport；退出、普通错误和 panic 必须先清理应用帧并离开 alternate screen，再在恢复后的 primary screen 输出 resume hint 或错误。info rail 是可响应收起的普通布局区域，不拥有独立终端写入路径，也不能成为隐藏其他区域重绘错误的稳定性开关。所有 transcript、status、composer 与 info-rail 宽度统一采用 Ratatui terminal-cell 模型，并先清理控制字符和非 emoji 序列中的 default-ignorable 字符；timeline render store 在缓存和命中区计算前就把每行约束到真实 live-panel 宽度，不把 renderer 的二次 wrap 当作布局事实。interactive TUI 独占 stdout/stderr 所指向的终端字节流，进程级 tracing 不能在运行期写入 stderr 绕过 Ratatui；非交互 CLI 仍保留标准 tracing 输出。TUI `/doctor` 复用 runtime 诊断事实；`/update [check|refresh|apply]` 复用 updater policy，网络和替换在独立后台任务执行，启动自动检查只在 release packaged build 且非 CI/source 时调度，并且永不自动 apply；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
+- `sigil-application`：transport-neutral application port、command reservation、projection/feed、typed receipt 与 kernel-owned recovery surface 的唯一高层 contract。它只做 bounded、lossless contract validation/round-trip，不拥有 runtime worker、physical resource、filesystem、sandbox 或第二份 recovery state。
+- `sigil-tui-core`：公开、application-neutral 的 bounded surface、input、damage、theme、virtual-list、presentation 与 widget primitives；没有 Sigil domain、runtime、filesystem 或 process 依赖。
+- `sigil-tui-ratatui`：公开的 Ratatui rendering adapter，只把 core contract 降为 renderer-owned buffer/terminal facts；不持有 application/session/worker state。
+- `sigil-tui-framework`（package `sigil-tui`）：公开 facade、`App`/`UiRuntimeDriver` 生命周期、prepared render/update 和标准 widget declarations；旧 `AppState`、WorkerProtocol、layout snapshot 与 platform effect 不再属于该 package 的 public API。
+- `sigil-tui-app`：non-publishable、薄的 Sigil product adapter，只依赖 `sigil-application` 与 public `sigil-tui`，将产品 action/projection 映射到 application port。
+- `sigil-tui`（package `sigil-tui-host`）：内部终端 composition host。它仍持有产品 renderer/worker 的实现细节、Ratatui/Crossterm lifecycle 和 host effects；这些代码不得重新成为 public framework compatibility facade，R70.8 release-cycle/user validation 由独立 evidence gate 记录。
 
 主 transcript 与 child-agent transcript 的历史浏览都保存内容锚点；新输出、文件 reload、
 高度变化或宽度 reflow 只能重投影同一锚点。child tail window 滚动时还必须用稳定的 logical
@@ -1989,7 +2015,7 @@ screen 只负责保留用户原来的 shell 内容，应用运行期间的所有
 
 当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛 bootstrap、顶层 key routing 和跨状态编排；运行状态、composer、approval、session browser、timeline presentation、review/checkpoint、agent panel 和 egress disclosure 字段归入 `crates/sigil-tui/src/app/state.rs`，已有公开 timeline/event/scroll 字段继续留在根 façade；输入焦点、slash selector、modal、setup/config、session/resume、timeline/history、tool card interaction/focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、view model 等 TUI 普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；provider config/status/context-window 这类入口共享 helper 的测试维护在 `crates/sigil-runtime/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、event/approval bridge、session/compaction flow 与 runner 状态机测试维护在 `crates/sigil-tui/src/runner/*`，worker loop 由私有 state aggregate、薄 scheduler、七类 advancement、public command 到 domain-typed command 的穷尽 handler、覆盖四种 scope-changing path 的统一 session transition，以及 active run、queue、MCP/provider refresh、agent/task runtime、terminal refresh 共同维护在 `runner/worker_loop/*`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
 
-主题与右侧信息栏启动可见性作为 TUI appearance 能力落在 `AppearanceConfig`，而不是拆成独立 crate。`sigil-kernel` 只承载可序列化的 `AppearanceConfig`、`ThemeId`、`info_rail` 和 `[appearance.colors]` 原始字符串；`sigil-tui` 将主题配置解析为 `ThemePalette`，并把 `info_rail` 作为启动默认值投影到当前运行的可见状态。内置主题包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。颜色 override 只允许稳定语义 token 和 `#RRGGBB`，用于 TUI 外观，不进入 session/control state、approval 审计、tool payload 或 provider-visible context。`/config` 里的 Appearance draft 会优先供 renderer 解析，让用户在保存前即时预览完整 config palette，包括背景、边框、标题 chip、正文、弱化文字、选中行、状态和提示 token；保存后运行时 config snapshot 更新并重建 timeline render cache，避免旧消息缓存保留旧主题色。Info rail 的 `F2` 运行时覆盖只改变进程内布局状态，不写回配置，也不进入会话审计。
+主题与右侧信息栏启动可见性作为 TUI appearance 能力落在 `AppearanceConfig`，而不是拆成独立 crate。`sigil-kernel` 只承载可序列化的 `AppearanceConfig`、`ThemeId`、`info_rail` 和 `[appearance.colors]` 原始字符串；内部 `sigil-tui-host` 将主题配置解析为 `ThemePalette`，并把 `info_rail` 作为启动默认值投影到当前运行的可见状态。公开 framework 只提供 application-neutral 的 `SemanticTheme`/`ThemeRole`/`ThemeColor`，不暴露 Sigil palette。内置主题包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。颜色 override 只允许稳定语义 token 和 `#RRGGBB`，用于 TUI 外观，不进入 session/control state、approval 审计、tool payload 或 provider-visible context。`/config` 里的 Appearance draft 会优先供 renderer 解析，让用户在保存前即时预览完整 config palette，包括背景、边框、标题 chip、正文、弱化文字、选中行、状态和提示 token；保存后运行时 config snapshot 更新并重建 timeline render cache，避免旧消息缓存保留旧主题色。Info rail 的 `F2` 运行时覆盖只改变进程内布局状态，不写回配置，也不进入会话审计。
 
 ### 15.2 Desktop/TUI 双表面下的能力暴露规则
 

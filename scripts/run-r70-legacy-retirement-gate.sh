@@ -9,6 +9,7 @@ python3 scripts/check-r70-legacy-retirement.py
 python3 -m unittest scripts/test-r70-legacy-retirement.py
 python3 scripts/check-r70-package-topology.py
 python3 scripts/check-r70-migration-manifest.py
+python3 -m unittest scripts/test-r70-release-cycle-validation.py
 cargo fmt --all --check
 cargo check --locked -p sigil-application --lib
 cargo check --locked -p sigil-runtime --lib

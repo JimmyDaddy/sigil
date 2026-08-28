@@ -37,7 +37,11 @@
 - `crates/sigil-process`：跨 crate 的最小进程树 lifecycle ownership；不承载 shell、sandbox、MCP framing 或 TUI 状态
 - `crates/sigil-desktop`：桌面 Rust 后端的 child/token/bootstrap/client ownership；不依赖 kernel/runtime/TUI/HTTP server internals，不向 renderer 暴露 bearer 或 generic process/network API
 - `crates/sigil-mcp`：MCP 接入
-- `crates/sigil-runtime`：跨 Desktop / TUI / CLI 的 provider、tool registry、run options 装配，并提供 provider-neutral 的配置草稿、状态请求/刷新任务、provider/model metadata、agent-message route 和 session-control append helper；入口层不直接依赖 provider crate
+- `crates/sigil-application`：transport-neutral command/projection/recovery contract；只复用 kernel-owned contract，不持有 runtime、TUI、filesystem、process 或 physical authority
+- `crates/sigil-runtime`：跨 Desktop / TUI / CLI 的 provider、tool registry、run options 装配，并实现 application port；入口层不直接依赖 provider crate
+- `crates/sigil-tui-core` / `crates/sigil-tui-ratatui` / public `crates/sigil-tui`：可发布的 application-neutral TUI framework family，依赖方向固定为 core → Ratatui adapter → facade
+- `crates/sigil-tui-app`：薄产品 adapter，只依赖 `sigil-application` 与 public `sigil-tui`；不接收 physical authority 或 host process type
+- `crates/sigil-tui`（package `sigil-tui-host`）：non-publishable TUI composition host；runner、AppState、legacy layout and platform effects 不得从 public framework package 泄漏
 
 ## 3. 变更流程
 
@@ -169,6 +173,7 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 - TUI 状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`；新增或修复某个 flow 时必须优先补同域状态转换测试
 - TUI worker runner 维护在 `crates/sigil-tui/src/runner/*`；协议、启动装配、运行 loop、审批桥接、事件桥接和 session/compaction flow 不要回填到 `runner.rs` 单文件
 - TUI renderer 变更必须同时确认状态模型、事件流、键位提示和 README/governance 文档是否需要同步；纯 renderer 拆分也要跑对应 TUI renderer/state tests
+- R70 public framework boundary：`sigil-tui-core`、`sigil-tui-ratatui` 与 public `sigil-tui` 只能暴露 bounded renderer-neutral contract；`sigil-tui-app` 只能通过 `sigil-application` 与 framework facade 交互。`sigil-tui-host` 的 runner、AppState、legacy layout 和 platform effects 是内部 composition implementation，不得恢复为 public compatibility facade；R70.8 的真实 release-cycle/user validation 由独立 evidence gate 证明，不能用本地 package test 冒充。
 - UI 快捷键变更必须覆盖 key mapping 与 `AppState` state transition tests，并确认 info rail / keyboard help / README 与真实 metadata 一致
 - markdown renderer 变更必须覆盖 assistant timeline、tool preview 或 approval modal 的至少一个调用面，避免 options 增强只在单测中成立
 - setup/config 状态模型拆分必须保留保存、关闭、dirty guard 和 modal 输入的持久化/状态机测试

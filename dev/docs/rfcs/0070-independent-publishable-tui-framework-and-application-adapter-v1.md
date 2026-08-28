@@ -3277,3 +3277,18 @@ R70.x
 - R70.7 metadata correction：Cargo 不接受 `package.changelog` 作为稳定 manifest key；三个公开 package 改为
   使用约定位置的 `CHANGELOG.md`，metadata checker 直接校验文件存在，避免发布 gate 带 warning 或把未生效的
   字段误当成 Cargo 发布元数据。preview package gate 的 package/unpack/docs/feature/dry-run 语义不变。
+
+### R70.8：public compatibility retirement boundary（2026-08-28）
+
+`daf770ec` 完成 R70.8 的可执行 public-boundary slice：`sigil-tui-host` 的旧 app/launcher/mouse/ui/runner
+modules 均降为 crate-private，host 明确 `publish = false`；public `sigil-tui` facade、`sigil-tui-app` 和其
+依赖方向不再暴露 `AppState`、WorkerProtocol、legacy LayoutSnapshot、Sigil ThemePalette 或 platform effects。
+R71 runtime 的 lossless recovery surface facade 已迁入 `sigil-application`，runtime 不再发布
+`resource_recovery_surface` transitional module；kernel recovery contract、canonical bytes 与 authority owner
+保持不变。`dev/governance/r70-command-event-migration-v1.toml` 登记 5 条 `verified-retire` row，
+`scripts/run-r70-legacy-retirement-gate.sh` 通过。
+
+本 slice 不伪造 RFC 要求的 release-cycle/user validation：真实 `0.1.0` publish、至少一个 release cycle 和
+真实用户验证仍需由 release operator 提供 evidence 后才可删除内部 host implementation 并将 RFC 标为
+Implemented/Frozen。`scripts/check-r70-release-cycle-validation.py --evidence <record.json>` 对该外部证据
+执行 fail-closed 校验；本 RFC 当前仍为 R70.8 In Progress。
