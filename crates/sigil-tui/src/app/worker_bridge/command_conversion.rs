@@ -352,6 +352,9 @@ impl AppState {
             | AppAction::ApplyUpdate { .. } => unreachable!(
                 "setup/config/runtime updates are handled before worker command conversion"
             ),
+            AppAction::PersistConfiguration { .. } => {
+                unreachable!("configuration persistence is handled through the application port")
+            }
         }
     }
 

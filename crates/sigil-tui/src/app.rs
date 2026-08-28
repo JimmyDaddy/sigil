@@ -3,15 +3,19 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
     time::SystemTime,
 };
+
+#[cfg(not(test))]
+use std::sync::Mutex;
 
 mod agent_flow;
 mod approval_flow;
 mod checkpoint_flow;
 mod command_dispatch;
 mod compaction_flow;
-mod config_flow;
+pub(crate) mod config_flow;
 mod conversation_queue_flow;
 mod diagnostics_flow;
 mod egress_disclosure_flow;
@@ -898,6 +902,29 @@ pub enum AppAction {
     ConfigSaved {
         root_config: Box<RootConfig>,
     },
+    PersistConfiguration {
+        request: Arc<ConfigurationSaveRequest>,
+    },
+}
+
+pub struct ConfigurationSaveRequest {
+    pub(crate) expected: RootConfig,
+    pub(crate) next_base: RootConfig,
+    pub(crate) config_path: PathBuf,
+    #[cfg(not(test))]
+    pub(crate) draft: Mutex<Option<sigil_runtime::provider_connections::ConnectionSaveDraft>>,
+}
+
+impl std::fmt::Debug for ConfigurationSaveRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfigurationSaveRequest")
+            .field("expected", &self.expected)
+            .field("next_base", &self.next_base)
+            .field("config_path", &self.config_path)
+            .field("draft", &"[redacted]")
+            .finish()
+    }
 }
 
 fn configured_runtime_route(

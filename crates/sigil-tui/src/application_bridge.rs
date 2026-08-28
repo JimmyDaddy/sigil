@@ -26,7 +26,7 @@ use sigil_application::{
 use sigil_kernel::ReasoningEffort;
 
 use crate::{
-    app::AppAction,
+    app::{AppAction, ConfigurationSaveRequest},
     runner::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerCommandSender},
 };
 
@@ -38,6 +38,7 @@ pub(crate) struct TuiApplicationSession {
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
     mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
+    configuration_bindings: Arc<Mutex<BTreeMap<String, Arc<ConfigurationSaveRequest>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +83,7 @@ impl TuiApplicationSession {
         session_maintenance_bindings: Arc<
             Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>,
         >,
+        configuration_bindings: Arc<Mutex<BTreeMap<String, Arc<ConfigurationSaveRequest>>>>,
         mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
     ) -> Result<Self, ApplicationError> {
         Ok(Self {
@@ -96,6 +98,7 @@ impl TuiApplicationSession {
             session_bindings,
             session_maintenance_bindings,
             mcp_oauth_bindings,
+            configuration_bindings,
         })
     }
 
@@ -181,6 +184,18 @@ impl TuiApplicationSession {
         Ok(binding)
     }
 
+    fn bind_configuration_save(
+        &self,
+        request: &Arc<ConfigurationSaveRequest>,
+    ) -> Result<String, ApplicationError> {
+        let binding = format!("tui-config-save-{}", uuid::Uuid::new_v4());
+        self.configuration_bindings
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .insert(binding.clone(), Arc::clone(request));
+        Ok(binding)
+    }
+
     pub(crate) async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
         self.client.refresh().await
     }
@@ -259,6 +274,7 @@ impl TuiApplicationSession {
                 | AppAction::ApplyLocalSessionDelete { .. }
                 | AppAction::ApplySessionRetention { .. }
                 | AppAction::PreviewSessionRetention { .. }
+                | AppAction::PersistConfiguration { .. }
         ) {
             return Ok(None);
         }
@@ -347,6 +363,12 @@ impl TuiApplicationSession {
                 )?,
                 action: application_mcp_oauth_action(action),
             })),
+            AppAction::PersistConfiguration { request } => Some(ApplicationCommand::Configuration(
+                sigil_application::ConfigurationCommand::Save {
+                    binding: self.bind_configuration_save(request)?,
+                    patch: sigil_application::SafeText::new("config-save-v1")?,
+                },
+            )),
             AppAction::SubmitUserInputDecision {
                 command_id: _,
                 request_id,
@@ -1032,6 +1054,7 @@ pub(crate) fn build_for_worker(
     let session_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let session_maintenance_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let mcp_oauth_bindings = Arc::new(Mutex::new(BTreeMap::new()));
+    let configuration_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let executor = Arc::new(TuiWorkerCommandExecutor {
         worker_tx,
         reasoning_effort,
@@ -1039,6 +1062,7 @@ pub(crate) fn build_for_worker(
         session_bindings: Arc::clone(&session_bindings),
         session_maintenance_bindings: Arc::clone(&session_maintenance_bindings),
         mcp_oauth_bindings: Arc::clone(&mcp_oauth_bindings),
+        configuration_bindings: Arc::clone(&configuration_bindings),
     });
     let service = Arc::new(sigil_runtime::RuntimeApplicationService::new(
         Arc::new(projection),
@@ -1057,6 +1081,7 @@ pub(crate) fn build_for_worker(
         application_reasoning_effort,
         session_bindings,
         session_maintenance_bindings,
+        configuration_bindings,
         mcp_oauth_bindings,
     )
     .map_err(|error| anyhow!(error))
@@ -1140,6 +1165,7 @@ struct TuiWorkerCommandExecutor {
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
     mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
+    configuration_bindings: Arc<Mutex<BTreeMap<String, Arc<ConfigurationSaveRequest>>>>,
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecutor {
@@ -1719,6 +1745,56 @@ impl TuiWorkerCommandExecutor {
                         ));
                     }
                 }
+            }
+            ApplicationCommand::Configuration(sigil_application::ConfigurationCommand::Save {
+                binding,
+                ..
+            }) => {
+                let target = self
+                    .configuration_bindings
+                    .lock()
+                    .map_err(|_| ApplicationError::Unavailable)?
+                    .get(binding)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ApplicationError::InvalidRequest(
+                            "configuration binding is not owned by this TUI connection".to_owned(),
+                        )
+                    })?;
+                let draft = target
+                    .draft
+                    .lock()
+                    .map_err(|_| ApplicationError::Unavailable)?
+                    .take()
+                    .ok_or_else(|| {
+                        ApplicationError::InvalidRequest(
+                            "configuration binding was already consumed".to_owned(),
+                        )
+                    })?;
+                crate::app::config_flow::persist_connection_config(
+                    target.expected.clone(),
+                    target.next_base.clone(),
+                    target.config_path.clone(),
+                    draft,
+                )
+                .map_err(|_| ApplicationError::Unavailable)?;
+                return Ok(sigil_runtime::RuntimeApplicationDispatch::Settled(
+                    sigil_application::ApplicationDomainReceipt {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        frontier: sigil_application::ApplicationFrontier {
+                            schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+                            scope: request.admission.scope.clone(),
+                            writer_generation: request.envelope.expected_frontier.writer_generation,
+                            stream_generation: 1,
+                            through_sequence: request.envelope.expected_frontier.through_sequence,
+                            durable_cursor: "configuration-save".to_owned(),
+                        },
+                        settlement: request.envelope.command.policy().settlement,
+                        summary: "configuration persisted".to_owned(),
+                        outcome: None,
+                    },
+                ));
             }
             _ => {
                 return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(

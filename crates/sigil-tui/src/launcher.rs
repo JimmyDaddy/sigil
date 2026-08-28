@@ -1111,6 +1111,45 @@ where
                 )?,
             }
         }
+        AppAction::PersistConfiguration { request } => {
+            let persist_action = AppAction::PersistConfiguration {
+                request: std::sync::Arc::clone(&request),
+            };
+            let receipt = match try_execute_application_action(app, worker, &persist_action) {
+                Ok(Some(receipt)) => receipt,
+                Ok(None) => {
+                    report_worker_unavailable(
+                        app,
+                        "configuration save requires the application port",
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("configuration save was not admitted: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let settled = matches!(
+                receipt,
+                sigil_application::ApplicationCommandReceipt::Settled(_)
+                    | sigil_application::ApplicationCommandReceipt::Replayed(_)
+            );
+            report_application_receipt(app, &receipt)?;
+            if settled {
+                return process_app_action_with_spawner_and_host(
+                    app,
+                    worker,
+                    AppAction::ConfigSaved {
+                        root_config: Box::new(request.next_base.clone()),
+                    },
+                    spawn_worker_fn,
+                    host_effects,
+                );
+            }
+        }
         AppAction::ConfigSaved { .. } | AppAction::RuntimeConfigUpdated { .. } => {
             let Some(session_route) = app.current_session_route() else {
                 return Ok(());
