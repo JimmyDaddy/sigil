@@ -18,9 +18,10 @@ use sigil_application::{
     ApplicationCommandRequest, ApplicationError, ApplicationPermissionMode, ApplicationPort,
     ApplicationProjection, ApplicationQueueAction, ApplicationQueueItemKind,
     ApplicationQueueMoveDirection, ApplicationQueueTarget, ApplicationReasoningEffort,
-    ApplicationRecoveryAction, ApplicationScope, AuthenticatedSubject, ConversationCommand,
-    HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand, SessionCommand,
-    SessionItemId, UserInputCommand, VerificationCommand,
+    ApplicationRecoveryAction, ApplicationScope, ApplicationTerminalTaskIdentity,
+    AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId, McpCommand,
+    PlanTaskCommand, RunCommand, SessionCommand, SessionItemId, UserInputCommand,
+    VerificationCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -120,6 +121,7 @@ impl TuiApplicationSession {
             AppAction::SubmitPrompt(_)
                 | AppAction::SubmitPromptWithAttachments { .. }
                 | AppAction::CancelRun
+                | AppAction::CancelTerminalTask { .. }
                 | AppAction::ApprovalDecision { .. }
                 | AppAction::ActivateLazyMcp {
                     server_name: Some(_),
@@ -210,6 +212,18 @@ impl TuiApplicationSession {
                     )
                 })
                 .map(Some)?,
+            AppAction::CancelTerminalTask { identity } => {
+                Some(ApplicationCommand::Run(RunCommand::CancelTerminalTask {
+                    identity: ApplicationTerminalTaskIdentity {
+                        session_scope_id: sigil_application::SafeText::new(
+                            identity.session_scope_id.clone(),
+                        )?,
+                        run_id: sigil_application::SafeText::new(identity.run_id.clone())?,
+                        task_id: sigil_application::SafeText::new(identity.task_id.clone())?,
+                        expected_generation: identity.expected_generation,
+                    },
+                }))
+            }
             AppAction::ApprovalDecision { approved, .. } => latest
                 .approval
                 .binding
@@ -898,6 +912,16 @@ impl TuiWorkerCommandExecutor {
                 }
             }
             ApplicationCommand::Run(RunCommand::Cancel { .. }) => WorkerCommand::CancelRun,
+            ApplicationCommand::Run(RunCommand::CancelTerminalTask { identity }) => {
+                WorkerCommand::CancelTerminalTask {
+                    identity: crate::runner::TerminalTaskControlIdentity {
+                        session_scope_id: identity.session_scope_id.as_str().to_owned(),
+                        run_id: identity.run_id.as_str().to_owned(),
+                        task_id: identity.task_id.as_str().to_owned(),
+                        expected_generation: identity.expected_generation,
+                    },
+                }
+            }
             ApplicationCommand::Run(RunCommand::UpdatePermissionMode { mode }) => {
                 WorkerCommand::UpdateActiveRunPermissionMode {
                     mode: tui_permission_mode(*mode),

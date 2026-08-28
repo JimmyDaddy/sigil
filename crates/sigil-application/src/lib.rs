@@ -452,12 +452,28 @@ pub enum RunCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<SafeText>,
     },
+    CancelTerminalTask {
+        identity: ApplicationTerminalTaskIdentity,
+    },
     Pause {
         binding: String,
     },
     UpdatePermissionMode {
         mode: ApplicationPermissionMode,
     },
+}
+
+/// Stable owner facts required to cancel one persistent terminal task.
+///
+/// The application contract carries only bounded, transport-neutral identity values. A host
+/// adapter may convert them to its private worker protocol, but callers cannot provide a path,
+/// process handle, or generic execution request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationTerminalTaskIdentity {
+    pub session_scope_id: SafeText,
+    pub run_id: SafeText,
+    pub task_id: SafeText,
+    pub expected_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -703,6 +719,7 @@ impl ApplicationCommand {
             },
             Self::Run(
                 RunCommand::Cancel { .. }
+                | RunCommand::CancelTerminalTask { .. }
                 | RunCommand::Pause { .. }
                 | RunCommand::UpdatePermissionMode { .. },
             )
@@ -2463,5 +2480,31 @@ mod tests {
                 .iter()
                 .all(|domain| domain.frontier.scope == expected_frontier.scope)
         );
+    }
+
+    #[test]
+    fn terminal_task_cancellation_is_an_urgent_monotonic_application_command() {
+        let command = ApplicationCommand::Run(RunCommand::CancelTerminalTask {
+            identity: ApplicationTerminalTaskIdentity {
+                session_scope_id: SafeText::new("session").expect("valid session identity"),
+                run_id: SafeText::new("run").expect("valid run identity"),
+                task_id: SafeText::new("terminal-task").expect("valid task identity"),
+                expected_generation: 4,
+            },
+        });
+
+        assert_eq!(command.kind(), "run");
+        assert_eq!(
+            command.policy(),
+            CommandPolicy {
+                lane: CommandLane::Urgent,
+                settlement: EffectSettlementClass::MonotonicControl,
+                requires_session: true,
+            }
+        );
+        let encoded = serde_json::to_vec(&command).expect("terminal cancel should serialize");
+        let decoded: ApplicationCommand =
+            serde_json::from_slice(&encoded).expect("terminal cancel should deserialize");
+        assert_eq!(decoded, command);
     }
 }
