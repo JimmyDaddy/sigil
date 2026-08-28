@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.4 Complete / R70.5 In Progress / R70.6 Pending（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 public module completion、R70.6-R70.8 仍在实施）
+状态：R70.4 Complete / R70.5 Complete / R70.6 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 framework/package boundary 已闭合，R70.6-R70.8 仍在实施）
 
 创建日期：2026-08-23
 
@@ -3252,3 +3252,17 @@ R70.x
   projection/service、五表面 shared frontier/receipt fixture、production HTTP/TUI adapter tests，以及 100k
   cold-cache transcript test。该 gate 在当前 clean commit 全部通过；R70.4 的 application contract、production
   port、surface conformance 与 cold-cache 条件现已闭合。R70.5 public module completion 与 R70.6-R70.8 仍未闭合。
+
+- R70.5 framework contract completion follow-up：`b5d581bc` 为 public facade 发布 host-owned `UiRuntimeDriver` 生命周期
+  契约、renderer-neutral 的 `SurfaceUpdate`/`PreparedRender`/presentation state，以及 bounded standard widget
+  declarations（包括 box、text、stack、scroll、virtual list、input、button、select、modal、popover、status、card
+  与 markdown 类别）。独立 framework consumer test 覆盖 widget lowering 且不依赖 Sigil domain。该 slice 不引入
+  application、filesystem、process 或 Tokio 依赖；R70.5 publication metadata/feature/docs gate 与 R70.6 host
+  ownership audit 仍待完成。
+
+- R70.5/R70.6 ownership follow-up：`75bfc35a` 将 historical R71 composition 引用从 TUI/HTTP/CLI production
+  surfaces 收敛到 runtime `application_host` composition boundary，并将 host runner 从 public module 降为
+  crate-private。新增 `check-r70-host-ownership.py` 与 `run-r70-host-ownership-gate.sh`，验证 app 依赖 allowlist、
+  application 无 physical authority marker、ProductUpdaterState 仍在 runtime owner、manifest 276/276 与 host
+  全量库测试。该 slice 关闭 R70.5 package/module boundary；R70.6 remaining side-effect extraction、R70.7 release
+  qualification 与 R70.8 compatibility deletion 仍未闭合。
