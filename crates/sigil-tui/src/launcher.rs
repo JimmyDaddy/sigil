@@ -46,6 +46,8 @@ use sigil_runtime::support::SupportBuildInfo;
 use sigil_updater::BuildMetadata;
 
 #[cfg(not(test))]
+use crate::application_bridge;
+#[cfg(not(test))]
 use crate::host_effects::SystemHostEffects;
 #[cfg(test)]
 use crate::host_effects::{ExternalLaunchPlatform, TestHostEffects, external_launch_plan};
@@ -525,6 +527,9 @@ async fn run_app(
         let mut dirty = needs_render;
         dirty |= drain_worker_messages_with_attention(app, worker, &mut attention)?;
         dirty |= restart_worker_after_session_transition(app, worker, spawn_worker)?;
+        if dirty {
+            dirty |= refresh_application_projection(app, worker).await;
+        }
         attention.emit_pending_nonfatal(terminal.backend_mut());
         dirty |= app.poll_background_tasks();
         dirty |= flush_pending_worker_commands(app, worker)?;
@@ -1374,13 +1379,85 @@ where
         AppAction::ApplyUpdate { channel } => {
             app.start_update_apply(channel);
         }
-        action => {
-            let command = app.into_worker_command(action);
-            send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
-        }
+        action => match try_execute_application_action(worker, &action) {
+            Ok(Some(receipt)) => report_application_receipt(app, &receipt)?,
+            Ok(None) => {
+                let command = app.into_worker_command(action);
+                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            }
+            Err(error) => {
+                report_worker_unavailable(
+                    app,
+                    &format!("application command was not admitted: {error}"),
+                )?;
+            }
+        },
     }
     flush_pending_worker_commands(app, worker)?;
     Ok(())
+}
+
+fn try_execute_application_action(
+    worker: &Option<WorkerRuntime>,
+    action: &AppAction,
+) -> Result<Option<sigil_application::ApplicationCommandReceipt>> {
+    #[cfg(not(test))]
+    {
+        return worker
+            .as_ref()
+            .map(|runtime| runtime.application.try_execute_action(action))
+            .transpose()?
+            .flatten()
+            .map_or(Ok(None), |receipt| Ok(Some(receipt)));
+    }
+    #[cfg(test)]
+    {
+        let _ = (worker, action);
+        Ok(None)
+    }
+}
+
+#[cfg(not(test))]
+async fn refresh_application_projection(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) -> bool {
+    let Some(application) = worker.as_ref().map(|runtime| &runtime.application) else {
+        return false;
+    };
+    match application.refresh().await {
+        Ok(snapshot) => app.apply_application_projection(&snapshot.envelope.projection),
+        Err(error) => {
+            tracing::debug!(%error, "application projection refresh unavailable");
+            false
+        }
+    }
+}
+
+fn report_application_receipt(
+    app: &mut AppState,
+    receipt: &sigil_application::ApplicationCommandReceipt,
+) -> Result<()> {
+    let notice = match receipt {
+        sigil_application::ApplicationCommandReceipt::Settled(_) => return Ok(()),
+        sigil_application::ApplicationCommandReceipt::Replayed(_) => "application command replayed",
+        sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+            return app.handle_worker_message(WorkerMessage::Notice(format!(
+                "application command rejected: {}",
+                rejection.reason
+            )));
+        }
+        sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
+            "application command payload conflicts with its durable reservation"
+        }
+        sigil_application::ApplicationCommandReceipt::InFlight(_) => {
+            "application command is already in flight"
+        }
+        sigil_application::ApplicationCommandReceipt::Uncertain(_) => {
+            "application command dispatched; waiting for durable outcome"
+        }
+    };
+    app.handle_worker_message(WorkerMessage::Notice(notice.to_owned()))
 }
 
 fn process_host_request<H: HostEffects>(
@@ -1888,6 +1965,8 @@ fn shell_quote(value: &str) -> String {
 
 struct WorkerRuntime {
     worker_tx: runner::WorkerCommandSender,
+    #[cfg(not(test))]
+    application: application_bridge::TuiApplicationSession,
     #[cfg(test)]
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     #[cfg(not(test))]
@@ -1948,8 +2027,21 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
         app.boot_cutover().cloned(),
         app.worker_session_attachment(),
     )?;
+    let application = match application_bridge::build_for_worker(
+        app,
+        spawned.command_tx.clone(),
+        app.runtime.reasoning_effort.clone(),
+    ) {
+        Ok(application) => application,
+        Err(error) => {
+            let _ = spawned.command_tx.send(WorkerCommand::Shutdown);
+            let _ = spawned.join_handle.join();
+            return Err(error.context("failed to attach TUI application port"));
+        }
+    };
     Ok(WorkerRuntime {
         worker_tx: spawned.command_tx,
+        application,
         worker_rx: WorkerMessageInbox::forward_from(spawned.message_rx)?,
         join_handle: Some(spawned.join_handle),
         ready: false,

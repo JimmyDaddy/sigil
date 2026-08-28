@@ -1,0 +1,364 @@
+//! TUI adapter for the transport-neutral application port.
+//!
+//! The adapter deliberately keeps worker protocol details at the composition edge.  The TUI
+//! receives only an application snapshot and submits grouped, bounded commands; a worker
+//! enqueue is reported as `Uncertain` until the durable application event stream settles it.
+
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, anyhow};
+use futures::future::BoxFuture;
+use sigil_application::{
+    ApplicationCommand, ApplicationCommandEnvelope, ApplicationCommandId,
+    ApplicationCommandReceipt, ApplicationCommandRequest, ApplicationError, ApplicationPort,
+    ApplicationScope, AuthenticatedSubject, CommandAdmissionContext, ConversationCommand,
+    ExpectedFrontier, HostConnectionInstanceId, McpCommand, OpenProjectionRequest,
+    ProjectionSnapshot, RunCommand,
+};
+use sigil_kernel::ReasoningEffort;
+
+use crate::{
+    app::AppAction,
+    runner::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerCommandSender},
+};
+
+/// A TUI-local application client.  It caches only the latest bounded frontier/projection needed
+/// to construct a CAS-bound command; paths and physical authority objects remain in the runtime.
+pub(crate) struct TuiApplicationSession {
+    port: Arc<dyn ApplicationPort>,
+    scope: ApplicationScope,
+    observer_generation: u64,
+    client_epoch: u64,
+    connection_instance: HostConnectionInstanceId,
+    latest: Mutex<Option<ProjectionSnapshot>>,
+}
+
+impl std::fmt::Debug for TuiApplicationSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TuiApplicationSession")
+            .field("scope", &self.scope)
+            .field("observer_generation", &self.observer_generation)
+            .field("client_epoch", &self.client_epoch)
+            .field("connection_instance", &self.connection_instance)
+            .field("latest", &"<bounded projection>")
+            .finish()
+    }
+}
+
+impl TuiApplicationSession {
+    pub(crate) fn new(
+        port: Arc<dyn ApplicationPort>,
+        scope: ApplicationScope,
+        observer_generation: u64,
+        client_epoch: u64,
+        connection_instance: HostConnectionInstanceId,
+    ) -> Result<Self, ApplicationError> {
+        if observer_generation == 0 || client_epoch == 0 {
+            return Err(ApplicationError::InvalidRequest(
+                "TUI application generations and client epoch must be non-zero".to_owned(),
+            ));
+        }
+        Ok(Self {
+            port,
+            scope,
+            observer_generation,
+            client_epoch,
+            connection_instance,
+            latest: Mutex::new(None),
+        })
+    }
+
+    pub(crate) async fn refresh(&self) -> Result<ProjectionSnapshot, ApplicationError> {
+        let snapshot = self
+            .port
+            .open_projection(OpenProjectionRequest {
+                scope: self.scope.clone(),
+                observer_generation: self.observer_generation,
+            })
+            .await?;
+        if snapshot.envelope.scope != self.scope
+            || snapshot.envelope.observer_generation != self.observer_generation
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        let mut latest = self
+            .latest
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        *latest = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    /// Converts only commands with a lossless V1 application representation.  Unsupported TUI
+    /// actions remain at the legacy adapter until their typed payload is added to the contract;
+    /// they are never smuggled through a generic string command.
+    pub(crate) fn try_execute_action(
+        &self,
+        action: &AppAction,
+    ) -> Result<Option<ApplicationCommandReceipt>, ApplicationError> {
+        if !matches!(
+            action,
+            AppAction::SubmitPrompt(_)
+                | AppAction::CancelRun
+                | AppAction::ApprovalDecision { .. }
+                | AppAction::ActivateLazyMcp {
+                    server_name: Some(_),
+                }
+                | AppAction::RefreshMcpServer { .. }
+        ) {
+            return Ok(None);
+        }
+        let latest = self
+            .latest
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .clone()
+            .ok_or(ApplicationError::Unavailable)?;
+        let command = match action {
+            AppAction::SubmitPrompt(prompt) => Some(ApplicationCommand::Conversation(
+                ConversationCommand::SubmitPrompt {
+                    prompt: sigil_application::SafeText::new(prompt.clone())?,
+                },
+            )),
+            AppAction::CancelRun => latest
+                .envelope
+                .projection
+                .run
+                .active_binding
+                .clone()
+                .map(|binding| ApplicationCommand::Run(RunCommand::Cancel { binding }))
+                .ok_or_else(|| {
+                    ApplicationError::InvalidRequest(
+                        "cannot cancel without an active application run binding".to_owned(),
+                    )
+                })
+                .map(Some)?,
+            AppAction::ApprovalDecision { approved, .. } => latest
+                .envelope
+                .projection
+                .approval
+                .binding
+                .clone()
+                .map(|binding| {
+                    ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
+                        binding,
+                        accepted: *approved,
+                    })
+                })
+                .ok_or_else(|| {
+                    ApplicationError::InvalidRequest(
+                        "cannot resolve approval without an active application binding".to_owned(),
+                    )
+                })
+                .map(Some)?,
+            AppAction::ActivateLazyMcp { server_name } => server_name.as_ref().map(|binding| {
+                ApplicationCommand::Mcp(McpCommand::Activate {
+                    binding: binding.clone(),
+                })
+            }),
+            AppAction::RefreshMcpServer { server_name } => {
+                Some(ApplicationCommand::Mcp(McpCommand::Refresh {
+                    binding: server_name.clone(),
+                }))
+            }
+            _ => None,
+        };
+        let Some(command) = command else {
+            return Ok(None);
+        };
+        let command_id =
+            ApplicationCommandId::new(format!("tui-command-{}", uuid::Uuid::new_v4()))?;
+        let expected_frontier = &latest.envelope.cut;
+        let request = ApplicationCommandRequest {
+            envelope: ApplicationCommandEnvelope {
+                schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+                command_id,
+                correlation_id: None,
+                expected_frontier: ExpectedFrontier {
+                    scope: self.scope.clone(),
+                    writer_generation: expected_frontier.writer_generation,
+                    through_sequence: expected_frontier.through_sequence,
+                },
+                command,
+            },
+            admission: CommandAdmissionContext::host_bound(
+                self.scope.authenticated_subject.clone(),
+                self.client_epoch,
+                self.connection_instance.clone(),
+                self.scope.clone(),
+            )?,
+        };
+        Ok(Some(futures::executor::block_on(
+            self.port.execute(request),
+        )?))
+    }
+}
+
+/// Builds the runtime application port for one already-started worker.  The worker command
+/// sender is only an executor edge; reservation, projection and receipt policy remain in the
+/// runtime service.
+pub(crate) fn build_for_worker(
+    app: &crate::app::AppState,
+    worker_tx: WorkerCommandSender,
+    reasoning_effort: ReasoningEffort,
+) -> Result<TuiApplicationSession> {
+    let cutover = app
+        .boot_cutover()
+        .context("application port requires the published boot cutover")?;
+    let composition = app
+        .authority_composition()
+        .context("application port requires the composed authority")?;
+    let application_instance = sigil_application::ApplicationInstanceId::new(
+        cutover.manifest().application_instance_id.clone(),
+    )?;
+    let subject = AuthenticatedSubject::new("local-user")?;
+    let workspace_id =
+        sigil_kernel::stable_workspace_id(&app.workspace_root).map_err(|error| anyhow!(error))?;
+    let scope = ApplicationScope {
+        application_instance: application_instance.clone(),
+        authenticated_subject: subject.clone(),
+        workspace: Some(sigil_application::WorkspaceScopeId::new(workspace_id)?),
+        session: Some(sigil_application::SessionScopeId::new(
+            app.session_id.clone(),
+        )?),
+    };
+    let session_scope_id = app.session_id.clone();
+    let projection = sigil_runtime::RuntimeSessionProjectionBinding::new(
+        app.config_path.clone(),
+        std::env::current_dir()?,
+        app.session_log_path.clone(),
+        session_scope_id.clone(),
+        application_instance,
+        subject,
+        scope.workspace.clone(),
+        cutover.manifest().application_generation,
+        1,
+        1,
+        1,
+    )?;
+    let reservations = sigil_runtime::ManagedApplicationReservationStore::open(
+        Arc::clone(&composition.storage_writer),
+        "tui-application",
+    )
+    .map_err(|error| anyhow!(error))?;
+    let executor = Arc::new(TuiWorkerCommandExecutor {
+        worker_tx,
+        reasoning_effort,
+        session_id: session_scope_id,
+    });
+    let service = Arc::new(sigil_runtime::RuntimeApplicationService::new(
+        Arc::new(projection),
+        executor,
+        Arc::new(reservations),
+        Arc::new(TuiDeliveryAcker),
+    ));
+    let client_epoch = (uuid::Uuid::new_v4().as_u128() as u64) | 1;
+    let connection = HostConnectionInstanceId::new(format!("tui-{}", uuid::Uuid::new_v4()))?;
+    TuiApplicationSession::new(service, scope, 1, client_epoch, connection)
+        .map_err(|error| anyhow!(error))
+}
+
+struct TuiDeliveryAcker;
+
+impl sigil_runtime::RuntimeApplicationDeliveryAcker for TuiDeliveryAcker {
+    fn acknowledge(
+        &self,
+        acknowledgement: sigil_application::ProjectionDeliveryAck,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        Box::pin(async move { acknowledgement.validate() })
+    }
+}
+
+struct TuiWorkerCommandExecutor {
+    worker_tx: WorkerCommandSender,
+    reasoning_effort: ReasoningEffort,
+    session_id: String,
+}
+
+impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecutor {
+    fn dispatch(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError>>
+    {
+        let result = self.dispatch_sync(&request);
+        Box::pin(async move { result })
+    }
+}
+
+impl TuiWorkerCommandExecutor {
+    fn dispatch_sync(
+        &self,
+        request: &ApplicationCommandRequest,
+    ) -> Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError> {
+        let command = match &request.envelope.command {
+            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt { prompt }) => {
+                WorkerCommand::SubmitPrompt {
+                    prompt: prompt.as_str().to_owned(),
+                    reasoning_effort: self.reasoning_effort.clone(),
+                }
+            }
+            ApplicationCommand::Run(RunCommand::Cancel { .. }) => WorkerCommand::CancelRun,
+            ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
+                binding,
+                accepted,
+            }) => {
+                let (_, call_id, approval_request_id) = parse_approval_binding(binding)?;
+                WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
+                    request.envelope.command_id.as_str(),
+                    "sigil-tui-application",
+                    &self.session_id,
+                    WorkerApprovalCommand::Decision {
+                        call_id,
+                        approval_request_id,
+                        approved: *accepted,
+                    },
+                ))
+            }
+            ApplicationCommand::Mcp(McpCommand::Activate { binding }) => {
+                WorkerCommand::ActivateLazyMcp {
+                    server_name: Some(binding.clone()),
+                }
+            }
+            ApplicationCommand::Mcp(McpCommand::Refresh { binding }) => {
+                WorkerCommand::RefreshMcpServer {
+                    server_name: binding.clone(),
+                }
+            }
+            _ => {
+                return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(
+                    sigil_application::CommandRejection {
+                        kind: "unsupported_tui_command".to_owned(),
+                        reason: "the TUI adapter has no lossless worker mapping".to_owned(),
+                    },
+                ));
+            }
+        };
+        self.worker_tx
+            .send(command)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let fingerprint = sigil_application::command_fingerprint(request)?;
+        Ok(sigil_runtime::RuntimeApplicationDispatch::Uncertain(
+            sigil_application::UncertainCommandReceipt {
+                command_id: request.envelope.command_id.clone(),
+                command_kind: request.envelope.command.kind().to_owned(),
+                reservation_fingerprint: fingerprint,
+                recovery_binding: "tui-worker-event-reconcile".to_owned(),
+            },
+        ))
+    }
+}
+
+fn parse_approval_binding(binding: &str) -> Result<(String, String, String), ApplicationError> {
+    let mut parts = binding.splitn(3, ':');
+    let run_id = parts.next().unwrap_or_default();
+    let call_id = parts.next().unwrap_or_default();
+    let request_id = parts.next().unwrap_or_default();
+    if run_id.is_empty() || call_id.is_empty() || request_id.is_empty() {
+        return Err(ApplicationError::InvalidRequest(
+            "approval binding is malformed".to_owned(),
+        ));
+    }
+    Ok((run_id.to_owned(), call_id.to_owned(), request_id.to_owned()))
+}

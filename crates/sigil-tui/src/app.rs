@@ -973,6 +973,35 @@ impl AppState {
         self.boot_cutover = Some(cutover);
     }
 
+    /// Applies the bounded runtime application projection to the legacy orchestration state used
+    /// by the current product adapter. The projection is the source of truth for shared run
+    /// status, selected route and attention; it never carries paths or provider payloads.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn apply_application_projection(
+        &mut self,
+        projection: &sigil_application::ApplicationProjection,
+    ) -> bool {
+        let mut changed = false;
+        let is_busy = projection.run.status.as_str() == "running";
+        if self.runtime.is_busy != is_busy {
+            self.runtime.is_busy = is_busy;
+            changed = true;
+        }
+        if let Some(route) = projection.configuration.selected_route.as_ref()
+            && self.runtime.model_name != route.as_str()
+        {
+            self.runtime.model_name = route.as_str().to_owned();
+            changed = true;
+        }
+        if let Some(notice) = projection.attention.last_notice.as_ref()
+            && self.last_notice.as_deref() != Some(notice.as_str())
+        {
+            self.last_notice = Some(notice.as_str().to_owned());
+            changed = true;
+        }
+        changed
+    }
+
     /// Clears all authority-owned boot attachments before a replacement transaction is
     /// attempted. A failed config replacement must not leave the stopped worker paired with an
     /// authority composition built from a previous snapshot.

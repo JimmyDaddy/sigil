@@ -22,6 +22,7 @@ tracing.workspace = true
 tokio.workspace = true
 url.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-application = { path = "../sigil-application" }
 sigil-runtime = { path = "../sigil-runtime" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 sigil-updater = { path = "../sigil-updater" }

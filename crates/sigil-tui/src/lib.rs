@@ -15,6 +15,8 @@ pub(crate) mod test_env;
 pub(crate) mod agent_display;
 pub mod app;
 pub mod appearance_diagnostics;
+#[cfg(not(test))]
+pub(crate) mod application_bridge;
 pub(crate) mod approval;
 pub(crate) mod attention;
 pub(crate) mod clipboard;
