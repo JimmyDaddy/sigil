@@ -2903,7 +2903,8 @@ R70.x
 
 ### R70.1：提交式 presentation 与 terminal fault state（2026-08-28）
 
-- implementation commit：待本 slice 提交后记录；基线为 R70.0 evidence follow-up `df34e740f90eab20f4c2ba892d8e18e829b2f12a`。
+- implementation commit：`de9ee32fc5acb2c78067cc8ce3b77acef8afe8f8`（`rfc-0070(R70.1): commit presented-frame interaction state`）；基线为 R70.0 evidence follow-up
+  `df34e740f90eab20f4c2ba892d8e18e829b2f12a`。
 - moved authority：没有移动 Resource Authority、Sandbox、permission 或 worker/resource owner；本 slice 只在
   `sigil-tui` 内建立 terminal presentation owner。
 - delivered：新增 `PresentationSession`，为每个 frame 分配不可复用的 generation/attempt/terminal epoch；同一
