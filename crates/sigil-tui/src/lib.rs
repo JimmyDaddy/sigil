@@ -45,6 +45,7 @@ pub(crate) mod workspace_trust;
 
 pub use app::AppState;
 pub use appearance_diagnostics::appearance_doctor_checks;
+#[cfg(not(test))]
 pub use launcher::{
     install_current_boot_transaction, run_tui_resume_with_build_context, run_tui_with_build_context,
 };

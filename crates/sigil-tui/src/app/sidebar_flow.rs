@@ -86,13 +86,14 @@ impl AppState {
             if self.runtime.is_busy {
                 // During an active run the worker must not restart; switch the shared mode override
                 // so the next permission decision uses the new mode immediately.
-                return Ok(Some(AppAction::UpdateActiveRunPermissionMode {
+                Ok(Some(AppAction::UpdateActiveRunPermissionMode {
                     mode: next_config.permission.mode,
-                }));
+                }))
+            } else {
+                Ok(Some(AppAction::RuntimeConfigUpdated {
+                    root_config: Box::new(next_config),
+                }))
             }
-            return Ok(Some(AppAction::RuntimeConfigUpdated {
-                root_config: Box::new(next_config),
-            }));
         }
     }
 }

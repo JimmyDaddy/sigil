@@ -83,8 +83,8 @@ fn complete_visual_order(
     // wezterm-bidi intentionally omits Rule X9 formatting controls from its reordered result.
     // Keep those zero-width codepoints in the public mapping so a logical string remains a
     // complete, round-trippable value (notably for emoji ZWJ sequences).
-    for logical in 0..character_count {
-        if !seen[logical] {
+    for (logical, was_seen) in seen.iter().copied().enumerate() {
+        if !was_seen {
             let insertion = visual_order
                 .iter()
                 .position(|&candidate| candidate > logical)

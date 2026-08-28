@@ -3352,3 +3352,11 @@ R70.3 render-transaction metrics follow-up（2026-08-28）：`PreparedRender` �
 generation 一致的 `FrameMetrics`，构造时拒绝跨 generation metrics，consumer 可从同一 immutable render
 transaction 读取 observation；该契约已有独立 consumer 回归。这样不会把 detached counter 误认为当前 frame
 的指标，也不绑定 telemetry backend。
+
+### R70.8 test-build boundary hardening（2026-08-28）
+
+本 follow-up 修复了 host crate 的 test/non-test 导出边界：production launcher 入口只在非 test 构建重导出，
+测试辅助保持模块私有；同时修正 sidebar 配置流与 release qualification 常量断言，使 host、framework 和 app
+在 `-D warnings` 下通过严格 Clippy。该修复不改变 public package surface，也不把测试 helper 重新暴露给
+consumer。验证包括相关 crate strict Clippy、fmt 与 diff check；R70.8 所要求的真实 preview 发布、release
+cycle 和用户验证仍待外部 evidence，因此 RFC 状态继续为 In Progress。

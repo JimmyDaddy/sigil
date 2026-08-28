@@ -111,7 +111,9 @@ fn resize_theme_and_unicode_inputs_preserve_framework_contract() {
         .build_surface(Rect::new(0, 0, 120, 40), 9)
         .expect("unicode surface");
     assert_eq!(surface.nodes().len(), 1);
-    assert!(MAX_HIT_GRID_CELLS >= 120 * 40);
+    const {
+        assert!(MAX_HIT_GRID_CELLS >= 120 * 40);
+    }
     let bidi = BidiText::new("中文 אבג 👩‍💻").expect("bidi text");
     for (visual, logical) in bidi.map().visual_to_logical().iter().copied().enumerate() {
         assert_eq!(bidi.map().visual_index_for_logical(logical), Some(visual));
