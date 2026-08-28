@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.4 In Progress / R70.5 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract 与部分 production port 已落地，四 surface conformance、package split 与 legacy cutover 尚未闭合）
+状态：R70.4 Complete / R70.5 In Progress / R70.6 Pending（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 public module completion、R70.6-R70.8 仍在实施）
 
 创建日期：2026-08-23
 
@@ -3246,3 +3246,9 @@ R70.x
   `sigil-tui-app` adapter 在处理输入前执行相同 input validation。core、facade、app tests、fmt、package topology
   与 host check 通过；Sigil-specific Crossterm decoder/Ratatui palette 仍属于 host adapter，R70.5 full module
   migration 和 R70.6 runner extraction 仍需继续。
+
+- R70.4 application exit gate follow-up：新增 `scripts/run-r70-application-gate.sh`，把 R70.4 的退出条件固化为可
+  重复执行的 gate：closed migration manifest、public package topology、application contract、runtime
+  projection/service、五表面 shared frontier/receipt fixture、production HTTP/TUI adapter tests，以及 100k
+  cold-cache transcript test。该 gate 在当前 clean commit 全部通过；R70.4 的 application contract、production
+  port、surface conformance 与 cold-cache 条件现已闭合。R70.5 public module completion 与 R70.6-R70.8 仍未闭合。
