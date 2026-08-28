@@ -6,4 +6,4 @@ if [[ "$#" -eq 0 ]]; then
 fi
 
 export SIGIL_TUI_TEST_SLICE_APP_INPUT_FLOW=1
-exec cargo test -p sigil-tui-app --lib "$@"
+exec cargo test -p sigil-tui-host --lib "$@"

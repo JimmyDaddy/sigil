@@ -1,11 +1,11 @@
 [package]
-name = "sigil-tui-app"
+name = "sigil-tui-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "sigil_tui_app"
+name = "sigil_tui_host"
 
 [dependencies]
 anyhow.workspace = true

@@ -22,6 +22,7 @@ members = [
     "crates/sigil-http",
     "crates/sigil",
     "crates/sigil-tui",
+    "crates/sigil-tui-app",
     "crates/sigil-tui-core",
     "crates/sigil-tui-ratatui",
     "crates/sigil-tui-framework",

@@ -14,20 +14,24 @@ ALLOWED = {
     "sigil-tui-core": set(),
     "sigil-tui-ratatui": {"sigil-tui-core"},
     "sigil-tui": {"sigil-tui-core", "sigil-tui-ratatui"},
+    "sigil-tui-app": {"sigil-application", "sigil-tui"},
 }
 PUBLIC_ROOTS = {
     "sigil-tui-core": ROOT / "crates/sigil-tui-core/src",
     "sigil-tui-ratatui": ROOT / "crates/sigil-tui-ratatui/src",
     "sigil-tui": ROOT / "crates/sigil-tui-framework/src",
+    "sigil-tui-app": ROOT / "crates/sigil-tui-app/src",
 }
 FORBIDDEN_SOURCE_MARKERS = (
     "sigil_kernel",
     "sigil_runtime",
-    "sigil_application",
     "std::fs",
     "std::process",
     "tokio::",
 )
+PACKAGE_FORBIDDEN_SOURCE_MARKERS = {
+    "sigil-tui-app": FORBIDDEN_SOURCE_MARKERS + ("sigil_tui_host",),
+}
 
 
 def metadata() -> dict[str, object]:
@@ -73,9 +77,12 @@ def main() -> int:
             )
 
         source_root = PUBLIC_ROOTS[package_name]
+        forbidden_markers = PACKAGE_FORBIDDEN_SOURCE_MARKERS.get(
+            package_name, FORBIDDEN_SOURCE_MARKERS + ("sigil_application",)
+        )
         for path in source_root.rglob("*.rs"):
             text = path.read_text(encoding="utf-8")
-            for marker in FORBIDDEN_SOURCE_MARKERS:
+            for marker in forbidden_markers:
                 if marker in text:
                     errors.append(f"{package_name} public source contains {marker}: {path}")
 
@@ -100,4 +107,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

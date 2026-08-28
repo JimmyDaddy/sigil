@@ -5472,7 +5472,7 @@ dependencies = [
  "sigil-http",
  "sigil-kernel",
  "sigil-runtime",
- "sigil-tui-app",
+ "sigil-tui-host",
  "sigil-updater",
  "tempfile",
  "tokio",
@@ -5909,6 +5909,18 @@ dependencies = [
 name = "sigil-tui-app"
 version = "0.0.1-beta.4"
 dependencies = [
+ "sigil-application",
+ "sigil-tui",
+]
+
+[[package]]
+name = "sigil-tui-core"
+version = "0.0.1-beta.4"
+
+[[package]]
+name = "sigil-tui-host"
+version = "0.0.1-beta.4"
+dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
@@ -5940,10 +5952,6 @@ dependencies = [
  "uuid",
  "wezterm-bidi",
 ]
-
-[[package]]
-name = "sigil-tui-core"
-version = "0.0.1-beta.4"
 
 [[package]]
 name = "sigil-tui-ratatui"

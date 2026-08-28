@@ -112,7 +112,7 @@ run_cargo_fixture() {
 run_cargo_fixture "r71-causal-edges" cargo test -p sigil-tools-builtin --lib r71_ -- --format terse
 
 # 2. Original feedback flow suite (only after fixture isolation passes).
-run_cargo_fixture "feedback-flow" cargo test -p sigil-tui-app --lib feedback_ -- --format terse
+run_cargo_fixture "feedback-flow" cargo test -p sigil-tui-host --lib feedback_ -- --format terse
 
 # 3. Paths fail-closed: missing HOME/XDG must not create cwd .sigil-state/.sigil-cache (the former
 #    pollution causal edge); the current resolver behavior is asserted by the existing test.
