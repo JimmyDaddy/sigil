@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use futures::future::BoxFuture;
+use sha2::{Digest, Sha256};
 use sigil_application::{
     ApplicationClient, ApplicationCommand, ApplicationCommandReceipt, ApplicationCommandRequest,
     ApplicationError, ApplicationPort, ApplicationProjection, ApplicationScope,
@@ -201,10 +202,33 @@ pub(crate) fn build_for_worker(
         Arc::new(reservations),
         Arc::new(delivery_acks),
     ));
-    let client_epoch = (uuid::Uuid::new_v4().as_u128() as u64) | 1;
+    let client_epoch = stable_tui_client_epoch(&scope);
     let connection = HostConnectionInstanceId::new(format!("tui-{}", uuid::Uuid::new_v4()))?;
     TuiApplicationSession::new(service, scope, 1, client_epoch, connection)
         .map_err(|error| anyhow!(error))
+}
+
+/// Derives the durable TUI client epoch from the host-owned application/session identity. A
+/// reconnect keeps the same reservation namespace for retained command ids, while the live
+/// connection instance remains unique for each attachment.
+fn stable_tui_client_epoch(scope: &ApplicationScope) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"sigil-tui-application-client-epoch-v1\0");
+    hasher.update(scope.application_instance.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(scope.authenticated_subject.as_str().as_bytes());
+    hasher.update(b"\0");
+    if let Some(workspace) = &scope.workspace {
+        hasher.update(workspace.as_str().as_bytes());
+    }
+    hasher.update(b"\0");
+    if let Some(session) = &scope.session {
+        hasher.update(session.as_str().as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut epoch_bytes = [0u8; 8];
+    epoch_bytes.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(epoch_bytes) | 1
 }
 
 struct TuiWorkerCommandExecutor {

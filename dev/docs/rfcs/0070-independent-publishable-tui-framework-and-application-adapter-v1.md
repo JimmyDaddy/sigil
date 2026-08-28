@@ -2996,7 +2996,8 @@ R70.x
   fail-closed；TUI production bridge 不再使用仅校验内存对象的 ACK adapter。
 - TUI adapter：生产 launcher 为每个 worker 绑定 runtime `ApplicationPort`，用同一 application scope/frontier
   刷新 projection；共享 ApplicationClient 统一处理 snapshot、reducer、resumable feed、delivery ACK、page/cancel
-  与保留 command id 的 retry。prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application
+  与保留 command id 的 retry；client epoch 由 host-owned application/session scope 稳定派生，reconnect 不会因
+  随机 epoch 变化而制造第二个 reservation namespace。prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application
   reservation service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造
   `Settled`；未有无损 V1 payload 的旧动作仍保留在迁移期 adapter，不能把 R70.4 误记为最终闭合。
 - HTTP adapter：生产 command store 在 `ApplicationControlLog` 的独占 managed namespace 中完成 legacy
