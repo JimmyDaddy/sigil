@@ -12,11 +12,12 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_application::{
-    ApplicationClient, ApplicationCommand, ApplicationCommandId, ApplicationCommandReceipt,
-    ApplicationCommandRequest, ApplicationError, ApplicationPermissionMode, ApplicationPort,
-    ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject, ConversationCommand,
-    HostConnectionInstanceId, PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId,
-    ProjectionPage, RunCommand, RunStartOptions, SessionScopeId, StablePageCursor,
+    ApplicationApprovalDecision, ApplicationApprovalResolution, ApplicationClient,
+    ApplicationCommand, ApplicationCommandId, ApplicationCommandReceipt, ApplicationCommandRequest,
+    ApplicationError, ApplicationPermissionMode, ApplicationPort, ApplicationReasoningEffort,
+    ApplicationScope, AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId,
+    PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId, ProjectionPage, RunCommand,
+    RunStartOptions, SessionScopeId, StablePageCursor,
 };
 use sigil_runtime::{
     ManagedApplicationReservationStore, RuntimeApplicationDeliveryAckStore,
@@ -272,6 +273,37 @@ pub(crate) fn application_run_start_options(
     })
 }
 
+pub(crate) fn application_approval_resolution(
+    request: &crate::HttpApprovalDecisionRequest,
+) -> Result<ApplicationApprovalResolution, ApplicationError> {
+    let decision = match request.decision {
+        crate::HttpApprovalDecision::Approve => ApplicationApprovalDecision::Approve,
+        crate::HttpApprovalDecision::ApproveForSession => {
+            ApplicationApprovalDecision::ApproveForSession
+        }
+        crate::HttpApprovalDecision::ApproveForFamily => {
+            ApplicationApprovalDecision::ApproveForFamily
+        }
+        crate::HttpApprovalDecision::Deny => ApplicationApprovalDecision::Deny,
+    };
+    Ok(ApplicationApprovalResolution {
+        tool_call_hash: sigil_application::SafeText::new(request.tool_call_hash.clone())?,
+        policy_version: sigil_application::SafeText::new(request.policy_version.clone())?,
+        expires_at_ms: request.expires_at_ms,
+        decision,
+        family_pattern: request
+            .family_pattern
+            .as_ref()
+            .map(|pattern| sigil_application::SafeText::new(pattern.clone()))
+            .transpose()?,
+        reason: request
+            .reason
+            .as_ref()
+            .map(|reason| sigil_application::SafeText::new(reason.clone()))
+            .transpose()?,
+    })
+}
+
 fn application_driver_error(error: ApplicationError) -> HttpRunDriverError {
     HttpRunDriverError::new(format!("application client binding failed: {error}"))
 }
@@ -395,6 +427,74 @@ impl HttpApplicationCommandExecutor {
                     },
                 ))
             }
+            ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
+                binding,
+                accepted,
+                resolution: Some(resolution),
+            }) => {
+                let (run_id, call_id, approval_request_id) = parse_approval_binding(binding)?;
+                let resolution_accepted =
+                    !matches!(resolution.decision, ApplicationApprovalDecision::Deny);
+                if resolution_accepted != *accepted {
+                    return Err(ApplicationError::InvalidRequest(
+                        "approval accepted flag does not match the typed decision".to_owned(),
+                    ));
+                }
+                let decision = match resolution.decision {
+                    ApplicationApprovalDecision::Approve => crate::HttpApprovalDecision::Approve,
+                    ApplicationApprovalDecision::ApproveForSession => {
+                        crate::HttpApprovalDecision::ApproveForSession
+                    }
+                    ApplicationApprovalDecision::ApproveForFamily => {
+                        crate::HttpApprovalDecision::ApproveForFamily
+                    }
+                    ApplicationApprovalDecision::Deny => crate::HttpApprovalDecision::Deny,
+                };
+                let route = self
+                    .registry
+                    .submit_approval_decision_from_application(
+                        &run_id,
+                        &call_id,
+                        crate::HttpApprovalDecisionRequest {
+                            approval_request_id,
+                            tool_call_hash: resolution.tool_call_hash.as_str().to_owned(),
+                            policy_version: resolution.policy_version.as_str().to_owned(),
+                            expires_at_ms: resolution.expires_at_ms,
+                            decision,
+                            family_pattern: resolution
+                                .family_pattern
+                                .as_ref()
+                                .map(|pattern| pattern.as_str().to_owned()),
+                            reason: resolution
+                                .reason
+                                .as_ref()
+                                .map(|reason| reason.as_str().to_owned()),
+                        },
+                    )
+                    .map_err(|_| ApplicationError::Unavailable)?;
+                let fingerprint = sigil_application::command_fingerprint(request)?;
+                Ok(RuntimeApplicationDispatch::Uncertain(
+                    sigil_application::UncertainCommandReceipt {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        reservation_fingerprint: fingerprint,
+                        recovery_binding: format!(
+                            "http-approval:{}:{}",
+                            approval_route_token(route.0),
+                            route.1
+                        ),
+                    },
+                ))
+            }
+            ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
+                resolution: None,
+                ..
+            }) => Ok(RuntimeApplicationDispatch::Rejected(
+                sigil_application::CommandRejection {
+                    kind: "missing_http_approval_resolution".to_owned(),
+                    reason: "HTTP approval requires its exact typed guard and decision".to_owned(),
+                },
+            )),
             _ => Ok(RuntimeApplicationDispatch::Rejected(
                 sigil_application::CommandRejection {
                     kind: "unsupported_http_application_command".to_owned(),
@@ -404,6 +504,31 @@ impl HttpApplicationCommandExecutor {
             )),
         }
     }
+}
+
+fn approval_route_token(route: crate::HttpApprovalRouteState) -> &'static str {
+    match route {
+        crate::HttpApprovalRouteState::DecisionAccepted => "accepted",
+        crate::HttpApprovalRouteState::DeliveryUncertain => "uncertain",
+        crate::HttpApprovalRouteState::Terminal => "terminal",
+    }
+}
+
+fn parse_approval_binding(binding: &str) -> Result<(String, String, String), ApplicationError> {
+    let mut parts = binding.splitn(3, ':');
+    let run_id = parts.next().unwrap_or_default();
+    let call_id = parts.next().unwrap_or_default();
+    let approval_request_id = parts.next().unwrap_or_default();
+    if run_id.is_empty() || call_id.is_empty() || approval_request_id.is_empty() {
+        return Err(ApplicationError::InvalidRequest(
+            "approval binding is malformed".to_owned(),
+        ));
+    }
+    Ok((
+        run_id.to_owned(),
+        call_id.to_owned(),
+        approval_request_id.to_owned(),
+    ))
 }
 
 fn http_run_start_request(

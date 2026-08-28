@@ -3540,59 +3540,187 @@ impl HttpSessionRunRegistry {
                 message: error.to_string(),
             }
         })?;
-        let request = HttpReservedCommand::approval(run_id, call_id, &command)?;
-        let reservation =
-            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
-                HttpCommandClaim::Execute(reservation) => reservation,
-                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_approval(),
-            };
-        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-        let result = (|| {
-            {
-                let state = self.lock_state();
-                let run = state
-                    .runs
-                    .get(run_id)
-                    .ok_or_else(|| HttpRegistryError::RunNotFound {
-                        run_id: run_id.to_owned(),
-                    })?;
-                if run.session_id != command.session_id {
-                    return Err(HttpRegistryError::CommandSessionMismatch {
-                        command_session_id: command.session_id,
-                        run_id: run_id.to_owned(),
-                        run_session_id: run.session_id.clone(),
-                    });
-                }
-                if let Some(expected) = command.expected_stream_sequence
-                    && expected != run.stream_sequence
-                {
-                    return Err(HttpRegistryError::StaleCommandSequence {
-                        run_id: run_id.to_owned(),
-                        expected,
-                        actual: run.stream_sequence,
-                    });
-                }
+
+        #[cfg(not(test))]
+        {
+            let run = self.get_run(run_id)?;
+            if run.session_id != command.session_id {
+                return Err(HttpRegistryError::CommandSessionMismatch {
+                    command_session_id: command.session_id.clone(),
+                    run_id: run_id.to_owned(),
+                    run_session_id: run.session_id,
+                });
             }
-            let approval_request_id = command.payload.approval_request_id.clone();
-            let outcome =
-                self.submit_approval_decision_with_route(run_id, call_id, command.payload)?;
-            Ok(HttpApprovalCommandReceipt {
-                command_id: command.command_id,
-                client_id: command.client_id,
-                session_id: command.session_id,
+            let client = self.application_client(&run.session_id, &command.client_id)?;
+            self.submit_approval_command_via_application(run_id, call_id, command, client)
+        }
+        #[cfg(test)]
+        if let Ok(run) = self.get_run(run_id)
+            && let Ok(client) = self.application_client(&run.session_id, &command.client_id)
+        {
+            return self.submit_approval_command_via_application(run_id, call_id, command, client);
+        }
+
+        #[cfg(test)]
+        {
+            let request = HttpReservedCommand::approval(run_id, call_id, &command)?;
+            let reservation =
+                match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                    HttpCommandClaim::Execute(reservation) => reservation,
+                    HttpCommandClaim::Wait(reservation) => return reservation.wait_for_approval(),
+                };
+            let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+            let result =
+                (|| {
+                    {
+                        let state = self.lock_state();
+                        let run = state.runs.get(run_id).ok_or_else(|| {
+                            HttpRegistryError::RunNotFound {
+                                run_id: run_id.to_owned(),
+                            }
+                        })?;
+                        if run.session_id != command.session_id {
+                            return Err(HttpRegistryError::CommandSessionMismatch {
+                                command_session_id: command.session_id,
+                                run_id: run_id.to_owned(),
+                                run_session_id: run.session_id.clone(),
+                            });
+                        }
+                        if let Some(expected) = command.expected_stream_sequence
+                            && expected != run.stream_sequence
+                        {
+                            return Err(HttpRegistryError::StaleCommandSequence {
+                                run_id: run_id.to_owned(),
+                                expected,
+                                actual: run.stream_sequence,
+                            });
+                        }
+                    }
+                    let approval_request_id = command.payload.approval_request_id.clone();
+                    let outcome =
+                        self.submit_approval_decision_with_route(run_id, call_id, command.payload)?;
+                    Ok(HttpApprovalCommandReceipt {
+                        command_id: command.command_id,
+                        client_id: command.client_id,
+                        session_id: command.session_id,
+                        run_id: run_id.to_owned(),
+                        call_id: call_id.to_owned(),
+                        approval_request_id,
+                        expected_stream_sequence: command.expected_stream_sequence,
+                        correlation_id: command.correlation_id,
+                        decision: outcome.decision,
+                        route_state: outcome.route_state,
+                        registry_revision: outcome.registry_revision,
+                        replayed: false,
+                    })
+                })();
+            completion.complete(HttpCommandCompletion::Approval(result.clone()))?;
+            result
+        }
+    }
+
+    fn submit_approval_command_via_application(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        command: HttpCommandEnvelope<HttpApprovalDecisionRequest>,
+        client: crate::application_bridge::HttpApplicationClient,
+    ) -> Result<HttpApprovalCommandReceipt, HttpRegistryError> {
+        client.refresh().map_err(application_registry_error)?;
+        let request = command.payload.clone();
+        if request.approval_request_id.trim().is_empty()
+            || request.tool_call_hash.trim().is_empty()
+            || request.policy_version.trim().is_empty()
+        {
+            return Err(HttpRegistryError::InvalidApprovalRequest {
+                message: "approval command guard fields must not be empty".to_owned(),
+            });
+        }
+        let binding = format!("{run_id}:{call_id}:{}", request.approval_request_id);
+        let resolution = crate::application_bridge::application_approval_resolution(&request)
+            .map_err(application_registry_error)?;
+        let accepted = !matches!(
+            resolution.decision,
+            sigil_application::ApplicationApprovalDecision::Deny
+        );
+        let receipt = client
+            .execute(
+                &command.command_id,
+                sigil_application::ApplicationCommand::Approval(
+                    sigil_application::ApprovalCommand::Resolve {
+                        binding,
+                        accepted,
+                        resolution: Some(Box::new(resolution)),
+                    },
+                ),
+            )
+            .map_err(application_registry_error)?;
+        let ((route_state, registry_revision), replayed) = match &receipt {
+            sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
+                parse_application_approval_recovery(&receipt.recovery_binding)?,
+                false,
+            ),
+            sigil_application::ApplicationCommandReceipt::ReplayedUncertain(receipt) => (
+                parse_application_approval_recovery(&receipt.recovery_binding)?,
+                true,
+            ),
+            sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+                return Err(HttpRegistryError::InvalidApprovalRequest {
+                    message: rejection.reason.clone(),
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
+                return Err(HttpRegistryError::CommandKeyConflict {
+                    session_id: command.session_id,
+                    client_id: command.client_id,
+                    command_id: command.command_id,
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::InFlight(_) => {
+                return Err(HttpRegistryError::ApprovalDecisionUnavailable {
+                    run_id: run_id.to_owned(),
+                    call_id: call_id.to_owned(),
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::Settled(_)
+            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application approval",
+                    run_id: run_id.to_owned(),
+                    message: "application approval returned an invalid settled receipt".to_owned(),
+                });
+            }
+        };
+        Ok(HttpApprovalCommandReceipt {
+            command_id: command.command_id,
+            client_id: command.client_id,
+            session_id: command.session_id,
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+            approval_request_id: request.approval_request_id.clone(),
+            expected_stream_sequence: command.expected_stream_sequence,
+            correlation_id: command.correlation_id,
+            decision: HttpApprovalDecisionRecord {
                 run_id: run_id.to_owned(),
                 call_id: call_id.to_owned(),
-                approval_request_id,
-                expected_stream_sequence: command.expected_stream_sequence,
-                correlation_id: command.correlation_id,
-                decision: outcome.decision,
-                route_state: outcome.route_state,
-                registry_revision: outcome.registry_revision,
-                replayed: false,
-            })
-        })();
-        completion.complete(HttpCommandCompletion::Approval(result.clone()))?;
-        result
+                decision: request.decision.to_user_decision(),
+                family_pattern: request.family_pattern,
+                reason: request.reason,
+            },
+            route_state,
+            registry_revision,
+            replayed,
+        })
+    }
+
+    pub(crate) fn submit_approval_decision_from_application(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        request: HttpApprovalDecisionRequest,
+    ) -> Result<(HttpApprovalRouteState, u64), HttpRegistryError> {
+        let outcome = self.submit_approval_decision_with_route(run_id, call_id, request)?;
+        Ok((outcome.route_state, outcome.registry_revision))
     }
 
     /// Routes one user approval decision to an active run.
@@ -3982,6 +4110,7 @@ enum HttpCommandKind {
     Cancel,
     Pause,
     TerminalCancel,
+    #[cfg(test)]
     Approval,
     Verification,
     Integration,
@@ -4001,6 +4130,7 @@ impl HttpCommandKind {
             Self::Cancel => b"cancel",
             Self::Pause => b"pause",
             Self::TerminalCancel => b"terminal_cancel",
+            #[cfg(test)]
             Self::Approval => b"approval",
             Self::Verification => b"verification",
             Self::Integration => b"integration",
@@ -4020,6 +4150,7 @@ impl HttpCommandKind {
             Self::Cancel => "cancel",
             Self::Pause => "pause",
             Self::TerminalCancel => "terminal_cancel",
+            #[cfg(test)]
             Self::Approval => "approval",
             Self::Verification => "verification",
             Self::Integration => "integration",
@@ -4069,6 +4200,7 @@ impl HttpReservedCommand {
         Self::new(HttpCommandKind::TerminalCancel, &[run_id], command)
     }
 
+    #[cfg(test)]
     fn approval(
         run_id: &str,
         call_id: &str,
@@ -4648,6 +4780,7 @@ impl HttpCommandReservation {
         }
     }
 
+    #[cfg(test)]
     fn wait_for_approval(&self) -> Result<HttpApprovalCommandReceipt, HttpRegistryError> {
         match self.wait() {
             HttpCommandCompletion::Approval(result) => {
@@ -5200,6 +5333,46 @@ struct HttpApprovalRouteOutcome {
     decision: HttpApprovalDecisionRecord,
     route_state: HttpApprovalRouteState,
     registry_revision: u64,
+}
+
+fn parse_application_approval_recovery(
+    binding: &str,
+) -> Result<(HttpApprovalRouteState, u64), HttpRegistryError> {
+    let Some(value) = binding.strip_prefix("http-approval:") else {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application approval",
+            run_id: "unknown".to_owned(),
+            message: "application approval recovery binding is malformed".to_owned(),
+        });
+    };
+    let Some((route, revision)) = value.split_once(':') else {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application approval",
+            run_id: "unknown".to_owned(),
+            message: "application approval recovery binding is incomplete".to_owned(),
+        });
+    };
+    let route_state = match route {
+        "accepted" => HttpApprovalRouteState::DecisionAccepted,
+        "uncertain" => HttpApprovalRouteState::DeliveryUncertain,
+        "terminal" => HttpApprovalRouteState::Terminal,
+        _ => {
+            return Err(HttpRegistryError::DriverRejected {
+                operation: "application approval",
+                run_id: "unknown".to_owned(),
+                message: "application approval recovery route is unknown".to_owned(),
+            });
+        }
+    };
+    let registry_revision =
+        revision
+            .parse::<u64>()
+            .map_err(|_| HttpRegistryError::DriverRejected {
+                operation: "application approval",
+                run_id: "unknown".to_owned(),
+                message: "application approval recovery revision is invalid".to_owned(),
+            })?;
+    Ok((route_state, registry_revision))
 }
 
 fn prompt_preview(prompt: &str) -> String {

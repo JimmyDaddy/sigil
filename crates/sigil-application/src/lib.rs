@@ -235,8 +235,33 @@ pub enum RunCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationApprovalDecision {
+    Approve,
+    ApproveForSession,
+    ApproveForFamily,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationApprovalResolution {
+    pub tool_call_hash: SafeText,
+    pub policy_version: SafeText,
+    pub expires_at_ms: u64,
+    pub decision: ApplicationApprovalDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_pattern: Option<SafeText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SafeText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApprovalCommand {
-    Resolve { binding: String, accepted: bool },
+    Resolve {
+        binding: String,
+        accepted: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<Box<ApplicationApprovalResolution>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

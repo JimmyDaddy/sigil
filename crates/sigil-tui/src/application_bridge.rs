@@ -113,6 +113,7 @@ impl TuiApplicationSession {
                     ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
                         binding,
                         accepted: *approved,
+                        resolution: None,
                     })
                 })
                 .ok_or_else(|| {
@@ -282,6 +283,7 @@ impl TuiWorkerCommandExecutor {
             ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
                 binding,
                 accepted,
+                ..
             }) => {
                 let (_, call_id, approval_request_id) = parse_approval_binding(binding)?;
                 WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
