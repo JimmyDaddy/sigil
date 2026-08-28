@@ -2924,7 +2924,8 @@ R70.x
 
 ### R70.2：normalized input、Damage 与 host effects（2026-08-28）
 
-- implementation commit：待本 slice 提交后记录；基线为 R70.1 evidence follow-up `1dc22eaf50edeea5b1898162c7ba70acc02db2c7`。
+- implementation commit：`8ee8560e89c6070fe7114ae8873380080a95e392`（`rfc-0070(R70.2): normalize input and inject host effects`）；基线为 R70.1 evidence follow-up
+  `1dc22eaf50edeea5b1898162c7ba70acc02db2c7`。
 - moved authority：没有移动 Resource Authority、Sandbox、permission、worker 或 durable event owner；本 slice
   只收窄 terminal adapter 与 launcher 的输入/host capability 边界。
 - delivered：新增不依赖 Crossterm 类型的 `InputEvent`/`InputKeyEvent`/`InputMouseEvent`/`FocusChange`，并在
