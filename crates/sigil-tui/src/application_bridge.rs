@@ -20,8 +20,8 @@ use sigil_application::{
     ApplicationQueueMoveDirection, ApplicationQueueTarget, ApplicationReasoningEffort,
     ApplicationRecoveryAction, ApplicationScope, ApplicationTerminalTaskIdentity,
     AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId, McpCommand,
-    PlanTaskCommand, RunCommand, SessionCommand, SessionItemId, UserInputCommand,
-    VerificationCommand,
+    PlanTaskCommand, RunCommand, SessionCommand, SessionItemId, SessionMaintenanceOperation,
+    UserInputCommand, VerificationCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -36,12 +36,21 @@ pub(crate) struct TuiApplicationSession {
     client: ApplicationClient,
     reasoning_effort: ApplicationReasoningEffort,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
+    session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
 }
 
 #[derive(Debug, Clone)]
 struct TuiSessionBinding {
     session_log_path: PathBuf,
     attachment_recovery_binding: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TuiSessionMaintenanceBinding {
+    source_path: PathBuf,
+    current_model_route: Option<sigil_kernel::ResolvedModelRoute>,
+    delete_preview: Option<sigil_runtime::SessionDeletePreview>,
+    retention_preview: Option<sigil_runtime::SessionRetentionPreview>,
 }
 
 impl std::fmt::Debug for TuiApplicationSession {
@@ -62,6 +71,9 @@ impl TuiApplicationSession {
         connection_instance: HostConnectionInstanceId,
         reasoning_effort: ApplicationReasoningEffort,
         session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
+        session_maintenance_bindings: Arc<
+            Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>,
+        >,
     ) -> Result<Self, ApplicationError> {
         Ok(Self {
             client: ApplicationClient::new(
@@ -73,6 +85,7 @@ impl TuiApplicationSession {
             )?,
             reasoning_effort,
             session_bindings,
+            session_maintenance_bindings,
         })
     }
 
@@ -100,6 +113,30 @@ impl TuiApplicationSession {
                     attachment_recovery_binding: attachment_recovery_binding.map(str::to_owned),
                 },
             );
+        Ok(binding)
+    }
+
+    fn bind_session_maintenance(
+        &self,
+        request_id: u64,
+        operation: SessionMaintenanceOperation,
+        target: TuiSessionMaintenanceBinding,
+    ) -> Result<SessionItemId, ApplicationError> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"sigil-tui-session-maintenance-binding-v1\0");
+        hasher.update(request_id.to_be_bytes());
+        hasher.update(format!("{operation:?}").as_bytes());
+        hasher.update(target.source_path.to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        let digest = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let binding = SessionItemId::new(format!("tui-session-maintenance-{digest}"))?;
+        self.session_maintenance_bindings
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .insert(binding.clone(), target);
         Ok(binding)
     }
 
@@ -172,6 +209,13 @@ impl TuiApplicationSession {
                 | AppAction::AcceptTaskIntegration { .. }
                 | AppAction::StartNewSession { .. }
                 | AppAction::SwitchSession { .. }
+                | AppAction::InspectLocalSession { .. }
+                | AppAction::ForkLocalSession { .. }
+                | AppAction::ExportLocalSession { .. }
+                | AppAction::SetLocalSessionPin { .. }
+                | AppAction::PreviewLocalSessionDelete { .. }
+                | AppAction::ApplyLocalSessionDelete { .. }
+                | AppAction::ApplySessionRetention { .. }
         ) {
             return Ok(None);
         }
@@ -545,6 +589,134 @@ impl TuiApplicationSession {
                         .bind_session_target(session_log_path, attachment_recovery_binding)?,
                 }))
             }
+            AppAction::InspectLocalSession {
+                request_id,
+                source_path,
+            } => Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                binding: self.bind_session_maintenance(
+                    *request_id,
+                    SessionMaintenanceOperation::Inspect,
+                    TuiSessionMaintenanceBinding {
+                        source_path: source_path.clone(),
+                        current_model_route: None,
+                        delete_preview: None,
+                        retention_preview: None,
+                    },
+                )?,
+                request_id: *request_id,
+                operation: SessionMaintenanceOperation::Inspect,
+            })),
+            AppAction::ForkLocalSession {
+                request_id,
+                source_path,
+                current_model_route,
+            } => Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                binding: self.bind_session_maintenance(
+                    *request_id,
+                    SessionMaintenanceOperation::Fork,
+                    TuiSessionMaintenanceBinding {
+                        source_path: source_path.clone(),
+                        current_model_route: Some(current_model_route.clone()),
+                        delete_preview: None,
+                        retention_preview: None,
+                    },
+                )?,
+                request_id: *request_id,
+                operation: SessionMaintenanceOperation::Fork,
+            })),
+            AppAction::ExportLocalSession {
+                request_id,
+                source_path,
+            } => Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                binding: self.bind_session_maintenance(
+                    *request_id,
+                    SessionMaintenanceOperation::Export,
+                    TuiSessionMaintenanceBinding {
+                        source_path: source_path.clone(),
+                        current_model_route: None,
+                        delete_preview: None,
+                        retention_preview: None,
+                    },
+                )?,
+                request_id: *request_id,
+                operation: SessionMaintenanceOperation::Export,
+            })),
+            AppAction::SetLocalSessionPin {
+                request_id,
+                source_path,
+                pinned,
+            } => Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                binding: self.bind_session_maintenance(
+                    *request_id,
+                    SessionMaintenanceOperation::SetPin { pinned: *pinned },
+                    TuiSessionMaintenanceBinding {
+                        source_path: source_path.clone(),
+                        current_model_route: None,
+                        delete_preview: None,
+                        retention_preview: None,
+                    },
+                )?,
+                request_id: *request_id,
+                operation: SessionMaintenanceOperation::SetPin { pinned: *pinned },
+            })),
+            AppAction::PreviewLocalSessionDelete {
+                request_id,
+                source_path,
+            } => Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                binding: self.bind_session_maintenance(
+                    *request_id,
+                    SessionMaintenanceOperation::PreviewDelete,
+                    TuiSessionMaintenanceBinding {
+                        source_path: source_path.clone(),
+                        current_model_route: None,
+                        delete_preview: None,
+                        retention_preview: None,
+                    },
+                )?,
+                request_id: *request_id,
+                operation: SessionMaintenanceOperation::PreviewDelete,
+            })),
+            AppAction::ApplyLocalSessionDelete {
+                request_id,
+                preview,
+            } => Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                binding: self.bind_session_maintenance(
+                    *request_id,
+                    SessionMaintenanceOperation::ApplyDelete,
+                    TuiSessionMaintenanceBinding {
+                        source_path: preview.source_path.clone(),
+                        current_model_route: None,
+                        delete_preview: Some(preview.clone()),
+                        retention_preview: None,
+                    },
+                )?,
+                request_id: *request_id,
+                operation: SessionMaintenanceOperation::ApplyDelete,
+            })),
+            AppAction::ApplySessionRetention {
+                request_id,
+                preview,
+            } => {
+                let source_path = preview
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.delete_preview.source_path.clone())
+                    .unwrap_or_default();
+                Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                    binding: self.bind_session_maintenance(
+                        *request_id,
+                        SessionMaintenanceOperation::ApplyRetention,
+                        TuiSessionMaintenanceBinding {
+                            source_path,
+                            current_model_route: None,
+                            delete_preview: None,
+                            retention_preview: Some(preview.clone()),
+                        },
+                    )?,
+                    request_id: *request_id,
+                    operation: SessionMaintenanceOperation::ApplyRetention,
+                }))
+            }
             AppAction::QueueConversationInput {
                 prompt,
                 kind,
@@ -782,11 +954,13 @@ pub(crate) fn build_for_worker(
     .map_err(|error| anyhow!(error))?;
     let application_reasoning_effort = application_reasoning_effort(&reasoning_effort);
     let session_bindings = Arc::new(Mutex::new(BTreeMap::new()));
+    let session_maintenance_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let executor = Arc::new(TuiWorkerCommandExecutor {
         worker_tx,
         reasoning_effort,
         session_id: session_scope_id,
         session_bindings: Arc::clone(&session_bindings),
+        session_maintenance_bindings: Arc::clone(&session_maintenance_bindings),
     });
     let service = Arc::new(sigil_runtime::RuntimeApplicationService::new(
         Arc::new(projection),
@@ -804,6 +978,7 @@ pub(crate) fn build_for_worker(
         connection,
         application_reasoning_effort,
         session_bindings,
+        session_maintenance_bindings,
     )
     .map_err(|error| anyhow!(error))
 }
@@ -856,6 +1031,7 @@ struct TuiWorkerCommandExecutor {
     reasoning_effort: ReasoningEffort,
     session_id: String,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
+    session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecutor {
@@ -1094,6 +1270,65 @@ impl TuiWorkerCommandExecutor {
                 WorkerCommand::SwitchSession {
                     session_log_path: target.session_log_path,
                     attachment_recovery_binding: target.attachment_recovery_binding,
+                }
+            }
+            ApplicationCommand::Session(SessionCommand::Maintain {
+                binding,
+                request_id,
+                operation,
+            }) => {
+                let target = self.resolve_session_maintenance_binding(binding)?;
+                match operation {
+                    SessionMaintenanceOperation::Inspect => WorkerCommand::InspectLocalSession {
+                        request_id: *request_id,
+                        source_path: target.source_path,
+                    },
+                    SessionMaintenanceOperation::Fork => WorkerCommand::ForkLocalSession {
+                        request_id: *request_id,
+                        source_path: target.source_path,
+                        current_model_route: target.current_model_route.ok_or_else(|| {
+                            ApplicationError::InvalidRequest(
+                                "session fork binding has no model route".to_owned(),
+                            )
+                        })?,
+                    },
+                    SessionMaintenanceOperation::Export => WorkerCommand::ExportLocalSession {
+                        request_id: *request_id,
+                        source_path: target.source_path,
+                    },
+                    SessionMaintenanceOperation::SetPin { pinned } => {
+                        WorkerCommand::SetLocalSessionPin {
+                            request_id: *request_id,
+                            source_path: target.source_path,
+                            pinned: *pinned,
+                        }
+                    }
+                    SessionMaintenanceOperation::PreviewDelete => {
+                        WorkerCommand::PreviewLocalSessionDelete {
+                            request_id: *request_id,
+                            source_path: target.source_path,
+                        }
+                    }
+                    SessionMaintenanceOperation::ApplyDelete => {
+                        WorkerCommand::ApplyLocalSessionDelete {
+                            request_id: *request_id,
+                            preview: target.delete_preview.ok_or_else(|| {
+                                ApplicationError::InvalidRequest(
+                                    "session delete binding has no reviewed preview".to_owned(),
+                                )
+                            })?,
+                        }
+                    }
+                    SessionMaintenanceOperation::ApplyRetention => {
+                        WorkerCommand::ApplySessionRetention {
+                            request_id: *request_id,
+                            preview: target.retention_preview.ok_or_else(|| {
+                                ApplicationError::InvalidRequest(
+                                    "session retention binding has no reviewed preview".to_owned(),
+                                )
+                            })?,
+                        }
+                    }
                 }
             }
             ApplicationCommand::Session(SessionCommand::Close { .. }) => {
@@ -1366,6 +1601,22 @@ impl TuiWorkerCommandExecutor {
             .ok_or_else(|| {
                 ApplicationError::InvalidRequest(
                     "session binding is not owned by this TUI connection".to_owned(),
+                )
+            })
+    }
+
+    fn resolve_session_maintenance_binding(
+        &self,
+        binding: &SessionItemId,
+    ) -> Result<TuiSessionMaintenanceBinding, ApplicationError> {
+        self.session_maintenance_bindings
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .get(binding)
+            .cloned()
+            .ok_or_else(|| {
+                ApplicationError::InvalidRequest(
+                    "session maintenance binding is not owned by this TUI connection".to_owned(),
                 )
             })
     }

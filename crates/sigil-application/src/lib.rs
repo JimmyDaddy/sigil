@@ -634,9 +634,31 @@ pub enum VerificationCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionCommand {
-    Create { binding: SessionItemId },
-    Switch { binding: SessionItemId },
-    Close { binding: SessionItemId },
+    Create {
+        binding: SessionItemId,
+    },
+    Switch {
+        binding: SessionItemId,
+    },
+    Close {
+        binding: SessionItemId,
+    },
+    Maintain {
+        binding: SessionItemId,
+        request_id: u64,
+        operation: SessionMaintenanceOperation,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionMaintenanceOperation {
+    Inspect,
+    Fork,
+    Export,
+    SetPin { pinned: bool },
+    PreviewDelete,
+    ApplyDelete,
+    ApplyRetention,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
