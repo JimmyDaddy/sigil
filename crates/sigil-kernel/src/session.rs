@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -343,7 +343,7 @@ pub use stats::session_stats_from_entries;
 pub(crate) use store::session_entry_from_domain_event;
 pub use store::{
     JsonlSessionStore, SessionIoBusyError, SessionIoBusyKind, SessionIoLockMetricsSnapshot,
-    session_io_lock_metrics,
+    SessionStreamRecordReader, session_io_lock_metrics,
 };
 pub use tool_artifact::{
     ModelMessagePayloadV1, ProcessStreamCaptureConfigV1, ProviderToolResultMessageV1,

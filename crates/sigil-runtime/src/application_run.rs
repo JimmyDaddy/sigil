@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -5103,138 +5103,68 @@ pub fn application_session_transcript_page(
         bail!("transcript before ordinal must be positive");
     }
 
-    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
+    let mut reader = JsonlSessionStore::read_event_record_stream(session_path)?;
     let mut tool_names = BTreeMap::new();
-    let mut projected = Vec::new();
-    for entry in entries {
-        if let SessionLogEntry::Control(control) = &entry {
-            if let Some(trace) = application_transcript_reasoning_trace(control) {
-                let safe_content = safe_persistence_text(trace);
-                let original_content_bytes = safe_content.len();
-                let truncated = original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES;
-                let content = truncate_application_transcript_text(
-                    &safe_content,
-                    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
-                );
-                let ordinal = u64::try_from(projected.len())
-                    .map_err(|_| anyhow!("transcript message count exceeds supported range"))?
-                    .saturating_add(1);
-                projected.push(ApplicationTranscriptMessage {
-                    ordinal,
-                    message_id: safe_application_transcript_message_id(&format!(
-                        "reasoning-trace:{ordinal}"
-                    )),
-                    role: ApplicationTranscriptRole::Assistant,
-                    content: Some(content),
-                    assistant_kind: Some(AssistantMessageKind::ReasoningTrace),
-                    tool_name: None,
-                    image_attachment_count: 0,
-                    truncated,
-                    original_content_bytes: u64::try_from(original_content_bytes)
-                        .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
-                });
-            }
-            continue;
+    let mut tool_name_order = VecDeque::new();
+    const MAX_TOOL_NAMES: usize = 512;
+    let mut messages = VecDeque::<ApplicationTranscriptMessage>::new();
+    let mut message_bytes = 0_usize;
+    let mut total_messages = 0_u64;
+    let mut saw_record = false;
+    for record in &mut reader {
+        let record = record?;
+        saw_record = true;
+        if record.session_id() != expected_session_scope_id {
+            bail!("durable application session scope does not match the bound session");
         }
-        if matches!(entry, SessionLogEntry::RuntimeContextSnapshotV2(_)) {
+        let Some(entry) = sigil_kernel::conversation_transcript_entry_from_record(&record)? else {
             continue;
-        }
-        let (message, role, expected_role) = match entry {
-            SessionLogEntry::User(message) => {
-                (message, ApplicationTranscriptRole::User, MessageRole::User)
-            }
-            SessionLogEntry::Assistant(message) => {
-                for call in &message.tool_calls {
-                    tool_names.insert(
-                        call.id.clone(),
-                        truncate_application_transcript_text(
-                            &safe_persistence_text(&call.name),
-                            128,
-                        ),
-                    );
-                }
-                (
-                    message,
-                    ApplicationTranscriptRole::Assistant,
-                    MessageRole::Assistant,
-                )
-            }
-            SessionLogEntry::ToolResultV3(result) => (
-                result.model_message()?,
-                ApplicationTranscriptRole::Tool,
-                MessageRole::Tool,
-            ),
-            SessionLogEntry::RuntimeContextSnapshotV2(_) => {
-                unreachable!("runtime context snapshots are filtered above")
-            }
-            SessionLogEntry::Control(_) => unreachable!("control entries are handled above"),
         };
-        if message.role != expected_role {
-            bail!("durable transcript entry role does not match its entry class");
+        total_messages = total_messages
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("transcript message count exceeds supported range"))?;
+        let Some(message) = project_application_transcript_entry(
+            entry,
+            total_messages,
+            &mut tool_names,
+            &mut tool_name_order,
+            MAX_TOOL_NAMES,
+        )?
+        else {
+            total_messages = total_messages.saturating_sub(1);
+            continue;
+        };
+        if before.is_none_or(|boundary| message.ordinal < boundary) {
+            let item_bytes = message.content.as_ref().map_or(0, String::len);
+            if messages.len() == limit {
+                if let Some(removed) = messages.pop_front() {
+                    message_bytes = message_bytes
+                        .saturating_sub(removed.content.as_ref().map_or(0, String::len));
+                }
+            }
+            message_bytes = message_bytes.saturating_add(item_bytes);
+            messages.push_back(message);
+            while messages.len() > 1 && message_bytes > MAX_APPLICATION_TRANSCRIPT_PAGE_BYTES {
+                if let Some(removed) = messages.pop_front() {
+                    message_bytes = message_bytes
+                        .saturating_sub(removed.content.as_ref().map_or(0, String::len));
+                }
+            }
         }
-        let ordinal = u64::try_from(projected.len())
-            .map_err(|_| anyhow!("transcript message count exceeds supported range"))?
-            .saturating_add(1);
-        let safe_content = message.content.as_deref().map(safe_persistence_text);
-        let original_content_bytes = safe_content.as_ref().map_or(0, String::len);
-        let truncated = original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES;
-        let content = safe_content.map(|content| {
-            truncate_application_transcript_text(&content, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES)
-        });
-        let tool_name = message
-            .tool_call_id
-            .as_ref()
-            .and_then(|call_id| tool_names.get(call_id))
-            .cloned();
-        projected.push(ApplicationTranscriptMessage {
-            ordinal,
-            message_id: safe_application_transcript_message_id(&message.id),
-            role,
-            content,
-            assistant_kind: if role == ApplicationTranscriptRole::Assistant {
-                message.assistant_kind
-            } else {
-                None
-            },
-            tool_name,
-            image_attachment_count: u64::try_from(message.image_attachments.len())
-                .map_err(|_| anyhow!("transcript attachment count exceeds supported range"))?,
-            truncated,
-            original_content_bytes: u64::try_from(original_content_bytes)
-                .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
-        });
+    }
+    if !saw_record {
+        bail!("durable application session has no session identity");
     }
 
-    let total_messages = u64::try_from(projected.len())
-        .map_err(|_| anyhow!("transcript message count exceeds supported range"))?;
-    let eligible_end = before.map_or(projected.len(), |before| {
-        projected.partition_point(|message| message.ordinal < before)
-    });
-    let mut page_bytes = 0_usize;
-    let mut messages = Vec::with_capacity(limit.min(eligible_end));
-    for message in projected[..eligible_end].iter().rev() {
-        if messages.len() == limit {
-            break;
-        }
-        let message_bytes = message.content.as_ref().map_or(0, String::len);
-        if !messages.is_empty()
-            && page_bytes.saturating_add(message_bytes) > MAX_APPLICATION_TRANSCRIPT_PAGE_BYTES
-        {
-            break;
-        }
-        page_bytes = page_bytes.saturating_add(message_bytes);
-        messages.push(message.clone());
-    }
-    messages.reverse();
     let next_before = messages
-        .first()
+        .front()
         .filter(|message| message.ordinal > 1)
         .map(|message| message.ordinal);
 
     Ok(ApplicationTranscriptPage {
         session_scope_id: expected_session_scope_id.to_owned(),
         total_messages,
-        messages,
+        messages: messages.into_iter().collect(),
         next_before,
     })
 }
@@ -5249,6 +5179,100 @@ fn application_transcript_reasoning_trace(control: &ControlEntry) -> Option<&str
     data.get("text")
         .and_then(serde_json::Value::as_str)
         .filter(|trace| !trace.trim().is_empty())
+}
+
+fn project_application_transcript_entry(
+    entry: SessionLogEntry,
+    ordinal: u64,
+    tool_names: &mut BTreeMap<String, String>,
+    tool_name_order: &mut VecDeque<String>,
+    max_tool_names: usize,
+) -> Result<Option<ApplicationTranscriptMessage>> {
+    let message = match entry {
+        SessionLogEntry::Control(control) => {
+            let Some(trace) = application_transcript_reasoning_trace(&control) else {
+                return Ok(None);
+            };
+            let safe_content = safe_persistence_text(trace);
+            let original_content_bytes = safe_content.len();
+            return Ok(Some(ApplicationTranscriptMessage {
+                ordinal,
+                message_id: safe_application_transcript_message_id(&format!(
+                    "reasoning-trace:{ordinal}"
+                )),
+                role: ApplicationTranscriptRole::Assistant,
+                content: Some(truncate_application_transcript_text(
+                    &safe_content,
+                    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+                )),
+                assistant_kind: Some(AssistantMessageKind::ReasoningTrace),
+                tool_name: None,
+                image_attachment_count: 0,
+                truncated: original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+                original_content_bytes: u64::try_from(original_content_bytes)
+                    .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
+            }));
+        }
+        SessionLogEntry::RuntimeContextSnapshotV2(_) => return Ok(None),
+        SessionLogEntry::User(message) => {
+            (message, ApplicationTranscriptRole::User, MessageRole::User)
+        }
+        SessionLogEntry::Assistant(message) => {
+            for call in &message.tool_calls {
+                if !tool_names.contains_key(&call.id) {
+                    tool_name_order.push_back(call.id.clone());
+                }
+                tool_names.insert(
+                    call.id.clone(),
+                    truncate_application_transcript_text(&safe_persistence_text(&call.name), 128),
+                );
+            }
+            while tool_name_order.len() > max_tool_names {
+                if let Some(call_id) = tool_name_order.pop_front() {
+                    tool_names.remove(&call_id);
+                }
+            }
+            (
+                message,
+                ApplicationTranscriptRole::Assistant,
+                MessageRole::Assistant,
+            )
+        }
+        SessionLogEntry::ToolResultV3(result) => (
+            result.model_message()?,
+            ApplicationTranscriptRole::Tool,
+            MessageRole::Tool,
+        ),
+    };
+    let (message, role, expected_role) = message;
+    if message.role != expected_role {
+        bail!("durable transcript entry role does not match its entry class");
+    }
+    let safe_content = message.content.as_deref().map(safe_persistence_text);
+    let original_content_bytes = safe_content.as_ref().map_or(0, String::len);
+    Ok(Some(ApplicationTranscriptMessage {
+        ordinal,
+        message_id: safe_application_transcript_message_id(&message.id),
+        role,
+        content: safe_content.map(|content| {
+            truncate_application_transcript_text(&content, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES)
+        }),
+        assistant_kind: if role == ApplicationTranscriptRole::Assistant {
+            message.assistant_kind
+        } else {
+            None
+        },
+        tool_name: message
+            .tool_call_id
+            .as_ref()
+            .and_then(|call_id| tool_names.get(call_id))
+            .cloned(),
+        image_attachment_count: u64::try_from(message.image_attachments.len())
+            .map_err(|_| anyhow!("transcript attachment count exceeds supported range"))?,
+        truncated: original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+        original_content_bytes: u64::try_from(original_content_bytes)
+            .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
+    }))
 }
 
 fn truncate_application_transcript_text(value: &str, max_bytes: usize) -> String {

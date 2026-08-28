@@ -970,6 +970,74 @@ pub(super) fn read_stream_records_from_file(
     read_stream_records_from_str(path, &content)
 }
 
+/// Streaming reader for a validated session stream.
+///
+/// Unlike [`JsonlSessionStore::read_event_records`], this reader retains only the current line
+/// and validation cursor. It is intended for bounded transcript/page projections that must not
+/// materialize an entire long-lived session in memory.
+pub struct SessionStreamRecordReader {
+    reader: BufReader<File>,
+    path: PathBuf,
+    physical_line: usize,
+    record_ordinal: u64,
+    expected_session_id: Option<String>,
+}
+
+impl Iterator for SessionStreamRecordReader {
+    type Item = Result<SessionStreamRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => return None,
+                Ok(_) => {}
+                Err(error) => return Some(Err(anyhow::Error::new(error))),
+            }
+            self.physical_line = self.physical_line.saturating_add(1);
+            if line.trim().is_empty() {
+                continue;
+            }
+            self.record_ordinal = self.record_ordinal.saturating_add(1);
+            let event = match stored_event_from_stream_line(
+                line.trim_end_matches(['\r', '\n']),
+                &self.path,
+                self.physical_line,
+            ) {
+                Ok(event) => event,
+                Err(error) => return Some(Err(error)),
+            };
+            if let Err(error) = validate_stream_record_identity(
+                self.physical_line,
+                self.record_ordinal,
+                &event.session_id,
+                event.stream_sequence,
+                &mut self.expected_session_id,
+            ) {
+                return Some(Err(error));
+            }
+            return Some(Ok(SessionStreamRecord::Stored(event)));
+        }
+    }
+}
+
+impl JsonlSessionStore {
+    /// Opens a shared-locked streaming reader without retaining the complete session in memory.
+    pub fn read_event_record_stream(path: impl AsRef<Path>) -> Result<SessionStreamRecordReader> {
+        let path = path.as_ref();
+        let file =
+            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        lock_shared_with_retry(&file, path)?;
+        Ok(SessionStreamRecordReader {
+            reader: BufReader::new(file),
+            path: path.to_path_buf(),
+            physical_line: 0,
+            record_ordinal: 0,
+            expected_session_id: None,
+        })
+    }
+}
+
 pub(super) fn read_stream_records_from_str(
     path: &Path,
     content: &str,
