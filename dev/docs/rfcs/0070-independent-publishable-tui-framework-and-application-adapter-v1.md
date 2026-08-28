@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.3 Complete / R70.4 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 contract/runtime 基础已落地，TUI production port、legacy cutover 与跨 surface conformance 尚未闭合）
+状态：R70.4 In Progress / R70.5 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract 与部分 production port 已落地，四 surface conformance、package split 与 legacy cutover 尚未闭合）
 
 创建日期：2026-08-23
 
@@ -3006,6 +3006,14 @@ R70.x
   还原既有 typed attachment command，provider/runtime ownership 不变。application `6/6`、package check、TUI
   定向测试、strict library clippy 与 diff check 通过；configuration、terminal lifecycle、四表面 conformance
   与完整 R70.4 exit gate 仍未闭合。
+
+### R70.5：package topology foundation（本轮切片）
+
+- product implementation package 已改名为 `sigil-tui-app`；workspace 新增 `sigil-tui-core`、
+  `sigil-tui-ratatui` 与 public `sigil-tui` facade。`cargo metadata --locked` 已确认 core 无依赖、Ratatui
+  adapter 只依赖 core 与 Ratatui、facade 只依赖 core/adapter；CLI 已切换到 app package。
+- 该切片只建立真实 package identity 与依赖拓扑，现有 Sigil product modules 尚未全部物理移出 app package，
+  因此 R70.5 package-identity/public-source exit gate、R70.4 四表面 conformance 与 R70.6 runner 下沉仍未闭合。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
