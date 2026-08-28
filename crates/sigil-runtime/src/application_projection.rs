@@ -8,16 +8,18 @@ use sigil_application::{
     ApplicationEvent, ApplicationEventEnvelope, ApplicationFrontier, ApplicationInstanceId,
     ApplicationProjection, ApplicationQueueItemKind, ApplicationQueueItemProjection,
     ApplicationQueueSurfaceProjection, ApplicationQueueTarget, ApplicationScope,
-    AttentionSurfaceProjection, CapabilitySurfaceProjection, ConfigurationSurfaceProjection,
-    ConversationSurfaceProjection, OpenProjectionRequest, PageDirection, PlanTaskSurfaceProjection,
-    ProjectionFeedItem, ProjectionPage, ProjectionPageRequest, ProjectionSnapshot,
-    ProjectionSnapshotEnvelope, ResourceRecoverySurfaceContractV1, RunSurfaceProjection, SafeText,
-    SessionItemId, SessionScopeId, SessionSurfaceProjection, StablePageCursor,
+    ApplicationTerminalTaskProjection, AttentionSurfaceProjection, CapabilitySurfaceProjection,
+    ConfigurationSurfaceProjection, ConversationSurfaceProjection, OpenProjectionRequest,
+    PageDirection, PlanTaskSurfaceProjection, ProjectionFeedItem, ProjectionPage,
+    ProjectionPageRequest, ProjectionSnapshot, ProjectionSnapshotEnvelope,
+    ResourceRecoverySurfaceContractV1, RunSurfaceProjection, SafeText, SessionItemId,
+    SessionScopeId, SessionSurfaceProjection, StablePageCursor, TerminalSurfaceProjection,
     UserInputSurfaceProjection,
 };
 use sigil_kernel::{
-    ConversationQueueDurableProjection, JsonlSessionStore, PublicEventOutboxEntryV1,
-    PublicEventOutboxProjectionV1, PublicRunEventKind,
+    ControlEntry, ConversationQueueDurableProjection, JsonlSessionStore, PublicEventOutboxEntryV1,
+    PublicEventOutboxProjectionV1, PublicRunEventKind, SessionLogEntry, TerminalReadinessStatus,
+    TerminalTaskProjection,
 };
 
 use crate::application_run::{
@@ -194,6 +196,7 @@ impl RuntimeSessionProjectionBinding {
         let queue = ConversationQueueDurableProjection::from_records(&records).map_err(|_| {
             ApplicationError::CorruptProjection("invalid conversation queue projection".to_owned())
         })?;
+        let terminal = terminal_surface_projection(&records)?;
         let queue_revision = queue.current_revision();
         let queue_next_dispatchable = queue.queue.next_dispatchable.clone();
         let queue_paused = queue.queue.paused;
@@ -277,6 +280,7 @@ impl RuntimeSessionProjectionBinding {
                 last_notice: event_state.last_notice,
             },
             queue,
+            terminal,
         };
         let envelope = ProjectionSnapshotEnvelope {
             schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
@@ -330,6 +334,12 @@ impl RuntimeSessionProjectionBinding {
         let mut base_projection = current.projection.clone();
         let base_state = ProjectionEventState::from_events(&prefix_public);
         apply_projection_event_state(&mut base_projection, &base_state)?;
+        let prefix_records = records
+            .iter()
+            .filter(|record| record.stream_sequence() <= resume_from.through_sequence)
+            .cloned()
+            .collect::<Vec<_>>();
+        base_projection.terminal = terminal_surface_projection(&prefix_records)?;
         base_projection.frontier = resume_from.clone();
         let mut base = ProjectionSnapshotEnvelope {
             schema_version: current.schema_version,
@@ -375,6 +385,12 @@ impl RuntimeSessionProjectionBinding {
             let state = ProjectionEventState::from_events(&all_public[..public_index]);
             let mut next_projection = base.projection.clone();
             apply_projection_event_state(&mut next_projection, &state)?;
+            let through_records = records
+                .iter()
+                .filter(|candidate| candidate.stream_sequence() <= record.stream_sequence())
+                .cloned()
+                .collect::<Vec<_>>();
+            next_projection.terminal = terminal_surface_projection(&through_records)?;
             let next_frontier = ApplicationFrontier {
                 through_sequence: record.stream_sequence(),
                 durable_cursor: format!("session-stream:{}", record.stream_sequence()),
@@ -472,6 +488,69 @@ impl RuntimeSessionProjectionBinding {
             total: page.total_messages,
             items,
         })
+    }
+}
+
+fn terminal_surface_projection(
+    records: &[sigil_kernel::SessionStreamRecord],
+) -> Result<TerminalSurfaceProjection, ApplicationError> {
+    let mut entries = Vec::new();
+    for record in records {
+        let Some(SessionLogEntry::Control(ControlEntry::TerminalTask(entry))) =
+            record.session_log_entry().map_err(|_| {
+                ApplicationError::CorruptProjection(
+                    "invalid terminal task session entry".to_owned(),
+                )
+            })?
+        else {
+            continue;
+        };
+        entries.push(SessionLogEntry::Control(ControlEntry::TerminalTask(entry)));
+    }
+
+    let projection = TerminalTaskProjection::from_entries(&entries);
+    if projection.tasks.len() > sigil_application::MAX_TERMINAL_TASKS {
+        return Err(ApplicationError::CorruptProjection(
+            "terminal task projection exceeds application bound".to_owned(),
+        ));
+    }
+    let tasks = projection
+        .tasks
+        .values()
+        .map(|task| {
+            Ok(ApplicationTerminalTaskProjection {
+                task_id: safe_text(task.handle.task_id.as_str())?,
+                generation: task.generation,
+                status: safe_text(task.status.as_str())?,
+                readiness: safe_text(terminal_readiness_label(&task.readiness))?,
+                output_total_bytes: task.output_total_bytes,
+                output_truncated: task.output_truncated,
+                output_hash: task.output_hash.as_deref().map(safe_text).transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    let active_task_count = u16::try_from(projection.active_task_ids.len()).map_err(|_| {
+        ApplicationError::CorruptProjection("active terminal task count exceeds bound".to_owned())
+    })?;
+    let latest_task_id = projection
+        .latest_task_id
+        .as_ref()
+        .map(|task_id| safe_text(task_id.as_str()))
+        .transpose()?;
+    Ok(TerminalSurfaceProjection {
+        tasks,
+        active_task_count,
+        latest_task_id,
+    })
+}
+
+fn terminal_readiness_label(readiness: &TerminalReadinessStatus) -> &'static str {
+    match readiness {
+        TerminalReadinessStatus::None => "none",
+        TerminalReadinessStatus::Waiting { .. } => "waiting",
+        TerminalReadinessStatus::Ready { .. } => "ready",
+        TerminalReadinessStatus::Failed { .. } => "failed",
+        TerminalReadinessStatus::TimedOut { .. } => "timed_out",
     }
 }
 
@@ -751,6 +830,56 @@ fn application_queue_item_status(status: sigil_kernel::ConversationInputStatus) 
 mod tests {
     use super::*;
 
+    fn terminal_record(
+        sequence: u64,
+        generation: u64,
+        status: sigil_kernel::TerminalTaskStatus,
+    ) -> sigil_kernel::SessionStreamRecord {
+        let task = sigil_kernel::TerminalTaskEntry {
+            schema_version: sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION,
+            handle: sigil_kernel::TerminalTaskHandle {
+                task_id: sigil_kernel::TerminalTaskId::new("terminal-projection-test")
+                    .expect("valid task id"),
+                command_sha256: "0".repeat(64),
+                cwd_label: ".".to_owned(),
+                shell_label: "zsh".to_owned(),
+                shell_sha256: "1".repeat(64),
+                log_ref: "terminal-log:terminal-projection-test".to_owned(),
+                created_at_ms: 1,
+                execution_backend: None,
+                execution_backend_capabilities: None,
+                enforcement_backend: None,
+                enforcement_backend_capabilities: None,
+                sandbox_profile: None,
+            },
+            generation,
+            status,
+            readiness: sigil_kernel::TerminalReadinessStatus::None,
+            output_preview: None,
+            output_hash: None,
+            output_truncated: false,
+            output_total_bytes: generation * 10,
+            output_limit_bytes: None,
+            output_termination_reason: None,
+            cleanup: None,
+            updated_at_ms: generation,
+        };
+        let event = sigil_kernel::StoredEvent::new(
+            sigil_kernel::DurableEventType::SessionEntryRecorded,
+            sigil_kernel::EventClass::NonCritical,
+            format!("event-{sequence}"),
+            "session-1".to_owned(),
+            sequence,
+            serde_json::json!({
+                "session_log_entry": sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::TerminalTask(task),
+                ),
+            }),
+        )
+        .expect("valid stored terminal event");
+        sigil_kernel::SessionStreamRecord::Stored(event)
+    }
+
     fn outbox_entry(
         sequence: u64,
         event: PublicRunEventKind,
@@ -807,5 +936,26 @@ mod tests {
             state.last_notice.as_ref().map(SafeText::as_str),
             Some("checkpoint")
         );
+    }
+
+    #[test]
+    fn terminal_surface_projection_replays_latest_bounded_task_state() {
+        let records = vec![
+            terminal_record(1, 1, sigil_kernel::TerminalTaskStatus::Starting),
+            terminal_record(2, 2, sigil_kernel::TerminalTaskStatus::Running),
+        ];
+
+        let projection = terminal_surface_projection(&records).expect("terminal projection");
+
+        assert_eq!(projection.active_task_count, 1);
+        assert_eq!(
+            projection.latest_task_id.as_ref().map(SafeText::as_str),
+            Some("terminal-projection-test")
+        );
+        assert_eq!(projection.tasks.len(), 1);
+        assert_eq!(projection.tasks[0].generation, 2);
+        assert_eq!(projection.tasks[0].status.as_str(), "running");
+        assert_eq!(projection.tasks[0].output_total_bytes, 20);
+        assert!(projection.tasks[0].output_hash.is_none());
     }
 }

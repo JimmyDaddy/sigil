@@ -74,15 +74,37 @@ impl AppState {
             self.last_notice = Some("focus a terminal task first".to_owned());
             return None;
         };
-        let projection =
-            TerminalTaskProjection::from_entries(&self.session_browser.current_entries);
-        let Some(task) = projection.tasks.values().find(|task| {
-            task.handle.task_id.as_str() == task_id.as_str() && task.status.is_active()
-        }) else {
+        let projected_terminal =
+            self.application_terminal_projection
+                .as_ref()
+                .and_then(|projection| {
+                    projection
+                        .tasks
+                        .iter()
+                        .find(|task| task.task_id.as_str() == task_id.as_str())
+                });
+        let (is_active, generation) = if let Some(task) = projected_terminal {
+            (
+                matches!(task.status.as_str(), "starting" | "running"),
+                task.generation,
+            )
+        } else {
+            let projection =
+                TerminalTaskProjection::from_entries(&self.session_browser.current_entries);
+            let Some(task) = projection.tasks.values().find(|task| {
+                task.handle.task_id.as_str() == task_id.as_str() && task.status.is_active()
+            }) else {
+                self.pending_terminal_cancel_confirmation = None;
+                self.last_notice = Some(format!("terminal task {task_id} is not running"));
+                return None;
+            };
+            (task.status.is_active(), task.generation)
+        };
+        if !is_active {
             self.pending_terminal_cancel_confirmation = None;
             self.last_notice = Some(format!("terminal task {task_id} is not running"));
             return None;
-        };
+        }
         let Some(identity) = self.terminal_task_control_identities.get(&task_id).cloned() else {
             self.pending_terminal_cancel_confirmation = None;
             self.last_notice = Some(format!(
@@ -90,7 +112,7 @@ impl AppState {
             ));
             return None;
         };
-        if identity.expected_generation != task.generation {
+        if identity.expected_generation != generation {
             self.pending_terminal_cancel_confirmation = None;
             self.last_notice = Some(format!(
                 "terminal task {task_id} changed; review its latest state before cancelling"
@@ -115,10 +137,7 @@ impl AppState {
         self.last_notice = Some(format!("Alt-X again to cancel terminal task {task_id}"));
         self.push_timeline(
             super::TimelineRole::Notice,
-            format!(
-                "Press Alt-X again to cancel terminal task {}.",
-                task.handle.task_id.as_str()
-            ),
+            format!("Press Alt-X again to cancel terminal task {}.", task_id),
         );
         None
     }

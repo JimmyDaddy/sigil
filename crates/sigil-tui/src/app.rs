@@ -619,6 +619,7 @@ pub struct AppState {
     thinking_block_mode: ThinkingBlockMode,
     timeline_state: TimelineState,
     pending_terminal_cancel_confirmation: Option<String>,
+    application_terminal_projection: Option<sigil_application::TerminalSurfaceProjection>,
     terminal_task_control_identities: HashMap<String, TerminalTaskControlIdentity>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
@@ -1041,6 +1042,10 @@ impl AppState {
             self.last_notice = Some(notice.as_str().to_owned());
             changed = true;
         }
+        if self.application_terminal_projection.as_ref() != Some(&projection.terminal) {
+            self.application_terminal_projection = Some(projection.terminal.clone());
+            changed = true;
+        }
         changed
     }
 
@@ -1264,6 +1269,7 @@ impl AppState {
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
+            application_terminal_projection: None,
             terminal_task_control_identities: HashMap::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
@@ -1403,6 +1409,7 @@ impl AppState {
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
+            application_terminal_projection: None,
             terminal_task_control_identities: HashMap::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,

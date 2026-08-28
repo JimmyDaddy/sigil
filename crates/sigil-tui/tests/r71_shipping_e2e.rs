@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use sigil_kernel::RootConfig;
-use sigil_tui::{app::AppState, launcher};
+use sigil_tui_app::{app::AppState, launcher};
 
 fn fixture() -> Result<(tempfile::TempDir, std::path::PathBuf, RootConfig)> {
     let temp = tempfile::tempdir()?;

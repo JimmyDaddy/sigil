@@ -28,6 +28,7 @@ pub const APPLICATION_CONTRACT_SCHEMA_VERSION: u16 = 1;
 pub const MAX_SAFE_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_PAGE_ITEMS: usize = 100;
 pub const MAX_PAGE_BYTES: usize = 512 * 1024;
+pub const MAX_TERMINAL_TASKS: usize = 256;
 
 macro_rules! bounded_id {
     ($name:ident) => {
@@ -1048,6 +1049,68 @@ pub struct ApplicationQueueSurfaceProjection {
     pub items: Vec<ApplicationQueueItemProjection>,
 }
 
+/// Renderer-safe projection of one durable terminal task.
+///
+/// The application contract intentionally carries lifecycle facts only.  Commands, paths,
+/// process handles, and owner-specific cancellation bindings remain at the host/runtime edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationTerminalTaskProjection {
+    pub task_id: SafeText,
+    pub generation: u64,
+    pub status: SafeText,
+    pub readiness: SafeText,
+    pub output_total_bytes: u64,
+    pub output_truncated: bool,
+    pub output_hash: Option<SafeText>,
+}
+
+/// Bounded terminal-task state included in every application snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSurfaceProjection {
+    pub tasks: Vec<ApplicationTerminalTaskProjection>,
+    pub active_task_count: u16,
+    pub latest_task_id: Option<SafeText>,
+}
+
+impl TerminalSurfaceProjection {
+    fn validate(&self) -> Result<(), ApplicationError> {
+        if self.tasks.len() > MAX_TERMINAL_TASKS
+            || usize::from(self.active_task_count) > self.tasks.len()
+        {
+            return Err(ApplicationError::CorruptProjection(
+                "terminal surface projection exceeds its bound".to_owned(),
+            ));
+        }
+        if self.tasks.iter().any(|task| {
+            task.generation == 0
+                || task.task_id.as_str().is_empty()
+                || !matches!(
+                    task.status.as_str(),
+                    "starting" | "running" | "exited" | "failed" | "cancelled" | "interrupted"
+                )
+                || !matches!(
+                    task.readiness.as_str(),
+                    "none" | "waiting" | "ready" | "failed" | "timed_out"
+                )
+        }) {
+            return Err(ApplicationError::CorruptProjection(
+                "terminal surface projection contains an invalid task".to_owned(),
+            ));
+        }
+        if let Some(latest_task_id) = &self.latest_task_id
+            && !self
+                .tasks
+                .iter()
+                .any(|task| task.task_id == *latest_task_id)
+        {
+            return Err(ApplicationError::CorruptProjection(
+                "terminal surface latest task is not present".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationProjection {
     pub schema_version: u16,
@@ -1068,6 +1131,7 @@ pub struct ApplicationProjection {
     pub configuration: ConfigurationSurfaceProjection,
     pub attention: AttentionSurfaceProjection,
     pub queue: ApplicationQueueSurfaceProjection,
+    pub terminal: TerminalSurfaceProjection,
 }
 
 impl ApplicationProjection {
@@ -1085,7 +1149,8 @@ impl ApplicationProjection {
         }
         self.resource_recovery.validate_schema().map_err(|_| {
             ApplicationError::CorruptProjection("invalid resource recovery schema".to_owned())
-        })
+        })?;
+        self.terminal.validate()
     }
 }
 
@@ -2180,6 +2245,11 @@ mod tests {
                 ),
                 paused: false,
                 items: Vec::new(),
+            },
+            terminal: TerminalSurfaceProjection {
+                tasks: Vec::new(),
+                active_task_count: 0,
+                latest_task_id: None,
             },
         };
         ProjectionSnapshotEnvelope {
