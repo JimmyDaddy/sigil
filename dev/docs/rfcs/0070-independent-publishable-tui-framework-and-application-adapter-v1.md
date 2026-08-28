@@ -3180,3 +3180,11 @@ R70.x
   与 production-library strict clippy 通过；all-target strict clippy 仍受上述 slice 外的 HTTP test-target warning
   阻断。configuration/session lifecycle、terminal、HTTP compaction preview、四表面 conformance 与完整 migration
   manifest 仍开放。
+
+- TUI configuration-save follow-up：`65562367` 将 production 配置保存拆为 TUI adapter 私有
+  `ConfigurationSaveRequest` 与 typed `ConfigurationCommand::Save`。TUI 不再直接调用 credential/config publisher；
+  application executor 在 reservation 后消费一次性 draft，完成原有 CAS/config publication，再以 settled receipt
+  触发统一的 runtime reboot。敏感 draft 只保存在私有 binding 中，application contract 只传 opaque binding 与
+  `config-save-v1` patch marker。测试构建保留隔离 fixture，production build 不再绕过 application port。
+  config-flow `118/118`、package check、production-library strict clippy 与 fmt 通过；terminal PTY lifecycle、
+  四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
