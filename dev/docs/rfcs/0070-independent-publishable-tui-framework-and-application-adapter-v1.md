@@ -2985,6 +2985,13 @@ R70.x
   仍由 HTTP driver 的直接 effect seam 在同一 session mutation lock 下执行，避免递归回到旧 command-store
   reservation。application service 内的同步 HTTP driver 调用移出 Tokio worker，避免 production
   `Handle::block_on` re-entrant panic；driver rejection 通过 typed application `Rejected` 返回。
+- `b885f198`（`rfc-0070(R70.4): cut over HTTP conversation recovery`）再将 production conversation recovery
+  route 切换到同一 host-bound `ApplicationClient` 与 durable reservation；application contract 新增窄化 typed
+  recovery action/outcome，完整承载 compaction apply、standalone tool-output shrink、checkpoint restore 与
+  conversation fork 的结果，并由 HTTP registry direct effect 保留唯一 driver 执行 owner。
+  `PrepareCompaction` 当前在 application boundary 返回 typed preview-required rejection，因为现有 contract 尚
+  不能无损携带 process-local preview/review；它没有被降级为 generic uncertain 或伪造 settled。production
+  application-client regression 覆盖该拒绝语义。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -3075,10 +3082,11 @@ R70.x
   user-input 定向回归 `4 passed`；与 `cargo clippy --locked -p sigil-http --lib -- -D warnings` 通过；本轮 HTTP cancel/application/runtime
   定向回归与四包 strict clippy 通过，新增 uncertain terminal replay 与 HTTP production run-start 测试通过。
 - remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
-  HTTP reservation cutover、HTTP 首个 application bridge 与 resumable snapshot-feed 基础已分别落地，但不关闭
-  R70.4。TUI 尚有未迁移旧动作，HTTP recovery 与其余 command routes 尚未完全收敛到同一 application service；HTTP 新
-  bridge 当前已对 start/cancel/approval/user-input/queue 提供无损执行映射，其余 typed command
-  明确拒绝。feed 的跨 surface ACK/restart
+  HTTP reservation cutover、HTTP application bridge 与 resumable snapshot-feed 基础已分别落地，但不关闭
+  R70.4。TUI 尚有未迁移旧动作，HTTP `PrepareCompaction` preview boundary 与其余 command routes 尚未完全
+  收敛到同一 application service；HTTP 新 bridge 当前已对 start/cancel/approval/user-input/queue 以及
+  recovery apply/shrink/restore/fork 提供无损 typed mapping，preview-boundary 与其余未映射 command 明确拒绝。
+  feed 的跨 surface ACK/restart
   conformance、所有 shared command 的四表面 conformance、cold-cache 100k page e2e 与完整 migration manifest
   gate 仍需继续完成。TUI ACK 已进入 durable managed writer，但 HTTP/Desktop/CLI 还未全部复用该 delivery
   journal。R70.5 package split 不得在这些条件未满足前开始。
