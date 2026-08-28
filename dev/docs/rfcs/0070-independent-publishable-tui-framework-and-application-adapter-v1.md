@@ -3025,6 +3025,16 @@ R70.x
   只携带 opaque `SessionItemId`、request id 与明确 operation，真实路径、fork route、delete/retention preview 仅由
   TUI adapter 私有 resolver 保留。application/TUI package check 与 production-library strict clippy 通过；
   configuration save/reboot、terminal PTY lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route TUI MCP OAuth through application port`（`fa6b3de4`）新增 typed `McpCommand::OAuth` 与
+  `ApplicationMcpOAuthAction`；TUI adapter 仅提交 opaque OAuth binding 与 action，manual callback secret 留在
+  adapter 私有 map，直到 worker 边界才恢复为 `McpOAuthUserAction`。application/TUI package check、application
+  `7/7`、strict library clippy 与 diff check 通过；configuration save/reboot、terminal PTY lifecycle、四表面
+  conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route session retention preview through application port`（`90f9bf93`）将 retention preview 从
+  AppState 直接 enqueue legacy worker 改为 typed `SessionCommand::Maintain` 的 `PreviewRetention` operation；
+  retention policy 通过 adapter-owned opaque binding 解析到 worker。session lifecycle 定向测试、
+  application/TUI package check、strict library clippy 与 diff check 通过；configuration save/reboot、terminal
+  PTY lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
