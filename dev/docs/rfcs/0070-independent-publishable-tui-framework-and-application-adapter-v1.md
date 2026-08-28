@@ -2961,8 +2961,9 @@ R70.x
 
 ### R70.4：transport-neutral application contract 与 runtime port（2026-08-28）
 
-- implementation commits：`d9b57da3`（`rfc-0070(R70.4): establish transport-neutral application contract`）与
-  `efc7851b`（`rfc-0070(R70.4): consume durable application outbox in projection`）。
+- implementation commits：`d9b57da3`（`rfc-0070(R70.4): establish transport-neutral application contract`）、
+  `efc7851b`（`rfc-0070(R70.4): consume durable application outbox in projection`）与 `b5c0a37e`
+  （`rfc-0070(R70.4): route TUI through application port`）。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -2979,9 +2980,15 @@ R70.x
   ordinary clone/serialization。runtime projection binding 从现有 durable session query 与完整 durable public
   outbox（按 stream sequence 排序，不受 adapter delivery receipt 影响）生成 bounded、path-free snapshot/page，并
   使用 opaque before cursor；outbox delivery 只表示传输进度，不会从状态历史中删除事件。
+- TUI adapter：生产 launcher 为每个 worker 绑定 runtime `ApplicationPort`，用同一 application scope/frontier
+  刷新 projection；prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application reservation
+  service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造 `Settled`；
+  未有无损 V1 payload 的旧动作仍保留在迁移期 adapter，不能把 R70.4 误记为最终闭合。
 - validation：`cargo fmt --all --check`、`cargo check -p sigil-application -p sigil-runtime`、
-  application/runtime strict clippy、application tests `3 passed`、runtime projection tests `2 passed`、kernel
-  public-event-outbox tests `2 passed`，以及 runtime application-filtered regression `106 passed`、`git diff --check`。
+  `cargo check -p sigil-tui --tests`、application/runtime strict clippy、application tests `3 passed`、runtime
+  projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
+  `2 passed`、TUI launcher regression `1 passed`，以及 runtime application-filtered regression `106 passed`、
+  `git diff --check`。
 - remaining deviations / exit gate：本记录只证明 contract/runtime implementation foundation，不关闭 R70.4。生产
   TUI 尚未经 `ApplicationPort` 读取 projection/提交 shared command；现有 HTTP command-store 尚未在 exclusive
   lease 下导入 application reservation journal；snapshot-feed durable outbox、所有 shared command 的四表面
