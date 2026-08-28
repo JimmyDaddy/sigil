@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_application::{
     ApplicationClient, ApplicationCommand, ApplicationCommandId, ApplicationCommandReceipt,
-    ApplicationCommandRequest, ApplicationError, ApplicationPort, ApplicationScope,
-    AuthenticatedSubject, HostConnectionInstanceId, PageAnchor, PageDirection,
-    PageQueryFingerprint, PageRequestId, ProjectionPage, RunCommand, SessionScopeId,
-    StablePageCursor,
+    ApplicationCommandRequest, ApplicationError, ApplicationPermissionMode, ApplicationPort,
+    ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject, ConversationCommand,
+    HostConnectionInstanceId, PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId,
+    ProjectionPage, RunCommand, RunStartOptions, SessionScopeId, StablePageCursor,
 };
 use sigil_runtime::{
     ManagedApplicationReservationStore, RuntimeApplicationDeliveryAckStore,
@@ -181,6 +181,97 @@ pub(crate) fn build_client(
     })
 }
 
+pub(crate) fn application_run_start_options(
+    request: &crate::HttpRunStartRequest,
+) -> Result<RunStartOptions, ApplicationError> {
+    let permission_mode = request.permission_mode.ok_or_else(|| {
+        ApplicationError::InvalidRequest("permission mode is required".to_owned())
+    })?;
+    let model = request
+        .model_ref
+        .as_ref()
+        .map(|model| {
+            let selection_binding = request.model_selection_binding.as_ref().ok_or_else(|| {
+                ApplicationError::InvalidRequest(
+                    "model selection binding is required with a model route".to_owned(),
+                )
+            })?;
+            Ok(sigil_application::ApplicationModelRoute {
+                connection_id: sigil_application::SafeText::new(model.connection_id.clone())?,
+                model_id: sigil_application::SafeText::new(model.model_id.clone())?,
+                selection_binding: sigil_application::SafeText::new(selection_binding.clone())?,
+            })
+        })
+        .transpose()?;
+    let skill = request
+        .skill_binding
+        .as_ref()
+        .map(|skill| {
+            Ok(sigil_application::ApplicationSkillBinding {
+                skill_id: sigil_application::SafeText::new(skill.skill_id.clone())?,
+                skill_sha256: sigil_application::SafeText::new(skill.skill_sha256.clone())?,
+                index_fingerprint: sigil_application::SafeText::new(
+                    skill.index_fingerprint.clone(),
+                )?,
+            })
+        })
+        .transpose()?;
+    let agent = request
+        .agent_binding
+        .as_ref()
+        .map(|agent| {
+            Ok(sigil_application::ApplicationAgentBinding {
+                profile_id: sigil_application::SafeText::new(agent.profile_id.clone())?,
+                snapshot_id: sigil_application::SafeText::new(agent.snapshot_id.clone())?,
+            })
+        })
+        .transpose()?;
+    let task_continuation = request
+        .task_continuation
+        .as_ref()
+        .map(|task| {
+            Ok(sigil_application::ApplicationTaskContinuation {
+                task_id: sigil_application::SafeText::new(task.task_id.clone())?,
+                guidance: task
+                    .guidance
+                    .as_ref()
+                    .map(|guidance| sigil_application::SafeText::new(guidance.clone()))
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+    Ok(RunStartOptions {
+        permission_mode: match permission_mode {
+            crate::HttpPermissionMode::ReadOnly => ApplicationPermissionMode::ReadOnly,
+            crate::HttpPermissionMode::Manual => ApplicationPermissionMode::Manual,
+            crate::HttpPermissionMode::AutoEdit => ApplicationPermissionMode::AutoEdit,
+            crate::HttpPermissionMode::DangerFullAccess => {
+                ApplicationPermissionMode::DangerFullAccess
+            }
+        },
+        model,
+        route_recovery_binding: request
+            .route_recovery_binding
+            .as_ref()
+            .map(|binding| sigil_application::SafeText::new(binding.clone()))
+            .transpose()?,
+        reasoning_effort: request.reasoning_effort.map(|effort| match effort {
+            crate::HttpReasoningEffort::Low => ApplicationReasoningEffort::Low,
+            crate::HttpReasoningEffort::Medium => ApplicationReasoningEffort::Medium,
+            crate::HttpReasoningEffort::High => ApplicationReasoningEffort::High,
+            crate::HttpReasoningEffort::Max => ApplicationReasoningEffort::Max,
+        }),
+        reasoning_effort_binding: request
+            .reasoning_effort_binding
+            .as_ref()
+            .map(|binding| sigil_application::SafeText::new(binding.clone()))
+            .transpose()?,
+        skill,
+        agent,
+        task_continuation,
+    })
+}
+
 fn application_driver_error(error: ApplicationError) -> HttpRunDriverError {
     HttpRunDriverError::new(format!("application client binding failed: {error}"))
 }
@@ -239,6 +330,42 @@ impl HttpApplicationCommandExecutor {
         request: &ApplicationCommandRequest,
     ) -> Result<RuntimeApplicationDispatch, ApplicationError> {
         match &request.envelope.command {
+            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                prompt,
+                options: Some(options),
+            }) => {
+                let has_prompt = prompt.is_some();
+                let has_task_continuation = options.task_continuation.is_some();
+                if has_prompt == has_task_continuation {
+                    return Err(ApplicationError::InvalidRequest(
+                        "HTTP run start requires exactly one prompt or task continuation"
+                            .to_owned(),
+                    ));
+                }
+                let run_request = http_run_start_request(prompt.as_ref(), options)?;
+                let run = self
+                    .registry
+                    .start_run(&self.session_id, run_request)
+                    .map_err(|_| ApplicationError::Unavailable)?;
+                let fingerprint = sigil_application::command_fingerprint(request)?;
+                Ok(RuntimeApplicationDispatch::Uncertain(
+                    sigil_application::UncertainCommandReceipt {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        reservation_fingerprint: fingerprint,
+                        recovery_binding: format!("http-run-start:{}", run.id),
+                    },
+                ))
+            }
+            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                options: None,
+                ..
+            }) => Ok(RuntimeApplicationDispatch::Rejected(
+                sigil_application::CommandRejection {
+                    kind: "missing_http_run_options".to_owned(),
+                    reason: "HTTP run start requires explicit typed run options".to_owned(),
+                },
+            )),
             ApplicationCommand::Run(RunCommand::Cancel { binding, reason }) => {
                 if binding.trim().is_empty() {
                     return Err(ApplicationError::InvalidRequest(
@@ -277,4 +404,83 @@ impl HttpApplicationCommandExecutor {
             )),
         }
     }
+}
+
+fn http_run_start_request(
+    prompt: Option<&sigil_application::SafeText>,
+    options: &RunStartOptions,
+) -> Result<crate::HttpRunStartRequest, ApplicationError> {
+    let has_prompt = prompt.is_some();
+    let has_task_continuation = options.task_continuation.is_some();
+    if has_prompt == has_task_continuation {
+        return Err(ApplicationError::InvalidRequest(
+            "HTTP run start requires exactly one prompt or task continuation".to_owned(),
+        ));
+    }
+    let model_ref = options
+        .model
+        .as_ref()
+        .map(|model| crate::HttpProviderModelRef {
+            connection_id: model.connection_id.as_str().to_owned(),
+            model_id: model.model_id.as_str().to_owned(),
+        });
+    let skill_binding = options
+        .skill
+        .as_ref()
+        .map(|skill| crate::HttpApplicationSkillBinding {
+            skill_id: skill.skill_id.as_str().to_owned(),
+            skill_sha256: skill.skill_sha256.as_str().to_owned(),
+            index_fingerprint: skill.index_fingerprint.as_str().to_owned(),
+        });
+    let agent_binding = options
+        .agent
+        .as_ref()
+        .map(|agent| crate::HttpApplicationAgentBinding {
+            profile_id: agent.profile_id.as_str().to_owned(),
+            snapshot_id: agent.snapshot_id.as_str().to_owned(),
+        });
+    let task_continuation =
+        options
+            .task_continuation
+            .as_ref()
+            .map(|task| crate::HttpTaskContinuationRequest {
+                task_id: task.task_id.as_str().to_owned(),
+                guidance: task
+                    .guidance
+                    .as_ref()
+                    .map(|guidance| guidance.as_str().to_owned()),
+            });
+    Ok(crate::HttpRunStartRequest {
+        prompt: prompt.map_or_else(String::new, |prompt| prompt.as_str().to_owned()),
+        model_ref,
+        model_selection_binding: options
+            .model
+            .as_ref()
+            .map(|model| model.selection_binding.as_str().to_owned()),
+        route_recovery_binding: options
+            .route_recovery_binding
+            .as_ref()
+            .map(|binding| binding.as_str().to_owned()),
+        permission_mode: Some(match options.permission_mode {
+            ApplicationPermissionMode::ReadOnly => crate::HttpPermissionMode::ReadOnly,
+            ApplicationPermissionMode::Manual => crate::HttpPermissionMode::Manual,
+            ApplicationPermissionMode::AutoEdit => crate::HttpPermissionMode::AutoEdit,
+            ApplicationPermissionMode::DangerFullAccess => {
+                crate::HttpPermissionMode::DangerFullAccess
+            }
+        }),
+        reasoning_effort: options.reasoning_effort.map(|effort| match effort {
+            ApplicationReasoningEffort::Low => crate::HttpReasoningEffort::Low,
+            ApplicationReasoningEffort::Medium => crate::HttpReasoningEffort::Medium,
+            ApplicationReasoningEffort::High => crate::HttpReasoningEffort::High,
+            ApplicationReasoningEffort::Max => crate::HttpReasoningEffort::Max,
+        }),
+        reasoning_effort_binding: options
+            .reasoning_effort_binding
+            .as_ref()
+            .map(|binding| binding.as_str().to_owned()),
+        skill_binding,
+        agent_binding,
+        task_continuation,
+    })
 }

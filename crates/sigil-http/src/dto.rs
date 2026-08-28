@@ -3429,6 +3429,7 @@ pub struct HttpRunStartCommandReceipt {
 }
 
 impl HttpRunStartCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

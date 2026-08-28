@@ -8,7 +8,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use sigil_application::{ApplicationCommand, ApplicationCommandReceipt, McpCommand};
+use sigil_application::{
+    ApplicationCommand, ApplicationCommandReceipt, ApplicationPermissionMode, ConversationCommand,
+    McpCommand, RunStartOptions, SafeText,
+};
 use sigil_kernel::{
     AgentRole, ApprovalMode, AssistantMessageKind, CandidateCheck, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
@@ -259,7 +262,7 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
     let client = registry
         .application_client(&session.id, "http-application-test")
         .expect("application client should bind");
-    let (projection, page, receipt) = tokio::task::spawn_blocking(move || {
+    let (projection, page, receipt, start_receipt) = tokio::task::spawn_blocking(move || {
         let projection = client
             .refresh()
             .expect("application projection should refresh");
@@ -274,7 +277,25 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                 }),
             )
             .expect("unsupported command should receive a typed rejection");
-        (projection, page, receipt)
+        let start_receipt = client
+            .execute(
+                "application-start-test",
+                ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                    prompt: Some(SafeText::new("start through application port").expect("prompt")),
+                    options: Some(Box::new(RunStartOptions {
+                        permission_mode: ApplicationPermissionMode::Manual,
+                        model: None,
+                        route_recovery_binding: None,
+                        reasoning_effort: None,
+                        reasoning_effort_binding: None,
+                        skill: None,
+                        agent: None,
+                        task_continuation: None,
+                    })),
+                }),
+            )
+            .expect("run start should receive a durable uncertain receipt");
+        (projection, page, receipt, start_receipt)
     })
     .await
     .expect("blocking application client task should complete");
@@ -285,6 +306,14 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
     );
     assert_eq!(page.scope, projection.scope);
     assert!(matches!(receipt, ApplicationCommandReceipt::Rejected(_)));
+    let ApplicationCommandReceipt::Uncertain(start_receipt) = start_receipt else {
+        panic!("run start should be represented as an uncertain application receipt");
+    };
+    assert!(
+        start_receipt
+            .recovery_binding
+            .starts_with("http-run-start:")
+    );
 }
 
 #[tokio::test]

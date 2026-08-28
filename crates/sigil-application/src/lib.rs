@@ -152,7 +152,73 @@ pub struct CommandPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConversationCommand {
-    SubmitPrompt { prompt: SafeText },
+    SubmitPrompt {
+        prompt: Option<SafeText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Box<RunStartOptions>>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationPermissionMode {
+    ReadOnly,
+    Manual,
+    AutoEdit,
+    DangerFullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationReasoningEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationModelRoute {
+    pub connection_id: SafeText,
+    pub model_id: SafeText,
+    pub selection_binding: SafeText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationSkillBinding {
+    pub skill_id: SafeText,
+    pub skill_sha256: SafeText,
+    pub index_fingerprint: SafeText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationAgentBinding {
+    pub profile_id: SafeText,
+    pub snapshot_id: SafeText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationTaskContinuation {
+    pub task_id: SafeText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<SafeText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunStartOptions {
+    pub permission_mode: ApplicationPermissionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ApplicationModelRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_recovery_binding: Option<SafeText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ApplicationReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_binding: Option<SafeText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<ApplicationSkillBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<ApplicationAgentBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_continuation: Option<ApplicationTaskContinuation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1656,7 +1722,8 @@ mod tests {
                     through_sequence: expected.through_sequence,
                 },
                 command: ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
-                    prompt: SafeText::new("hello").expect("valid text"),
+                    prompt: Some(SafeText::new("hello").expect("valid text")),
+                    options: None,
                 }),
             },
             admission: CommandAdmissionContext::host_bound(
@@ -1674,7 +1741,8 @@ mod tests {
         let mut conflicting = request();
         conflicting.envelope.command =
             ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
-                prompt: SafeText::new("different").expect("valid text"),
+                prompt: Some(SafeText::new("different").expect("valid text")),
+                options: None,
             });
         assert!(matches!(
             futures::executor::block_on(app.execute(conflicting)).expect("conflict"),

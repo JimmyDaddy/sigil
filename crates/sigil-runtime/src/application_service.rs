@@ -589,7 +589,8 @@ mod tests {
                     through_sequence: 0,
                 },
                 command: ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
-                    prompt: SafeText::new(prompt).expect("prompt"),
+                    prompt: Some(SafeText::new(prompt).expect("prompt")),
+                    options: None,
                 }),
             },
             admission: CommandAdmissionContext::host_bound(

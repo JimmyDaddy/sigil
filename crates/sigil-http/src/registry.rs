@@ -835,6 +835,21 @@ impl HttpSessionRunRegistry {
             })
     }
 
+    pub(crate) fn session_foreground_owner(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<HttpForegroundRunOwner>, HttpRegistryError> {
+        let state = self.lock_state();
+        let session =
+            state
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?;
+        Ok(session.foreground_owner())
+    }
+
     pub(crate) fn record_session_route_transition(
         &self,
         durable_session_scope_id: &str,
@@ -2122,32 +2137,147 @@ impl HttpSessionRunRegistry {
                 path_session_id: session_id.to_owned(),
             });
         }
-        let request = HttpReservedCommand::start(session_id, &command)?;
-        let reservation =
-            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
-                HttpCommandClaim::Execute(reservation) => reservation,
-                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_start(),
-            };
-        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-        let result = self.start_run(session_id, command.payload).map(|run| {
-            let foreground_owner = self
-                .lock_state()
-                .sessions
-                .get(session_id)
-                .and_then(HttpSessionState::foreground_owner)
-                .filter(|owner| owner.run_id == run.id);
-            HttpRunStartCommandReceipt {
-                command_id: command.command_id,
-                client_id: command.client_id,
-                session_id: command.session_id,
-                correlation_id: command.correlation_id,
-                run,
-                foreground_owner,
-                replayed: false,
+
+        // The shipping route is application-owned. The legacy command store below is compiled
+        // only for synthetic unit-test drivers until the remaining HTTP command families migrate.
+        #[cfg(not(test))]
+        {
+            let client = self.application_client(session_id, &command.client_id)?;
+            self.start_run_command_via_application(session_id, command, client)
+        }
+        #[cfg(test)]
+        if let Ok(client) = self.application_client(session_id, &command.client_id) {
+            return self.start_run_command_via_application(session_id, command, client);
+        }
+
+        #[cfg(test)]
+        {
+            let request = HttpReservedCommand::start(session_id, &command)?;
+            let reservation =
+                match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                    HttpCommandClaim::Execute(reservation) => reservation,
+                    HttpCommandClaim::Wait(reservation) => return reservation.wait_for_start(),
+                };
+            let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+            let result = self.start_run(session_id, command.payload).map(|run| {
+                let foreground_owner = self
+                    .lock_state()
+                    .sessions
+                    .get(session_id)
+                    .and_then(HttpSessionState::foreground_owner)
+                    .filter(|owner| owner.run_id == run.id);
+                HttpRunStartCommandReceipt {
+                    command_id: command.command_id,
+                    client_id: command.client_id,
+                    session_id: command.session_id,
+                    correlation_id: command.correlation_id,
+                    run,
+                    foreground_owner,
+                    replayed: false,
+                }
+            });
+            completion.complete(HttpCommandCompletion::Start(result.clone()))?;
+            result
+        }
+    }
+
+    fn start_run_command_via_application(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpRunStartRequest>,
+        client: crate::application_bridge::HttpApplicationClient,
+    ) -> Result<HttpRunStartCommandReceipt, HttpRegistryError> {
+        client.refresh().map_err(application_registry_error)?;
+        let prompt = if command.payload.prompt.trim().is_empty() {
+            None
+        } else {
+            Some(
+                sigil_application::SafeText::new(command.payload.prompt.clone())
+                    .map_err(application_registry_error)?,
+            )
+        };
+        let options = crate::application_bridge::application_run_start_options(&command.payload)
+            .map_err(application_registry_error)?;
+        let receipt = client
+            .execute(
+                &command.command_id,
+                sigil_application::ApplicationCommand::Conversation(
+                    sigil_application::ConversationCommand::SubmitPrompt {
+                        prompt,
+                        options: Some(Box::new(options)),
+                    },
+                ),
+            )
+            .map_err(application_registry_error)?;
+        let (run_id, replayed) = match &receipt {
+            sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
+                receipt
+                    .recovery_binding
+                    .strip_prefix("http-run-start:")
+                    .ok_or_else(|| {
+                        application_registry_error(
+                            sigil_application::ApplicationError::CorruptProjection(
+                                "HTTP run-start recovery binding is malformed".to_owned(),
+                            ),
+                        )
+                    })?
+                    .to_owned(),
+                false,
+            ),
+            sigil_application::ApplicationCommandReceipt::ReplayedUncertain(receipt) => (
+                receipt
+                    .recovery_binding
+                    .strip_prefix("http-run-start:")
+                    .ok_or_else(|| {
+                        application_registry_error(
+                            sigil_application::ApplicationError::CorruptProjection(
+                                "HTTP run-start recovery binding is malformed".to_owned(),
+                            ),
+                        )
+                    })?
+                    .to_owned(),
+                true,
+            ),
+            sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application run start",
+                    run_id: session_id.to_owned(),
+                    message: rejection.reason.clone(),
+                });
             }
-        });
-        completion.complete(HttpCommandCompletion::Start(result.clone()))?;
-        result
+            sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
+                return Err(HttpRegistryError::CommandKeyConflict {
+                    session_id: command.session_id,
+                    client_id: command.client_id,
+                    command_id: command.command_id,
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::InFlight(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application run start",
+                    run_id: session_id.to_owned(),
+                    message: "application run start is already in flight".to_owned(),
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::Settled(_)
+            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application run start",
+                    run_id: session_id.to_owned(),
+                    message: "application run start returned an invalid settled receipt".to_owned(),
+                });
+            }
+        };
+        let run = self.get_run(&run_id)?;
+        Ok(HttpRunStartCommandReceipt {
+            command_id: command.command_id,
+            client_id: command.client_id,
+            session_id: command.session_id,
+            correlation_id: command.correlation_id,
+            foreground_owner: self.session_foreground_owner(session_id)?,
+            run,
+            replayed,
+        })
     }
 
     /// Returns one HTTP adapter run snapshot.
@@ -3846,6 +3976,7 @@ impl HttpCommandKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpCommandKind {
+    #[cfg(test)]
     Start,
     #[cfg(test)]
     Cancel,
@@ -3864,6 +3995,7 @@ enum HttpCommandKind {
 impl HttpCommandKind {
     const fn label(self) -> &'static [u8] {
         match self {
+            #[cfg(test)]
             Self::Start => b"start",
             #[cfg(test)]
             Self::Cancel => b"cancel",
@@ -3882,6 +4014,7 @@ impl HttpCommandKind {
 
     const fn name(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Start => "start",
             #[cfg(test)]
             Self::Cancel => "cancel",
@@ -3906,6 +4039,7 @@ struct HttpReservedCommand {
 }
 
 impl HttpReservedCommand {
+    #[cfg(test)]
     fn start(
         path_session_id: &str,
         command: &HttpCommandEnvelope<HttpRunStartRequest>,
@@ -4430,6 +4564,7 @@ impl HttpCommandReservation {
         }
     }
 
+    #[cfg(test)]
     fn wait_for_start(&self) -> Result<HttpRunStartCommandReceipt, HttpRegistryError> {
         match self.wait() {
             HttpCommandCompletion::Start(result) => {

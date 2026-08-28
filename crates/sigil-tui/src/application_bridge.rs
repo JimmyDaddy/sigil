@@ -85,7 +85,8 @@ impl TuiApplicationSession {
         let command = match action {
             AppAction::SubmitPrompt(prompt) => Some(ApplicationCommand::Conversation(
                 ConversationCommand::SubmitPrompt {
-                    prompt: sigil_application::SafeText::new(prompt.clone())?,
+                    prompt: Some(sigil_application::SafeText::new(prompt.clone())?),
+                    options: None,
                 },
             )),
             AppAction::CancelRun => latest
@@ -259,11 +260,23 @@ impl TuiWorkerCommandExecutor {
         request: &ApplicationCommandRequest,
     ) -> Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError> {
         let command = match &request.envelope.command {
-            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt { prompt }) => {
-                WorkerCommand::SubmitPrompt {
-                    prompt: prompt.as_str().to_owned(),
-                    reasoning_effort: self.reasoning_effort.clone(),
-                }
+            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                prompt: Some(prompt),
+                ..
+            }) => WorkerCommand::SubmitPrompt {
+                prompt: prompt.as_str().to_owned(),
+                reasoning_effort: self.reasoning_effort.clone(),
+            },
+            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                prompt: None,
+                ..
+            }) => {
+                return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(
+                    sigil_application::CommandRejection {
+                        kind: "missing_tui_prompt".to_owned(),
+                        reason: "the TUI worker adapter requires a prompt".to_owned(),
+                    },
+                ));
             }
             ApplicationCommand::Run(RunCommand::Cancel { .. }) => WorkerCommand::CancelRun,
             ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
