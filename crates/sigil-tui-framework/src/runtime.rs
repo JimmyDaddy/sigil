@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use sigil_tui_core::metrics::FrameMetrics;
 use sigil_tui_core::{
     CommittedPresentation, CoreError, Damage, InputEvent, PresentOutcome, Rect, Surface,
 };
@@ -32,6 +33,7 @@ pub struct PreparedRender {
     generation: u64,
     surface: Surface,
     presentation: CommittedPresentation,
+    metrics: FrameMetrics,
 }
 
 impl PreparedRender {
@@ -39,6 +41,7 @@ impl PreparedRender {
         generation: u64,
         surface: Surface,
         presentation: CommittedPresentation,
+        metrics: FrameMetrics,
     ) -> Result<Self, CoreError> {
         if generation == 0 || surface.generation() != generation {
             return Err(CoreError::InvalidValue(
@@ -50,10 +53,16 @@ impl PreparedRender {
                 "prepared render generation does not match presentation",
             ));
         }
+        if metrics.generation != generation {
+            return Err(CoreError::InvalidValue(
+                "prepared render generation does not match metrics",
+            ));
+        }
         Ok(Self {
             generation,
             surface,
             presentation,
+            metrics,
         })
     }
 
@@ -67,6 +76,11 @@ impl PreparedRender {
 
     pub fn presentation(&self) -> &CommittedPresentation {
         &self.presentation
+    }
+
+    /// Returns the counters captured for this render transaction.
+    pub fn metrics(&self) -> &FrameMetrics {
+        &self.metrics
     }
 }
 

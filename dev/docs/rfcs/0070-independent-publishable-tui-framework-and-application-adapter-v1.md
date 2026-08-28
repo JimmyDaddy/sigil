@@ -3347,3 +3347,8 @@ policy consistency、package gate 与现有 framework qualification 通过；`ca
 `glib 0.18.5` 对应 `RUSTSEC-2024-0429`，因此该精确 exception 继续保留；`cargo deny` 对同一 ID 的
 advisory-not-detected 只记录为工具数据库差异，不作为风险消失证明。该修复不改变 R70.8 release-cycle/
 user-validation 的外部条件。
+
+R70.3 render-transaction metrics follow-up（2026-08-28）：`PreparedRender` 现在携带与 surface/presentation
+generation 一致的 `FrameMetrics`，构造时拒绝跨 generation metrics，consumer 可从同一 immutable render
+transaction 读取 observation；该契约已有独立 consumer 回归。这样不会把 detached counter 误认为当前 frame
+的指标，也不绑定 telemetry backend。

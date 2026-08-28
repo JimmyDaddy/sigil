@@ -1,6 +1,6 @@
 use sigil_tui::{
-    App, Damage, InputEvent, NodeKey, Rect, Surface, Text, UpdateOutcome, WidgetKind, WidgetSpec,
-    WidgetTree,
+    App, CommittedPresentation, Damage, FrameMetrics, InputEvent, NodeId, NodeKey, Rect, Surface,
+    Text, UpdateOutcome, WidgetKind, WidgetSpec, WidgetTree,
 };
 
 struct Consumer {
@@ -86,4 +86,22 @@ fn independent_consumer_can_use_standard_widget_specs_without_sigil_domain_types
     )
     .expect("widget should be bounded");
     assert_eq!(tree.surface().nodes().len(), 1);
+}
+
+#[test]
+fn prepared_render_carries_generation_bound_metrics() {
+    let viewport = Rect::new(0, 0, 4, 2);
+    let surface = Surface::new(viewport, 7).expect("surface");
+    let presentation = CommittedPresentation::new(
+        3,
+        viewport,
+        7,
+        "digest",
+        vec![sigil_tui::HitTarget::new(NodeId::new(7, 0), viewport, "action").expect("hit target")],
+    )
+    .expect("presentation");
+    let metrics = FrameMetrics::new(7, Damage::PAINT);
+    let prepared =
+        sigil_tui::PreparedRender::new(7, surface, presentation, metrics).expect("prepared render");
+    assert_eq!(prepared.metrics(), &metrics);
 }
