@@ -3360,3 +3360,12 @@ transaction 读取 observation；该契约已有独立 consumer 回归。这样�
 在 `-D warnings` 下通过严格 Clippy。该修复不改变 public package surface，也不把测试 helper 重新暴露给
 consumer。验证包括相关 crate strict Clippy、fmt 与 diff check；R70.8 所要求的真实 preview 发布、release
 cycle 和用户验证仍待外部 evidence，因此 RFC 状态继续为 In Progress。
+
+### R70.4/R70.6 production application-session identity fix（2026-08-28）
+
+真实 TUI 进程回归发现 managed session leaf 使用 `records.jsonl` 后，内核按物理路径生成的 durable session
+scope 与 TUI 初始化时保留的随机 session ID 不一致，导致 application projection 返回 `ScopeMismatch`，进而
+session action 与 first-run command 被错误地报告为 application service unavailable。authority composition 接线
+现在会在切换到 managed leaf 后同步采用同一确定性 path identity，确保 worker、application projection 和 UI
+共享同一 session scope。真实 TUI session-action export 与 first-run provider fixture 已通过；R70.8 的真实
+preview 发布、release cycle 和用户验证仍待外部 evidence。

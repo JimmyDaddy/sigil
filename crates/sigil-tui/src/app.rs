@@ -1003,6 +1003,16 @@ impl AppState {
         self.session_log_path = self
             .managed_session_log_path()
             .unwrap_or_else(|| self.session_log_path.clone());
+        // `JsonlSessionStore::with_store` binds a managed leaf to the deterministic path identity
+        // because its leaf is `records.jsonl`, not the conventional `session-<id>.jsonl` name.
+        // Keep the application scope equal to that durable writer identity before the worker and
+        // application projection service are constructed.
+        if self.authority_composition.is_some() {
+            self.session_id = sigil_kernel::stable_event_uuid(
+                "sigil-session-path",
+                &self.session_log_path.to_string_lossy(),
+            );
+        }
         self.load_input_history();
     }
 
