@@ -2968,7 +2968,8 @@ R70.x
   （`rfc-0070(R70.4): stream bounded transcript pages`），以及 `f44d8c10`
   （`rfc-0070(R70.4): journal application command reservations`），以及本轮新增的 ApplicationClient
   resumable reducer/ACK、durable delivery ACK journal 与 cross-surface contract tests；当前切片补充
-  cold-cache 100k qualification。
+  cold-cache 100k qualification。`8b344943`（`rfc-0070(R70.4): persist application delivery acknowledgements`）
+  将 TUI production delivery ACK 接入 runtime-owned managed JSONL journal。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
