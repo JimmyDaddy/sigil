@@ -291,6 +291,7 @@ pub(crate) fn application_approval_resolution(
         policy_version: sigil_application::SafeText::new(request.policy_version.clone())?,
         expires_at_ms: request.expires_at_ms,
         decision,
+        expected_stream_sequence: None,
         family_pattern: request
             .family_pattern
             .as_ref()
@@ -433,6 +434,13 @@ impl HttpApplicationCommandExecutor {
                 resolution: Some(resolution),
             }) => {
                 let (run_id, call_id, approval_request_id) = parse_approval_binding(binding)?;
+                let run = self
+                    .registry
+                    .get_run(&run_id)
+                    .map_err(|_| ApplicationError::NotFound)?;
+                if run.session_id != self.session_id {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
                 let resolution_accepted =
                     !matches!(resolution.decision, ApplicationApprovalDecision::Deny);
                 if resolution_accepted != *accepted {
@@ -470,6 +478,7 @@ impl HttpApplicationCommandExecutor {
                                 .as_ref()
                                 .map(|reason| reason.as_str().to_owned()),
                         },
+                        resolution.expected_stream_sequence,
                     )
                     .map_err(|_| ApplicationError::Unavailable)?;
                 let fingerprint = sigil_application::command_fingerprint(request)?;
@@ -495,6 +504,61 @@ impl HttpApplicationCommandExecutor {
                     reason: "HTTP approval requires its exact typed guard and decision".to_owned(),
                 },
             )),
+            ApplicationCommand::UserInput(sigil_application::UserInputCommand::Resolve {
+                binding,
+                generation,
+                expected_request_hash,
+                decision,
+                permission_mode,
+            }) => {
+                if binding.trim().is_empty() {
+                    return Err(ApplicationError::InvalidRequest(
+                        "user input binding is empty".to_owned(),
+                    ));
+                }
+                let receipt = self
+                    .registry
+                    .user_input_decision_from_application(
+                        &self.session_id,
+                        binding,
+                        request.envelope.command_id.as_str(),
+                        request.admission.principal.as_str(),
+                        crate::HttpUserInputDecisionRequest {
+                            generation: *generation,
+                            expected_request_hash: expected_request_hash.as_str().to_owned(),
+                            decision: decision.clone(),
+                            permission_mode: permission_mode.map(|mode| match mode {
+                                ApplicationPermissionMode::ReadOnly => {
+                                    crate::HttpPermissionMode::ReadOnly
+                                }
+                                ApplicationPermissionMode::Manual => {
+                                    crate::HttpPermissionMode::Manual
+                                }
+                                ApplicationPermissionMode::AutoEdit => {
+                                    crate::HttpPermissionMode::AutoEdit
+                                }
+                                ApplicationPermissionMode::DangerFullAccess => {
+                                    crate::HttpPermissionMode::DangerFullAccess
+                                }
+                            }),
+                        },
+                    )
+                    .map_err(|_| ApplicationError::Unavailable)?;
+                let continuation = receipt.continuation_run_id.as_deref().unwrap_or_default();
+                let fingerprint = sigil_application::command_fingerprint(request)?;
+                Ok(RuntimeApplicationDispatch::Uncertain(
+                    sigil_application::UncertainCommandReceipt {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        reservation_fingerprint: fingerprint,
+                        recovery_binding: format!(
+                            "http-user-input:{}:{}",
+                            hex_binding_component(binding),
+                            hex_binding_component(continuation)
+                        ),
+                    },
+                ))
+            }
             _ => Ok(RuntimeApplicationDispatch::Rejected(
                 sigil_application::CommandRejection {
                     kind: "unsupported_http_application_command".to_owned(),
@@ -512,6 +576,16 @@ fn approval_route_token(route: crate::HttpApprovalRouteState) -> &'static str {
         crate::HttpApprovalRouteState::DeliveryUncertain => "uncertain",
         crate::HttpApprovalRouteState::Terminal => "terminal",
     }
+}
+
+fn hex_binding_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn parse_approval_binding(binding: &str) -> Result<(String, String, String), ApplicationError> {

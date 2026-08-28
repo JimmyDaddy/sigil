@@ -249,6 +249,8 @@ pub struct ApplicationApprovalResolution {
     pub expires_at_ms: u64,
     pub decision: ApplicationApprovalDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_stream_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_pattern: Option<SafeText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<SafeText>,
@@ -278,7 +280,14 @@ pub enum AgentCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserInputCommand {
-    Resolve { binding: String, value: SafeText },
+    Resolve {
+        binding: String,
+        generation: u32,
+        expected_request_hash: SafeText,
+        decision: sigil_kernel::UserInputDecisionV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<ApplicationPermissionMode>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

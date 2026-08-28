@@ -3089,55 +3089,181 @@ impl HttpSessionRunRegistry {
                 path_session_id: session_id.to_owned(),
             });
         }
-        let command_key = HttpCommandKey::from_envelope(&command);
-        let request = HttpReservedCommand::user_input_decision(session_id, request_id, &command)?;
-        let reservation = match self.reserve_command(command_key.clone(), request)? {
-            HttpCommandClaim::Execute(reservation) => reservation,
-            HttpCommandClaim::Wait(reservation) => {
-                return reservation.wait_for_user_input_decision();
+
+        #[cfg(not(test))]
+        {
+            let client = self.application_client(session_id, &command.client_id)?;
+            self.user_input_decision_command_via_application(
+                session_id, request_id, command, client,
+            )
+        }
+        #[cfg(test)]
+        if let Ok(client) = self.application_client(session_id, &command.client_id) {
+            return self.user_input_decision_command_via_application(
+                session_id, request_id, command, client,
+            );
+        }
+
+        #[cfg(test)]
+        {
+            let command_key = HttpCommandKey::from_envelope(&command);
+            let request =
+                HttpReservedCommand::user_input_decision(session_id, request_id, &command)?;
+            let reservation = match self.reserve_command(command_key.clone(), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => {
+                    return reservation.wait_for_user_input_decision();
+                }
+            };
+            let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+            let result = (|| -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
+                self.user_input_decision_from_application(
+                    session_id,
+                    request_id,
+                    &command.command_id,
+                    &command.client_id,
+                    command.payload.clone(),
+                )
+            })();
+            let completion_result = completion.complete(HttpCommandCompletion::UserInputDecision(
+                Box::new(result.clone()),
+            ));
+            if result.is_err() || completion_result.is_err() {
+                self.release_retryable_user_input_reservation(&command_key, &reservation);
+            }
+            completion_result?;
+            result
+        }
+    }
+
+    fn user_input_decision_command_via_application(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        command: HttpCommandEnvelope<HttpUserInputDecisionRequest>,
+        client: crate::application_bridge::HttpApplicationClient,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
+        client.refresh().map_err(application_registry_error)?;
+        let request = command.payload.clone();
+        let expected_request_hash =
+            sigil_application::SafeText::new(request.expected_request_hash.clone())
+                .map_err(application_registry_error)?;
+        let permission_mode = request.permission_mode.map(|mode| match mode {
+            HttpPermissionMode::ReadOnly => sigil_application::ApplicationPermissionMode::ReadOnly,
+            HttpPermissionMode::Manual => sigil_application::ApplicationPermissionMode::Manual,
+            HttpPermissionMode::AutoEdit => sigil_application::ApplicationPermissionMode::AutoEdit,
+            HttpPermissionMode::DangerFullAccess => {
+                sigil_application::ApplicationPermissionMode::DangerFullAccess
+            }
+        });
+        let receipt = client
+            .execute(
+                &command.command_id,
+                sigil_application::ApplicationCommand::UserInput(
+                    sigil_application::UserInputCommand::Resolve {
+                        binding: request_id.to_owned(),
+                        generation: request.generation,
+                        expected_request_hash,
+                        decision: request.decision.clone(),
+                        permission_mode,
+                    },
+                ),
+            )
+            .map_err(application_registry_error)?;
+        let (continuation_run_id, replayed) = match &receipt {
+            sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
+                parse_application_user_input_recovery(&receipt.recovery_binding, request_id)?,
+                false,
+            ),
+            sigil_application::ApplicationCommandReceipt::ReplayedUncertain(receipt) => (
+                parse_application_user_input_recovery(&receipt.recovery_binding, request_id)?,
+                true,
+            ),
+            sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application user input decision",
+                    run_id: session_id.to_owned(),
+                    message: rejection.reason.clone(),
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
+                return Err(HttpRegistryError::CommandKeyConflict {
+                    session_id: command.session_id,
+                    client_id: command.client_id,
+                    command_id: command.command_id,
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::InFlight(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application user input decision",
+                    run_id: session_id.to_owned(),
+                    message: "application user input decision is already in flight".to_owned(),
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::Settled(_)
+            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application user input decision",
+                    run_id: session_id.to_owned(),
+                    message: "application user input returned an invalid settled receipt"
+                        .to_owned(),
+                });
             }
         };
-        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-        let result = (|| -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
-            let session = self.get_session(session_id)?;
-            let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
-            let driver_command = HttpUserInputDecisionDriverCommand {
-                command_id: command.command_id.clone(),
-                client_id: command.client_id.clone(),
-                request_id: request_id.to_owned(),
-                request: command.payload.clone(),
-            };
-            let receipt = catch_unwind(AssertUnwindSafe(|| {
-                self.driver.user_input_decision(&session, &driver_command)
-            }))
-            .map_err(|_| HttpRegistryError::DriverPanicked {
+        let request_view = self.user_input_request(
+            session_id,
+            request_id,
+            request.generation,
+            &request.expected_request_hash,
+        )?;
+        Ok(HttpUserInputDecisionCommandReceipt {
+            command_id: command.command_id,
+            client_id: command.client_id,
+            session_id: command.session_id,
+            request: request_view,
+            continuation_run_id,
+            replayed,
+        })
+    }
+
+    pub(crate) fn user_input_decision_from_application(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        command_id: &str,
+        client_id: &str,
+        request: HttpUserInputDecisionRequest,
+    ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let driver_command = HttpUserInputDecisionDriverCommand {
+            command_id: command_id.to_owned(),
+            client_id: client_id.to_owned(),
+            request_id: request_id.to_owned(),
+            request,
+        };
+        let receipt = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.user_input_decision(&session, &driver_command)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "User input decision",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| match error.kind {
+            crate::HttpRunDriverErrorKind::StaleUserInput => HttpRegistryError::UserInputStale,
+            crate::HttpRunDriverErrorKind::General => HttpRegistryError::DriverRejected {
                 operation: "User input decision",
                 run_id: session_id.to_owned(),
-            })?
-            .map_err(|error| match error.kind {
-                crate::HttpRunDriverErrorKind::StaleUserInput => HttpRegistryError::UserInputStale,
-                crate::HttpRunDriverErrorKind::General => HttpRegistryError::DriverRejected {
-                    operation: "User input decision",
-                    run_id: session_id.to_owned(),
-                    message: error.message,
-                },
-            })?;
-            guard.finish(false);
-            let mut receipt = receipt;
-            receipt.command_id = command.command_id.clone();
-            receipt.client_id = command.client_id.clone();
-            receipt.session_id = command.session_id.clone();
-            receipt.replayed = false;
-            Ok(receipt)
-        })();
-        let completion_result = completion.complete(HttpCommandCompletion::UserInputDecision(
-            Box::new(result.clone()),
-        ));
-        if result.is_err() || completion_result.is_err() {
-            self.release_retryable_user_input_reservation(&command_key, &reservation);
-        }
-        completion_result?;
-        result
+                message: error.message,
+            },
+        })?;
+        guard.finish(false);
+        let mut receipt = receipt;
+        receipt.command_id = command_id.to_owned();
+        receipt.client_id = client_id.to_owned();
+        receipt.session_id = session_id.to_owned();
+        receipt.replayed = false;
+        Ok(receipt)
     }
 
     pub fn cancel_terminal_task_command(
@@ -3637,8 +3763,9 @@ impl HttpSessionRunRegistry {
             });
         }
         let binding = format!("{run_id}:{call_id}:{}", request.approval_request_id);
-        let resolution = crate::application_bridge::application_approval_resolution(&request)
+        let mut resolution = crate::application_bridge::application_approval_resolution(&request)
             .map_err(application_registry_error)?;
+        resolution.expected_stream_sequence = command.expected_stream_sequence;
         let accepted = !matches!(
             resolution.decision,
             sigil_application::ApplicationApprovalDecision::Deny
@@ -3718,7 +3845,18 @@ impl HttpSessionRunRegistry {
         run_id: &str,
         call_id: &str,
         request: HttpApprovalDecisionRequest,
+        expected_stream_sequence: Option<u64>,
     ) -> Result<(HttpApprovalRouteState, u64), HttpRegistryError> {
+        if let Some(expected) = expected_stream_sequence {
+            let actual = self.get_run(run_id)?.stream_sequence;
+            if expected != actual {
+                return Err(HttpRegistryError::StaleCommandSequence {
+                    run_id: run_id.to_owned(),
+                    expected,
+                    actual,
+                });
+            }
+        }
         let outcome = self.submit_approval_decision_with_route(run_id, call_id, request)?;
         Ok((outcome.route_state, outcome.registry_revision))
     }
@@ -3926,6 +4064,7 @@ impl HttpSessionRunRegistry {
         Ok(HttpCommandClaim::Execute(reservation))
     }
 
+    #[cfg(test)]
     fn release_retryable_user_input_reservation(
         &self,
         key: &HttpCommandKey,
@@ -4115,6 +4254,7 @@ enum HttpCommandKind {
     Verification,
     Integration,
     PlanDecision,
+    #[cfg(test)]
     UserInputDecision,
     IntentDrop,
     Queue,
@@ -4135,6 +4275,7 @@ impl HttpCommandKind {
             Self::Verification => b"verification",
             Self::Integration => b"integration",
             Self::PlanDecision => b"plan-decision",
+            #[cfg(test)]
             Self::UserInputDecision => b"user-input-decision",
             Self::IntentDrop => b"intent_drop",
             Self::Queue => b"queue",
@@ -4155,6 +4296,7 @@ impl HttpCommandKind {
             Self::Verification => "verification",
             Self::Integration => "integration",
             Self::PlanDecision => "plan_decision",
+            #[cfg(test)]
             Self::UserInputDecision => "user_input_decision",
             Self::IntentDrop => "intent_drop",
             Self::Queue => "queue",
@@ -4230,6 +4372,7 @@ impl HttpReservedCommand {
         Self::new(HttpCommandKind::PlanDecision, &[path_session_id], command)
     }
 
+    #[cfg(test)]
     fn user_input_decision(
         path_session_id: &str,
         request_id: &str,
@@ -4833,6 +4976,7 @@ impl HttpCommandReservation {
         }
     }
 
+    #[cfg(test)]
     fn wait_for_user_input_decision(
         &self,
     ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
@@ -5373,6 +5517,64 @@ fn parse_application_approval_recovery(
                 message: "application approval recovery revision is invalid".to_owned(),
             })?;
     Ok((route_state, registry_revision))
+}
+
+fn parse_application_user_input_recovery(
+    binding: &str,
+    expected_request_id: &str,
+) -> Result<Option<String>, HttpRegistryError> {
+    let Some(value) = binding.strip_prefix("http-user-input:") else {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application user input decision",
+            run_id: expected_request_id.to_owned(),
+            message: "user-input recovery binding is malformed".to_owned(),
+        });
+    };
+    let Some((request_id, continuation)) = value.split_once(':') else {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application user input decision",
+            run_id: expected_request_id.to_owned(),
+            message: "user-input recovery binding is incomplete".to_owned(),
+        });
+    };
+    let request_id = decode_hex_binding_component(request_id).ok_or_else(|| {
+        HttpRegistryError::DriverRejected {
+            operation: "application user input decision",
+            run_id: expected_request_id.to_owned(),
+            message: "user-input recovery request identity is invalid".to_owned(),
+        }
+    })?;
+    if request_id != expected_request_id {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application user input decision",
+            run_id: expected_request_id.to_owned(),
+            message: "user-input recovery request identity does not match the route".to_owned(),
+        });
+    }
+    let continuation = decode_hex_binding_component(continuation).ok_or_else(|| {
+        HttpRegistryError::DriverRejected {
+            operation: "application user input decision",
+            run_id: expected_request_id.to_owned(),
+            message: "user-input continuation identity is invalid".to_owned(),
+        }
+    })?;
+    Ok((!continuation.is_empty()).then_some(continuation))
+}
+
+fn decode_hex_binding_component(value: &str) -> Option<String> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
 }
 
 fn prompt_preview(prompt: &str) -> String {
