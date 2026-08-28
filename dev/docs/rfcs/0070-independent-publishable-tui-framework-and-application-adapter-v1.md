@@ -3118,3 +3118,8 @@ R70.x
   uncertain delivery 等待 durable worker event settlement；HTTP 对这些 TUI-only 操作不虚构 mapping。application
   `6/6`、plan-handoff `19/19`、agent `146/146` 与四包 strict clippy 通过。configuration/permission、verification、
   terminal、recovery preview 与剩余 surface conformance 仍开放。
+- permission-control follow-up：`7b27b996` 删除 launcher 对 active-run permission mode 的 direct worker send，新增
+  typed `RunCommand::UpdatePermissionMode` 并保留 kernel `PermissionMode` 的原有取值边界；TUI 经 application
+  reservation service 后再进入 worker edge，继续用 uncertain delivery 等待 durable worker event。TUI permission
+  回归 `20/20`、application `6/6`、四包 strict clippy 与 diff check 通过。persisted configuration CAS、verification、
+  terminal、recovery preview 与剩余 surface conformance 仍开放。
