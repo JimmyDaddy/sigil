@@ -3111,3 +3111,10 @@ R70.x
   application reservation id，否则由 client 生成。worker edge 保留原始 request 字段并以 uncertain delivery
   等待事件 reconciliation。TUI user-input 回归 `9/9`、application `6/6`、runtime service `4/4` 与四包
   strict clippy 通过。permission-mode override 和其他 legacy TUI command family 仍开放，该 slice 不关闭 R70.4。
+- plan/task/agent follow-up：`c27fbc47` 将 TUI plan prompt、plan accept/reject/save/revise、task submit/continue/
+  pause、agent profile、inline/child-session skill、agent message/close/cancel/background 映射为 typed
+  `PlanTaskCommand`/`AgentCommand`；payload 使用 SafeText 或既有 kernel typed request，不把 worker protocol 名称
+  或路径带入 application contract。TUI production 经 application reservation service 后再进入现有 worker edge，
+  uncertain delivery 等待 durable worker event settlement；HTTP 对这些 TUI-only 操作不虚构 mapping。application
+  `6/6`、plan-handoff `19/19`、agent `146/146` 与四包 strict clippy 通过。configuration/permission、verification、
+  terminal、recovery preview 与剩余 surface conformance 仍开放。
