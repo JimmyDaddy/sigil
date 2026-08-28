@@ -3232,3 +3232,11 @@ R70.x
   用它校验 terminal cancel 的 active 状态与 generation，缺失 projection 时才保留既有 durable-entry fallback。
   application `7/7`、runtime projection `3/3`、TUI app check、fmt 与 diff check 通过；本 slice 不宣称关闭 PTY
   owner lifecycle、四表面真实 transport smoke 或完整 R70.4 exit gate。
+
+- R70.5/R70.6 package-boundary follow-up：当前大而全的产品实现包改为内部 `sigil-tui-host`，并新增独立
+  `sigil-tui-app` adapter package；后者只依赖 `sigil-application` 与 public `sigil-tui` facade，持有 bounded
+  `ApplicationClient` 和 framework `App` surface，不导入 kernel/runtime/filesystem/process/Tokio。CLI 与 R71
+  shipping scripts 改用 host package，避免 facade 与产品 crate 共享同名 Rust library。`check-r70-package-topology.py`
+  现同时验证 app adapter 的 allowlist 与 public source markers；metadata、topology、app/host/sigil check 通过。
+  这完成 package identity 的可执行基线，但 host 内旧 renderer/runner 尚未全部下沉，R70.5/R70.6 exit gate 与
+  R70.4 full gate 仍未关闭。
