@@ -1159,13 +1159,6 @@ where
                 )?,
             }
         }
-        AppAction::UpdateActiveRunPermissionMode { mode } => {
-            if let Some(runtime) = worker.as_ref() {
-                let _ = runtime
-                    .worker_tx
-                    .send(super::runner::WorkerCommand::UpdateActiveRunPermissionMode { mode });
-            }
-        }
         AppAction::SetDefaultModel {
             root_config,
             expected_root_config,

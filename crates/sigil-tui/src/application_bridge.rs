@@ -11,11 +11,11 @@ use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
 use sigil_application::{
     AgentCommand, ApplicationClient, ApplicationCommand, ApplicationCommandReceipt,
-    ApplicationCommandRequest, ApplicationError, ApplicationPort, ApplicationProjection,
-    ApplicationQueueAction, ApplicationQueueItemKind, ApplicationQueueMoveDirection,
-    ApplicationQueueTarget, ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject,
-    ConversationCommand, HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand,
-    UserInputCommand,
+    ApplicationCommandRequest, ApplicationError, ApplicationPermissionMode, ApplicationPort,
+    ApplicationProjection, ApplicationQueueAction, ApplicationQueueItemKind,
+    ApplicationQueueMoveDirection, ApplicationQueueTarget, ApplicationReasoningEffort,
+    ApplicationScope, AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId,
+    McpCommand, PlanTaskCommand, RunCommand, UserInputCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -83,6 +83,7 @@ impl TuiApplicationSession {
                 }
                 | AppAction::RefreshMcpServer { .. }
                 | AppAction::SubmitUserInputDecision { .. }
+                | AppAction::UpdateActiveRunPermissionMode { .. }
                 | AppAction::QueueConversationInput { .. }
                 | AppAction::CancelQueuedConversationInput { .. }
                 | AppAction::EditQueuedConversationInput { .. }
@@ -177,6 +178,11 @@ impl TuiApplicationSession {
                 decision: decision.clone(),
                 permission_mode: None,
             })),
+            AppAction::UpdateActiveRunPermissionMode { mode } => {
+                Some(ApplicationCommand::Run(RunCommand::UpdatePermissionMode {
+                    mode: application_permission_mode(mode),
+                }))
+            }
             AppAction::SubmitPlanPrompt(prompt) => Some(ApplicationCommand::PlanTask(
                 PlanTaskCommand::SubmitPlanPrompt {
                     prompt: sigil_application::SafeText::new(prompt.clone())?,
@@ -563,6 +569,17 @@ fn application_reasoning_effort(effort: &ReasoningEffort) -> ApplicationReasonin
     }
 }
 
+fn application_permission_mode(mode: &sigil_kernel::PermissionMode) -> ApplicationPermissionMode {
+    match mode {
+        sigil_kernel::PermissionMode::ReadOnly => ApplicationPermissionMode::ReadOnly,
+        sigil_kernel::PermissionMode::Manual => ApplicationPermissionMode::Manual,
+        sigil_kernel::PermissionMode::AutoEdit => ApplicationPermissionMode::AutoEdit,
+        sigil_kernel::PermissionMode::DangerFullAccess => {
+            ApplicationPermissionMode::DangerFullAccess
+        }
+    }
+}
+
 /// Derives the durable TUI client epoch from the host-owned application/session identity. A
 /// reconnect keeps the same reservation namespace for retained command ids, while the live
 /// connection instance remains unique for each attachment.
@@ -628,6 +645,11 @@ impl TuiWorkerCommandExecutor {
                 ));
             }
             ApplicationCommand::Run(RunCommand::Cancel { .. }) => WorkerCommand::CancelRun,
+            ApplicationCommand::Run(RunCommand::UpdatePermissionMode { mode }) => {
+                WorkerCommand::UpdateActiveRunPermissionMode {
+                    mode: tui_permission_mode(*mode),
+                }
+            }
             ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
                 binding,
                 accepted,
@@ -965,5 +987,16 @@ fn tui_reasoning_effort(effort: ApplicationReasoningEffort) -> ReasoningEffort {
         ApplicationReasoningEffort::Medium => ReasoningEffort::Medium,
         ApplicationReasoningEffort::High => ReasoningEffort::High,
         ApplicationReasoningEffort::Max => ReasoningEffort::Max,
+    }
+}
+
+fn tui_permission_mode(mode: ApplicationPermissionMode) -> sigil_kernel::PermissionMode {
+    match mode {
+        ApplicationPermissionMode::ReadOnly => sigil_kernel::PermissionMode::ReadOnly,
+        ApplicationPermissionMode::Manual => sigil_kernel::PermissionMode::Manual,
+        ApplicationPermissionMode::AutoEdit => sigil_kernel::PermissionMode::AutoEdit,
+        ApplicationPermissionMode::DangerFullAccess => {
+            sigil_kernel::PermissionMode::DangerFullAccess
+        }
     }
 }

@@ -390,6 +390,9 @@ pub enum RunCommand {
     Pause {
         binding: String,
     },
+    UpdatePermissionMode {
+        mode: ApplicationPermissionMode,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,7 +601,11 @@ impl ApplicationCommand {
                 settlement: EffectSettlementClass::AtomicDurableMutation,
                 requires_session: true,
             },
-            Self::Run(RunCommand::Cancel { .. } | RunCommand::Pause { .. })
+            Self::Run(
+                RunCommand::Cancel { .. }
+                | RunCommand::Pause { .. }
+                | RunCommand::UpdatePermissionMode { .. },
+            )
             | Self::Approval(_)
             | Self::UserInput(_) => CommandPolicy {
                 lane: CommandLane::Urgent,
