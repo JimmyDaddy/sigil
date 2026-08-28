@@ -2996,6 +2996,11 @@ R70.x
   bridge 对 `PrepareCompaction` 的 preview-boundary 预拒绝，使该 action 进入既有 typed registry owner；stale
   recovery binding 仍返回 typed rejection。production application regression 与 HTTP application 测试通过。
   该切片不宣称完成四表面 conformance、configuration/session lifecycle 或完整 R70.4 exit gate。
+- `rfc-0070(R70.4): route TUI session transitions through application port`（本轮切片）将 `StartNewSession` 与
+  `SwitchSession` 送入同一 application reservation/worker edge；application payload 只使用 host-owned opaque
+  `SessionItemId`，真实 session path 与可选 attachment-recovery binding 由 TUI adapter 私有 resolver 保留。
+  application `6/6`、TUI session `169/169`（`2 ignored`）、package check 与 production-library strict clippy 通过；
+  configuration save/reboot、terminal lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
