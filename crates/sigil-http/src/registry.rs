@@ -3341,15 +3341,13 @@ impl HttpSessionRunRegistry {
                 }
             };
             let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-            let result = (|| -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
-                self.user_input_decision_from_application(
-                    session_id,
-                    request_id,
-                    &command.command_id,
-                    &command.client_id,
-                    command.payload.clone(),
-                )
-            })();
+            let result = self.user_input_decision_from_application(
+                session_id,
+                request_id,
+                &command.command_id,
+                &command.client_id,
+                command.payload.clone(),
+            );
             let completion_result = completion.complete(HttpCommandCompletion::UserInputDecision(
                 Box::new(result.clone()),
             ));
