@@ -962,9 +962,9 @@ impl HttpProductionRunDriver {
         });
         if current_schema && let Some(composition) = self.services.authority_composition() {
             command_store
-                .attach_managed_writer(
+                .attach_application_writer(
                     Arc::clone(&composition.storage_writer),
-                    "http-idempotency-ledger",
+                    "http-application-reservations",
                 )
                 .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         }

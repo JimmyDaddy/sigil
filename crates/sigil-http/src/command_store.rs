@@ -35,26 +35,28 @@ pub struct HttpDurableCommandStore {
     server_epoch: Mutex<u64>,
     state: Mutex<HttpCommandStoreState>,
     managed_writer: Mutex<Option<ManagedCommandWriter>>,
-    legacy_path_created_by_open: bool,
     _lease: File,
 }
 
 struct ManagedCommandWriter {
     writer: Arc<ManagedStorageWriterAdapterV1>,
     lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
+    channel: StorageWriterChannelV1,
 }
 
 impl ManagedCommandWriter {
     fn new(
         writer: Arc<ManagedStorageWriterAdapterV1>,
         key: &str,
+        channel: StorageWriterChannelV1,
     ) -> Result<Self, HttpCommandStoreError> {
         let lease = writer
-            .acquire_named(StorageWriterChannelV1::AdapterIdempotencyLedger, key)
+            .acquire_named(channel, key)
             .map_err(|error| HttpCommandStoreError::io(std::io::Error::other(error.to_string())))?;
         Ok(Self {
             writer,
             lease: Mutex::new(Some(lease)),
+            channel,
         })
     }
 
@@ -79,8 +81,22 @@ impl ManagedCommandWriter {
         let Some(lease) = lease.as_ref() else {
             return Err(HttpCommandStoreError::Unavailable);
         };
+        // ApplicationControlLog is an append-log channel even though this adapter stores one
+        // bounded canonical snapshot in its namespace. Keep the physical record a complete
+        // JSONL line so finalization observes the same channel contract as other application
+        // control writers. AdapterIdempotencyLedger retains its historical JSON snapshot shape.
+        let record = if self.channel == StorageWriterChannelV1::ApplicationControlLog
+            && !bytes.is_empty()
+            && !bytes.ends_with(b"\n")
+        {
+            let mut record = bytes.to_vec();
+            record.push(b'\n');
+            record
+        } else {
+            bytes.to_vec()
+        };
         self.writer
-            .replace_record_bytes(lease, bytes)
+            .replace_record_bytes(lease, &record)
             .map_err(|error| HttpCommandStoreError::io(std::io::Error::other(error.to_string())))
     }
 
@@ -138,7 +154,6 @@ impl HttpDurableCommandStore {
             });
         }
         let path = canonical_durable_path(path.into()).map_err(HttpCommandStoreError::io)?;
-        let path_existed = std::fs::symlink_metadata(&path).is_ok();
         let lease = acquire_exclusive_lease(&path).map_err(HttpCommandStoreError::io)?;
         let mut state = if path.exists() {
             let bytes = read_bounded(&path, MAX_HTTP_COMMAND_STORE_BYTES)
@@ -166,8 +181,8 @@ impl HttpDurableCommandStore {
                     message: "server epoch exhausted".to_owned(),
                 })?;
         // Preserve the legacy store's epoch-on-open behavior until a current-schema boot has
-        // successfully attached its managed ledger. The attachment removes only this process'
-        // newly-created compatibility file after importing it into the authority owner.
+        // successfully attached its managed ledger. The attachment then retires this
+        // compatibility file after importing it into the authority owner.
         persist_state(&path, &state)?;
         Ok(Self {
             path,
@@ -175,7 +190,6 @@ impl HttpDurableCommandStore {
             server_epoch: Mutex::new(state.server_epoch),
             state: Mutex::new(state),
             managed_writer: Mutex::new(None),
-            legacy_path_created_by_open: !path_existed,
             _lease: lease,
         })
     }
@@ -188,7 +202,32 @@ impl HttpDurableCommandStore {
         writer: Arc<ManagedStorageWriterAdapterV1>,
         key: &str,
     ) -> Result<(), HttpCommandStoreError> {
-        let managed = ManagedCommandWriter::new(writer, key)?;
+        self.attach_writer(
+            writer,
+            key,
+            StorageWriterChannelV1::AdapterIdempotencyLedger,
+        )
+    }
+
+    /// Performs the one-time HTTP compatibility cutover into the application reservation
+    /// authority. The legacy file remains exclusively leased until the managed snapshot has
+    /// been durably replaced; if the process stops before the legacy file is retired, the next
+    /// boot prefers the managed snapshot and retries retirement under the same leases.
+    pub(crate) fn attach_application_writer(
+        &self,
+        writer: Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+    ) -> Result<(), HttpCommandStoreError> {
+        self.attach_writer(writer, key, StorageWriterChannelV1::ApplicationControlLog)
+    }
+
+    fn attach_writer(
+        &self,
+        writer: Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+        channel: StorageWriterChannelV1,
+    ) -> Result<(), HttpCommandStoreError> {
+        let managed = ManagedCommandWriter::new(writer, key, channel)?;
         let managed_bytes = managed.read_snapshot()?;
         let mut state = self
             .state
@@ -231,7 +270,10 @@ impl HttpDurableCommandStore {
             return Err(HttpCommandStoreError::Unavailable);
         }
         *attached = Some(managed);
-        if self.legacy_path_created_by_open {
+        // A successful import makes the managed record the only writable authority. Retire the
+        // compatibility pathname even when it pre-dated this process; keeping it would leave a
+        // second durable-looking source that future code could accidentally reopen.
+        if self.path.exists() {
             std::fs::remove_file(&self.path).map_err(HttpCommandStoreError::io)?;
             if let Some(parent) = self.path.parent() {
                 File::open(parent)
