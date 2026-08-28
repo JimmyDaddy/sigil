@@ -5136,11 +5136,11 @@ pub fn application_session_transcript_page(
         };
         if before.is_none_or(|boundary| message.ordinal < boundary) {
             let item_bytes = message.content.as_ref().map_or(0, String::len);
-            if messages.len() == limit {
-                if let Some(removed) = messages.pop_front() {
-                    message_bytes = message_bytes
-                        .saturating_sub(removed.content.as_ref().map_or(0, String::len));
-                }
+            if messages.len() == limit
+                && let Some(removed) = messages.pop_front()
+            {
+                message_bytes =
+                    message_bytes.saturating_sub(removed.content.as_ref().map_or(0, String::len));
             }
             message_bytes = message_bytes.saturating_add(item_bytes);
             messages.push_back(message);

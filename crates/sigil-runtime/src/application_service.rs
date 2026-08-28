@@ -302,9 +302,25 @@ impl ApplicationPort for RuntimeApplicationService {
                 }
             }
 
-            reservations
+            if let Err(error) = reservations
                 .mark_dispatch_started(key.clone(), fingerprint.clone())
-                .await?;
+                .await
+            {
+                // The reservation is already durable, but dispatch has not been admitted. If
+                // the marker write raced a storage fault, retain an explicit uncertain terminal
+                // instead of leaving an unrepairable Reserved row that every retry reports as
+                // InFlight forever. A failed settlement keeps the original error and the
+                // durable reservation remains fail-closed for operator reconciliation.
+                let uncertain = Self::uncertain_receipt(&request, fingerprint.clone());
+                if reservations
+                    .settle(key, fingerprint, uncertain.clone())
+                    .await
+                    .is_ok()
+                {
+                    return Ok(uncertain);
+                }
+                return Err(error);
+            }
 
             let outcome = match executor.dispatch(request.clone()).await {
                 Ok(RuntimeApplicationDispatch::Settled(receipt)) => {
@@ -420,6 +436,7 @@ mod tests {
     #[derive(Default)]
     struct TestReservationStore {
         entries: Mutex<BTreeMap<CommandReservationKey, (String, TestReservationState)>>,
+        fail_mark: bool,
     }
 
     enum TestReservationState {
@@ -477,6 +494,9 @@ mod tests {
             key: CommandReservationKey,
             fingerprint: String,
         ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+            if self.fail_mark {
+                return Box::pin(async { Err(ApplicationError::Unavailable) });
+            }
             let result = (|| {
                 let mut entries = self
                     .entries
@@ -585,6 +605,33 @@ mod tests {
             .expect("new epoch command");
         assert!(matches!(new_epoch, ApplicationCommandReceipt::Settled(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn runtime_service_settles_uncertain_when_dispatch_marker_fails() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reservations = Arc::new(TestReservationStore {
+            fail_mark: true,
+            ..TestReservationStore::default()
+        });
+        let service = RuntimeApplicationService::new(
+            Arc::new(UnavailableProjection),
+            Arc::new(SettlingExecutor {
+                calls: Arc::clone(&calls),
+            }),
+            Arc::clone(&reservations) as Arc<dyn RuntimeApplicationReservationStore>,
+            Arc::new(Acker),
+        );
+        let receipt = futures::executor::block_on(service.execute(request("hello", 1)))
+            .expect("uncertain terminal");
+        assert!(matches!(receipt, ApplicationCommandReceipt::Uncertain(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let state = reservations.entries.lock().expect("reservation state");
+        assert!(state.values().all(|(_, state)| matches!(
+            state,
+            TestReservationState::Terminal(receipt)
+                if matches!(receipt.as_ref(), ApplicationCommandReceipt::Uncertain(_))
+        )));
     }
 
     #[test]

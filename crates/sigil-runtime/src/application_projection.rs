@@ -24,6 +24,12 @@ use crate::application_run::{
 
 const MAX_PROJECTION_FEED_ITEMS: usize = 256;
 
+type ProjectionBuild = (
+    ProjectionSnapshotEnvelope,
+    Vec<sigil_kernel::SessionStreamRecord>,
+    Vec<(u64, PublicEventOutboxEntryV1)>,
+);
+
 /// Runtime-owned binding used to construct an application projection without exposing its durable
 /// paths to the application contract or renderer.
 #[derive(Debug, Clone)]
@@ -101,16 +107,7 @@ impl RuntimeSessionProjectionBinding {
         })
     }
 
-    fn build_projection(
-        &self,
-    ) -> Result<
-        (
-            ProjectionSnapshotEnvelope,
-            Vec<sigil_kernel::SessionStreamRecord>,
-            Vec<(u64, PublicEventOutboxEntryV1)>,
-        ),
-        ApplicationError,
-    > {
+    fn build_projection(&self) -> Result<ProjectionBuild, ApplicationError> {
         let records = JsonlSessionStore::read_event_records(&self.session_path)
             .map_err(|_| ApplicationError::Unavailable)?;
         let actual_session_scope_id = records
