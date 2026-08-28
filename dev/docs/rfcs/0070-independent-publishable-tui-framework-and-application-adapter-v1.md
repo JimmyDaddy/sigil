@@ -3188,3 +3188,12 @@ R70.x
   `config-save-v1` patch marker。测试构建保留隔离 fixture，production build 不再绕过 application port。
   config-flow `118/118`、package check、production-library strict clippy 与 fmt 通过；terminal PTY lifecycle、
   四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+
+- TUI authority-admission follow-up：`5474f371` 将 `/model` session route、默认模型保存与 permission-mode
+  persistence 接入同一 ApplicationPort。provider route 只以 adapter-owned opaque binding 进入
+  `ProviderCommand::SelectRoute`，成功 receipt 后由 launcher 重启 worker；配置与权限保存由 typed
+  `ConfigurationCommand::Save` 在 application reservation 后执行，busy run 只在 durable config receipt 后提交
+  urgent permission override。production session/config actions 不再在 application unavailable 时回退到直接
+  worker/path mutation；旧 session fixture 仅保留在测试构建。TUI 全量 lib tests `1720 passed / 3 ignored`，
+  migration manifest `276/276`、package check、strict library clippy 与 diff check 通过；HTTP/CLI/Desktop
+  四表面 conformance 与完整 R70.4 exit gate仍待完成。
