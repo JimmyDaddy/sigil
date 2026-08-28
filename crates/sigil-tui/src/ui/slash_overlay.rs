@@ -6,7 +6,9 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Wrap},
 };
 
+#[cfg(test)]
 use crate::app::AppState;
+use crate::surface::SlashSelectorSurface;
 
 use super::{
     geometry::{selector_window_range, shadow_rect},
@@ -25,6 +27,7 @@ pub(crate) fn render_slash_selector_overlay(
     render_slash_selector_overlay_with_theme(frame, live_area, composer_area, app, &theme);
 }
 
+#[cfg(test)]
 pub(crate) fn render_slash_selector_overlay_with_theme(
     frame: &mut Frame,
     live_area: Rect,
@@ -142,6 +145,118 @@ pub(crate) fn render_slash_selector_overlay_with_theme(
         );
     };
 
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(Style::default().bg(palette.overlay_bg))
+            .wrap(Wrap { trim: false }),
+        content,
+    );
+}
+
+pub(crate) fn render_slash_selector_overlay_surface(
+    frame: &mut Frame,
+    live_area: Rect,
+    composer_area: Rect,
+    selector: &SlashSelectorSurface,
+    theme: &Theme,
+) {
+    if !selector.visible || live_area.width == 0 || live_area.height == 0 {
+        return;
+    }
+    let palette = &theme.palette;
+    let visible_rows = selector.visible_rows as usize;
+    if visible_rows == 0 {
+        return;
+    }
+    let Some(overlay) = slash_selector_overlay_rect(live_area, composer_area, visible_rows) else {
+        return;
+    };
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.overlay_shadow)),
+        shadow_rect(overlay, frame.area()),
+    );
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.overlay_bg)),
+        overlay,
+    );
+    let gutter = Rect::new(overlay.x, overlay.y, 1, overlay.height);
+    frame.render_widget(
+        Paragraph::new(Text::from(
+            (0..gutter.height)
+                .map(|_| {
+                    Line::from(vec![Span::styled(
+                        "▌",
+                        Style::default()
+                            .fg(palette.selection_bg)
+                            .bg(palette.overlay_bg),
+                    )])
+                })
+                .collect::<Vec<_>>(),
+        ))
+        .style(Style::default().bg(palette.overlay_bg))
+        .wrap(Wrap { trim: false }),
+        gutter,
+    );
+    let content = Rect::new(
+        overlay.x.saturating_add(2),
+        overlay.y,
+        overlay.width.saturating_sub(4),
+        overlay.height,
+    );
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+    let mut lines = selector
+        .title
+        .as_deref()
+        .map(|title| selector_title_line_with_theme(title, theme))
+        .into_iter()
+        .collect::<Vec<_>>();
+    let row_capacity = (content.height as usize).saturating_sub(lines.len());
+    if row_capacity == 0 {
+        // Keep the title visible on a tiny terminal.
+    } else if selector.rows.is_empty() {
+        lines.push(Line::styled(
+            selector
+                .empty_message
+                .as_deref()
+                .unwrap_or("no slash match"),
+            Style::default()
+                .fg(palette.accent_danger)
+                .bg(palette.overlay_bg),
+        ));
+    } else {
+        let selected_index = selector.selected_index.unwrap_or(0);
+        let (window_start, window_end) =
+            selector_window_range(selector.rows.len(), selected_index, row_capacity);
+        lines.extend(
+            selector
+                .rows
+                .iter()
+                .enumerate()
+                .skip(window_start)
+                .take(window_end.saturating_sub(window_start))
+                .map(|(index, (command, description))| {
+                    let selected = index == selected_index;
+                    let marker = if selected { "› " } else { "  " };
+                    let style = if selected {
+                        Style::default()
+                            .fg(palette.selection_fg)
+                            .bg(palette.selection_bg)
+                    } else {
+                        Style::default()
+                            .fg(palette.accent_info)
+                            .bg(palette.overlay_bg)
+                    };
+                    Line::from(vec![
+                        Span::styled(marker, style.add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("{command:<12}"), style.add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("  {description}"), style),
+                    ])
+                }),
+        );
+    }
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .style(Style::default().bg(palette.overlay_bg))

@@ -11,9 +11,11 @@ use sigil_kernel::{
     ToolAnalysisReasonCode, ToolAnalysisStatus, ToolPermissionEffect, ToolSubject,
 };
 
+#[cfg(test)]
+use crate::app::AppState;
 use crate::app::{
-    AppState, ApprovalAction, ApprovalChangeSetSummary, ApprovalDiagnosticSummary,
-    ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
+    ApprovalAction, ApprovalChangeSetSummary, ApprovalDiagnosticSummary, ApprovalDiffLine,
+    ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
     session_grant_unavailable_reason_label,
 };
 
@@ -31,13 +33,40 @@ use super::{
     theme::{self, ThemePalette},
 };
 
+#[cfg(test)]
 pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     let Some(view) = app.approval_modal_view() else {
         return;
     };
     let current_theme = theme::resolve_for_app(app);
+    render_approval_modal_view(
+        frame,
+        &view,
+        app.approval.scroll_back as u16,
+        &current_theme,
+    );
+}
+
+pub(super) fn render_approval_modal_surface(
+    frame: &mut Frame,
+    view: Option<&ApprovalModalView>,
+    scroll_back: u16,
+    theme: &theme::Theme,
+) {
+    let Some(view) = view else {
+        return;
+    };
+    render_approval_modal_view(frame, view, scroll_back, theme);
+}
+
+fn render_approval_modal_view(
+    frame: &mut Frame,
+    view: &ApprovalModalView,
+    scroll_back: u16,
+    current_theme: &theme::Theme,
+) {
     let palette = &current_theme.palette;
-    let area = approval_modal_area(frame.area(), &view);
+    let area = approval_modal_area(frame.area(), view);
     let backdrop = halo_rect(area, frame.area(), 5, 2);
     if backdrop.width > 0 && backdrop.height > 0 {
         frame.render_widget(Clear, backdrop);
@@ -59,7 +88,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     }
     frame.render_widget(Clear, area);
     let block = Block::default()
-        .title(approval_block_title(&view))
+        .title(approval_block_title(view))
         .title_style(
             Style::default()
                 .fg(palette.text_inverse)
@@ -77,13 +106,13 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     }
 
     let header_lines = approval_header_lines_with_palette(
-        &view,
+        view,
         area.width.saturating_sub(2) as usize,
         current_theme.syntax_theme,
         palette,
     );
-    let footer_lines = approval_footer_lines_with_palette(&view, palette);
-    let sections = approval_modal_sections(inner, &view);
+    let footer_lines = approval_footer_lines_with_palette(view, palette);
+    let sections = approval_modal_sections(inner, view);
 
     frame.render_widget(
         Paragraph::new(Text::from(header_lines))
@@ -99,15 +128,15 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     if !view.has_diff_preview {
         render_approval_review_content(
             frame,
-            &view,
+            view,
             sections.body,
-            app.approval.scroll_back as u16,
+            scroll_back,
             area.width.saturating_sub(6) as usize,
             current_theme.syntax_theme,
             palette,
         );
         if let Some(metadata_area) = sections.metadata {
-            render_approval_metadata(frame, &view, metadata_area, palette);
+            render_approval_metadata(frame, view, metadata_area, palette);
         }
         render_approval_footer(frame, sections.footer, footer_lines, palette);
         return;
@@ -172,7 +201,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     frame.render_widget(diff_block, diff_area);
     if diff_inner.width > 0 && diff_inner.height > 0 {
         let summary_lines = approval_preview_summary_lines_with_palette(
-            &view,
+            view,
             diff_inner.width as usize,
             current_theme.syntax_theme,
             palette,
@@ -187,7 +216,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
             .constraints(constraints)
             .split(diff_inner);
         frame.render_widget(
-            Paragraph::new(approval_diff_status_line_with_palette(&view, palette)),
+            Paragraph::new(approval_diff_status_line_with_palette(view, palette)),
             diff_sections[0],
         );
         if !summary_lines.is_empty() {
@@ -216,14 +245,14 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
             .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(Text::from(diff_lines))
-                .scroll((app.approval.scroll_back as u16, 0))
+                .scroll((scroll_back, 0))
                 .wrap(Wrap { trim: false }),
             *diff_sections.last().unwrap_or(&diff_inner),
         );
     }
 
     if let Some(metadata_area) = sections.metadata {
-        render_approval_metadata(frame, &view, metadata_area, palette);
+        render_approval_metadata(frame, view, metadata_area, palette);
     }
     render_approval_footer(frame, sections.footer, footer_lines, palette);
 }

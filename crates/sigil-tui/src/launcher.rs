@@ -52,6 +52,8 @@ use crate::host_effects::{ExternalLaunchPlatform, TestHostEffects, external_laun
 #[cfg(not(test))]
 use crate::input_event::{FocusChange, InputEvent, InputKeyCode, InputKeyEventKind, Modifiers};
 use crate::ui;
+#[cfg(test)]
+use crate::ui::LayoutSnapshot;
 use crate::{
     app::{AppAction, AppState},
     attention::AttentionController,
@@ -61,7 +63,7 @@ use crate::{
     mouse::AppMouseOutcome,
     presentation::PresentationSession,
     runner::{self, WorkerCommand, WorkerMessage},
-    ui::LayoutSnapshot,
+    surface_adapter::build_surface_model,
 };
 
 const BACKGROUND_TASK_WAKE_INTERVAL: Duration = Duration::from_millis(250);
@@ -778,11 +780,25 @@ fn render_timed_frame<B: Backend>(
         .begin_present(generation)
         .map_err(|error| anyhow::anyhow!(error))?;
     let mut prepared = None;
+    let mut egress_rendered = false;
+    app.begin_egress_disclosure_frame();
     let draw_result = terminal.draw(|frame| {
         // Layout, cell output, and the interaction facts are captured by this one render
         // transaction. Input never reconstructs this layout from the mutable AppState.
-        let layout = std::sync::Arc::new(LayoutSnapshot::from_app(frame.area(), app));
-        ui::render(frame, app);
+        let surface = build_surface_model(
+            frame.area(),
+            app,
+            crate::surface::SurfaceState {
+                frame_generation: generation.value(),
+                terminal_epoch: presentation.terminal_epoch().value(),
+            },
+        );
+        egress_rendered = surface.egress_disclosure.is_some()
+            && surface.layout.egress_disclosure.is_some()
+            && !surface.user_input_open
+            && !surface.plan_workbench_open;
+        let layout = std::sync::Arc::new(surface.layout.clone());
+        ui::render_surface(frame, &surface);
         prepared = Some((frame.area(), layout, frame.buffer_mut().clone()));
     });
     if let Err(error) = draw_result {
@@ -790,6 +806,9 @@ fn render_timed_frame<B: Backend>(
             .fail_after_io(generation, attempt, error.to_string())
             .map_err(|state_error| anyhow::anyhow!(state_error))?;
         return Err(anyhow::anyhow!("terminal present failed: {error}"));
+    }
+    if egress_rendered {
+        app.mark_egress_disclosure_rendered();
     }
     let Some((area, layout, surface)) = prepared else {
         presentation

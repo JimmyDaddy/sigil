@@ -92,7 +92,7 @@ use crate::workspace_git::{WorkspaceGitStatus, inspect_workspace_git_status};
 pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
 pub(crate) use self::checkpoint_flow::{CheckpointRestoreModalPhase, CheckpointRestoreModalView};
-pub(crate) use self::egress_disclosure_flow::EGRESS_DISCLOSURE_HEIGHT;
+pub(crate) use self::egress_disclosure_flow::{EGRESS_DISCLOSURE_HEIGHT, EgressDisclosureCard};
 use self::formatting::*;
 #[cfg(test)]
 pub(crate) use self::intent_stack_flow::IntentStackRowView;

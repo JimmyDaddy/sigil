@@ -24,7 +24,9 @@ mod timeline;
 mod tool_card;
 mod user_input_form;
 
+#[cfg(test)]
 pub use shell::render;
+pub(crate) use shell::render_surface;
 
 pub(crate) use layout_snapshot::live_transcript_rows_for_app;
 pub use layout_snapshot::{LayoutMode, LayoutSnapshot};
@@ -32,7 +34,7 @@ pub use layout_snapshot::{LayoutMode, LayoutSnapshot};
 pub(crate) use markdown::MarkdownRenderCursor;
 pub(crate) use markdown::contains_mermaid_diagram as markdown_contains_mermaid_diagram;
 pub(crate) use text::{
-    sanitize_terminal_text, terminal_cell_width, terminal_grapheme_width,
+    bidi_reorder_line, sanitize_terminal_text, terminal_cell_width, terminal_grapheme_width,
     visual_position_for_char_cursor, wrap_terminal_lines,
 };
 pub(crate) use timeline::{

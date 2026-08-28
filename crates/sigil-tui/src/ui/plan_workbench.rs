@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{PendingPlanApproval, PlanWorkbenchAction};
+use crate::surface::{PendingPlanApproval, PlanWorkbenchAction};
 
 use super::{
     text::wrap_terminal_lines,

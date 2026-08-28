@@ -41,7 +41,7 @@ pub(crate) enum CheckpointRestoreModalPhase {
     Unavailable,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct CheckpointRestoreModalView {
     pub(crate) phase: CheckpointRestoreModalPhase,
     pub(crate) phase_detail: String,

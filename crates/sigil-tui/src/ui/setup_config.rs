@@ -6,19 +6,21 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
+#[cfg(test)]
 use crate::app::AppState;
 use crate::config_panel::{CONFIG_HEADER_NOTICE, ConfigSection};
+use crate::surface::{ConfigSurface, SurfaceModel};
 
 use super::{
     StatusKind,
-    modal::render_modal,
-    shell::render_status,
     status_indicator::{
         FocusKind, StatusIndicator, focus_style_with_palette, focus_symbol,
         status_rest_style_with_palette,
     },
     theme::{self, ThemePalette},
 };
+#[cfg(test)]
+use super::{modal::render_modal, shell::render_status};
 
 pub(super) const CONFIG_DETAIL_SPLIT_MIN_WIDTH: u16 = 128;
 pub(super) const CONFIG_DETAIL_PANEL_WIDTH: u16 = 42;
@@ -32,6 +34,7 @@ pub(super) const CONFIG_FOOTER_COMPACT_WIDTH: u16 = 76;
 const CONFIG_SCROLL_MARKER_WIDTH: u16 = 8;
 const CONFIG_STATUS_MARKER_WIDTH: usize = 2;
 
+#[cfg(test)]
 pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
     let palette = &current_theme.palette;
@@ -83,6 +86,7 @@ pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
     render_modal(frame, app);
 }
 
+#[cfg(test)]
 pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
     let palette = &current_theme.palette;
@@ -144,6 +148,370 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
     render_modal(frame, app);
 }
 
+pub(super) fn render_setup_surface(frame: &mut Frame, surface: &SurfaceModel) {
+    let Some(setup) = surface.setup.as_ref() else {
+        return;
+    };
+    let palette = &surface.theme.palette;
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(12)])
+        .split(frame.area());
+    super::shell::render_status_surface(
+        frame,
+        outer[0],
+        &surface.status,
+        &surface.theme,
+        Some(setup),
+    );
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(10),
+            Constraint::Min(68),
+            Constraint::Percentage(10),
+        ])
+        .split(outer[1]);
+    let title = if setup.trust_gate {
+        "Workspace Trust"
+    } else {
+        "Setup"
+    };
+    let detail = setup
+        .lines
+        .iter()
+        .map(|line| render_setup_line_with_palette(line, palette))
+        .collect::<Vec<_>>();
+    let detail_widget = Paragraph::new(Text::from(detail))
+        .block(
+            Block::default()
+                .title(title)
+                .title_style(
+                    Style::default()
+                        .fg(palette.button_selected_fg)
+                        .bg(palette.button_selected_bg)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .border_type(BorderType::Rounded)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.config_warning))
+                .style(Style::default().bg(palette.setup_bg)),
+        )
+        .style(Style::default().bg(palette.setup_bg))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(detail_widget, body[1]);
+    super::modal::render_modal_surface(frame, &surface.modal, &surface.theme);
+}
+
+pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
+    let Some(config) = surface.config.as_ref() else {
+        return;
+    };
+    let palette = &surface.theme.palette;
+    let panel_bg = palette.config_bg;
+    frame.render_widget(
+        Block::default().style(Style::default().bg(panel_bg)),
+        frame.area(),
+    );
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(frame.area());
+    let header_area = centered_config_area(outer[0]);
+    let content_area = centered_config_area(outer[1]);
+    render_config_header_surface(frame, header_area, config, panel_bg, palette);
+
+    let (mut main_lines, context_lines) = split_config_context_lines(config.detail_lines.clone());
+    let show_context_panel = content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
+    if !show_context_panel && !context_lines.is_empty() {
+        main_lines.push(String::new());
+        main_lines.push("[details]".to_owned());
+        main_lines.extend(context_lines.iter().cloned());
+    }
+    let footer_height = u16::from(content_area.height > 0);
+    let footer_gap = u16::from(content_area.height > footer_height + 1);
+    let panel_max_height = content_area
+        .height
+        .saturating_sub(footer_height)
+        .saturating_sub(footer_gap);
+    let panel_height = if show_context_panel {
+        config_panel_height(&main_lines, &context_lines, panel_max_height)
+    } else {
+        config_panel_height(&main_lines, &[], panel_max_height)
+    };
+    let panel_area = top_aligned_config_area(content_area, panel_height);
+    if show_context_panel {
+        let content = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(72),
+                Constraint::Length(2),
+                Constraint::Length(CONFIG_DETAIL_PANEL_WIDTH),
+            ])
+            .split(panel_area);
+        render_config_panel(frame, content[0], main_lines, panel_bg, palette);
+        render_config_context_panel_surface(
+            frame,
+            content[2],
+            config,
+            context_lines,
+            panel_bg,
+            palette,
+        );
+    } else {
+        render_config_panel(frame, panel_area, main_lines, panel_bg, palette);
+    }
+    if footer_height > 0 {
+        let footer_area = Rect {
+            y: panel_area.y + panel_area.height + footer_gap,
+            height: footer_height,
+            ..content_area
+        };
+        render_config_footer_surface(frame, footer_area, config, panel_bg, palette);
+    }
+    super::modal::render_modal_surface(frame, &surface.modal, &surface.theme);
+}
+
+fn render_config_header_surface(
+    frame: &mut Frame,
+    area: Rect,
+    config: &ConfigSurface,
+    panel_bg: Color,
+    palette: &ThemePalette,
+) {
+    let content_width = area.width as usize;
+    let section = config.section_title.as_deref().unwrap_or("Config");
+    let (state, state_kind) = if config.save_error.is_some() {
+        ("save failed", StatusKind::Error)
+    } else if config.dirty {
+        ("unsaved", StatusKind::Warning)
+    } else {
+        ("saved", StatusKind::Success)
+    };
+    let state_style = if config.save_error.is_some() {
+        Style::default()
+            .fg(palette.button_selected_fg)
+            .bg(palette.config_danger)
+            .add_modifier(Modifier::BOLD)
+    } else if config.dirty {
+        Style::default()
+            .fg(palette.button_selected_fg)
+            .bg(palette.config_warning)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.button_selected_fg)
+            .bg(palette.config_primary)
+            .add_modifier(Modifier::BOLD)
+    };
+    let field = config.selected_field_label.as_deref().unwrap_or("summary");
+    let file_label = if config.file_label.is_empty() {
+        "config"
+    } else {
+        config.file_label.as_str()
+    };
+    let notice = config
+        .save_error
+        .as_deref()
+        .or_else(|| (!config.footer_hint.is_empty()).then_some(config.footer_hint.as_str()))
+        .unwrap_or(CONFIG_HEADER_NOTICE);
+    let title = " Sigil config ";
+    let mut summary_spans = Vec::new();
+    let mut remaining = content_width;
+    push_config_header_span(
+        &mut summary_spans,
+        &mut remaining,
+        title,
+        Style::default()
+            .fg(palette.button_selected_fg)
+            .bg(palette.button_selected_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    push_config_header_pair_with_palette(
+        &mut summary_spans,
+        &mut remaining,
+        "section",
+        section,
+        palette,
+    );
+    push_config_header_span(
+        &mut summary_spans,
+        &mut remaining,
+        &format!(
+            " {} {state} ",
+            StatusIndicator::static_kind(state_kind).symbol()
+        ),
+        state_style,
+    );
+    push_config_header_pair_with_palette(
+        &mut summary_spans,
+        &mut remaining,
+        "field",
+        field,
+        palette,
+    );
+    let notice_min_width = "hint ".chars().count() + 12;
+    let file_value_width = content_width
+        .saturating_sub("file ".chars().count() + 2 + notice_min_width)
+        .min(content_width / 3);
+    let file_value = fit_config_value(file_label, file_value_width);
+    let notice_width = content_width.saturating_sub(
+        "file ".chars().count() + file_value.chars().count() + "  ".chars().count(),
+    );
+    let mut file_spans = vec![
+        Span::styled("file ", Style::default().fg(palette.text_muted)),
+        Span::styled(file_value, Style::default().fg(palette.text_secondary)),
+        Span::raw("  "),
+    ];
+    file_spans.extend(render_config_header_notice_with_palette(
+        notice,
+        notice_width,
+        palette,
+    ));
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(summary_spans),
+            Line::from(file_spans),
+        ]))
+        .style(Style::default().bg(panel_bg))
+        .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_config_context_panel_surface(
+    frame: &mut Frame,
+    area: Rect,
+    config: &ConfigSurface,
+    context_lines: Vec<String>,
+    panel_bg: Color,
+    palette: &ThemePalette,
+) {
+    let lines = if context_lines.is_empty() {
+        vec![
+            config.status_summary.clone(),
+            String::new(),
+            "Move to a field to inspect its key and behavior.".to_owned(),
+            config.footer_hint.clone(),
+        ]
+    } else {
+        context_lines
+    };
+    render_context_panel_lines(frame, area, lines, panel_bg, palette);
+}
+
+fn render_context_panel_lines(
+    frame: &mut Frame,
+    area: Rect,
+    lines: Vec<String>,
+    panel_bg: Color,
+    palette: &ThemePalette,
+) {
+    let selected_line_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.starts_with("selected:").then_some(index))
+        .collect::<Vec<_>>();
+    let block = config_block_with_palette("Details", palette.config_detail, panel_bg, palette);
+    let content_area = block.inner(area);
+    let content_width = content_area.width as usize;
+    let detail = lines
+        .into_iter()
+        .map(|line| render_config_context_line_with_palette(&line, content_width, palette))
+        .collect::<Vec<_>>();
+    let scroll_offset =
+        config_scroll_offset(detail.len(), content_area.height, &selected_line_indexes);
+    frame.render_widget(block, area);
+    render_config_scroll_markers(
+        frame,
+        area,
+        detail.len(),
+        content_area.height,
+        scroll_offset,
+        palette,
+    );
+    render_config_selected_row_bgs(
+        frame,
+        content_area,
+        &selected_line_indexes,
+        scroll_offset,
+        palette,
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(detail)).scroll((scroll_offset.min(u16::MAX as usize) as u16, 0)),
+        content_area,
+    );
+}
+
+fn render_config_footer_surface(
+    frame: &mut Frame,
+    area: Rect,
+    config: &ConfigSurface,
+    panel_bg: Color,
+    palette: &ThemePalette,
+) {
+    let selected = config.selected_footer_action.as_deref();
+    let compact = area.width < CONFIG_FOOTER_COMPACT_WIDTH;
+    let mut action_spans = Vec::new();
+    let mut actions_width = 0usize;
+    for (index, label) in config.footer_actions.iter().enumerate() {
+        if index > 0 {
+            action_spans.push(Span::raw(" "));
+            actions_width += 1;
+        }
+        let is_selected = selected == Some(label.as_str());
+        action_spans.push(footer_action_span(
+            label,
+            is_selected,
+            footer_action_accent_with_palette(label, palette),
+            compact,
+            palette,
+        ));
+        actions_width += footer_action_width(label, is_selected, compact);
+    }
+    let gap_width = if compact {
+        " | ".chars().count()
+    } else {
+        let preferred_status_width = footer_status_width(&config.footer_hint);
+        area.width
+            .saturating_sub(actions_width as u16)
+            .saturating_sub(preferred_status_width as u16)
+            .max(2) as usize
+    };
+    let status_width = (area.width as usize)
+        .saturating_sub(actions_width)
+        .saturating_sub(gap_width);
+    let status_style = if config.close_guard_armed || config.save_error.is_some() {
+        Style::default()
+            .fg(palette.config_danger)
+            .add_modifier(Modifier::BOLD)
+    } else if config.dirty {
+        Style::default()
+            .fg(palette.config_warning)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.text_secondary)
+    };
+    let gap = if compact {
+        " | ".to_owned()
+    } else {
+        " ".repeat(gap_width)
+    };
+    action_spans.push(Span::raw(gap));
+    action_spans.extend(footer_status_spans_with_palette(
+        &config.footer_hint,
+        status_width,
+        status_style,
+        palette,
+    ));
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![Line::from(action_spans)]))
+            .style(Style::default().bg(panel_bg))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 pub(super) fn centered_config_area(area: Rect) -> Rect {
     let min_width = CONFIG_CONTENT_MIN_WIDTH.min(area.width);
     let max_width = CONFIG_CONTENT_MAX_WIDTH.min(area.width);
@@ -154,6 +522,7 @@ pub(super) fn centered_config_area(area: Rect) -> Rect {
     Rect { x, width, ..area }
 }
 
+#[cfg(test)]
 fn render_config_header(
     frame: &mut Frame,
     area: Rect,
@@ -253,6 +622,7 @@ fn render_config_header(
     frame.render_widget(header, area);
 }
 
+#[cfg(test)]
 fn config_file_label(app: &AppState) -> String {
     app.config_path
         .file_name()
@@ -475,6 +845,7 @@ fn render_config_selected_row_bgs(
     }
 }
 
+#[cfg(test)]
 fn render_config_context_panel(
     frame: &mut Frame,
     area: Rect,
@@ -647,6 +1018,7 @@ pub(super) fn split_config_context_lines(lines: Vec<String>) -> (Vec<String>, Ve
     (main_lines, context_lines)
 }
 
+#[cfg(test)]
 fn render_config_footer(
     frame: &mut Frame,
     area: Rect,
@@ -734,7 +1106,7 @@ fn footer_action_accent_with_palette(label: &str, palette: &ThemePalette) -> Col
 }
 
 fn footer_action_span(
-    label: &'static str,
+    label: &str,
     selected: bool,
     accent: Color,
     compact: bool,
@@ -755,11 +1127,11 @@ fn footer_action_span(
     Span::styled(text, style)
 }
 
-pub(super) fn footer_action_width(label: &'static str, selected: bool, compact: bool) -> usize {
+pub(super) fn footer_action_width(label: &str, selected: bool, compact: bool) -> usize {
     footer_action_text(label, selected, compact).chars().count()
 }
 
-fn footer_action_text(label: &'static str, selected: bool, compact: bool) -> String {
+fn footer_action_text(label: &str, selected: bool, compact: bool) -> String {
     let inner = if selected {
         format!("> {label} <")
     } else {

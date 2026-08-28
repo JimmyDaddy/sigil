@@ -13,6 +13,10 @@ impl FrameGeneration {
     const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    pub(crate) const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// A terminal lifecycle generation. A poisoned terminal can never reuse its old epoch.
@@ -24,7 +28,6 @@ impl TerminalEpoch {
         Self(value)
     }
 
-    #[cfg(test)]
     pub(crate) const fn value(self) -> u64 {
         self.0
     }

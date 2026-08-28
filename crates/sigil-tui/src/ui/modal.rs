@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::app::AppState;
+use crate::surface::ModalSurface;
 
 use super::{
     geometry::{centered_rect, halo_rect, shadow_rect},
@@ -14,6 +15,7 @@ use super::{
     theme,
 };
 
+#[cfg(test)]
 pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     if !app.has_modal() || app.checkpoint_restore_modal_open() {
         return;
@@ -134,6 +136,164 @@ pub(super) fn modal_geometry(screen: Rect, app: &AppState) -> ModalGeometry {
         area,
         content,
         inner_width,
+    }
+}
+
+pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, theme: &theme::Theme) {
+    if !modal.visible || modal.checkpoint_restore_visible {
+        return;
+    }
+    let visual = modal_visual_for(modal.title.as_deref(), modal.config_mode, theme);
+    let geometry = modal_geometry_from_lines(frame.area(), &modal.lines, modal.title.as_deref());
+    let raw_lines = &modal.lines;
+    let area = geometry.area;
+    let lines = raw_lines
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, line)| render_modal_line(index, line, &visual))
+        .collect::<Vec<_>>();
+    let backdrop = halo_rect(area, frame.area(), 4, 1);
+    if backdrop.width > 0 && backdrop.height > 0 {
+        frame.render_widget(Clear, backdrop);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(visual.backdrop_border))
+                .style(Style::default().bg(visual.backdrop_bg)),
+            backdrop,
+        );
+    }
+    let shadow = shadow_rect(area, frame.area());
+    if shadow.width > 0 && shadow.height > 0 {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(visual.shadow_bg)),
+            shadow,
+        );
+    }
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(modal.title.as_deref().unwrap_or("Modal"))
+        .title_style(
+            Style::default()
+                .fg(visual.title_fg)
+                .bg(visual.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .border_type(BorderType::Rounded)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(visual.border))
+        .style(Style::default().bg(visual.modal_bg));
+    let content_area = block.inner(area);
+    frame.render_widget(block, area);
+    render_modal_focus_row_bgs(
+        frame,
+        content_area,
+        raw_lines,
+        geometry.inner_width,
+        &visual,
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(Style::default().bg(visual.modal_bg))
+            .wrap(Wrap { trim: false }),
+        content_area,
+    );
+    if let Some((label, offset, line_index)) = modal.input_cursor.as_ref() {
+        let rows_before = raw_lines
+            .iter()
+            .take(*line_index)
+            .map(|line| wrapped_line_rows(line, geometry.inner_width))
+            .sum::<usize>() as u16;
+        let max_offset = geometry
+            .inner_width
+            .saturating_sub(label.chars().count() + 2);
+        let cursor_x = area.x.saturating_add(
+            1 + format!("{label}: ").len() as u16 + (*offset).min(max_offset) as u16,
+        );
+        let cursor_y = area.y.saturating_add(1 + rows_before);
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+fn modal_geometry_from_lines(
+    screen: Rect,
+    raw_lines: &[String],
+    title: Option<&str>,
+) -> ModalGeometry {
+    let title = title.unwrap_or("Modal");
+    let max_inner_width = screen.width.saturating_sub(8).max(24) as usize;
+    let inner_width = raw_lines
+        .iter()
+        .map(|line| line.chars().count())
+        .chain(std::iter::once(title.chars().count()))
+        .max()
+        .unwrap_or(24)
+        .saturating_add(2)
+        .clamp(24, max_inner_width);
+    let body_height = raw_lines
+        .iter()
+        .map(|line| wrapped_line_rows(line, inner_width))
+        .sum::<usize>()
+        .max(4) as u16
+        + 2;
+    let area = centered_rect(
+        inner_width as u16 + 2,
+        body_height.min(screen.height.saturating_sub(2)),
+        screen,
+    );
+    let content = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    ModalGeometry {
+        area,
+        content,
+        inner_width,
+    }
+}
+
+fn modal_visual_for(title: Option<&str>, config_mode: bool, theme: &theme::Theme) -> ModalVisual {
+    let palette = &theme.palette;
+    if config_mode {
+        return ModalVisual {
+            accent: palette.config_primary,
+            title_fg: palette.button_selected_fg,
+            border: palette.config_border,
+            label: palette.config_detail,
+            hint: palette.config_warning,
+            text: palette.text_primary,
+            muted: palette.text_secondary,
+            selected_bg: palette.config_selected_bg,
+            command_bg: palette.config_tab_bg,
+            modal_bg: palette.config_bg,
+            backdrop_bg: palette.surface_base,
+            backdrop_border: palette.config_border,
+            shadow_bg: palette.modal_shadow,
+        };
+    }
+    let accent = match title {
+        Some("API Key") => palette.accent_warning,
+        Some("Model") | Some("FIM Model") | Some("Model ID") => palette.accent_info,
+        _ => palette.accent_success,
+    };
+    ModalVisual {
+        accent,
+        title_fg: palette.button_selected_fg,
+        border: accent,
+        label: accent,
+        hint: accent,
+        text: palette.text_primary,
+        muted: palette.text_secondary,
+        selected_bg: palette.surface_selection,
+        command_bg: palette.modal_command_bg,
+        modal_bg: palette.modal_bg,
+        backdrop_bg: palette.surface_base,
+        backdrop_border: accent,
+        shadow_bg: palette.modal_shadow,
     }
 }
 
@@ -325,6 +485,7 @@ struct ModalVisual {
     shadow_bg: Color,
 }
 
+#[cfg(test)]
 fn modal_visual(app: &AppState) -> ModalVisual {
     let theme = theme::resolve_for_app(app);
     let palette = &theme.palette;

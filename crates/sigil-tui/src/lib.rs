@@ -33,6 +33,8 @@ pub mod runner;
 pub(crate) mod sessions;
 pub(crate) mod setup;
 pub(crate) mod slash;
+pub(crate) mod surface;
+pub(crate) mod surface_adapter;
 pub(crate) mod timeline;
 pub mod ui;
 pub(crate) mod view_model;

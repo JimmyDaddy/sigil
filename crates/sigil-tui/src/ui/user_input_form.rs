@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 
-use crate::app::{
+use crate::surface::{
     PendingUserInputForm, UserInputDraftValue, UserInputFormAction, UserInputFormSource,
 };
 
