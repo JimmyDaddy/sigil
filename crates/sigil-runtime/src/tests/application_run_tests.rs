@@ -2632,6 +2632,54 @@ fn transcript_page_truncates_utf8_content_without_breaking_character_boundaries(
 }
 
 #[test]
+#[ignore = "opt-in R70.4 cold-cache qualification workload"]
+fn cold_cache_transcript_page_100k_keeps_the_resident_page_bounded() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/cold-cache-100k.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    for index in 0..100_000 {
+        store.append(&SessionLogEntry::User(ModelMessage::user(format!(
+            "cold-cache-message-{index}"
+        ))))?;
+    }
+
+    let started = std::time::Instant::now();
+    let page = application_session_transcript_page(
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        None,
+        32,
+    )?;
+    let elapsed_ms = started.elapsed().as_millis();
+    assert_eq!(page.total_messages, 100_000);
+    assert_eq!(page.messages.len(), 32);
+    assert_eq!(
+        page.messages.first().map(|message| message.ordinal),
+        Some(99_969)
+    );
+    assert_eq!(
+        page.messages.last().map(|message| message.ordinal),
+        Some(100_000)
+    );
+    assert_eq!(page.next_before, Some(99_969));
+    assert!(page.messages.iter().all(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.len() < 128)
+    }));
+    eprintln!(
+        "r70 cold-cache transcript 100k: page={} resident_messages={} elapsed_ms={elapsed_ms}",
+        page.total_messages,
+        page.messages.len()
+    );
+    Ok(())
+}
+
+#[test]
 fn preparation_cancellation_is_durable_idempotent_and_secret_safe() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");

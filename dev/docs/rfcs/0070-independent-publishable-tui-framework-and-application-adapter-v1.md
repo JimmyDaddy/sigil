@@ -2967,7 +2967,7 @@ R70.x
   （`rfc-0070(R70.4): cut over HTTP reservations to application authority`），以及 `ffc3df4e`
   （`rfc-0070(R70.4): stream bounded transcript pages`），以及 `f44d8c10`
   （`rfc-0070(R70.4): journal application command reservations`），以及本轮新增的 ApplicationClient
-  resumable reducer/ACK 与 cross-surface contract tests。
+  resumable reducer/ACK 与 cross-surface contract tests；当前切片补充 cold-cache 100k qualification。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -3003,6 +3003,11 @@ R70.x
   排序；缺序、过旧或超出 feed bound 返回 reset/gap，不能拼接不连续状态。transcript page 通过 kernel
   `SessionStreamRecordReader` 逐行验证 V2 envelope/session identity，并只保留有界消息、工具名称和 UTF-8 安全文本；
   不再把整个 durable session 读入 runtime 内存。
+- cold-cache qualification：新增 opt-in 的 cold_cache_transcript_page_100k_keeps_the_resident_page_bounded
+  fixture/script，实际写入并逐行回放 100,000 条 durable user message，只返回 32 条 bounded page，断言首尾
+  ordinal、stable before cursor、完整计数与 bounded content；本地结果为 resident_messages=32、
+  elapsed_ms=10352，fixture 全部位于测试 TempDir；cold-cache 100k gate 1 passed（100,000 records / 32 resident
+  messages）。
 - validation：`cargo fmt --all --check`、`cargo check -p sigil-application -p sigil-runtime`、
   `cargo check -p sigil-tui --tests`、application/runtime strict clippy、application tests `3 passed`、runtime
   projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
