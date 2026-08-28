@@ -810,6 +810,11 @@ fn http_queue_request_action(
                 ApplicationQueueItemKind::AgentMessage => {
                     crate::HttpConversationQueueItemKind::AgentMessage
                 }
+                ApplicationQueueItemKind::TaskGuidance => {
+                    return Err(ApplicationError::InvalidRequest(
+                        "HTTP queue does not support task-guidance targets".to_owned(),
+                    ));
+                }
                 ApplicationQueueItemKind::Unknown => crate::HttpConversationQueueItemKind::Unknown,
             },
             reasoning_effort: reasoning_effort.map(|effort| match effort {
@@ -845,6 +850,11 @@ fn http_queue_request_action(
             entry_id: safe(entry_id),
             after_entry_id: after_entry_id.as_ref().map(safe),
         },
+        ApplicationQueueAction::Move { .. } => {
+            return Err(ApplicationError::InvalidRequest(
+                "HTTP queue requires an explicit reorder anchor".to_owned(),
+            ));
+        }
         ApplicationQueueAction::Pause => crate::HttpConversationQueueCommandAction::Pause,
         ApplicationQueueAction::Resume => crate::HttpConversationQueueCommandAction::Resume,
         ApplicationQueueAction::InterruptAndRunNext {

@@ -6,7 +6,8 @@ use futures::future::BoxFuture;
 use sigil_application::{
     APPLICATION_CONTRACT_SCHEMA_VERSION, AgentSurfaceProjection, ApplicationError,
     ApplicationEvent, ApplicationEventEnvelope, ApplicationFrontier, ApplicationInstanceId,
-    ApplicationProjection, ApplicationScope, AttentionSurfaceProjection,
+    ApplicationProjection, ApplicationQueueItemKind, ApplicationQueueItemProjection,
+    ApplicationQueueSurfaceProjection, ApplicationScope, AttentionSurfaceProjection,
     CapabilitySurfaceProjection, ConfigurationSurfaceProjection, ConversationSurfaceProjection,
     OpenProjectionRequest, PageDirection, PlanTaskSurfaceProjection, ProjectionFeedItem,
     ProjectionPage, ProjectionPageRequest, ProjectionSnapshot, ProjectionSnapshotEnvelope,
@@ -14,7 +15,8 @@ use sigil_application::{
     SessionScopeId, SessionSurfaceProjection, StablePageCursor, UserInputSurfaceProjection,
 };
 use sigil_kernel::{
-    JsonlSessionStore, PublicEventOutboxEntryV1, PublicEventOutboxProjectionV1, PublicRunEventKind,
+    ConversationQueueDurableProjection, JsonlSessionStore, PublicEventOutboxEntryV1,
+    PublicEventOutboxProjectionV1, PublicRunEventKind,
 };
 
 use crate::application_run::{
@@ -188,6 +190,33 @@ impl RuntimeSessionProjectionBinding {
             .last()
             .and_then(|message| message.content.as_deref())
             .unwrap_or("No messages yet");
+        let queue = ConversationQueueDurableProjection::from_records(&records).map_err(|_| {
+            ApplicationError::CorruptProjection("invalid conversation queue projection".to_owned())
+        })?;
+        let queue_revision = queue.current_revision();
+        let queue_next_dispatchable = queue.queue.next_dispatchable.clone();
+        let queue_paused = queue.queue.paused;
+        let queue_items = queue.queue.items;
+        let queue = ApplicationQueueSurfaceProjection {
+            generation: sigil_application::queue_generation(
+                queue_revision.stream_sequence,
+                &queue_revision.event_id,
+            ),
+            paused: queue_paused,
+            items: queue_items
+                .into_iter()
+                .map(|item| {
+                    Ok(ApplicationQueueItemProjection {
+                        entry_id: safe_text(item.queued.queue_id.as_str())?,
+                        kind: application_queue_item_kind(item.queued.kind),
+                        status: safe_text(application_queue_item_status(item.status))?,
+                        dispatchable: queue_next_dispatchable
+                            .as_ref()
+                            .is_some_and(|queue_id| queue_id == &item.queued.queue_id),
+                    })
+                })
+                .collect::<Result<Vec<_>, ApplicationError>>()?,
+        };
         let projection = ApplicationProjection {
             schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
             scope: self.scope.clone(),
@@ -245,6 +274,7 @@ impl RuntimeSessionProjectionBinding {
             attention: AttentionSurfaceProjection {
                 last_notice: event_state.last_notice,
             },
+            queue,
         };
         let envelope = ProjectionSnapshotEnvelope {
             schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
@@ -670,6 +700,31 @@ fn parse_before_cursor(cursor: &StablePageCursor) -> Result<u64, ApplicationErro
 
 fn safe_text(value: &str) -> Result<SafeText, ApplicationError> {
     SafeText::new(value.to_owned())
+}
+
+fn application_queue_item_kind(
+    kind: sigil_kernel::ConversationInputKind,
+) -> ApplicationQueueItemKind {
+    match kind {
+        sigil_kernel::ConversationInputKind::Chat => ApplicationQueueItemKind::Chat,
+        sigil_kernel::ConversationInputKind::PlanPrompt => ApplicationQueueItemKind::PlanPrompt,
+        sigil_kernel::ConversationInputKind::AgentMention => ApplicationQueueItemKind::AgentMention,
+        sigil_kernel::ConversationInputKind::AgentMessage => ApplicationQueueItemKind::AgentMessage,
+        sigil_kernel::ConversationInputKind::TaskGuidance => ApplicationQueueItemKind::TaskGuidance,
+        sigil_kernel::ConversationInputKind::Unknown => ApplicationQueueItemKind::Unknown,
+    }
+}
+
+fn application_queue_item_status(status: sigil_kernel::ConversationInputStatus) -> &'static str {
+    match status {
+        sigil_kernel::ConversationInputStatus::Queued => "queued",
+        sigil_kernel::ConversationInputStatus::Dispatching => "dispatching",
+        sigil_kernel::ConversationInputStatus::Delivered => "delivered",
+        sigil_kernel::ConversationInputStatus::Rejected => "rejected",
+        sigil_kernel::ConversationInputStatus::Cancelled => "cancelled",
+        sigil_kernel::ConversationInputStatus::Stale => "stale",
+        sigil_kernel::ConversationInputStatus::Unknown => "unknown",
+    }
 }
 
 #[cfg(test)]

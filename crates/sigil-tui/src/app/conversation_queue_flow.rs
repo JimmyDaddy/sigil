@@ -52,7 +52,7 @@ impl AppState {
         projection
     }
 
-    pub(super) fn active_conversation_queue_target(&self) -> Option<ConversationInputTarget> {
+    pub(crate) fn active_conversation_queue_target(&self) -> Option<ConversationInputTarget> {
         match &self.agent_panel.active_view {
             AgentView::Main => self
                 .runtime

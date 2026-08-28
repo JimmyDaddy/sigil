@@ -3938,15 +3938,11 @@ fn stable_http_identity_seed(parts: &[&str]) -> String {
 }
 
 fn http_queue_generation(revision: ConversationQueueRevision) -> HttpConversationQueueGeneration {
-    let mut hasher = Sha256::new();
-    for part in [
-        revision.stream_sequence.to_be_bytes().as_slice(),
-        revision.event_id.as_bytes(),
-    ] {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    HttpConversationQueueGeneration(format!("queue-v1:{:x}", hasher.finalize()))
+    HttpConversationQueueGeneration(
+        sigil_application::queue_generation(revision.stream_sequence, &revision.event_id)
+            .as_str()
+            .to_owned(),
+    )
 }
 
 fn http_queue_prompt_preview(prompt: &str) -> (String, bool) {

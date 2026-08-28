@@ -234,7 +234,14 @@ pub enum ApplicationQueueItemKind {
     PlanPrompt,
     AgentMention,
     AgentMessage,
+    TaskGuidance,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationQueueMoveDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,6 +265,10 @@ pub enum ApplicationQueueAction {
         entry_id: SafeText,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_entry_id: Option<SafeText>,
+    },
+    Move {
+        entry_id: SafeText,
+        direction: ApplicationQueueMoveDirection,
     },
     Pause,
     Resume,
@@ -757,6 +768,21 @@ pub struct AttentionSurfaceProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationQueueItemProjection {
+    pub entry_id: SafeText,
+    pub kind: ApplicationQueueItemKind,
+    pub status: SafeText,
+    pub dispatchable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationQueueSurfaceProjection {
+    pub generation: SafeText,
+    pub paused: bool,
+    pub items: Vec<ApplicationQueueItemProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationProjection {
     pub schema_version: u16,
     pub scope: ApplicationScope,
@@ -775,6 +801,7 @@ pub struct ApplicationProjection {
     pub capabilities: CapabilitySurfaceProjection,
     pub configuration: ConfigurationSurfaceProjection,
     pub attention: AttentionSurfaceProjection,
+    pub queue: ApplicationQueueSurfaceProjection,
 }
 
 impl ApplicationProjection {
@@ -1780,6 +1807,18 @@ pub fn event_payload_digest(event: &ApplicationEvent) -> Result<String, Applicat
     digest_event(event)
 }
 
+/// Returns the stable opaque generation token for the durable conversation queue revision.
+pub fn queue_generation(stream_sequence: u64, event_id: &str) -> SafeText {
+    let sequence = stream_sequence.to_be_bytes();
+    let mut input = Vec::with_capacity(16 + event_id.len() + 8);
+    input.extend_from_slice(&(sequence.len() as u64).to_be_bytes());
+    input.extend_from_slice(&sequence);
+    input.extend_from_slice(&(event_id.len() as u64).to_be_bytes());
+    input.extend_from_slice(event_id.as_bytes());
+    SafeText::new(format!("queue-v1:{}", hex_digest(&input)))
+        .expect("queue generation digest is bounded and safe")
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1865,6 +1904,14 @@ mod tests {
                 dirty: false,
             },
             attention: AttentionSurfaceProjection { last_notice: None },
+            queue: ApplicationQueueSurfaceProjection {
+                generation: queue_generation(
+                    0,
+                    sigil_kernel::conversation_queue::CONVERSATION_QUEUE_INITIAL_REVISION_EVENT_ID,
+                ),
+                paused: false,
+                items: Vec::new(),
+            },
         };
         ProjectionSnapshotEnvelope {
             schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,

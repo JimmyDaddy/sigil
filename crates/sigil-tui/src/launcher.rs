@@ -1379,7 +1379,7 @@ where
         AppAction::ApplyUpdate { channel } => {
             app.start_update_apply(channel);
         }
-        action => match try_execute_application_action(worker, &action) {
+        action => match try_execute_application_action(app, worker, &action) {
             Ok(Some(receipt)) => report_application_receipt(app, &receipt)?,
             Ok(None) => {
                 let command = app.into_worker_command(action);
@@ -1398,6 +1398,7 @@ where
 }
 
 fn try_execute_application_action(
+    app: &AppState,
     worker: &Option<WorkerRuntime>,
     action: &AppAction,
 ) -> Result<Option<sigil_application::ApplicationCommandReceipt>> {
@@ -1405,14 +1406,18 @@ fn try_execute_application_action(
     {
         worker
             .as_ref()
-            .map(|runtime| runtime.application.try_execute_action(action))
+            .map(|runtime| {
+                runtime
+                    .application
+                    .try_execute_action(action, app.active_conversation_queue_target().as_ref())
+            })
             .transpose()?
             .flatten()
             .map_or(Ok(None), |receipt| Ok(Some(receipt)))
     }
     #[cfg(test)]
     {
-        let _ = (worker, action);
+        let _ = (app, worker, action);
         Ok(None)
     }
 }
