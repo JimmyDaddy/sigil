@@ -2093,7 +2093,10 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        num::NonZeroUsize,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     fn scope() -> ApplicationScope {
         ApplicationScope {
@@ -2467,11 +2470,11 @@ mod tests {
     }
 
     #[test]
-    fn four_surface_clients_share_the_same_domain_receipt() {
+    fn five_surface_clients_share_frontier_page_and_domain_receipt() {
         let application = FakeApplication::new(snapshot()).expect("valid snapshot");
         let expected_frontier = snapshot().cut;
         let command_id = ApplicationCommandId::new("shared-command").expect("valid id");
-        let clients = ["tui", "desktop", "http", "cli"]
+        let clients = ["tui-keyboard", "tui-mouse", "desktop", "http", "cli"]
             .into_iter()
             .map(|surface| {
                 ApplicationClient::new(
@@ -2487,6 +2490,29 @@ mod tests {
             .collect::<Vec<_>>();
         for client in &clients {
             futures::executor::block_on(client.refresh()).expect("refresh");
+        }
+
+        for (index, client) in clients.iter().enumerate() {
+            let page = futures::executor::block_on(client.page(
+                PageRequestId::new(format!("page-{index}")).expect("valid page request id"),
+                1,
+                PageQueryFingerprint::new("conversation").expect("valid query"),
+                PageAnchor {
+                    item_id: None,
+                    intra_item_row: 0,
+                    cursor: None,
+                },
+                PageDirection::Older,
+                NonZeroUsize::new(8).expect("non-zero page size"),
+                80,
+            ))
+            .expect("page should use the refreshed frontier");
+            assert_eq!(page.scope, expected_frontier.scope);
+            assert_eq!(page.at_frontier, expected_frontier);
+            assert_eq!(
+                futures::executor::block_on(client.cancel_page(page.request_id.clone())),
+                PageCancellationReceipt::TooLate
+            );
         }
 
         let command = ApplicationCommand::Run(RunCommand::Cancel {
