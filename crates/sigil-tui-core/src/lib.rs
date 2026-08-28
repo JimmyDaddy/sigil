@@ -57,6 +57,139 @@ impl Rect {
     }
 }
 
+pub const MAX_SURFACE_NODES: usize = 4_096;
+pub const MAX_SURFACE_TEXT_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SurfaceNodeKind {
+    Text(String),
+    Action { label: String, binding: NodeKey },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurfaceNode {
+    pub id: NodeId,
+    pub key: NodeKey,
+    pub bounds: Rect,
+    pub kind: SurfaceNodeKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Surface {
+    viewport: Rect,
+    generation: u64,
+    nodes: Vec<SurfaceNode>,
+}
+
+impl Surface {
+    pub fn new(viewport: Rect, generation: u64) -> Result<Self, CoreError> {
+        if generation == 0 {
+            return Err(CoreError::InvalidValue(
+                "surface generation must be non-zero",
+            ));
+        }
+        Ok(Self {
+            viewport,
+            generation,
+            nodes: Vec::new(),
+        })
+    }
+
+    pub fn viewport(&self) -> Rect {
+        self.viewport
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn nodes(&self) -> &[SurfaceNode] {
+        &self.nodes
+    }
+
+    pub fn push_text(
+        &mut self,
+        key: NodeKey,
+        bounds: Rect,
+        value: impl Into<String>,
+    ) -> Result<NodeId, CoreError> {
+        let value = bounded_text(value.into())?;
+        self.push_node(key, bounds, SurfaceNodeKind::Text(value))
+    }
+
+    pub fn push_action(
+        &mut self,
+        key: NodeKey,
+        bounds: Rect,
+        label: impl Into<String>,
+        binding: NodeKey,
+    ) -> Result<NodeId, CoreError> {
+        let label = bounded_text(label.into())?;
+        self.push_node(key, bounds, SurfaceNodeKind::Action { label, binding })
+    }
+
+    pub fn hit_test(&self, x: u16, y: u16) -> Option<&SurfaceNode> {
+        self.nodes
+            .iter()
+            .rev()
+            .find(|node| node.bounds.contains(x, y))
+    }
+
+    pub fn committed_presentation(
+        &self,
+        terminal_epoch: u64,
+    ) -> Result<CommittedPresentation, CoreError> {
+        let hits = self
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                SurfaceNodeKind::Action { binding, .. } => {
+                    Some(HitTarget::new(node.id, node.bounds, binding.as_str()))
+                }
+                SurfaceNodeKind::Text(_) => None,
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        CommittedPresentation::new(
+            terminal_epoch,
+            self.viewport,
+            self.generation,
+            format!("surface:{}:{}", self.generation, self.nodes.len()),
+            hits,
+        )
+    }
+
+    fn push_node(
+        &mut self,
+        key: NodeKey,
+        bounds: Rect,
+        kind: SurfaceNodeKind,
+    ) -> Result<NodeId, CoreError> {
+        if self.nodes.len() >= MAX_SURFACE_NODES {
+            return Err(CoreError::InvalidValue("surface node budget exceeded"));
+        }
+        if self.nodes.iter().any(|node| node.key == key) {
+            return Err(CoreError::InvalidValue("surface node key is duplicated"));
+        }
+        let slot = u32::try_from(self.nodes.len())
+            .map_err(|_| CoreError::InvalidValue("surface node slot overflow"))?;
+        let id = NodeId::new(self.generation, slot);
+        self.nodes.push(SurfaceNode {
+            id,
+            key,
+            bounds,
+            kind,
+        });
+        Ok(id)
+    }
+}
+
+fn bounded_text(value: String) -> Result<String, CoreError> {
+    if value.len() > MAX_SURFACE_TEXT_BYTES {
+        return Err(CoreError::InvalidValue("surface text budget exceeded"));
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Damage(u8);
 
