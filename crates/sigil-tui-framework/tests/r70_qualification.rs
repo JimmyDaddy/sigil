@@ -1,9 +1,10 @@
 use std::time::Instant;
 
 use sigil_tui::{
-    App, BidiText, CommittedPresentation, Damage, HeightIndex, HitTarget, InputEvent,
-    MAX_HIT_GRID_CELLS, NodeId, NodeKey, Rect, SemanticTheme, Surface, ThemeColor, ThemeRole,
-    UpdateOutcome, VirtualSequence,
+    App, BidiText, CacheHitMetrics, CommittedPresentation, Damage, DamageSummary, FrameMetrics,
+    FrameMetricsObserver, HeightIndex, HitTarget, InputEvent, MAX_HIT_GRID_CELLS, NodeId, NodeKey,
+    PhaseDurations, Rect, SemanticTheme, Surface, ThemeColor, ThemeRole, UpdateOutcome,
+    VirtualSequence,
 };
 
 struct QualificationApp;
@@ -115,4 +116,49 @@ fn resize_theme_and_unicode_inputs_preserve_framework_contract() {
     for (visual, logical) in bidi.map().visual_to_logical().iter().copied().enumerate() {
         assert_eq!(bidi.map().visual_index_for_logical(logical), Some(visual));
     }
+}
+
+#[test]
+fn frame_metrics_contract_is_host_observable_without_a_telemetry_dependency() {
+    struct Observer(Vec<FrameMetrics>);
+
+    impl FrameMetricsObserver for Observer {
+        fn observe(&mut self, metrics: FrameMetrics) {
+            self.0.push(metrics);
+        }
+    }
+
+    let damage = Damage::PAINT.union(Damage::INTERACTION);
+    let mut metrics = FrameMetrics::new(11, damage);
+    metrics.retained_nodes = 100_000;
+    metrics.materialized_nodes = 64;
+    metrics.measured_nodes = 16;
+    metrics.painted_nodes = 16;
+    metrics.hit_cells_written = 4_800;
+    metrics.changed_cells = 320;
+    metrics.cache_hits = CacheHitMetrics {
+        hits: 90,
+        misses: 10,
+    };
+    metrics.phase_durations = PhaseDurations {
+        application_projection_ns: 1,
+        reconcile_ns: 2,
+        measure_ns: 3,
+        layout_ns: 4,
+        virtual_range_ns: 5,
+        paint_ns: 6,
+        hit_map_ns: 7,
+        present_ns: 8,
+        input_dispatch_ns: 9,
+        present_ack_ns: 10,
+    };
+
+    let mut observer = Observer(Vec::new());
+    observer.observe(metrics);
+    assert_eq!(observer.0.len(), 1);
+    assert_eq!(observer.0[0].generation, 11);
+    assert_eq!(observer.0[0].damage, DamageSummary::from_damage(damage));
+    assert_eq!(observer.0[0].materialized_nodes, 64);
+    assert_eq!(observer.0[0].cache_hits.hits, 90);
+    assert_eq!(observer.0[0].phase_durations.present_ack_ns, 10);
 }

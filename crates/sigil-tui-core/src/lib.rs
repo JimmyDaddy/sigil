@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod metrics;
 pub mod text;
 pub mod theme;
 pub mod widgets;
@@ -433,6 +434,11 @@ impl Damage {
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+
+    /// Returns the stable bit representation used by renderer-neutral metrics.
+    pub const fn bits(self) -> u8 {
+        self.0
     }
 
     pub const fn is_empty(self) -> bool {

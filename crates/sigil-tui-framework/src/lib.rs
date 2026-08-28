@@ -8,6 +8,9 @@ pub use runtime::{
     UpdateOutcome, Viewport,
 };
 pub use sigil_tui_core as core;
+pub use sigil_tui_core::metrics::{
+    CacheHitMetrics, DamageSummary, FrameMetrics, FrameMetricsObserver, PhaseDurations,
+};
 pub use sigil_tui_core::text::{BidiLineMap, BidiText};
 pub use sigil_tui_core::theme::{SemanticTheme, ThemeColor, ThemeRole};
 pub use sigil_tui_core::widgets::{WidgetKind, WidgetSpec, WidgetTree};
@@ -23,7 +26,8 @@ pub use text::Text;
 
 pub mod prelude {
     pub use crate::{
-        App, CommittedPresentation, Damage, InputEvent, NodeId, NodeKey, PreparedRender,
+        App, CacheHitMetrics, CommittedPresentation, Damage, DamageSummary, FrameMetrics,
+        FrameMetricsObserver, InputEvent, NodeId, NodeKey, PhaseDurations, PreparedRender,
         PresentationSessionState, Rect, Renderer, SemanticTheme, Surface, SurfaceUpdate, Text,
         ThemeColor, ThemeRole, UiRuntimeDriver, UpdateOutcome, Viewport, WidgetKind, WidgetSpec,
         WidgetTree,

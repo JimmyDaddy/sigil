@@ -3326,3 +3326,16 @@ UAX #9 paragraph reorder，并同时提供 visual→logical 与 logical→visual
 core bidi bijection test、public release-profile qualification（3/3）、framework check、fmt 与 diff check 通过。
 该 slice 补齐 public Unicode/bidi contract，但不把仅有 character map 误称为完整 grapheme-width/selection
 资格；这些仍由 host interaction matrix 与最终 release qualification 继续验证。
+
+### R70.3 public frame metrics follow-up（2026-08-28）
+
+public `sigil-tui-core` 新增 renderer-neutral `FrameMetrics`、`DamageSummary`、`CacheHitMetrics`、
+`PhaseDurations` 与 `FrameMetricsObserver`，并由 `sigil-tui` facade 重导出。metrics 仅描述 generation、damage、
+retained/materialized/measured/painted nodes、hit cells、changed cells、cache counters 与各阶段纳秒耗时，不绑定
+任何 telemetry backend；framework consumer 可以直接保存或转发 observation。release-profile qualification 新增
+host-observable observer contract。
+
+同一 follow-up 修复 `BidiText` 对 UAX #9 Rule X9 formatting controls 的处理：底层 bidi reorder 省略的零宽控制字符
+会被补回完整 logical/visual mapping，emoji ZWJ 序列不再触发越界或丢失控制字符。core、release-profile
+qualification、fmt 与 diff check 通过。该 slice 仍不把代码点映射等同于完整 grapheme-width/selection 资格，
+也不替代 R70.8 的真实发布、release-cycle 与用户验证。

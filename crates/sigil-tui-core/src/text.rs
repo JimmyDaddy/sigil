@@ -25,11 +25,16 @@ impl BidiText {
             let mut context = BidiContext::new();
             context.resolve_paragraph(&chars, ParagraphDirectionHint::AutoLeftToRight);
             let (_, visual_order) = context.reorder_line(0..chars.len());
-            visual_order
+            complete_visual_order(chars.len(), visual_order)?
         };
-        let mut logical_to_visual = vec![0; visual_order.len()];
+        let mut logical_to_visual = vec![0; chars.len()];
         for (visual, logical) in visual_order.iter().copied().enumerate() {
-            logical_to_visual[logical] = visual;
+            let Some(mapped) = logical_to_visual.get_mut(logical) else {
+                return Err(CoreError::InvalidValue(
+                    "bidi mapping index is out of bounds",
+                ));
+            };
+            *mapped = visual;
         }
         let visual = visual_order
             .iter()
@@ -56,6 +61,38 @@ impl BidiText {
     pub fn map(&self) -> &BidiLineMap {
         &self.map
     }
+}
+
+fn complete_visual_order(
+    character_count: usize,
+    mut visual_order: Vec<usize>,
+) -> Result<Vec<usize>, CoreError> {
+    let mut seen = vec![false; character_count];
+    for &logical in &visual_order {
+        let Some(mapped) = seen.get_mut(logical) else {
+            return Err(CoreError::InvalidValue(
+                "bidi mapping index is out of bounds",
+            ));
+        };
+        if *mapped {
+            return Err(CoreError::InvalidValue("bidi mapping index is duplicated"));
+        }
+        *mapped = true;
+    }
+
+    // wezterm-bidi intentionally omits Rule X9 formatting controls from its reordered result.
+    // Keep those zero-width codepoints in the public mapping so a logical string remains a
+    // complete, round-trippable value (notably for emoji ZWJ sequences).
+    for logical in 0..character_count {
+        if !seen[logical] {
+            let insertion = visual_order
+                .iter()
+                .position(|&candidate| candidate > logical)
+                .unwrap_or(visual_order.len());
+            visual_order.insert(insertion, logical);
+        }
+    }
+    Ok(visual_order)
 }
 
 /// The bijection between logical character offsets and visual character offsets.
@@ -98,5 +135,18 @@ mod tests {
         for (visual, logical) in text.map().visual_to_logical().iter().copied().enumerate() {
             assert_eq!(text.map().visual_index_for_logical(logical), Some(visual));
         }
+    }
+
+    #[test]
+    fn bidi_mapping_preserves_format_controls_in_emoji_sequences() {
+        let text = BidiText::new("中文 אבג 👩‍💻").expect("bidi text");
+        assert_eq!(
+            text.map().visual_to_logical().len(),
+            text.logical().chars().count()
+        );
+        for (visual, logical) in text.map().visual_to_logical().iter().copied().enumerate() {
+            assert_eq!(text.map().visual_index_for_logical(logical), Some(visual));
+        }
+        assert!(text.visual().contains('‍'));
     }
 }
