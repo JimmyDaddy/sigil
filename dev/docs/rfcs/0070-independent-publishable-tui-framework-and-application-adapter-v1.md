@@ -3197,3 +3197,12 @@ R70.x
   worker/path mutation；旧 session fixture 仅保留在测试构建。TUI 全量 lib tests `1720 passed / 3 ignored`，
   migration manifest `276/276`、package check、strict library clippy 与 diff check 通过；HTTP/CLI/Desktop
   四表面 conformance 与完整 R70.4 exit gate仍待完成。
+
+- R70.5 framework contract follow-up：`b5304438` 为 public `sigil-tui` facade 增加 application-neutral 的
+  bounded `Surface`/node builder、opaque action hit binding、`App`/`UpdateOutcome` input-update contract 与
+  bounded `Text` 类型；新增不依赖 Sigil domain 的 `todo`、`chat` examples 和 independent consumer contract
+  tests。新增 `check-r70-package-topology.sh` 使用 `cargo metadata --all-features` 检查 core → ratatui → facade
+  的实际 package identity/依赖 allowlist，并扫描 public framework production source 的 domain、filesystem、process
+  与 Tokio 依赖；当前 gate 已通过。该 slice 证明了真实第二消费者与 public surface contract，但现有 Sigil product
+  modules 尚未全部物理迁出 `sigil-tui-app`，故 R70.5 exit gate、R70.4 四表面 conformance 与 R70.6 runner 下沉
+  仍未闭合。
