@@ -32,13 +32,15 @@ def main() -> int:
             "version": "0.1.0",
             "rust-version": "1.85",
             "repository": "https://github.com/JimmyDaddy/sigil",
-            "changelog": "CHANGELOG.md",
         }.items():
             if package.get(key) != expected:
                 errors.append(f"{relative}: {key} must be {expected!r}")
         readme = ROOT / path.parent / str(package.get("readme", ""))
         if not readme.is_file():
             errors.append(f"{relative}: readme is missing: {readme}")
+        changelog = path.parent / "CHANGELOG.md"
+        if not changelog.is_file():
+            errors.append(f"{relative}: changelog is missing: {changelog}")
         documentation = package.get("documentation")
         if documentation != f"https://docs.rs/{expected_name}":
             errors.append(f"{relative}: documentation must point to docs.rs/{expected_name}")

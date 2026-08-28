@@ -8,7 +8,6 @@ description = "Ratatui adapter for bounded terminal UI presentation"
 repository = "https://github.com/JimmyDaddy/sigil"
 documentation = "https://docs.rs/sigil-tui-ratatui"
 readme = "README.md"
-changelog = "CHANGELOG.md"
 keywords = ["terminal", "tui", "ratatui", "ui"]
 categories = ["gui", "command-line-interface"]
 

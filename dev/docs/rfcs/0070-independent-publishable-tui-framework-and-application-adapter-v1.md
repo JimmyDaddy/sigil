@@ -3273,3 +3273,7 @@ R70.x
   `.github/workflows/sigil-tui-preview.yml` 提供 core → Ratatui adapter → facade 的显式发布顺序，默认只做
   qualification，真实 publish 需由 release operator 显式触发。R70.7 已完成；R70.8 仍需 release-cycle/user
   validation 后执行 compatibility deletion。
+
+- R70.7 metadata correction：Cargo 不接受 `package.changelog` 作为稳定 manifest key；三个公开 package 改为
+  使用约定位置的 `CHANGELOG.md`，metadata checker 直接校验文件存在，避免发布 gate 带 warning 或把未生效的
+  字段误当成 Cargo 发布元数据。preview package gate 的 package/unpack/docs/feature/dry-run 语义不变。

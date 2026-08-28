@@ -6,7 +6,6 @@ license.workspace = true
 rust-version = "1.85"
 description = "Application-neutral terminal UI framework facade"
 readme = "README.md"
-changelog = "CHANGELOG.md"
 repository = "https://github.com/JimmyDaddy/sigil"
 documentation = "https://docs.rs/sigil-tui"
 keywords = ["terminal", "tui", "ratatui", "ui"]
