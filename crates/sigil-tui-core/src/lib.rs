@@ -63,6 +63,12 @@ impl Rect {
 pub const MAX_SURFACE_NODES: usize = 4_096;
 pub const MAX_SURFACE_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_INPUT_TEXT_BYTES: usize = 64 * 1024;
+/// Maximum cells reserved by a committed presentation's dense hit grid.
+///
+/// A `u32` target index keeps the grid below 400 KiB while covering the largest reference
+/// qualification viewport (400x120). Oversized viewports fail at commit time rather than
+/// silently falling back to a linear interaction path.
+pub const MAX_HIT_GRID_CELLS: usize = 48_000;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -377,18 +383,24 @@ impl HeightIndex {
         if row >= self.total_height() || self.heights.is_empty() {
             return None;
         }
-        let mut low = 0usize;
-        let mut high = self.len();
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if self.prefix_height(middle.saturating_add(1)) <= row {
-                low = middle.saturating_add(1);
-            } else {
-                high = middle;
-            }
+        // Fenwick-tree binary lifting finds the first prefix whose sum exceeds `row` in O(log N).
+        // Calling `prefix_height` from a binary search would make this hot path O(log² N).
+        let mut bit = 1usize;
+        while bit.saturating_mul(2) <= self.len() {
+            bit = bit.saturating_mul(2);
         }
-        let item = low.min(self.len().saturating_sub(1));
-        Some((item, (row - self.prefix_height(item)) as u32))
+        let mut prefix_items = 0usize;
+        let mut prefix_height = 0u64;
+        while bit > 0 {
+            let candidate = prefix_items.saturating_add(bit);
+            if candidate <= self.len() && prefix_height.saturating_add(self.tree[candidate]) <= row
+            {
+                prefix_items = candidate;
+                prefix_height = prefix_height.saturating_add(self.tree[candidate]);
+            }
+            bit >>= 1;
+        }
+        Some((prefix_items, (row - prefix_height) as u32))
     }
 
     fn add_tree(&mut self, item: usize, value: u64) {
@@ -482,6 +494,7 @@ pub struct CommittedPresentation {
     pub generation: u64,
     pub cell_digest: String,
     hits: Vec<HitTarget>,
+    hit_grid: Vec<u32>,
 }
 
 impl CommittedPresentation {
@@ -497,20 +510,60 @@ impl CommittedPresentation {
                 "presentation generations are non-zero",
             ));
         }
+        let cell_count = usize::from(viewport.width)
+            .checked_mul(usize::from(viewport.height))
+            .ok_or(CoreError::InvalidValue(
+                "presentation viewport is too large",
+            ))?;
+        if cell_count > MAX_HIT_GRID_CELLS {
+            return Err(CoreError::InvalidValue(
+                "presentation viewport exceeds hit grid bound",
+            ));
+        }
+        let mut hit_grid = vec![u32::MAX; cell_count];
+        for (target_index, target) in hits.iter().enumerate() {
+            let target_index = u32::try_from(target_index)
+                .map_err(|_| CoreError::InvalidValue("hit target index overflow"))?;
+            let viewport_x_end = u32::from(viewport.x) + u32::from(viewport.width);
+            let viewport_y_end = u32::from(viewport.y) + u32::from(viewport.height);
+            let target_x_end = u32::from(target.bounds.x) + u32::from(target.bounds.width);
+            let target_y_end = u32::from(target.bounds.y) + u32::from(target.bounds.height);
+            let x_start = u32::from(target.bounds.x.max(viewport.x));
+            let y_start = u32::from(target.bounds.y.max(viewport.y));
+            let x_end = target_x_end.min(viewport_x_end);
+            let y_end = target_y_end.min(viewport_y_end);
+            if x_start >= x_end || y_start >= y_end {
+                continue;
+            }
+            for y in y_start..y_end {
+                for x in x_start..x_end {
+                    let offset = ((y - u32::from(viewport.y)) * u32::from(viewport.width)
+                        + (x - u32::from(viewport.x))) as usize;
+                    hit_grid[offset] = target_index;
+                }
+            }
+        }
         Ok(Self {
             terminal_epoch,
             viewport,
             generation,
             cell_digest: cell_digest.into(),
             hits,
+            hit_grid,
         })
     }
 
     pub fn hit_test(&self, x: u16, y: u16) -> Option<&HitTarget> {
-        self.hits
-            .iter()
-            .rev()
-            .find(|target| target.bounds.contains(x, y))
+        if !self.viewport.contains(x, y) {
+            return None;
+        }
+        let offset = (usize::from(y - self.viewport.y) * usize::from(self.viewport.width))
+            + usize::from(x - self.viewport.x);
+        let target_index = *self.hit_grid.get(offset)?;
+        if target_index == u32::MAX {
+            return None;
+        }
+        self.hits.get(target_index as usize)
     }
 
     pub fn hits(&self) -> &[HitTarget] {
@@ -560,8 +613,8 @@ impl std::error::Error for CoreError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        InputEvent, MAX_INPUT_TEXT_BYTES, MAX_SURFACE_NODES, NodeKey, Rect, Surface,
-        VirtualSequence,
+        CommittedPresentation, HeightIndex, HitTarget, InputEvent, MAX_HIT_GRID_CELLS,
+        MAX_INPUT_TEXT_BYTES, MAX_SURFACE_NODES, NodeId, NodeKey, Rect, Surface, VirtualSequence,
     };
 
     #[test]
@@ -615,6 +668,43 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn committed_presentation_uses_the_topmost_target_from_one_dense_grid() {
+        let viewport = Rect::new(10, 4, 20, 4);
+        let lower = HitTarget::new(NodeId::new(1, 1), viewport, "lower").expect("target");
+        let upper =
+            HitTarget::new(NodeId::new(1, 2), Rect::new(12, 5, 4, 2), "upper").expect("target");
+        let presentation = CommittedPresentation::new(1, viewport, 1, "digest", vec![lower, upper])
+            .expect("presentation");
+
+        assert_eq!(
+            presentation.hit_test(10, 4).map(HitTarget::binding),
+            Some("lower")
+        );
+        assert_eq!(
+            presentation.hit_test(13, 5).map(HitTarget::binding),
+            Some("upper")
+        );
+        assert!(presentation.hit_test(9, 4).is_none());
+    }
+
+    #[test]
+    fn committed_presentation_rejects_an_unbounded_dense_grid() {
+        let width = (MAX_HIT_GRID_CELLS as f64).sqrt() as u16 + 1;
+        let viewport = Rect::new(0, 0, width, width);
+        assert!(CommittedPresentation::new(1, viewport, 1, "digest", Vec::new()).is_err());
+    }
+
+    #[test]
+    fn height_index_locates_variable_rows_with_fenwick_binary_lifting() {
+        let mut index = HeightIndex::with_estimate(100_000, 2);
+        assert_eq!(index.locate_row(0), Some((0, 0)));
+        assert_eq!(index.locate_row(199_999), Some((99_999, 1)));
+        assert_eq!(index.set_height(50_000, 7), Some(2));
+        assert_eq!(index.locate_row(100_000), Some((50_000, 0)));
+        assert!(index.locate_row(index.total_height()).is_none());
     }
 }
 

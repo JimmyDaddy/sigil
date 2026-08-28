@@ -10,6 +10,7 @@ FEATURES=(crossterm serde syntax image tracing test-util)
 python3 scripts/check-r70-package-topology.py
 python3 scripts/check-r70-preview-metadata.py
 cargo fmt --all --check
+bash scripts/run-r70-framework-qualification.sh
 
 for package in sigil-tui-core sigil-tui-ratatui sigil-tui; do
   cargo package --locked -p "$package" --allow-dirty --list >/dev/null

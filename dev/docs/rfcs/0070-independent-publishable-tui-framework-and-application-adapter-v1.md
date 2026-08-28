@@ -3303,3 +3303,16 @@ Implemented/Frozen。`scripts/check-r70-release-cycle-validation.py --evidence <
 提交：`rfc-0070(R70.6): route production TUI through the application adapter`。验证包括 host ownership checker、
 host ownership unit、`sigil-tui-app` library tests、`sigil-tui-host` compile、fmt 与 diff check；R70.8 external
 release-cycle/user validation 仍未被本地代码接线冒充。
+
+### R70.2 performance-invariant follow-up（2026-08-28）
+
+本 follow-up 收口了 public interaction hot path 的两个可证明不变量。`CommittedPresentation` 在成功提交时建立
+有界 dense hit grid，dispatch 只按 viewport cell 做 O(1) lookup；超过 400×120 reference capacity 的 viewport
+直接拒绝提交，不再静默退回线性扫描。`HeightIndex::locate_row` 改为 Fenwick binary lifting，避免原先
+“二分 + 每次 prefix scan”形成 O(log²N) 的分页定位路径。
+
+新增 release-profile `r70_qualification` fixture 与 `scripts/run-r70-framework-qualification.sh`，覆盖 100k
+transcript 的 64-item resident window、variable-height lookup、100k same-target mouse flood、resize/theme/
+Unicode input 和 dense hit-grid bound；输出保存在 ignored qualification directory，不进入用户 durable state。
+本 slice 的 framework qualification 为 `3 passed`，并通过 core tests、fmt、diff check。该 slice 证明 framework
+complexity/invariant 条件，不替代 R70.8 的真实发布、release-cycle 与用户验证。
