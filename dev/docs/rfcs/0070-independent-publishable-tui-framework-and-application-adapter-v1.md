@@ -3206,3 +3206,10 @@ R70.x
   与 Tokio 依赖；当前 gate 已通过。该 slice 证明了真实第二消费者与 public surface contract，但现有 Sigil product
   modules 尚未全部物理迁出 `sigil-tui-app`，故 R70.5 exit gate、R70.4 四表面 conformance 与 R70.6 runner 下沉
   仍未闭合。
+
+- R70.5 framework module migration follow-up：`26ca4520` 将 `VirtualSequence`、generation-scoped
+  `SurfaceItemId`、`HeightIndex`、`ViewportAnchor` 与 `ProjectionPageRequest` 从 Sigil product-private surface
+  module 迁入 `sigil-tui-core`；Ratatui-only bounded scratch renderer 迁入 `sigil-tui-ratatui` 并由 facade 暴露。
+  product adapter 现在只为其 `Line<'static>` 提供 framework `VirtualSequence` 类型别名，保留 projection ownership
+  在 adapter。core、ratatui、framework 与 `sigil-tui-app` 回归、strict clippy、package topology gate 均通过。
+  仍未完成全部 public widget/theme/input module 迁移、R70.4 四表面 conformance 或 R70.5 exit gate。
