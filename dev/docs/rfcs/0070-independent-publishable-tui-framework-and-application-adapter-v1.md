@@ -3213,3 +3213,9 @@ R70.x
   product adapter 现在只为其 `Line<'static>` 提供 framework `VirtualSequence` 类型别名，保留 projection ownership
   在 adapter。core、ratatui、framework 与 `sigil-tui-app` 回归、strict clippy、package topology gate 均通过。
   仍未完成全部 public widget/theme/input module 迁移、R70.4 四表面 conformance 或 R70.5 exit gate。
+
+- R70.5 public contract hardening follow-up：`fb13d370` 同步 R70.0 migration manifest 单测到当前冻结的 276 个
+  production variants；`SurfaceNode` 与 `VirtualSequence` 不再暴露可绕过构造/校验的可变字段，改为只读访问器，
+  并为 virtual sequence generation/identity invariant 增加 core regression。TUI live panel 已迁移到只读 accessor。
+  manifest `276/276`、core/ratatui/facade tests、app check 与 diff check 通过；该 slice 仍不关闭 R70.4
+  四表面 conformance、R70.5 完整模块迁移或后续 R70.6-R70.8。
