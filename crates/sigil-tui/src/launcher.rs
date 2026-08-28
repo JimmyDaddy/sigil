@@ -1167,6 +1167,26 @@ where
             app.apply_saved_default_model(*root_config);
         }
         AppAction::StartNewSession { session_log_path } => {
+            match try_execute_application_action(
+                app,
+                worker,
+                &AppAction::StartNewSession {
+                    session_log_path: session_log_path.clone(),
+                },
+            ) {
+                Ok(Some(receipt)) => {
+                    report_application_receipt(app, &receipt)?;
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("application session creation was not admitted: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            }
             if let Some(runtime) = worker.as_ref()
                 && runtime
                     .worker_tx
@@ -1239,6 +1259,26 @@ where
             }
         }
         AppAction::SwitchSession { session_log_path } => {
+            match try_execute_application_action(
+                app,
+                worker,
+                &AppAction::SwitchSession {
+                    session_log_path: session_log_path.clone(),
+                },
+            ) {
+                Ok(Some(receipt)) => {
+                    report_application_receipt(app, &receipt)?;
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("application session switch was not admitted: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            }
             let attachment_recovery_binding = app
                 .pending_session_attachment_recovery_binding_for(&session_log_path)
                 .map(str::to_owned);
@@ -1400,9 +1440,17 @@ fn try_execute_application_action(
         worker
             .as_ref()
             .map(|runtime| {
-                runtime
-                    .application
-                    .try_execute_action(action, app.active_conversation_queue_target().as_ref())
+                let attachment_recovery_binding = match action {
+                    AppAction::SwitchSession { session_log_path } => {
+                        app.pending_session_attachment_recovery_binding_for(session_log_path)
+                    }
+                    _ => None,
+                };
+                runtime.application.try_execute_action(
+                    action,
+                    app.active_conversation_queue_target().as_ref(),
+                    attachment_recovery_binding,
+                )
             })
             .transpose()?
             .flatten()

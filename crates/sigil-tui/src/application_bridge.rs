@@ -4,7 +4,11 @@
 //! receives only an application snapshot and submits grouped, bounded commands; a worker
 //! enqueue is reported as `Uncertain` until the durable application event stream settles it.
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result, anyhow};
 use futures::future::BoxFuture;
@@ -15,8 +19,8 @@ use sigil_application::{
     ApplicationProjection, ApplicationQueueAction, ApplicationQueueItemKind,
     ApplicationQueueMoveDirection, ApplicationQueueTarget, ApplicationReasoningEffort,
     ApplicationRecoveryAction, ApplicationScope, AuthenticatedSubject, ConversationCommand,
-    HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand, UserInputCommand,
-    VerificationCommand,
+    HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand, SessionCommand,
+    SessionItemId, UserInputCommand, VerificationCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -30,6 +34,13 @@ use crate::{
 pub(crate) struct TuiApplicationSession {
     client: ApplicationClient,
     reasoning_effort: ApplicationReasoningEffort,
+    session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
+}
+
+#[derive(Debug, Clone)]
+struct TuiSessionBinding {
+    session_log_path: PathBuf,
+    attachment_recovery_binding: Option<String>,
 }
 
 impl std::fmt::Debug for TuiApplicationSession {
@@ -42,13 +53,14 @@ impl std::fmt::Debug for TuiApplicationSession {
 }
 
 impl TuiApplicationSession {
-    pub(crate) fn new(
+    fn new(
         port: Arc<dyn ApplicationPort>,
         scope: ApplicationScope,
         observer_generation: u64,
         client_epoch: u64,
         connection_instance: HostConnectionInstanceId,
         reasoning_effort: ApplicationReasoningEffort,
+        session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     ) -> Result<Self, ApplicationError> {
         Ok(Self {
             client: ApplicationClient::new(
@@ -59,7 +71,35 @@ impl TuiApplicationSession {
                 connection_instance,
             )?,
             reasoning_effort,
+            session_bindings,
         })
+    }
+
+    fn bind_session_target(
+        &self,
+        session_log_path: &std::path::Path,
+        attachment_recovery_binding: Option<&str>,
+    ) -> Result<SessionItemId, ApplicationError> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"sigil-tui-session-item-binding-v1\0");
+        hasher.update(session_log_path.to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        let digest = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let binding = SessionItemId::new(format!("tui-session-{digest}"))?;
+        self.session_bindings
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .insert(
+                binding.clone(),
+                TuiSessionBinding {
+                    session_log_path: session_log_path.to_owned(),
+                    attachment_recovery_binding: attachment_recovery_binding.map(str::to_owned),
+                },
+            );
+        Ok(binding)
     }
 
     pub(crate) async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
@@ -73,6 +113,7 @@ impl TuiApplicationSession {
         &self,
         action: &AppAction,
         queue_target: Option<&sigil_kernel::ConversationInputTarget>,
+        attachment_recovery_binding: Option<&str>,
     ) -> Result<Option<ApplicationCommandReceipt>, ApplicationError> {
         if !matches!(
             action,
@@ -126,6 +167,8 @@ impl TuiApplicationSession {
                 | AppAction::RerunTaskVerification { .. }
                 | AppAction::ReviewTaskIntegration { .. }
                 | AppAction::AcceptTaskIntegration { .. }
+                | AppAction::StartNewSession { .. }
+                | AppAction::SwitchSession { .. }
         ) {
             return Ok(None);
         }
@@ -466,6 +509,17 @@ impl TuiApplicationSession {
                     request: request.clone(),
                 },
             )),
+            AppAction::StartNewSession { session_log_path } => {
+                Some(ApplicationCommand::Session(SessionCommand::Create {
+                    binding: self.bind_session_target(session_log_path, None)?,
+                }))
+            }
+            AppAction::SwitchSession { session_log_path } => {
+                Some(ApplicationCommand::Session(SessionCommand::Switch {
+                    binding: self
+                        .bind_session_target(session_log_path, attachment_recovery_binding)?,
+                }))
+            }
             AppAction::QueueConversationInput {
                 prompt,
                 kind,
@@ -702,10 +756,12 @@ pub(crate) fn build_for_worker(
     )
     .map_err(|error| anyhow!(error))?;
     let application_reasoning_effort = application_reasoning_effort(&reasoning_effort);
+    let session_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let executor = Arc::new(TuiWorkerCommandExecutor {
         worker_tx,
         reasoning_effort,
         session_id: session_scope_id,
+        session_bindings: Arc::clone(&session_bindings),
     });
     let service = Arc::new(sigil_runtime::RuntimeApplicationService::new(
         Arc::new(projection),
@@ -722,6 +778,7 @@ pub(crate) fn build_for_worker(
         client_epoch,
         connection,
         application_reasoning_effort,
+        session_bindings,
     )
     .map_err(|error| anyhow!(error))
 }
@@ -773,6 +830,7 @@ struct TuiWorkerCommandExecutor {
     worker_tx: WorkerCommandSender,
     reasoning_effort: ReasoningEffort,
     session_id: String,
+    session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecutor {
@@ -971,6 +1029,29 @@ impl TuiWorkerCommandExecutor {
             }
             ApplicationCommand::Agent(AgentCommand::Background) => {
                 WorkerCommand::BackgroundActiveAgent
+            }
+            ApplicationCommand::Session(SessionCommand::Create { binding }) => {
+                let target = self.resolve_session_binding(binding)?;
+                WorkerCommand::StartNewSession {
+                    session_log_path: target.session_log_path,
+                }
+            }
+            ApplicationCommand::Session(SessionCommand::Switch { binding }) => {
+                let target = self.resolve_session_binding(binding)?;
+                WorkerCommand::SwitchSession {
+                    session_log_path: target.session_log_path,
+                    attachment_recovery_binding: target.attachment_recovery_binding,
+                }
+            }
+            ApplicationCommand::Session(SessionCommand::Close { .. }) => {
+                return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(
+                    sigil_application::CommandRejection {
+                        kind: "unsupported_tui_session_command".to_owned(),
+                        reason:
+                            "the TUI adapter does not expose session close through this worker edge"
+                                .to_owned(),
+                    },
+                ));
             }
             ApplicationCommand::Verification(command) => match command {
                 VerificationCommand::CheckChangedFilesDiagnostics => {
@@ -1218,6 +1299,22 @@ impl TuiWorkerCommandExecutor {
                 recovery_binding: "tui-worker-event-reconcile".to_owned(),
             },
         ))
+    }
+
+    fn resolve_session_binding(
+        &self,
+        binding: &SessionItemId,
+    ) -> Result<TuiSessionBinding, ApplicationError> {
+        self.session_bindings
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .get(binding)
+            .cloned()
+            .ok_or_else(|| {
+                ApplicationError::InvalidRequest(
+                    "session binding is not owned by this TUI connection".to_owned(),
+                )
+            })
     }
 }
 

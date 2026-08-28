@@ -612,9 +612,9 @@ pub enum VerificationCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionCommand {
-    Create,
-    Switch { binding: String },
-    Close { binding: String },
+    Create { binding: SessionItemId },
+    Switch { binding: SessionItemId },
+    Close { binding: SessionItemId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
