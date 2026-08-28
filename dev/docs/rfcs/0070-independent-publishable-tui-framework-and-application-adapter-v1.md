@@ -2992,6 +2992,10 @@ R70.x
   `PrepareCompaction` 当前在 application boundary 返回 typed preview-required rejection，因为现有 contract 尚
   不能无损携带 process-local preview/review；它没有被降级为 generic uncertain 或伪造 settled。production
   application-client regression 覆盖该拒绝语义。
+- `rfc-0070(R70.4): route HTTP compaction preparation through application port`（本轮切片）移除 production HTTP
+  bridge 对 `PrepareCompaction` 的 preview-boundary 预拒绝，使该 action 进入既有 typed registry owner；stale
+  recovery binding 仍返回 typed rejection。production application regression 与 HTTP application 测试通过。
+  该切片不宣称完成四表面 conformance、configuration/session lifecycle 或完整 R70.4 exit gate。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
