@@ -2976,7 +2976,9 @@ R70.x
   legacy envelope reservation 仅保留在 `cfg(test)` 合成 driver 兼容路径；`bdcd44a4`
   （`rfc-0070(R70.4): cut over HTTP run starts`）再将 production run-start route 切换到同一
   ApplicationClient 与 durable reservation；`52b7724b`（`rfc-0070(R70.4): cut over HTTP approval decisions`）
-  将 production approval decision route 也切换到同一 application reservation 与 typed guard。
+  将 production approval decision route 也切换到同一 application reservation 与 typed guard；`7be30de7`
+  （`rfc-0070(R70.4): cut over HTTP user-input decisions`）再将 production user-input decision route
+  切换到同一 reservation 与 typed kernel decision。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -3034,6 +3036,10 @@ R70.x
   family pattern 和 reason 由 provider-neutral `ApplicationApprovalResolution` 承载，执行前重新绑定到
   HTTP registry 的 exact approval guard。旧 HTTP command-store approval reservation 仅保留给 `cfg(test)` 合成
   driver，uncertain delivery 通过 `Uncertain`/`ReplayedUncertain` recovery binding 返回。
+- HTTP user-input cutover：`7be30de7` 让 production user-input decision route 通过同一 host-bound
+  ApplicationClient 与 durable reservation；request id、generation、request hash、kernel-owned typed decision
+  和 permission mode 由 application command 显式承载，执行后仅通过不含答案内容的 opaque recovery binding
+  暴露 continuation identity。旧 command-store user-input reservation 仅保留给 `cfg(test)` 合成 driver。
 - snapshot-feed：`OpenProjectionRequest` 可携带 resume frontier；runtime 以 durable session stream sequence 为
   application frontier，在 bounded feed 中逐 record 生成 scope/generation/digest/前后 frontier 一致的
   `ProjectionReplaced` event。outbox projection 保留 durable record order，不再用跨 run 不唯一的 run-local sequence
@@ -3053,12 +3059,12 @@ R70.x
   `sigil-application` client/reducer/ACK/conformance tests `6 passed`、runtime durable ACK tests `4 passed`，
   以及 TUI production dependency check `cargo check -p sigil-tui`；本轮 `sigil-http --lib` 回归为
   `224 passed`，HTTP application client production 定向测试为 `1 passed`，`cargo check --locked -p sigil-http`
-  与 `cargo clippy --locked -p sigil-http --lib -- -D warnings` 通过；本轮 HTTP cancel/application/runtime
+  user-input 定向回归 `4 passed`；与 `cargo clippy --locked -p sigil-http --lib -- -D warnings` 通过；本轮 HTTP cancel/application/runtime
   定向回归与四包 strict clippy 通过，新增 uncertain terminal replay 与 HTTP production run-start 测试通过。
 - remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
   HTTP reservation cutover、HTTP 首个 application bridge 与 resumable snapshot-feed 基础已分别落地，但不关闭
   R70.4。TUI 尚有未迁移旧动作，HTTP 既有 start/approval/user-input/queue/recovery 等 command routes 尚未
-  完全收敛到同一 application service；HTTP 新 bridge 当前已对 start/cancel/approval 提供无损执行映射，其余 typed command
+  完全收敛到同一 application service；HTTP 新 bridge 当前已对 start/cancel/approval/user-input 提供无损执行映射，其余 typed command
   明确拒绝。feed 的跨 surface ACK/restart
   conformance、所有 shared command 的四表面 conformance、cold-cache 100k page e2e 与完整 migration manifest
   gate 仍需继续完成。TUI ACK 已进入 durable managed writer，但 HTTP/Desktop/CLI 还未全部复用该 delivery
