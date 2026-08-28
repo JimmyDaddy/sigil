@@ -12,9 +12,9 @@ use sha2::{Digest, Sha256};
 use sigil_application::{
     ApplicationClient, ApplicationCommand, ApplicationCommandReceipt, ApplicationCommandRequest,
     ApplicationError, ApplicationPort, ApplicationProjection, ApplicationQueueAction,
-    ApplicationQueueItemKind, ApplicationQueueMoveDirection, ApplicationReasoningEffort,
-    ApplicationScope, AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId,
-    McpCommand, RunCommand,
+    ApplicationQueueItemKind, ApplicationQueueMoveDirection, ApplicationQueueTarget,
+    ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject, ConversationCommand,
+    HostConnectionInstanceId, McpCommand, RunCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -85,6 +85,8 @@ impl TuiApplicationSession {
                 | AppAction::CancelQueuedConversationInput { .. }
                 | AppAction::EditQueuedConversationInput { .. }
                 | AppAction::MoveQueuedConversationInput { .. }
+                | AppAction::PromoteQueuedConversationInput { .. }
+                | AppAction::SendQueuedConversationInputNow { .. }
                 | AppAction::SetConversationQueuePaused { .. }
         ) {
             return Ok(None);
@@ -146,24 +148,28 @@ impl TuiApplicationSession {
             AppAction::QueueConversationInput {
                 prompt,
                 kind,
-                target: sigil_kernel::ConversationInputTarget::MainThread,
-            } => Some(ApplicationCommand::Conversation(
-                ConversationCommand::Queue {
-                    expected_generation: latest.queue.generation.clone(),
-                    action: ApplicationQueueAction::Enqueue {
-                        prompt: sigil_application::SafeText::new(prompt.clone())?,
-                        kind: application_queue_item_kind(*kind),
-                        reasoning_effort: Some(self.reasoning_effort),
+                target,
+            } => {
+                let target = require_active_queue_target(queue_target, target)?;
+                Some(ApplicationCommand::Conversation(
+                    ConversationCommand::Queue {
+                        expected_generation: latest.queue.generation.clone(),
+                        action: ApplicationQueueAction::Enqueue {
+                            target: application_queue_target(target)?,
+                            prompt: sigil_application::SafeText::new(prompt.clone())?,
+                            kind: application_queue_item_kind(*kind),
+                            reasoning_effort: Some(self.reasoning_effort),
+                        },
                     },
-                },
-            )),
-            AppAction::CancelQueuedConversationInput { queue_id }
-                if is_main_queue_target(queue_target) =>
-            {
+                ))
+            }
+            AppAction::CancelQueuedConversationInput { queue_id } => {
+                let target = active_application_queue_target(queue_target)?;
                 Some(ApplicationCommand::Conversation(
                     ConversationCommand::Queue {
                         expected_generation: latest.queue.generation.clone(),
                         action: ApplicationQueueAction::Remove {
+                            target,
                             entry_id: sigil_application::SafeText::new(
                                 queue_id.as_str().to_owned(),
                             )?,
@@ -171,13 +177,13 @@ impl TuiApplicationSession {
                     },
                 ))
             }
-            AppAction::EditQueuedConversationInput { queue_id, prompt }
-                if is_main_queue_target(queue_target) =>
-            {
+            AppAction::EditQueuedConversationInput { queue_id, prompt } => {
+                let target = active_application_queue_target(queue_target)?;
                 Some(ApplicationCommand::Conversation(
                     ConversationCommand::Queue {
                         expected_generation: latest.queue.generation.clone(),
                         action: ApplicationQueueAction::Edit {
+                            target,
                             entry_id: sigil_application::SafeText::new(
                                 queue_id.as_str().to_owned(),
                             )?,
@@ -190,36 +196,66 @@ impl TuiApplicationSession {
             AppAction::MoveQueuedConversationInput {
                 queue_id,
                 direction,
-            } if is_main_queue_target(queue_target) => Some(ApplicationCommand::Conversation(
-                ConversationCommand::Queue {
-                    expected_generation: latest.queue.generation.clone(),
-                    action: ApplicationQueueAction::Move {
-                        entry_id: sigil_application::SafeText::new(queue_id.as_str().to_owned())?,
-                        direction: match direction {
-                            crate::runner::QueueMoveDirection::Up => {
-                                ApplicationQueueMoveDirection::Up
-                            }
-                            crate::runner::QueueMoveDirection::Down => {
-                                ApplicationQueueMoveDirection::Down
-                            }
-                        },
-                    },
-                },
-            )),
-            AppAction::SetConversationQueuePaused { paused }
-                if is_main_queue_target(queue_target) =>
-            {
+            } => {
+                let target = active_application_queue_target(queue_target)?;
                 Some(ApplicationCommand::Conversation(
                     ConversationCommand::Queue {
                         expected_generation: latest.queue.generation.clone(),
-                        action: if *paused {
-                            ApplicationQueueAction::Pause
-                        } else {
-                            ApplicationQueueAction::Resume
+                        action: ApplicationQueueAction::Move {
+                            target,
+                            entry_id: sigil_application::SafeText::new(
+                                queue_id.as_str().to_owned(),
+                            )?,
+                            direction: match direction {
+                                crate::runner::QueueMoveDirection::Up => {
+                                    ApplicationQueueMoveDirection::Up
+                                }
+                                crate::runner::QueueMoveDirection::Down => {
+                                    ApplicationQueueMoveDirection::Down
+                                }
+                            },
                         },
                     },
                 ))
             }
+            AppAction::PromoteQueuedConversationInput { queue_id } => {
+                let target = active_application_queue_target(queue_target)?;
+                Some(ApplicationCommand::Conversation(
+                    ConversationCommand::Queue {
+                        expected_generation: latest.queue.generation.clone(),
+                        action: ApplicationQueueAction::Promote {
+                            target,
+                            entry_id: sigil_application::SafeText::new(
+                                queue_id.as_str().to_owned(),
+                            )?,
+                        },
+                    },
+                ))
+            }
+            AppAction::SendQueuedConversationInputNow { queue_id } => {
+                let target = active_application_queue_target(queue_target)?;
+                Some(ApplicationCommand::Conversation(
+                    ConversationCommand::Queue {
+                        expected_generation: latest.queue.generation.clone(),
+                        action: ApplicationQueueAction::SendNow {
+                            target,
+                            entry_id: sigil_application::SafeText::new(
+                                queue_id.as_str().to_owned(),
+                            )?,
+                        },
+                    },
+                ))
+            }
+            AppAction::SetConversationQueuePaused { paused } => Some(
+                ApplicationCommand::Conversation(ConversationCommand::Queue {
+                    expected_generation: latest.queue.generation.clone(),
+                    action: if *paused {
+                        ApplicationQueueAction::Pause
+                    } else {
+                        ApplicationQueueAction::Resume
+                    },
+                }),
+            ),
             _ => None,
         };
         let Some(command) = command else {
@@ -231,8 +267,42 @@ impl TuiApplicationSession {
     }
 }
 
-fn is_main_queue_target(target: Option<&sigil_kernel::ConversationInputTarget>) -> bool {
-    target.is_some_and(|target| matches!(target, sigil_kernel::ConversationInputTarget::MainThread))
+fn require_active_queue_target<'a>(
+    active: Option<&'a sigil_kernel::ConversationInputTarget>,
+    requested: &'a sigil_kernel::ConversationInputTarget,
+) -> Result<&'a sigil_kernel::ConversationInputTarget, ApplicationError> {
+    let active = active.ok_or(ApplicationError::Unavailable)?;
+    if active != requested {
+        return Err(ApplicationError::ScopeMismatch);
+    }
+    Ok(active)
+}
+
+fn active_application_queue_target(
+    target: Option<&sigil_kernel::ConversationInputTarget>,
+) -> Result<ApplicationQueueTarget, ApplicationError> {
+    target
+        .map(application_queue_target)
+        .transpose()?
+        .ok_or(ApplicationError::Unavailable)
+}
+
+fn application_queue_target(
+    target: &sigil_kernel::ConversationInputTarget,
+) -> Result<ApplicationQueueTarget, ApplicationError> {
+    match target {
+        sigil_kernel::ConversationInputTarget::MainThread => Ok(ApplicationQueueTarget::MainThread),
+        sigil_kernel::ConversationInputTarget::AgentThread { thread_id } => {
+            Ok(ApplicationQueueTarget::AgentThread {
+                thread_id: sigil_application::SafeText::new(thread_id.as_str().to_owned())?,
+            })
+        }
+        sigil_kernel::ConversationInputTarget::Task { task_id } => {
+            Ok(ApplicationQueueTarget::Task {
+                task_id: sigil_application::SafeText::new(task_id.as_str().to_owned())?,
+            })
+        }
+    }
 }
 
 fn application_queue_item_kind(
@@ -431,19 +501,21 @@ impl TuiWorkerCommandExecutor {
             ApplicationCommand::Conversation(ConversationCommand::Queue { action, .. }) => {
                 match action {
                     ApplicationQueueAction::Enqueue {
+                        target,
                         prompt,
                         kind,
                         reasoning_effort,
                     } => WorkerCommand::QueueConversationInput {
                         prompt: prompt.as_str().to_owned(),
                         kind: tui_queue_item_kind(*kind),
-                        target: sigil_kernel::ConversationInputTarget::MainThread,
+                        target: tui_queue_target(target)?,
                         reasoning_effort: tui_reasoning_effort(
                             reasoning_effort
                                 .unwrap_or(application_reasoning_effort(&self.reasoning_effort)),
                         ),
                     },
                     ApplicationQueueAction::Edit {
+                        target: _,
                         entry_id,
                         prompt,
                         reasoning_effort,
@@ -460,17 +532,19 @@ impl TuiWorkerCommandExecutor {
                                 .unwrap_or(application_reasoning_effort(&self.reasoning_effort)),
                         ),
                     },
-                    ApplicationQueueAction::Remove { entry_id } => {
-                        WorkerCommand::CancelQueuedConversationInput {
-                            queue_id: sigil_kernel::ConversationInputQueueId::new(
-                                entry_id.as_str().to_owned(),
-                            )
-                            .map_err(|_| {
-                                ApplicationError::InvalidRequest("invalid queue id".to_owned())
-                            })?,
-                        }
-                    }
+                    ApplicationQueueAction::Remove {
+                        target: _,
+                        entry_id,
+                    } => WorkerCommand::CancelQueuedConversationInput {
+                        queue_id: sigil_kernel::ConversationInputQueueId::new(
+                            entry_id.as_str().to_owned(),
+                        )
+                        .map_err(|_| {
+                            ApplicationError::InvalidRequest("invalid queue id".to_owned())
+                        })?,
+                    },
                     ApplicationQueueAction::Move {
+                        target: _,
                         entry_id,
                         direction,
                     } => WorkerCommand::MoveQueuedConversationInput {
@@ -488,6 +562,28 @@ impl TuiWorkerCommandExecutor {
                                 crate::runner::QueueMoveDirection::Down
                             }
                         },
+                    },
+                    ApplicationQueueAction::Promote {
+                        target: _,
+                        entry_id,
+                    } => WorkerCommand::PromoteQueuedConversationInput {
+                        queue_id: sigil_kernel::ConversationInputQueueId::new(
+                            entry_id.as_str().to_owned(),
+                        )
+                        .map_err(|_| {
+                            ApplicationError::InvalidRequest("invalid queue id".to_owned())
+                        })?,
+                    },
+                    ApplicationQueueAction::SendNow {
+                        target: _,
+                        entry_id,
+                    } => WorkerCommand::SendQueuedConversationInputNow {
+                        queue_id: sigil_kernel::ConversationInputQueueId::new(
+                            entry_id.as_str().to_owned(),
+                        )
+                        .map_err(|_| {
+                            ApplicationError::InvalidRequest("invalid queue id".to_owned())
+                        })?,
                     },
                     ApplicationQueueAction::Pause => {
                         WorkerCommand::SetConversationQueuePaused { paused: true }
@@ -552,6 +648,28 @@ fn tui_queue_item_kind(kind: ApplicationQueueItemKind) -> sigil_kernel::Conversa
         ApplicationQueueItemKind::AgentMessage => sigil_kernel::ConversationInputKind::AgentMessage,
         ApplicationQueueItemKind::TaskGuidance => sigil_kernel::ConversationInputKind::TaskGuidance,
         ApplicationQueueItemKind::Unknown => sigil_kernel::ConversationInputKind::Unknown,
+    }
+}
+
+fn tui_queue_target(
+    target: &ApplicationQueueTarget,
+) -> Result<sigil_kernel::ConversationInputTarget, ApplicationError> {
+    match target {
+        ApplicationQueueTarget::MainThread => Ok(sigil_kernel::ConversationInputTarget::MainThread),
+        ApplicationQueueTarget::AgentThread { thread_id } => {
+            Ok(sigil_kernel::ConversationInputTarget::AgentThread {
+                thread_id: sigil_kernel::AgentThreadId::new(thread_id.as_str().to_owned())
+                    .map_err(|_| {
+                        ApplicationError::InvalidRequest("invalid agent thread id".to_owned())
+                    })?,
+            })
+        }
+        ApplicationQueueTarget::Task { task_id } => {
+            Ok(sigil_kernel::ConversationInputTarget::Task {
+                task_id: sigil_kernel::TaskId::new(task_id.as_str().to_owned())
+                    .map_err(|_| ApplicationError::InvalidRequest("invalid task id".to_owned()))?,
+            })
+        }
     }
 }
 

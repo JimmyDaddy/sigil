@@ -16,10 +16,10 @@ use sigil_application::{
     ApplicationCommand, ApplicationCommandId, ApplicationCommandOutcome, ApplicationCommandReceipt,
     ApplicationCommandRequest, ApplicationDomainReceipt, ApplicationError,
     ApplicationPermissionMode, ApplicationPort, ApplicationQueueAction, ApplicationQueueItemKind,
-    ApplicationReasoningEffort, ApplicationRecoveryAction, ApplicationRecoveryOutcome,
-    ApplicationScope, AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId,
-    PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId, ProjectionPage, RunCommand,
-    RunStartOptions, SessionScopeId, StablePageCursor,
+    ApplicationQueueTarget, ApplicationReasoningEffort, ApplicationRecoveryAction,
+    ApplicationRecoveryOutcome, ApplicationScope, AuthenticatedSubject, ConversationCommand,
+    HostConnectionInstanceId, PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId,
+    ProjectionPage, RunCommand, RunStartOptions, SessionScopeId, StablePageCursor,
 };
 use sigil_runtime::{
     ManagedApplicationReservationStore, RuntimeApplicationDeliveryAckStore,
@@ -726,6 +726,7 @@ fn application_queue_action(
             kind,
             reasoning_effort,
         } => ApplicationQueueAction::Enqueue {
+            target: ApplicationQueueTarget::MainThread,
             prompt: safe(prompt)?,
             kind: match kind {
                 crate::HttpConversationQueueItemKind::Chat => ApplicationQueueItemKind::Chat,
@@ -752,6 +753,7 @@ fn application_queue_action(
             prompt,
             reasoning_effort,
         } => ApplicationQueueAction::Edit {
+            target: ApplicationQueueTarget::MainThread,
             entry_id: safe(entry_id)?,
             prompt: safe(prompt)?,
             reasoning_effort: reasoning_effort.map(|effort| match effort {
@@ -763,6 +765,7 @@ fn application_queue_action(
         },
         crate::HttpConversationQueueCommandAction::Remove { entry_id } => {
             ApplicationQueueAction::Remove {
+                target: ApplicationQueueTarget::MainThread,
                 entry_id: safe(entry_id)?,
             }
         }
@@ -770,6 +773,7 @@ fn application_queue_action(
             entry_id,
             after_entry_id,
         } => ApplicationQueueAction::Reorder {
+            target: ApplicationQueueTarget::MainThread,
             entry_id: safe(entry_id)?,
             after_entry_id: after_entry_id
                 .as_ref()
@@ -794,65 +798,82 @@ fn http_queue_request_action(
     let safe = |value: &sigil_application::SafeText| value.as_str().to_owned();
     Ok(match action {
         ApplicationQueueAction::Enqueue {
+            target,
             prompt,
             kind,
             reasoning_effort,
-        } => crate::HttpConversationQueueCommandAction::Enqueue {
-            prompt: safe(prompt),
-            kind: match kind {
-                ApplicationQueueItemKind::Chat => crate::HttpConversationQueueItemKind::Chat,
-                ApplicationQueueItemKind::PlanPrompt => {
-                    crate::HttpConversationQueueItemKind::PlanPrompt
-                }
-                ApplicationQueueItemKind::AgentMention => {
-                    crate::HttpConversationQueueItemKind::AgentMention
-                }
-                ApplicationQueueItemKind::AgentMessage => {
-                    crate::HttpConversationQueueItemKind::AgentMessage
-                }
-                ApplicationQueueItemKind::TaskGuidance => {
-                    return Err(ApplicationError::InvalidRequest(
-                        "HTTP queue does not support task-guidance targets".to_owned(),
-                    ));
-                }
-                ApplicationQueueItemKind::Unknown => crate::HttpConversationQueueItemKind::Unknown,
-            },
-            reasoning_effort: reasoning_effort.map(|effort| match effort {
-                ApplicationReasoningEffort::Low => crate::HttpReasoningEffort::Low,
-                ApplicationReasoningEffort::Medium => crate::HttpReasoningEffort::Medium,
-                ApplicationReasoningEffort::High => crate::HttpReasoningEffort::High,
-                ApplicationReasoningEffort::Max => crate::HttpReasoningEffort::Max,
-            }),
-        },
+        } => {
+            ensure_http_main_queue_target(target)?;
+            crate::HttpConversationQueueCommandAction::Enqueue {
+                prompt: safe(prompt),
+                kind: match kind {
+                    ApplicationQueueItemKind::Chat => crate::HttpConversationQueueItemKind::Chat,
+                    ApplicationQueueItemKind::PlanPrompt => {
+                        crate::HttpConversationQueueItemKind::PlanPrompt
+                    }
+                    ApplicationQueueItemKind::AgentMention => {
+                        crate::HttpConversationQueueItemKind::AgentMention
+                    }
+                    ApplicationQueueItemKind::AgentMessage => {
+                        crate::HttpConversationQueueItemKind::AgentMessage
+                    }
+                    ApplicationQueueItemKind::TaskGuidance => {
+                        return Err(ApplicationError::InvalidRequest(
+                            "HTTP queue does not support task-guidance targets".to_owned(),
+                        ));
+                    }
+                    ApplicationQueueItemKind::Unknown => {
+                        crate::HttpConversationQueueItemKind::Unknown
+                    }
+                },
+                reasoning_effort: reasoning_effort.map(|effort| match effort {
+                    ApplicationReasoningEffort::Low => crate::HttpReasoningEffort::Low,
+                    ApplicationReasoningEffort::Medium => crate::HttpReasoningEffort::Medium,
+                    ApplicationReasoningEffort::High => crate::HttpReasoningEffort::High,
+                    ApplicationReasoningEffort::Max => crate::HttpReasoningEffort::Max,
+                }),
+            }
+        }
         ApplicationQueueAction::Edit {
+            target,
             entry_id,
             prompt,
             reasoning_effort,
-        } => crate::HttpConversationQueueCommandAction::Edit {
-            entry_id: safe(entry_id),
-            prompt: safe(prompt),
-            reasoning_effort: reasoning_effort.map(|effort| match effort {
-                ApplicationReasoningEffort::Low => crate::HttpReasoningEffort::Low,
-                ApplicationReasoningEffort::Medium => crate::HttpReasoningEffort::Medium,
-                ApplicationReasoningEffort::High => crate::HttpReasoningEffort::High,
-                ApplicationReasoningEffort::Max => crate::HttpReasoningEffort::Max,
-            }),
-        },
-        ApplicationQueueAction::Remove { entry_id } => {
+        } => {
+            ensure_http_main_queue_target(target)?;
+            crate::HttpConversationQueueCommandAction::Edit {
+                entry_id: safe(entry_id),
+                prompt: safe(prompt),
+                reasoning_effort: reasoning_effort.map(|effort| match effort {
+                    ApplicationReasoningEffort::Low => crate::HttpReasoningEffort::Low,
+                    ApplicationReasoningEffort::Medium => crate::HttpReasoningEffort::Medium,
+                    ApplicationReasoningEffort::High => crate::HttpReasoningEffort::High,
+                    ApplicationReasoningEffort::Max => crate::HttpReasoningEffort::Max,
+                }),
+            }
+        }
+        ApplicationQueueAction::Remove { target, entry_id } => {
+            ensure_http_main_queue_target(target)?;
             crate::HttpConversationQueueCommandAction::Remove {
                 entry_id: safe(entry_id),
             }
         }
         ApplicationQueueAction::Reorder {
+            target,
             entry_id,
             after_entry_id,
-        } => crate::HttpConversationQueueCommandAction::Reorder {
-            entry_id: safe(entry_id),
-            after_entry_id: after_entry_id.as_ref().map(safe),
-        },
-        ApplicationQueueAction::Move { .. } => {
+        } => {
+            ensure_http_main_queue_target(target)?;
+            crate::HttpConversationQueueCommandAction::Reorder {
+                entry_id: safe(entry_id),
+                after_entry_id: after_entry_id.as_ref().map(safe),
+            }
+        }
+        ApplicationQueueAction::Move { .. }
+        | ApplicationQueueAction::Promote { .. }
+        | ApplicationQueueAction::SendNow { .. } => {
             return Err(ApplicationError::InvalidRequest(
-                "HTTP queue requires an explicit reorder anchor".to_owned(),
+                "HTTP queue does not expose this TUI queue action".to_owned(),
             ));
         }
         ApplicationQueueAction::Pause => crate::HttpConversationQueueCommandAction::Pause,
@@ -865,6 +886,16 @@ fn http_queue_request_action(
             foreground_owner_revision: safe(foreground_owner_revision),
         },
     })
+}
+
+fn ensure_http_main_queue_target(target: &ApplicationQueueTarget) -> Result<(), ApplicationError> {
+    if matches!(target, ApplicationQueueTarget::MainThread) {
+        Ok(())
+    } else {
+        Err(ApplicationError::InvalidRequest(
+            "HTTP queue supports only the main-thread target".to_owned(),
+        ))
+    }
 }
 
 pub(crate) fn application_recovery_action(

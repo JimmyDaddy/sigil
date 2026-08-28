@@ -245,30 +245,50 @@ pub enum ApplicationQueueMoveDirection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationQueueTarget {
+    MainThread,
+    AgentThread { thread_id: SafeText },
+    Task { task_id: SafeText },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationQueueAction {
     Enqueue {
+        target: ApplicationQueueTarget,
         prompt: SafeText,
         kind: ApplicationQueueItemKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<ApplicationReasoningEffort>,
     },
     Edit {
+        target: ApplicationQueueTarget,
         entry_id: SafeText,
         prompt: SafeText,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<ApplicationReasoningEffort>,
     },
     Remove {
+        target: ApplicationQueueTarget,
         entry_id: SafeText,
     },
     Reorder {
+        target: ApplicationQueueTarget,
         entry_id: SafeText,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_entry_id: Option<SafeText>,
     },
     Move {
+        target: ApplicationQueueTarget,
         entry_id: SafeText,
         direction: ApplicationQueueMoveDirection,
+    },
+    Promote {
+        target: ApplicationQueueTarget,
+        entry_id: SafeText,
+    },
+    SendNow {
+        target: ApplicationQueueTarget,
+        entry_id: SafeText,
     },
     Pause,
     Resume,
@@ -770,6 +790,7 @@ pub struct AttentionSurfaceProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationQueueItemProjection {
     pub entry_id: SafeText,
+    pub target: ApplicationQueueTarget,
     pub kind: ApplicationQueueItemKind,
     pub status: SafeText,
     pub dispatchable: bool,

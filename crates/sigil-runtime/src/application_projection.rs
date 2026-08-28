@@ -7,12 +7,13 @@ use sigil_application::{
     APPLICATION_CONTRACT_SCHEMA_VERSION, AgentSurfaceProjection, ApplicationError,
     ApplicationEvent, ApplicationEventEnvelope, ApplicationFrontier, ApplicationInstanceId,
     ApplicationProjection, ApplicationQueueItemKind, ApplicationQueueItemProjection,
-    ApplicationQueueSurfaceProjection, ApplicationScope, AttentionSurfaceProjection,
-    CapabilitySurfaceProjection, ConfigurationSurfaceProjection, ConversationSurfaceProjection,
-    OpenProjectionRequest, PageDirection, PlanTaskSurfaceProjection, ProjectionFeedItem,
-    ProjectionPage, ProjectionPageRequest, ProjectionSnapshot, ProjectionSnapshotEnvelope,
-    ResourceRecoverySurfaceContractV1, RunSurfaceProjection, SafeText, SessionItemId,
-    SessionScopeId, SessionSurfaceProjection, StablePageCursor, UserInputSurfaceProjection,
+    ApplicationQueueSurfaceProjection, ApplicationQueueTarget, ApplicationScope,
+    AttentionSurfaceProjection, CapabilitySurfaceProjection, ConfigurationSurfaceProjection,
+    ConversationSurfaceProjection, OpenProjectionRequest, PageDirection, PlanTaskSurfaceProjection,
+    ProjectionFeedItem, ProjectionPage, ProjectionPageRequest, ProjectionSnapshot,
+    ProjectionSnapshotEnvelope, ResourceRecoverySurfaceContractV1, RunSurfaceProjection, SafeText,
+    SessionItemId, SessionScopeId, SessionSurfaceProjection, StablePageCursor,
+    UserInputSurfaceProjection,
 };
 use sigil_kernel::{
     ConversationQueueDurableProjection, JsonlSessionStore, PublicEventOutboxEntryV1,
@@ -208,6 +209,7 @@ impl RuntimeSessionProjectionBinding {
                 .map(|item| {
                     Ok(ApplicationQueueItemProjection {
                         entry_id: safe_text(item.queued.queue_id.as_str())?,
+                        target: application_queue_target(&item.queued.target)?,
                         kind: application_queue_item_kind(item.queued.kind),
                         status: safe_text(application_queue_item_status(item.status))?,
                         dispatchable: queue_next_dispatchable
@@ -712,6 +714,24 @@ fn application_queue_item_kind(
         sigil_kernel::ConversationInputKind::AgentMessage => ApplicationQueueItemKind::AgentMessage,
         sigil_kernel::ConversationInputKind::TaskGuidance => ApplicationQueueItemKind::TaskGuidance,
         sigil_kernel::ConversationInputKind::Unknown => ApplicationQueueItemKind::Unknown,
+    }
+}
+
+fn application_queue_target(
+    target: &sigil_kernel::ConversationInputTarget,
+) -> Result<ApplicationQueueTarget, ApplicationError> {
+    match target {
+        sigil_kernel::ConversationInputTarget::MainThread => Ok(ApplicationQueueTarget::MainThread),
+        sigil_kernel::ConversationInputTarget::AgentThread { thread_id } => {
+            Ok(ApplicationQueueTarget::AgentThread {
+                thread_id: safe_text(thread_id.as_str())?,
+            })
+        }
+        sigil_kernel::ConversationInputTarget::Task { task_id } => {
+            Ok(ApplicationQueueTarget::Task {
+                task_id: safe_text(task_id.as_str())?,
+            })
+        }
     }
 }
 

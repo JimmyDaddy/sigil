@@ -310,6 +310,7 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                     ApplicationCommand::Conversation(ConversationCommand::Queue {
                         expected_generation: SafeText::new(queue_generation).expect("generation"),
                         action: ApplicationQueueAction::Enqueue {
+                            target: sigil_application::ApplicationQueueTarget::MainThread,
                             prompt: SafeText::new("queue through application port")
                                 .expect("queue prompt"),
                             kind: ApplicationQueueItemKind::Chat,
