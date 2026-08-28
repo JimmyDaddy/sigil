@@ -3379,3 +3379,10 @@ Preview workflow 现在在显式 publish 模式下要求 `CARGO_REGISTRY_TOKEN`�
 
 本轮仍未执行真实发布、release cycle 或用户验证，也未生成外部 evidence；因此 R70.8 继续为 In Progress，
 不得将本地 preview dry-run 当作 RFC 的 published preview。
+
+### R70.8 release qualification harness follow-up（2026-08-29）
+
+PR qualification 暴露 `scripts/test-run-evals.py` 向 fake model-eval binary 注入了错误的环境变量：runner 实际
+读取 `SIGIL_MODEL_EVAL_BIN`，fixture 却设置未被读取的 `SIGIL_BIN`，使 CI 错误地执行真实 model-eval 并失败。
+测试现已改为注入 runner 的正式 override，且本地 contract test `1 passed`。该修复只纠正测试 harness 与生产
+runner 的既有接口不一致，不放宽 acceptance；PR CI 需要在新 commit 上重新验证。
