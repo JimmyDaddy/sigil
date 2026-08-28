@@ -3105,4 +3105,9 @@ R70.x
   TUI enqueue 要求请求 target 与 active target 一致，跨 target request 在 effect 前返回 scope error；HTTP 仍只
   暴露 main-thread queue，TUI-only promote/send-now/move 不被近似映射而是 typed reject。application `6/6`、runtime
   projection `2/2`、HTTP `224/224`、TUI 单线程 `1720/1720`（3 ignored）与四包 strict clippy 通过。该 slice 不关闭
-  TUI 其余 command family、HTTP compaction preview、四表面 conformance 或完整 migration manifest。
+ TUI 其余 command family、HTTP compaction preview、四表面 conformance 或完整 migration manifest。
+- user-input follow-up：`c4125bd1` 将 TUI durable request 的 request id、generation、expected request hash 与
+  kernel-owned decision 映射为 typed `UserInputCommand::Resolve`；worker 提供 retained command id 时复用为
+  application reservation id，否则由 client 生成。worker edge 保留原始 request 字段并以 uncertain delivery
+  等待事件 reconciliation。TUI user-input 回归 `9/9`、application `6/6`、runtime service `4/4` 与四包
+  strict clippy 通过。permission-mode override 和其他 legacy TUI command family 仍开放，该 slice 不关闭 R70.4。
