@@ -656,6 +656,7 @@ pub enum SessionMaintenanceOperation {
     Fork,
     Export,
     SetPin { pinned: bool },
+    PreviewRetention,
     PreviewDelete,
     ApplyDelete,
     ApplyRetention,

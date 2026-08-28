@@ -52,6 +52,7 @@ struct TuiSessionMaintenanceBinding {
     current_model_route: Option<sigil_kernel::ResolvedModelRoute>,
     delete_preview: Option<sigil_runtime::SessionDeletePreview>,
     retention_preview: Option<sigil_runtime::SessionRetentionPreview>,
+    retention_policy: Option<sigil_runtime::SessionRetentionPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -257,6 +258,7 @@ impl TuiApplicationSession {
                 | AppAction::PreviewLocalSessionDelete { .. }
                 | AppAction::ApplyLocalSessionDelete { .. }
                 | AppAction::ApplySessionRetention { .. }
+                | AppAction::PreviewSessionRetention { .. }
         ) {
             return Ok(None);
         }
@@ -651,6 +653,7 @@ impl TuiApplicationSession {
                         current_model_route: None,
                         delete_preview: None,
                         retention_preview: None,
+                        retention_policy: None,
                     },
                 )?,
                 request_id: *request_id,
@@ -669,6 +672,7 @@ impl TuiApplicationSession {
                         current_model_route: Some(current_model_route.clone()),
                         delete_preview: None,
                         retention_preview: None,
+                        retention_policy: None,
                     },
                 )?,
                 request_id: *request_id,
@@ -686,6 +690,7 @@ impl TuiApplicationSession {
                         current_model_route: None,
                         delete_preview: None,
                         retention_preview: None,
+                        retention_policy: None,
                     },
                 )?,
                 request_id: *request_id,
@@ -704,6 +709,7 @@ impl TuiApplicationSession {
                         current_model_route: None,
                         delete_preview: None,
                         retention_preview: None,
+                        retention_policy: None,
                     },
                 )?,
                 request_id: *request_id,
@@ -721,6 +727,7 @@ impl TuiApplicationSession {
                         current_model_route: None,
                         delete_preview: None,
                         retention_preview: None,
+                        retention_policy: None,
                     },
                 )?,
                 request_id: *request_id,
@@ -738,6 +745,7 @@ impl TuiApplicationSession {
                         current_model_route: None,
                         delete_preview: Some(preview.clone()),
                         retention_preview: None,
+                        retention_policy: None,
                     },
                 )?,
                 request_id: *request_id,
@@ -761,10 +769,28 @@ impl TuiApplicationSession {
                             current_model_route: None,
                             delete_preview: None,
                             retention_preview: Some(preview.clone()),
+                            retention_policy: None,
                         },
                     )?,
                     request_id: *request_id,
                     operation: SessionMaintenanceOperation::ApplyRetention,
+                }))
+            }
+            AppAction::PreviewSessionRetention { request_id, policy } => {
+                Some(ApplicationCommand::Session(SessionCommand::Maintain {
+                    binding: self.bind_session_maintenance(
+                        *request_id,
+                        SessionMaintenanceOperation::PreviewRetention,
+                        TuiSessionMaintenanceBinding {
+                            source_path: PathBuf::new(),
+                            current_model_route: None,
+                            delete_preview: None,
+                            retention_preview: None,
+                            retention_policy: Some(policy.clone()),
+                        },
+                    )?,
+                    request_id: *request_id,
+                    operation: SessionMaintenanceOperation::PreviewRetention,
                 }))
             }
             AppAction::QueueConversationInput {
@@ -1443,6 +1469,16 @@ impl TuiWorkerCommandExecutor {
                             preview: target.retention_preview.ok_or_else(|| {
                                 ApplicationError::InvalidRequest(
                                     "session retention binding has no reviewed preview".to_owned(),
+                                )
+                            })?,
+                        }
+                    }
+                    SessionMaintenanceOperation::PreviewRetention => {
+                        WorkerCommand::PreviewSessionRetention {
+                            request_id: *request_id,
+                            policy: target.retention_policy.ok_or_else(|| {
+                                ApplicationError::InvalidRequest(
+                                    "session retention binding has no policy".to_owned(),
                                 )
                             })?,
                         }

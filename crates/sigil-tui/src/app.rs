@@ -854,6 +854,10 @@ pub enum AppAction {
         request_id: u64,
         preview: SessionRetentionPreview,
     },
+    PreviewSessionRetention {
+        request_id: u64,
+        policy: sigil_runtime::SessionRetentionPolicy,
+    },
     ActivateLazyMcp {
         server_name: Option<String>,
     },

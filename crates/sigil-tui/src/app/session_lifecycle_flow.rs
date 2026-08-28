@@ -7,7 +7,6 @@ use sigil_runtime::{
 };
 
 use super::{AppAction, AppState, TimelineRole, modal_flow::ModalState};
-use crate::runner::WorkerCommand;
 
 #[derive(Debug, Clone)]
 pub(crate) enum SessionRetentionMaintenancePreview {
@@ -537,32 +536,29 @@ impl AppState {
         }
     }
 
-    pub(super) fn schedule_session_retention_preview(&mut self) {
-        let Some(retention) = self
+    pub(super) fn schedule_session_retention_preview(&mut self) -> Option<AppAction> {
+        let retention = self
             .config_snapshot
             .as_ref()
-            .map(|config| config.session.retention.clone())
-        else {
-            return;
-        };
+            .map(|config| config.session.retention.clone())?;
         let request_id = self.next_background_request_id();
         let policy = SessionRetentionPolicy::from(&retention);
         self.runtime.session_retention_preview =
             SessionRetentionMaintenancePreview::Pending { request_id };
-        self.enqueue_worker_command(WorkerCommand::PreviewSessionRetention { request_id, policy });
+        Some(AppAction::PreviewSessionRetention { request_id, policy })
     }
 
-    pub(super) fn open_session_retention_modal(&mut self) {
+    pub(super) fn open_session_retention_modal(&mut self) -> Option<AppAction> {
         let preview = match &self.runtime.session_retention_preview {
             SessionRetentionMaintenancePreview::Ready { preview } => preview.clone(),
             SessionRetentionMaintenancePreview::Pending { .. } => {
                 self.last_notice = Some("session retention preview is still loading".to_owned());
-                return;
+                return None;
             }
             SessionRetentionMaintenancePreview::Unavailable { .. } => {
-                self.schedule_session_retention_preview();
+                let action = self.schedule_session_retention_preview();
                 self.last_notice = Some("refreshing session retention preview".to_owned());
-                return;
+                return action;
             }
         };
         self.modal_state = Some(ModalState::SessionRetention(Box::new(
@@ -573,6 +569,7 @@ impl AppState {
             },
         )));
         self.last_notice = Some("reviewing explicit session cleanup".to_owned());
+        None
     }
 
     pub(super) fn apply_local_session_inspected(
@@ -712,7 +709,6 @@ impl AppState {
         ));
         state.request_id = None;
         self.refresh_session_history();
-        self.schedule_session_retention_preview();
         true
     }
 

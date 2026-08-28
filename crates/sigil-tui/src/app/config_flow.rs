@@ -735,8 +735,7 @@ impl AppState {
                             self.clean_selected_mutation_artifacts()
                         }
                         ConfigFooterAction::CleanSessions => {
-                            self.open_session_retention_modal();
-                            Ok(None)
+                            Ok(self.open_session_retention_modal())
                         }
                         ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
                         ConfigFooterAction::TrustAgent => {
@@ -1250,7 +1249,6 @@ impl AppState {
         self.config_state = Some(config_state);
         self.schedule_connection_inventory_refresh(&persisted_root_config);
         self.refresh_mutation_artifact_retention_preview();
-        self.schedule_session_retention_preview();
         self.last_notice = Some("opened config".to_owned());
         self.push_event("mode", "config");
     }

@@ -308,6 +308,9 @@ impl AppState {
                 request_id,
                 preview,
             },
+            AppAction::PreviewSessionRetention { request_id, policy } => {
+                WorkerCommand::PreviewSessionRetention { request_id, policy }
+            }
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
             }
