@@ -183,6 +183,13 @@ pub(crate) fn build_for_worker(
         "tui-application",
     )
     .map_err(|error| anyhow!(error))?;
+    let delivery_acks = sigil_runtime::RuntimeApplicationDeliveryAckStore::open(
+        Arc::clone(&composition.storage_writer),
+        &format!("tui-application-delivery-{}", app.session_id),
+        scope.clone(),
+        1,
+    )
+    .map_err(|error| anyhow!(error))?;
     let executor = Arc::new(TuiWorkerCommandExecutor {
         worker_tx,
         reasoning_effort,
@@ -192,23 +199,12 @@ pub(crate) fn build_for_worker(
         Arc::new(projection),
         executor,
         Arc::new(reservations),
-        Arc::new(TuiDeliveryAcker),
+        Arc::new(delivery_acks),
     ));
     let client_epoch = (uuid::Uuid::new_v4().as_u128() as u64) | 1;
     let connection = HostConnectionInstanceId::new(format!("tui-{}", uuid::Uuid::new_v4()))?;
     TuiApplicationSession::new(service, scope, 1, client_epoch, connection)
         .map_err(|error| anyhow!(error))
-}
-
-struct TuiDeliveryAcker;
-
-impl sigil_runtime::RuntimeApplicationDeliveryAcker for TuiDeliveryAcker {
-    fn acknowledge(
-        &self,
-        acknowledgement: sigil_application::ProjectionDeliveryAck,
-    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
-        Box::pin(async move { acknowledgement.validate() })
-    }
 }
 
 struct TuiWorkerCommandExecutor {

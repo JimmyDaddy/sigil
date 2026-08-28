@@ -2967,7 +2967,8 @@ R70.x
   （`rfc-0070(R70.4): cut over HTTP reservations to application authority`），以及 `ffc3df4e`
   （`rfc-0070(R70.4): stream bounded transcript pages`），以及 `f44d8c10`
   （`rfc-0070(R70.4): journal application command reservations`），以及本轮新增的 ApplicationClient
-  resumable reducer/ACK 与 cross-surface contract tests；当前切片补充 cold-cache 100k qualification。
+  resumable reducer/ACK、durable delivery ACK journal 与 cross-surface contract tests；当前切片补充
+  cold-cache 100k qualification。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -2988,6 +2989,10 @@ R70.x
   JSONL journal；每个 reserve、dispatch marker 和 terminal receipt 都在 effect 前按顺序持久化，旧 v1 snapshot
   只在首次重开时迁移，重复记录可安全重放，孤立 transition、指纹冲突和终态改写 fail-closed。dispatch marker
   写入失败时会尽力将已存在的 reservation settlement 为显式 `Uncertain`，避免永久卡在无恢复语义的 `Reserved`。
+- delivery ACK：新增 runtime-owned 的独立 application-control named namespace；ACK 在绑定的
+  application scope、observer generation、frontier 与 event identity 校验通过后才追加到 durable JSONL journal。
+  exact duplicate 可重放，event identity 改写、scope/observer 不一致、partial/corrupt record 与容量超限均
+  fail-closed；TUI production bridge 不再使用仅校验内存对象的 ACK adapter。
 - TUI adapter：生产 launcher 为每个 worker 绑定 runtime `ApplicationPort`，用同一 application scope/frontier
   刷新 projection；共享 ApplicationClient 统一处理 snapshot、reducer、resumable feed、delivery ACK、page/cancel
   与保留 command id 的 retry。prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application
@@ -3013,9 +3018,11 @@ R70.x
   projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
   `2 passed`、TUI launcher regression `1 passed`，以及 runtime application-filtered regression `106 passed`、
   `git diff --check`；`transcript_page` scope/boundary/reasoning/UTF-8 regression `3 passed`；本轮
-  `sigil-application` client/reducer/ACK/conformance tests `6 passed`。
+  `sigil-application` client/reducer/ACK/conformance tests `6 passed`、runtime durable ACK tests `4 passed`，
+  以及 TUI production dependency check `cargo check -p sigil-tui`。
 - remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
   HTTP reservation cutover 与 resumable snapshot-feed 基础已分别落地，但不关闭 R70.4。TUI 尚有未迁移旧动作，
   HTTP command domain execution 尚未完全收敛到同一 application service；feed 的跨 surface ACK/restart
   conformance、所有 shared command 的四表面 conformance、cold-cache 100k page e2e 与完整 migration manifest
-  gate 仍需继续完成。R70.5 package split 不得在这些条件未满足前开始。
+  gate 仍需继续完成。TUI ACK 已进入 durable managed writer，但 HTTP/Desktop/CLI 还未全部复用该 delivery
+  journal。R70.5 package split 不得在这些条件未满足前开始。

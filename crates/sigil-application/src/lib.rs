@@ -624,7 +624,7 @@ pub struct ProjectionSnapshot {
 
 /// Delivery acknowledgement emitted only after an adapter has committed an event to its local
 /// projection. It is not a command receipt and it never implies presentation completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionDeliveryAck {
     pub scope: ApplicationScope,
     pub observer_generation: u64,
@@ -636,6 +636,19 @@ impl ProjectionDeliveryAck {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         if self.scope != self.frontier.scope {
             return Err(ApplicationError::ScopeMismatch);
+        }
+        if self.observer_generation == 0 {
+            return Err(ApplicationError::InvalidRequest(
+                "delivery acknowledgement observer generation must be non-zero".to_owned(),
+            ));
+        }
+        if self.frontier.schema_version != APPLICATION_CONTRACT_SCHEMA_VERSION
+            || self.frontier.writer_generation == 0
+            || self.frontier.stream_generation == 0
+        {
+            return Err(ApplicationError::InvalidRequest(
+                "delivery acknowledgement frontier is invalid".to_owned(),
+            ));
         }
         if self.event_id.is_empty() || self.event_id.len() > 256 {
             return Err(ApplicationError::InvalidRequest(
@@ -868,6 +881,7 @@ pub struct ApplicationClient {
     client_epoch: u64,
     connection_instance: HostConnectionInstanceId,
     state: Mutex<ApplicationClientState>,
+    refresh_gate: futures::lock::Mutex<()>,
 }
 
 impl fmt::Debug for ApplicationClient {
@@ -903,6 +917,7 @@ impl ApplicationClient {
             client_epoch,
             connection_instance,
             state: Mutex::new(ApplicationClientState::default()),
+            refresh_gate: futures::lock::Mutex::new(()),
         })
     }
 
@@ -939,6 +954,9 @@ impl ApplicationClient {
     }
 
     pub async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
+        // A client has one committed frontier. Serialize refreshes so two concurrent callers
+        // cannot both consume the same resume feed and emit duplicate delivery acknowledgements.
+        let _refresh_guard = self.refresh_gate.lock().await;
         let resume_from = self.current_frontier()?;
         let snapshot = self
             .port
@@ -954,10 +972,10 @@ impl ApplicationClient {
         {
             return Err(ApplicationError::ScopeMismatch);
         }
-        if let Some(resume_from) = resume_from {
-            if !snapshot.envelope.cut.same_cut(&resume_from) {
-                return Err(ApplicationError::ResetRequired);
-            }
+        if let Some(resume_from) = resume_from
+            && !snapshot.envelope.cut.same_cut(&resume_from)
+        {
+            return Err(ApplicationError::ResetRequired);
         }
 
         let mut reducer = ProjectionReducer::open(snapshot.envelope)?;

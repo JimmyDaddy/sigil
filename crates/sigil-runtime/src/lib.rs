@@ -107,6 +107,7 @@ pub mod agent_supervisor;
 pub mod agent_tools;
 pub mod application_catalog;
 pub mod application_compaction;
+pub mod application_delivery_ack_store;
 pub mod application_intent_stack;
 pub mod application_projection;
 pub mod application_queue;
@@ -198,6 +199,7 @@ pub use application_catalog::{
     ApplicationExtensionCatalogView, ApplicationSkillBinding, ApplicationSkillCatalogEntry,
     application_extension_catalog_view,
 };
+pub use application_delivery_ack_store::RuntimeApplicationDeliveryAckStore;
 pub use application_intent_stack::{
     APPLICATION_INTENT_DROP_CONFIRMATION_TTL_MS, ApplicationIntentConfirmationSource,
     ApplicationIntentStackCommandOutputV1, ApplicationIntentStackCommandV1,
