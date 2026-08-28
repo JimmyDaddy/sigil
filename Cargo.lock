@@ -5485,6 +5485,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-application"
+version = "0.0.1-beta.4"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sigil-kernel",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sigil-code-intel"
 version = "0.0.1-beta.4"
 dependencies = [
@@ -5802,6 +5816,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sigil-application",
  "sigil-code-intel",
  "sigil-kernel",
  "sigil-mcp",

@@ -3,6 +3,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/sigil-kernel",
     "crates/sigil-resource-authority",
+    "crates/sigil-application",
     "crates/sigil-sandbox",
     "crates/sigil-process-observer",
     "crates/sigil-provider-http",

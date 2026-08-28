@@ -108,9 +108,12 @@ pub mod agent_tools;
 pub mod application_catalog;
 pub mod application_compaction;
 pub mod application_intent_stack;
+pub mod application_projection;
 pub mod application_queue;
 pub mod application_recovery;
+pub mod application_reservation_store;
 pub mod application_run;
+pub mod application_service;
 pub mod command_permission;
 pub mod context;
 pub mod context_window;
@@ -200,6 +203,13 @@ pub use application_intent_stack::{
     ApplicationIntentStackCommandOutputV1, ApplicationIntentStackCommandV1,
     ApplicationIntentStackError, ApplicationIntentStackErrorClass,
     execute_application_intent_stack_command, execute_durable_application_intent_stack_command,
+};
+pub use application_projection::RuntimeSessionProjectionBinding;
+pub use application_reservation_store::ManagedApplicationReservationStore;
+pub use application_service::{
+    RuntimeApplicationCommandExecutor, RuntimeApplicationDeliveryAcker, RuntimeApplicationDispatch,
+    RuntimeApplicationProjectionSource, RuntimeApplicationReservationAdmission,
+    RuntimeApplicationReservationStore, RuntimeApplicationService,
 };
 pub use context::{
     ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,

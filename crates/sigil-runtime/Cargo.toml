@@ -25,6 +25,7 @@ reqwest.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-application = { path = "../sigil-application" }
 sigil-code-intel = { path = "../sigil-code-intel" }
 sigil-mcp = { path = "../sigil-mcp" }
 sigil-process-observer = { path = "../sigil-process-observer" }
