@@ -3099,3 +3099,10 @@ R70.x
   明确 legacy adapter 边界。application/runtime/HTTP/TUI 回归与四包 strict clippy 通过（TUI `1720/1720`，3
   ignored）。该 slice 只关闭主线程 queue mutation 子集；TUI task/agent target、promote/send-now、剩余旧动作、
   HTTP compaction preview、四表面 conformance 与完整 migration manifest 仍未闭合。
+- queue target follow-up：`f52aecee` 将 application queue contract 扩展为显式的 main-thread、agent-thread、task
+  target；target identity 进入 projection 与 queue mutation action，TUI production 的 task/agent queue enqueue、
+  promote、send-now 以及 main-thread mutation 通过 generation-bound ApplicationClient 与 typed worker edge。
+  TUI enqueue 要求请求 target 与 active target 一致，跨 target request 在 effect 前返回 scope error；HTTP 仍只
+  暴露 main-thread queue，TUI-only promote/send-now/move 不被近似映射而是 typed reject。application `6/6`、runtime
+  projection `2/2`、HTTP `224/224`、TUI 单线程 `1720/1720`（3 ignored）与四包 strict clippy 通过。该 slice 不关闭
+  TUI 其余 command family、HTTP compaction preview、四表面 conformance 或完整 migration manifest。
