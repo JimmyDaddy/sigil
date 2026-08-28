@@ -31,7 +31,7 @@ pub mod launcher;
 pub mod mouse;
 pub(crate) mod phase_timing;
 pub(crate) mod presentation;
-pub mod runner;
+pub(crate) mod runner;
 pub(crate) mod sessions;
 pub(crate) mod setup;
 pub(crate) mod slash;

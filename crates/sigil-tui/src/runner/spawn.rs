@@ -38,6 +38,7 @@ pub(crate) struct SpawnedAgentWorker {
     pub(crate) join_handle: thread::JoinHandle<()>,
 }
 
+#[cfg(test)]
 pub fn spawn_agent_worker(
     root_config: RootConfig,
     config_path: PathBuf,
@@ -62,6 +63,7 @@ pub fn spawn_agent_worker(
     Ok((command_tx, message_rx))
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_agent_worker_with_route_directive(
     root_config: RootConfig,
     config_path: PathBuf,
@@ -91,9 +93,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     interaction_mode: InteractionMode,
     route_directive: WorkerSessionRouteDirective,
     authority_composition: Option<
-        std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+        std::sync::Arc<sigil_runtime::application_host::RuntimeAuthorityCompositionV1>,
     >,
-    boot_cutover: Option<std::sync::Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>>,
+    boot_cutover: Option<std::sync::Arc<sigil_runtime::application_host::RuntimeGlobalCutoverV1>>,
     supplied_attachment: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
@@ -130,7 +132,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     let authority_composition = authority_composition;
     let attachment_lease = if let Some(attachment) = supplied_attachment {
         let store = match boot_cutover.as_ref() {
-            Some(boot_cutover) => sigil_runtime::r71_global_cutover::guarded_session_open(
+            Some(boot_cutover) => sigil_runtime::application_host::guarded_session_open(
                 &session_log_path,
                 boot_cutover.as_ref(),
                 session_epoch,
@@ -268,7 +270,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 return;
             }
             let store_result: Result<JsonlSessionStore> = match boot_cutover.as_ref() {
-                Some(boot_cutover) => sigil_runtime::r71_global_cutover::guarded_session_open(
+                Some(boot_cutover) => sigil_runtime::application_host::guarded_session_open(
                     &session_log_path,
                     boot_cutover.as_ref(),
                     session_epoch,

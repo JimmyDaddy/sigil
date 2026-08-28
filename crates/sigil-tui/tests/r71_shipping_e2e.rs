@@ -28,7 +28,7 @@ fn fixture() -> Result<(tempfile::TempDir, std::path::PathBuf, RootConfig)> {
 #[test]
 fn production_boot_current_schema_uses_real_authority_transaction() -> Result<()> {
     let (_temp, config_path, persisted) = fixture()?;
-    let transaction = sigil_runtime::r71_authority_composition::boot_current_schema(
+    let transaction = sigil_runtime::application_host::boot_current_schema(
         &config_path,
         config_path.parent().expect("config parent"),
     )?;
@@ -36,8 +36,7 @@ fn production_boot_current_schema_uses_real_authority_transaction() -> Result<()
     assert_eq!(transaction.config().agent.model, persisted.agent.model);
     assert!(transaction.cutover().is_current_schema_ready());
     assert!(
-        sigil_runtime::r71_authority_composition::authority_bootstrap_manifest_path(&config_path)?
-            .is_file()
+        sigil_runtime::application_host::authority_bootstrap_manifest_path(&config_path)?.is_file()
     );
     Ok(())
 }
@@ -45,8 +44,7 @@ fn production_boot_current_schema_uses_real_authority_transaction() -> Result<()
 #[test]
 fn production_launcher_replacement_keeps_session_runtime_config() -> Result<()> {
     let (temp, config_path, persisted) = fixture()?;
-    let first =
-        sigil_runtime::r71_authority_composition::boot_current_schema(&config_path, temp.path())?;
+    let first = sigil_runtime::application_host::boot_current_schema(&config_path, temp.path())?;
     let first_manifest = first.cutover().manifest().clone();
     let mut app = AppState::from_root_config(&config_path, &persisted);
     let (_, session_route) = sigil_runtime::provider_connections::resolve_model_route(
@@ -78,10 +76,8 @@ fn production_launcher_replacement_keeps_session_runtime_config() -> Result<()> 
         "persisted-model"
     );
     let published =
-        sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1::load_and_validate_manifest(
-            &sigil_runtime::r71_authority_composition::authority_bootstrap_manifest_path(
-                &config_path,
-            )?,
+        sigil_runtime::application_host::RuntimeGlobalCutoverV1::load_and_validate_manifest(
+            &sigil_runtime::application_host::authority_bootstrap_manifest_path(&config_path)?,
         )?;
     assert_eq!(published, first_manifest);
     Ok(())

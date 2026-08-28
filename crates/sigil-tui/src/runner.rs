@@ -18,22 +18,28 @@ pub(crate) use protocol::{
     EgressDisclosureReceiptTx, McpElicitationResponseTx, WorkerApprovalCommand,
     WorkerApprovalRouteState, WorkerCommandEnvelope,
 };
-pub use protocol::{
-    LocalOperationKind, LocalOperationOutcome, LocalOperationStatus, McpActivationStatus,
-    McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
-    ToolArtifactDisplayReadFailure, ToolOutputShrinkPreview, V2CompactionAdmission,
-    V2CompactionApplySource, V2CompactionPreviewState, V2CompactionReview, V2ContinuityPreview,
-    WorkerApprovalCommandReceipt, WorkerCommand, WorkerCommandSender, WorkerMessage,
-    WorkerRouteRecoverySessionTarget,
+#[cfg(test)]
+pub(crate) use protocol::{
+    LocalOperationKind, LocalOperationOutcome, LocalOperationStatus, ToolOutputShrinkPreview,
+    V2ContinuityPreview, WorkerApprovalCommandReceipt,
+};
+pub(crate) use protocol::{
+    McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
+    ToolArtifactDisplayReadFailure, V2CompactionAdmission, V2CompactionApplySource,
+    V2CompactionPreviewState, V2CompactionReview, WorkerCommand, WorkerCommandSender,
+    WorkerMessage, WorkerRouteRecoverySessionTarget,
 };
 pub(crate) use route_recovery::worker_session_route_recovery_message;
 pub(in crate::runner) use session_flow::ManagedTuiArtifactStoreLease;
-pub use spawn::spawn_agent_worker;
+#[cfg(test)]
+pub(crate) use spawn::spawn_agent_worker;
 #[cfg(not(test))]
 pub(crate) use spawn::{
     WorkerSessionRouteDirective, spawn_agent_worker_with_route_directive_and_attachment,
 };
-pub use worker_loop::{
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use worker_loop::{
     ArtifactGcTaskMetricsSnapshot, WorkerReactorMetricsSnapshot, artifact_gc_task_metrics,
     worker_reactor_metrics,
 };

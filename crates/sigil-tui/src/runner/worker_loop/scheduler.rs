@@ -9,6 +9,7 @@ static WORKER_REACTOR_DEADLINE_TOTAL: std::sync::atomic::AtomicU64 =
 static WORKER_REACTOR_ADVANCEMENT_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkerReactorMetricsSnapshot {
     pub event_wake_total: u64,
@@ -16,6 +17,7 @@ pub struct WorkerReactorMetricsSnapshot {
     pub advancement_total: u64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl WorkerReactorMetricsSnapshot {
     #[must_use]
     pub fn saturating_delta(self, earlier: Self) -> Self {
@@ -31,6 +33,7 @@ impl WorkerReactorMetricsSnapshot {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn worker_reactor_metrics() -> WorkerReactorMetricsSnapshot {
     use std::sync::atomic::Ordering;

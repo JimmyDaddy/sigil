@@ -36,11 +36,11 @@ ENUM_SPECS = (
 )
 
 TRANSITIONAL_EDGE_SPECS = (
-    ("crates/sigil-tui/src/app.rs", "sigil_runtime::r71_authority_composition::"),
-    ("crates/sigil-tui/src/launcher.rs", "sigil_runtime::r71_authority_composition::"),
-    ("crates/sigil-tui/src/runner/spawn.rs", "sigil_runtime::r71_authority_composition::"),
-    ("crates/sigil/src/main.rs", "sigil_runtime::r71_authority_composition::"),
-    ("crates/sigil-http/src/production_driver.rs", "sigil_runtime::r71_authority_composition::"),
+    ("crates/sigil-tui/src/app.rs", "sigil_runtime::application_host::"),
+    ("crates/sigil-tui/src/launcher.rs", "sigil_runtime::application_host::"),
+    ("crates/sigil-tui/src/runner/spawn.rs", "sigil_runtime::application_host::"),
+    ("crates/sigil/src/main.rs", "sigil_runtime::application_host::"),
+    ("crates/sigil-http/src/production_driver.rs", "sigil_runtime::application_host::"),
 )
 
 REQUIRED_MAPPING_FIELDS = {

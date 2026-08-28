@@ -830,13 +830,13 @@ impl HttpProductionRunDriver {
         // bounded provider-setup recovery surface, but it never receives a runnable authority
         // route; every run/session mutation below checks `authority_ready` before proceeding.
         let (services, authority_ready) =
-            match sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
+            match sigil_runtime::application_host::attach_boot_authority_to_services(
                 services.clone(),
                 &options.config_path,
                 &options.launch_cwd,
             ) {
                 Ok(services) => (services, true),
-                Err(sigil_runtime::r71_authority_composition::BootAuthorityErrorV1::Config(_)) => {
+                Err(sigil_runtime::application_host::BootAuthorityErrorV1::Config(_)) => {
                     (services, false)
                 }
                 Err(error) => return Err(HttpRunDriverError::new(error.to_string())),

@@ -108,6 +108,7 @@ pub mod agent_tools;
 pub mod application_catalog;
 pub mod application_compaction;
 pub mod application_delivery_ack_store;
+pub mod application_host;
 pub mod application_intent_stack;
 pub mod application_projection;
 pub mod application_queue;

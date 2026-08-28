@@ -147,9 +147,8 @@ fn run_tui_with_initial_session(
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(config.as_deref(), &cwd)?;
-    let boot_result =
-        sigil_runtime::r71_authority_composition::boot_current_schema(&config_path, &cwd)
-            .map_err(anyhow::Error::new);
+    let boot_result = sigil_runtime::application_host::boot_current_schema(&config_path, &cwd)
+        .map_err(anyhow::Error::new);
     let (mut app, mut worker) = build_initial_app_with_session(
         cwd,
         config_path.clone(),
@@ -843,7 +842,7 @@ where
 {
     let boot_result = match load_result {
         Ok(_root_config) => {
-            sigil_runtime::r71_authority_composition::boot_current_schema(&config_path, &cwd)
+            sigil_runtime::application_host::boot_current_schema(&config_path, &cwd)
                 .map_err(anyhow::Error::new)
         }
         Err(error) => Err(error),
@@ -860,7 +859,7 @@ where
 fn build_initial_app_with_session<F>(
     cwd: PathBuf,
     config_path: PathBuf,
-    boot_result: Result<sigil_runtime::r71_authority_composition::RuntimeCurrentBootTransactionV1>,
+    boot_result: Result<sigil_runtime::application_host::RuntimeCurrentBootTransactionV1>,
     initial_session: InitialSessionTarget<'_>,
     mut spawn_worker_fn: F,
 ) -> Result<(AppState, Option<WorkerRuntime>)>
@@ -951,9 +950,8 @@ pub fn install_current_boot_transaction(
     // Authority composition always loads and validates the persisted configuration itself. The
     // optional route is a narrow session overlay used only to derive the worker configuration;
     // it can never select workspace/storage/execution authority roots.
-    let transaction =
-        sigil_runtime::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
-            .map_err(anyhow::Error::new)?;
+    let transaction = sigil_runtime::application_host::boot_current_schema(config_path, launch_cwd)
+        .map_err(anyhow::Error::new)?;
     let persisted_config = transaction.config().clone();
     let session_config = session_route
         .as_ref()

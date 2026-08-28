@@ -114,7 +114,9 @@ pub(in crate::runner) use agent_runtime::{
     start_portable_overflow_recovery_run, start_queued_conversation_run,
 };
 pub(in crate::runner) use artifact_gc_tasks::{ArtifactGcTaskManager, ArtifactGcTaskResult};
-pub use artifact_gc_tasks::{ArtifactGcTaskMetricsSnapshot, artifact_gc_task_metrics};
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use artifact_gc_tasks::{ArtifactGcTaskMetricsSnapshot, artifact_gc_task_metrics};
 pub(in crate::runner) use checkpoint_runtime::{
     execute_current_checkpoint_restore, fork_current_conversation,
     preview_current_checkpoint_restore,
@@ -174,7 +176,9 @@ pub(in crate::runner) use scheduler::{
     WorkerLoopSessionAttachment, WorkerLoopTerminalRuntime, finish_idle_auto_compaction,
     run_worker_loop,
 };
-pub use scheduler::{WorkerReactorMetricsSnapshot, worker_reactor_metrics};
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use scheduler::{WorkerReactorMetricsSnapshot, worker_reactor_metrics};
 pub(in crate::runner) use session_lifecycle_runtime::{
     apply_local_session_delete, apply_session_retention, export_local_session, fork_local_session,
     inspect_local_session, local_session_lifecycle_service_for_source_for_worker,

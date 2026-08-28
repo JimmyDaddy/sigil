@@ -12,12 +12,14 @@ use crate::runner::worker_event::WorkerEventPayloadSender;
 static ARTIFACT_GC_TASK_STARTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ARTIFACT_GC_TASK_COMPLETED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ArtifactGcTaskMetricsSnapshot {
     pub started_total: u64,
     pub completed_total: u64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ArtifactGcTaskMetricsSnapshot {
     #[must_use]
     pub fn saturating_delta(self, earlier: Self) -> Self {
@@ -28,6 +30,7 @@ impl ArtifactGcTaskMetricsSnapshot {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn artifact_gc_task_metrics() -> ArtifactGcTaskMetricsSnapshot {
     ArtifactGcTaskMetricsSnapshot {
