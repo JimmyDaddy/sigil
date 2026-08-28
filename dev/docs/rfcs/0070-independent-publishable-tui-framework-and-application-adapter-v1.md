@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.4 Complete / R70.5 Complete / R70.6 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 framework/package boundary 已闭合，R70.6-R70.8 仍在实施）
+状态：R70.4 Complete / R70.5 Complete / R70.6 Complete / R70.7 Complete / R70.8 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 framework/package boundary、R70.6 host ownership、R70.7 preview package qualification 已闭合，R70.8 compatibility retirement 仍待 release-cycle validation）
 
 创建日期：2026-08-23
 
@@ -3266,3 +3266,10 @@ R70.x
   application 无 physical authority marker、ProductUpdaterState 仍在 runtime owner、manifest 276/276 与 host
   全量库测试。该 slice 关闭 R70.5 package/module boundary；R70.6 remaining side-effect extraction、R70.7 release
   qualification 与 R70.8 compatibility deletion 仍未闭合。
+
+- R70.7 preview package follow-up：三个公开 package（`sigil-tui-core`、`sigil-tui-ratatui`、`sigil-tui`）已独立
+  声明 `0.1.0`、MSRV `1.85`、repository/docs.rs/README/changelog metadata；新增完整 feature powerset、Cargo
+  package verification、unpacked package `--all-targets` tests、docs 与 ordered publish dry-run gate。
+  `.github/workflows/sigil-tui-preview.yml` 提供 core → Ratatui adapter → facade 的显式发布顺序，默认只做
+  qualification，真实 publish 需由 release operator 显式触发。R70.7 已完成；R70.8 仍需 release-cycle/user
+  validation 后执行 compatibility deletion。
