@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.3 Complete / R70.4 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.3 已完成 owned surface renderer boundary、bounded virtualization primitives 与 UAX #9 text mapping）
+状态：R70.3 Complete / R70.4 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 contract/runtime 基础已落地，TUI production port、legacy cutover 与跨 surface conformance 尚未闭合）
 
 创建日期：2026-08-23
 
@@ -2958,3 +2958,30 @@ R70.x
   `1718 passed / 3 ignored`、surface/UAX #9 targeted tests、`git diff --check`。
 - moved authority：没有移动 R71 Resource Authority/Sandbox、permission、worker 或 runtime owner；下一 slice 是
   独立 `sigil-application` contract 与 fake application，R70.4-R70.8 仍未完成。
+
+### R70.4：transport-neutral application contract 与 runtime port（2026-08-28）
+
+- implementation commit：`d9b57da3`（`rfc-0070(R70.4): establish transport-neutral application contract`）。
+- contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
+  sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
+  command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
+  receipt、payload conflict、in-flight/uncertain 状态、scoped snapshot/reducer、gap/reset、bounded async page、
+  cancellation、delivery ACK 与 renderer-safe projection。
+- identity/replay：reservation key 为 application instance + authenticated subject + durable client epoch + command
+  id；connection instance 不进入 key；canonical fingerprint 与 expected frontier/settlement class 绑定。Fake
+  application 覆盖 exact replay、跨 payload conflict、scope/frontier 校验；runtime service 将 reserve → dispatch
+  started → executor → terminal settle 编排收敛到注入的 reservation store，executor error fail-closed 为
+  `Uncertain`，不能把 transport error 当成 effect 未发生。
+- persistence/presentation：生产 reservation store 使用 R71 managed storage writer 的 application-control
+  namespace，保存 `Reserved`/`DispatchStarted`/terminal receipt 并在重启时保留未决 identity；trusted presenter
+  capability 由 broker arm、绑定 marker/content/terminal epoch、单次 consume，session/broker Debug 脱敏且不允许
+  ordinary clone/serialization。runtime projection binding 从现有 durable session query 生成 bounded、path-free
+  snapshot/page，并使用 opaque before cursor。
+- validation：`cargo fmt --all --check`、`cargo check -p sigil-application`、`cargo check -p sigil-runtime`、
+  application/runtime strict clippy、application tests `3 passed`、runtime application tests `2 passed`，以及
+  runtime application-filtered regression `106 passed`、`git diff --check`。
+- remaining deviations / exit gate：本记录只证明 contract/runtime implementation foundation，不关闭 R70.4。生产
+  TUI 尚未经 `ApplicationPort` 读取 projection/提交 shared command；现有 HTTP command-store 尚未在 exclusive
+  lease 下导入 application reservation journal；snapshot-feed durable outbox、所有 shared command 的四表面
+  conformance、cold-cache 100k page e2e 与完整 migration manifest gate 仍需在 R70.4 继续完成。R70.5 package split
+  不得在这些条件未满足前开始。
