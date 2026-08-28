@@ -95,8 +95,10 @@ RustSec复扫同时识别出Tauri 2.11.5当前上游图中的以下无安全升�
 - Linux GTK3绑定的unmaintained组`RUSTSEC-2024-0411`至`RUSTSEC-2024-0420`，以及该路径的
   `proc-macro-error` `RUSTSEC-2024-0370`；这些crate只由Tauri/WebKitGTK Linux runtime/build graph引入，Sigil
   不直接调用GTK API。
-- `glib 0.18.5`的`VariantStrIter` unsoundness `RUSTSEC-2024-0429`；Sigil与desktop adapter不构造或遍历
-  `glib::VariantStrIter`。这是当前Tauri Linux传递依赖的受限风险接受，不是漏洞已修复的声明。
+- `glib 0.18.5` 的 `VariantStrIter` unsoundness `RUSTSEC-2024-0429`；`cargo audit` 仍报告该锁定依赖，
+  因此继续保留精确的 `deny.toml`/CI ignore。当前 `cargo deny` 数据库会将该 ID 标为未匹配，但这不构成风险
+  消失的证明；升级 Tauri Linux graph 后仍须同时重跑 `cargo audit` 与 `cargo deny`，不得把例外解释为对任意
+  `glib` API 的安全背书。
 - `tauri-utils -> urlpattern`的unmaintained `rust-unic`组：`RUSTSEC-2025-0075`、`RUSTSEC-2025-0080`、
   `RUSTSEC-2025-0081`、`RUSTSEC-2025-0098`、`RUSTSEC-2025-0100`；该路径用于Tauri构建/URL pattern contract，
   不处理Sigil provider或tool网络数据。
@@ -227,6 +229,14 @@ record schema 和 public trait，避免把 API key、OAuth token 与 continuatio
 
 P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为 HTTP journal 引入另一套 secret scanner 或 event-size 常量。journal 的 exclusive lease 只解决单机同路径 writer ownership；它不替代 append-only session evidence、command identity store 或跨进程服务选主。
 
+## Public TUI Unicode text contract（RFC-0070 R70.3）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `wezterm-bidi` | `0.2.3`；默认 feature | `sigil-tui-core/text` | 对 bounded UTF-8 文本执行 UAX #9 paragraph reorder，并保留 logical/visual character mapping；不读取环境、文件或网络，不承担 grapheme-width、字体 shaping 或剪贴板策略 | `MIT AND Unicode-DFS-2016`；wezterm项目 | 仅由 public renderer-neutral core 直接消费；`Unicode-DFS-2016` 是该依赖数据文件/软件许可，已加入 `deny.toml` 显式 allowlist。升级时必须复跑 bidi、ZWJ/Rule X9、feature powerset、package dry-run 与 `cargo deny` |
+
+该依赖的 Rule X9 控制字符处理由 `sigil-tui-core` 补齐为完整 mapping；public contract 仍以代码点索引为边界，不能将其描述为完整 terminal cell-width 或 grapheme selection 实现。
+
 ## 发布前扫描与显式例外（E21.17）
 
 2026-07-12 使用 `cargo-audit 0.22.2` 与 `cargo-deny 0.20.2` 对启用 all-features 的 workspace 依赖图执行扫描。首次扫描发现 `crossbeam-epoch 0.9.18`、`quinn-proto 0.11.14` 与经 `syntect` 默认 plist feature 引入的 `quick-xml 0.39.4` 存在已公开漏洞。处置如下：
@@ -272,7 +282,6 @@ cargo audit \
   --ignore RUSTSEC-2024-0418 \
   --ignore RUSTSEC-2024-0419 \
   --ignore RUSTSEC-2024-0420 \
-  --ignore RUSTSEC-2024-0429 \
   --ignore RUSTSEC-2024-0436 \
   --ignore RUSTSEC-2025-0075 \
   --ignore RUSTSEC-2025-0080 \

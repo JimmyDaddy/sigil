@@ -3339,3 +3339,11 @@ host-observable observer contract。
 会被补回完整 logical/visual mapping，emoji ZWJ 序列不再触发越界或丢失控制字符。core、release-profile
 qualification、fmt 与 diff check 通过。该 slice 仍不把代码点映射等同于完整 grapheme-width/selection 资格，
 也不替代 R70.8 的真实发布、release-cycle 与用户验证。
+
+R70.3 dependency follow-up（2026-08-28）：公开 Unicode contract 使用的 `wezterm-bidi 0.2.3` 所需
+`Unicode-DFS-2016` 已加入统一 license allowlist，并在依赖台账登记用途与边界；锁定的 `h2 0.4.16` 同时
+升级到 `0.4.16` 以消除 `RUSTSEC-2026-0258`。`cargo deny check`（advisories/bans/licenses/sources）、
+policy consistency、package gate 与现有 framework qualification 通过；`cargo audit` 仍报告锁定的
+`glib 0.18.5` 对应 `RUSTSEC-2024-0429`，因此该精确 exception 继续保留；`cargo deny` 对同一 ID 的
+advisory-not-detected 只记录为工具数据库差异，不作为风险消失证明。该修复不改变 R70.8 release-cycle/
+user-validation 的外部条件。
