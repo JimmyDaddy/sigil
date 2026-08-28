@@ -3397,3 +3397,11 @@ PR CI 随后发现 physical Rust test-layout gate 在 `origin/main` 已存在 in
 
 该 slice 只修复 CI gate 的真实测试布局缺口，不改变生产行为，也不伪造 R70.8 所需的 crates.io preview、release
 cycle 或 user-validation evidence；R70.8 在这些外部条件完成前继续保持 In Progress。
+
+### R70.8 desktop contract regeneration（2026-08-29）
+
+远端 Desktop contract job 发现 Rust HTTP application routes 已进入 OpenAPI，但 Desktop 提交的 snapshot 与
+generated TypeScript DTO 未同步。已按仓库规定的 `pnpm --dir apps/desktop contract:generate` 更新
+`apps/desktop/contracts/sigil-openapi.json` 与 `apps/desktop/src/generated/http-schema.ts`，并通过完整
+`pnpm --dir apps/desktop check`（contract、UI system、typecheck、287 个前端测试和 production build）。该修复
+不改变 transport contract 的定义，也不伪造 R70.8 的 crates.io preview、release-cycle 或 user-validation evidence。

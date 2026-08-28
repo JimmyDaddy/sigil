@@ -1156,6 +1156,157 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/application": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the transport-neutral application projection
+         * @description Returns the bounded application projection after applying the durable snapshot/feed reducer. The client identity is supplied by the x-sigil-application-client-id header.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header: {
+                    "x-sigil-application-client-id": components["parameters"]["ApplicationClientId"];
+                };
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Bounded application projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ApplicationProjection"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/application/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Execute one transport-neutral application command
+         * @description Reserves and dispatches a typed application command using the durable client identity supplied by the x-sigil-application-client-id header. Commands without a lossless HTTP host mapping are rejected explicitly during migration.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "x-sigil-application-client-id": components["parameters"]["ApplicationClientId"];
+                };
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ApplicationCommandRequest"];
+                };
+            };
+            responses: {
+                /** @description Typed application receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ApplicationCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/application/page": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one bounded application projection page
+         * @description Reads a renderer-safe, frontier-bound transcript page through the same application port used by application clients.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    before?: number;
+                };
+                header: {
+                    "x-sigil-application-client-id": components["parameters"]["ApplicationClientId"];
+                };
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Bounded renderer-safe application page */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ApplicationProjectionPage"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/continuity": {
         parameters: {
             query?: never;
@@ -2372,6 +2523,13 @@ export interface components {
             label: string;
             unavailable_reason?: string | null;
         };
+        /** @description Typed settlement, replay, rejection, conflict, in-flight, or uncertain application outcome. */
+        ApplicationCommandReceipt: Record<string, never> | Record<string, never> | Record<string, never> | Record<string, never> | Record<string, never> | Record<string, never>;
+        ApplicationCommandRequest: {
+            /** @description Versioned grouped application command. The server validates its schema and host binding. */
+            command: Record<string, never>;
+            command_id: string;
+        };
         ApplicationExtensionCatalog: {
             agents: components["schemas"]["ApplicationAgentCatalogEntry"][];
             commands: components["schemas"]["ApplicationCommandCatalogEntry"][];
@@ -2390,6 +2548,42 @@ export interface components {
             reasoning_effort_binding?: string | null;
             /** @enum {string} */
             recommendation: "recommended" | "standard";
+        };
+        ApplicationProjection: {
+            agents: Record<string, never>;
+            approval: Record<string, never>;
+            attention: Record<string, never>;
+            capabilities: Record<string, never>;
+            configuration: Record<string, never>;
+            conversation: Record<string, never>;
+            frontier: Record<string, never>;
+            /** Format: uint64 */
+            observer_generation: number;
+            plan_task: Record<string, never>;
+            resource_recovery?: Record<string, never>;
+            run: Record<string, never>;
+            /** @constant */
+            schema_version: 1;
+            scope: Record<string, never>;
+            session: Record<string, never>;
+            /** Format: uint64 */
+            stream_generation: number;
+            user_input: Record<string, never>;
+            /** Format: uint64 */
+            writer_generation: number;
+        };
+        ApplicationProjectionPage: {
+            after: string | null;
+            at_frontier: Record<string, never>;
+            before: string | null;
+            items: Record<string, never>[];
+            query: string;
+            request_id: string;
+            scope: Record<string, never>;
+            /** Format: uint64 */
+            source_generation: number;
+            /** Format: uint64 */
+            total: number;
         };
         ApplicationSkillBinding: {
             index_fingerprint: string;
@@ -4727,6 +4921,7 @@ export interface components {
         };
     };
     parameters: {
+        ApplicationClientId: string;
         CallId: string;
         RunId: string;
         SessionId: string;
