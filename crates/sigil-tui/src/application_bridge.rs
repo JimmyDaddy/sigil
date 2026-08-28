@@ -16,6 +16,7 @@ use sigil_application::{
     ApplicationQueueMoveDirection, ApplicationQueueTarget, ApplicationReasoningEffort,
     ApplicationRecoveryAction, ApplicationScope, AuthenticatedSubject, ConversationCommand,
     HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand, UserInputCommand,
+    VerificationCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -117,6 +118,14 @@ impl TuiApplicationSession {
                 | AppAction::LoadIntentStack { .. }
                 | AppAction::PreviewIntentDrop { .. }
                 | AppAction::ExecuteIntentDrop { .. }
+                | AppAction::CheckChangedFilesDiagnostics
+                | AppAction::CleanMutationArtifacts { .. }
+                | AppAction::DeleteMutationArtifact { .. }
+                | AppAction::ApproveVerificationCheck { .. }
+                | AppAction::SandboxVerificationCheck { .. }
+                | AppAction::RerunTaskVerification { .. }
+                | AppAction::ReviewTaskIntegration { .. }
+                | AppAction::AcceptTaskIntegration { .. }
         ) {
             return Ok(None);
         }
@@ -417,6 +426,44 @@ impl TuiApplicationSession {
                         request_id: sigil_application::SafeText::new(request_id.to_string())?,
                         request: request.clone(),
                     },
+                },
+            )),
+            AppAction::CheckChangedFilesDiagnostics => Some(ApplicationCommand::Verification(
+                VerificationCommand::CheckChangedFilesDiagnostics,
+            )),
+            AppAction::CleanMutationArtifacts { target } => Some(ApplicationCommand::Verification(
+                VerificationCommand::CleanMutationArtifacts {
+                    target: target.clone(),
+                },
+            )),
+            AppAction::DeleteMutationArtifact { artifact_id } => Some(
+                ApplicationCommand::Verification(VerificationCommand::DeleteMutationArtifact {
+                    artifact_id: sigil_application::SafeText::new(artifact_id.clone())?,
+                }),
+            ),
+            AppAction::ApproveVerificationCheck { check_spec_id } => Some(
+                ApplicationCommand::Verification(VerificationCommand::ApproveVerificationCheck {
+                    check_spec_id: sigil_application::SafeText::new(check_spec_id.clone())?,
+                }),
+            ),
+            AppAction::SandboxVerificationCheck { check_spec_id } => Some(
+                ApplicationCommand::Verification(VerificationCommand::SandboxVerificationCheck {
+                    check_spec_id: sigil_application::SafeText::new(check_spec_id.clone())?,
+                }),
+            ),
+            AppAction::RerunTaskVerification { request } => Some(ApplicationCommand::Verification(
+                VerificationCommand::RerunTaskVerification {
+                    request: request.clone(),
+                },
+            )),
+            AppAction::ReviewTaskIntegration { request } => Some(ApplicationCommand::Verification(
+                VerificationCommand::ReviewTaskIntegration {
+                    request: request.clone(),
+                },
+            )),
+            AppAction::AcceptTaskIntegration { request } => Some(ApplicationCommand::Verification(
+                VerificationCommand::AcceptTaskIntegration {
+                    request: request.clone(),
                 },
             )),
             AppAction::QueueConversationInput {
@@ -925,6 +972,46 @@ impl TuiWorkerCommandExecutor {
             ApplicationCommand::Agent(AgentCommand::Background) => {
                 WorkerCommand::BackgroundActiveAgent
             }
+            ApplicationCommand::Verification(command) => match command {
+                VerificationCommand::CheckChangedFilesDiagnostics => {
+                    WorkerCommand::CheckChangedFilesDiagnostics
+                }
+                VerificationCommand::CleanMutationArtifacts { target } => {
+                    WorkerCommand::CleanMutationArtifacts {
+                        target: target.clone(),
+                    }
+                }
+                VerificationCommand::DeleteMutationArtifact { artifact_id } => {
+                    WorkerCommand::DeleteMutationArtifact {
+                        artifact_id: artifact_id.as_str().to_owned(),
+                    }
+                }
+                VerificationCommand::ApproveVerificationCheck { check_spec_id } => {
+                    WorkerCommand::ApproveVerificationCheck {
+                        check_spec_id: check_spec_id.as_str().to_owned(),
+                    }
+                }
+                VerificationCommand::SandboxVerificationCheck { check_spec_id } => {
+                    WorkerCommand::SandboxVerificationCheck {
+                        check_spec_id: check_spec_id.as_str().to_owned(),
+                    }
+                }
+                VerificationCommand::RerunTaskVerification { request } => {
+                    WorkerCommand::RerunTaskVerification {
+                        request: request.clone(),
+                    }
+                }
+                VerificationCommand::ReviewTaskIntegration { request } => {
+                    WorkerCommand::ReviewTaskIntegration {
+                        request: request.clone(),
+                    }
+                }
+                VerificationCommand::AcceptTaskIntegration { request } => {
+                    WorkerCommand::AcceptTaskIntegration {
+                        request: request.clone(),
+                    }
+                }
+            },
             ApplicationCommand::Conversation(ConversationCommand::Recovery { action }) => {
                 match action {
                     ApplicationRecoveryAction::StartCompaction => WorkerCommand::StartV2Compaction,

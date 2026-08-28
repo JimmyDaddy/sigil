@@ -585,6 +585,32 @@ pub enum UserInputCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerificationCommand {
+    CheckChangedFilesDiagnostics,
+    CleanMutationArtifacts {
+        target: sigil_kernel::MutationArtifactCleanupTarget,
+    },
+    DeleteMutationArtifact {
+        artifact_id: SafeText,
+    },
+    ApproveVerificationCheck {
+        check_spec_id: SafeText,
+    },
+    SandboxVerificationCheck {
+        check_spec_id: SafeText,
+    },
+    RerunTaskVerification {
+        request: sigil_kernel::TaskVerificationRerunRequest,
+    },
+    ReviewTaskIntegration {
+        request: sigil_kernel::TaskIntegrationReviewRequest,
+    },
+    AcceptTaskIntegration {
+        request: sigil_kernel::TaskIntegrationReviewRequest,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionCommand {
     Create,
     Switch { binding: String },
@@ -622,6 +648,7 @@ pub enum ApplicationCommand {
     PlanTask(PlanTaskCommand),
     Agent(AgentCommand),
     UserInput(UserInputCommand),
+    Verification(VerificationCommand),
     Session(SessionCommand),
     Configuration(ConfigurationCommand),
     Provider(ProviderCommand),
@@ -638,6 +665,7 @@ impl ApplicationCommand {
             Self::PlanTask(_) => "plan_task",
             Self::Agent(_) => "agent",
             Self::UserInput(_) => "user_input",
+            Self::Verification(_) => "verification",
             Self::Session(_) => "session",
             Self::Configuration(_) => "configuration",
             Self::Provider(_) => "provider",
@@ -672,6 +700,11 @@ impl ApplicationCommand {
                 requires_session: true,
             },
             Self::Run(RunCommand::Start) | Self::PlanTask(_) | Self::Agent(_) => CommandPolicy {
+                lane: CommandLane::Interactive,
+                settlement: EffectSettlementClass::IdempotentWithKey,
+                requires_session: true,
+            },
+            Self::Verification(_) => CommandPolicy {
                 lane: CommandLane::Interactive,
                 settlement: EffectSettlementClass::IdempotentWithKey,
                 requires_session: true,
