@@ -8,6 +8,7 @@ pub use runtime::{
     UpdateOutcome, Viewport,
 };
 pub use sigil_tui_core as core;
+pub use sigil_tui_core::text::{BidiLineMap, BidiText};
 pub use sigil_tui_core::theme::{SemanticTheme, ThemeColor, ThemeRole};
 pub use sigil_tui_core::widgets::{WidgetKind, WidgetSpec, WidgetTree};
 pub use sigil_tui_core::{

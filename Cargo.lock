@@ -5916,6 +5916,9 @@ dependencies = [
 [[package]]
 name = "sigil-tui-core"
 version = "0.1.0"
+dependencies = [
+ "wezterm-bidi",
+]
 
 [[package]]
 name = "sigil-tui-host"

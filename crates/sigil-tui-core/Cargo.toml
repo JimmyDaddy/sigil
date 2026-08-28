@@ -14,5 +14,8 @@ categories = ["gui", "command-line-interface"]
 [lib]
 name = "sigil_tui_core"
 
+[dependencies]
+wezterm-bidi.workspace = true
+
 [lints]
 workspace = true

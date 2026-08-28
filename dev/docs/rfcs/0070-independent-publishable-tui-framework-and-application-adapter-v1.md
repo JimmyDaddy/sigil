@@ -3316,3 +3316,13 @@ transcript 的 64-item resident window、variable-height lookup、100k same-targ
 Unicode input 和 dense hit-grid bound；输出保存在 ignored qualification directory，不进入用户 durable state。
 本 slice 的 framework qualification 为 `3 passed`，并通过 core tests、fmt、diff check。该 slice 证明 framework
 complexity/invariant 条件，不替代 R70.8 的真实发布、release-cycle 与用户验证。
+### R70.3 public Unicode/UAX #9 follow-up（2026-08-28）
+
+public `sigil-tui-core` 新增 application-neutral `BidiText` 与 `BidiLineMap`。它使用 bounded UTF-8 输入执行
+UAX #9 paragraph reorder，并同时提供 visual→logical 与 logical→visual character mapping；超出 surface text
+预算时 fail closed。`sigil-tui` facade 重导出该 contract，host 仍可在 Ratatui styled-line adapter 中保留样式
+拼接，不把 provider/domain 类型带入 core。
+
+core bidi bijection test、public release-profile qualification（3/3）、framework check、fmt 与 diff check 通过。
+该 slice 补齐 public Unicode/bidi contract，但不把仅有 character map 误称为完整 grapheme-width/selection
+资格；这些仍由 host interaction matrix 与最终 release qualification 继续验证。

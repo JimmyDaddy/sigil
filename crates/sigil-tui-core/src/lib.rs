@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod text;
 pub mod theme;
 pub mod widgets;
 
