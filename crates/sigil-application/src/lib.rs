@@ -300,16 +300,30 @@ pub enum ApplicationQueueAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationRecoveryActionKind {
+    StartCompaction,
+    PreviewCompaction,
     PrepareCompaction,
+    CancelCompactionReview,
     ApplyCompaction,
     ApplyStandaloneToolOutputShrink,
+    PreviewCheckpointRestore,
+    ExecuteCheckpointRestore,
+    ForkCheckpoint,
     RestoreCheckpoint,
     ForkConversation,
+    LoadIntentStack,
+    PreviewIntentDrop,
+    ExecuteIntentDrop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationRecoveryAction {
+    StartCompaction,
+    PreviewCompaction,
     PrepareCompaction {
+        preview_id: SafeText,
+    },
+    CancelCompactionReview {
         preview_id: SafeText,
     },
     ApplyCompaction {
@@ -318,14 +332,44 @@ pub enum ApplicationRecoveryAction {
     ApplyStandaloneToolOutputShrink {
         preview_id: SafeText,
     },
+    PreviewCheckpointRestore {
+        checkpoint_id: SafeText,
+        checkpoint_digest: SafeText,
+        request_id: SafeText,
+    },
+    ExecuteCheckpointRestore {
+        checkpoint_id: SafeText,
+        checkpoint_digest: SafeText,
+        request_id: SafeText,
+    },
+    ForkCheckpoint {
+        checkpoint_id: SafeText,
+        checkpoint_digest: SafeText,
+        request_id: SafeText,
+    },
     RestoreCheckpoint {
         checkpoint_id: SafeText,
         checkpoint_digest: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<SafeText>,
     },
     ForkConversation {
         source_turn_digest: SafeText,
         connection_id: SafeText,
         model_id: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<SafeText>,
+    },
+    LoadIntentStack {
+        request_id: SafeText,
+    },
+    PreviewIntentDrop {
+        request_id: SafeText,
+        intent_ref: sigil_kernel::IntentVersionRef,
+    },
+    ExecuteIntentDrop {
+        request_id: SafeText,
+        request: sigil_kernel::IntentDropRequestV1,
     },
 }
 
@@ -333,13 +377,28 @@ impl ApplicationRecoveryAction {
     #[must_use]
     pub const fn kind(&self) -> ApplicationRecoveryActionKind {
         match self {
+            Self::StartCompaction => ApplicationRecoveryActionKind::StartCompaction,
+            Self::PreviewCompaction => ApplicationRecoveryActionKind::PreviewCompaction,
             Self::PrepareCompaction { .. } => ApplicationRecoveryActionKind::PrepareCompaction,
+            Self::CancelCompactionReview { .. } => {
+                ApplicationRecoveryActionKind::CancelCompactionReview
+            }
             Self::ApplyCompaction { .. } => ApplicationRecoveryActionKind::ApplyCompaction,
             Self::ApplyStandaloneToolOutputShrink { .. } => {
                 ApplicationRecoveryActionKind::ApplyStandaloneToolOutputShrink
             }
+            Self::PreviewCheckpointRestore { .. } => {
+                ApplicationRecoveryActionKind::PreviewCheckpointRestore
+            }
+            Self::ExecuteCheckpointRestore { .. } => {
+                ApplicationRecoveryActionKind::ExecuteCheckpointRestore
+            }
+            Self::ForkCheckpoint { .. } => ApplicationRecoveryActionKind::ForkCheckpoint,
             Self::RestoreCheckpoint { .. } => ApplicationRecoveryActionKind::RestoreCheckpoint,
             Self::ForkConversation { .. } => ApplicationRecoveryActionKind::ForkConversation,
+            Self::LoadIntentStack { .. } => ApplicationRecoveryActionKind::LoadIntentStack,
+            Self::PreviewIntentDrop { .. } => ApplicationRecoveryActionKind::PreviewIntentDrop,
+            Self::ExecuteIntentDrop { .. } => ApplicationRecoveryActionKind::ExecuteIntentDrop,
         }
     }
 }

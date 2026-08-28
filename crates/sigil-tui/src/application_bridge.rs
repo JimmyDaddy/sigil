@@ -14,8 +14,8 @@ use sigil_application::{
     ApplicationCommandRequest, ApplicationError, ApplicationPermissionMode, ApplicationPort,
     ApplicationProjection, ApplicationQueueAction, ApplicationQueueItemKind,
     ApplicationQueueMoveDirection, ApplicationQueueTarget, ApplicationReasoningEffort,
-    ApplicationScope, AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId,
-    McpCommand, PlanTaskCommand, RunCommand, UserInputCommand,
+    ApplicationRecoveryAction, ApplicationScope, AuthenticatedSubject, ConversationCommand,
+    HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand, UserInputCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -106,6 +106,17 @@ impl TuiApplicationSession {
                 | AppAction::CloseAgent { .. }
                 | AppAction::CancelAgent { .. }
                 | AppAction::MessageAgent { .. }
+                | AppAction::StartV2Compaction
+                | AppAction::PreviewV2Compaction
+                | AppAction::ApplyV2Compaction { .. }
+                | AppAction::ApplyStandaloneToolOutputShrink { .. }
+                | AppAction::CancelV2CompactionReview { .. }
+                | AppAction::PreviewCheckpointRestore { .. }
+                | AppAction::ExecuteCheckpointRestore { .. }
+                | AppAction::ForkConversationAtCheckpoint { .. }
+                | AppAction::LoadIntentStack { .. }
+                | AppAction::PreviewIntentDrop { .. }
+                | AppAction::ExecuteIntentDrop { .. }
         ) {
             return Ok(None);
         }
@@ -300,6 +311,114 @@ impl TuiApplicationSession {
                     prompt: sigil_application::SafeText::new(prompt.clone())?,
                 }))
             }
+            AppAction::StartV2Compaction => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::StartCompaction,
+                },
+            )),
+            AppAction::PreviewV2Compaction => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::PreviewCompaction,
+                },
+            )),
+            AppAction::ApplyV2Compaction { request_id } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::ApplyCompaction {
+                        preview_id: sigil_application::SafeText::new(request_id.to_string())?,
+                    },
+                },
+            )),
+            AppAction::ApplyStandaloneToolOutputShrink { request_id } => Some(
+                ApplicationCommand::Conversation(ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::ApplyStandaloneToolOutputShrink {
+                        preview_id: sigil_application::SafeText::new(request_id.to_string())?,
+                    },
+                }),
+            ),
+            AppAction::CancelV2CompactionReview { request_id } => Some(
+                ApplicationCommand::Conversation(ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::CancelCompactionReview {
+                        preview_id: sigil_application::SafeText::new(request_id.to_string())?,
+                    },
+                }),
+            ),
+            AppAction::PreviewCheckpointRestore {
+                request_id,
+                request,
+            } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::PreviewCheckpointRestore {
+                        checkpoint_id: sigil_application::SafeText::new(
+                            request.checkpoint_id.clone(),
+                        )?,
+                        checkpoint_digest: sigil_application::SafeText::new(
+                            request.checkpoint_digest.clone(),
+                        )?,
+                        request_id: sigil_application::SafeText::new(request_id.to_string())?,
+                    },
+                },
+            )),
+            AppAction::ExecuteCheckpointRestore {
+                request_id,
+                request,
+            } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::ExecuteCheckpointRestore {
+                        checkpoint_id: sigil_application::SafeText::new(
+                            request.checkpoint_id.clone(),
+                        )?,
+                        checkpoint_digest: sigil_application::SafeText::new(
+                            request.checkpoint_digest.clone(),
+                        )?,
+                        request_id: sigil_application::SafeText::new(request_id.to_string())?,
+                    },
+                },
+            )),
+            AppAction::ForkConversationAtCheckpoint {
+                request_id,
+                request,
+            } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::ForkCheckpoint {
+                        checkpoint_id: sigil_application::SafeText::new(
+                            request.checkpoint_id.clone(),
+                        )?,
+                        checkpoint_digest: sigil_application::SafeText::new(
+                            request.checkpoint_digest.clone(),
+                        )?,
+                        request_id: sigil_application::SafeText::new(request_id.to_string())?,
+                    },
+                },
+            )),
+            AppAction::LoadIntentStack { request_id } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::LoadIntentStack {
+                        request_id: sigil_application::SafeText::new(request_id.to_string())?,
+                    },
+                },
+            )),
+            AppAction::PreviewIntentDrop {
+                request_id,
+                intent_ref,
+            } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::PreviewIntentDrop {
+                        request_id: sigil_application::SafeText::new(request_id.to_string())?,
+                        intent_ref: intent_ref.clone(),
+                    },
+                },
+            )),
+            AppAction::ExecuteIntentDrop {
+                request_id,
+                request,
+            } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::ExecuteIntentDrop {
+                        request_id: sigil_application::SafeText::new(request_id.to_string())?,
+                        request: request.clone(),
+                    },
+                },
+            )),
             AppAction::QueueConversationInput {
                 prompt,
                 kind,
@@ -806,6 +925,86 @@ impl TuiWorkerCommandExecutor {
             ApplicationCommand::Agent(AgentCommand::Background) => {
                 WorkerCommand::BackgroundActiveAgent
             }
+            ApplicationCommand::Conversation(ConversationCommand::Recovery { action }) => {
+                match action {
+                    ApplicationRecoveryAction::StartCompaction => WorkerCommand::StartV2Compaction,
+                    ApplicationRecoveryAction::PreviewCompaction => {
+                        WorkerCommand::PreviewV2Compaction
+                    }
+                    ApplicationRecoveryAction::CancelCompactionReview { preview_id }
+                    | ApplicationRecoveryAction::ApplyCompaction { preview_id }
+                    | ApplicationRecoveryAction::ApplyStandaloneToolOutputShrink { preview_id } => {
+                        let request_id = parse_tui_request_id(preview_id)?;
+                        match action {
+                            ApplicationRecoveryAction::CancelCompactionReview { .. } => {
+                                WorkerCommand::CancelV2CompactionReview { request_id }
+                            }
+                            ApplicationRecoveryAction::ApplyCompaction { .. } => {
+                                WorkerCommand::ApplyV2Compaction { request_id }
+                            }
+                            ApplicationRecoveryAction::ApplyStandaloneToolOutputShrink {
+                                ..
+                            } => WorkerCommand::ApplyStandaloneToolOutputShrink { request_id },
+                            _ => unreachable!("matched compaction preview id action"),
+                        }
+                    }
+                    ApplicationRecoveryAction::PreviewCheckpointRestore {
+                        checkpoint_id,
+                        checkpoint_digest,
+                        request_id,
+                    } => WorkerCommand::PreviewCheckpointRestore {
+                        request_id: parse_tui_request_id(request_id)?,
+                        request: checkpoint_restore_request(checkpoint_id, checkpoint_digest)?,
+                    },
+                    ApplicationRecoveryAction::ExecuteCheckpointRestore {
+                        checkpoint_id,
+                        checkpoint_digest,
+                        request_id,
+                    } => WorkerCommand::ExecuteCheckpointRestore {
+                        request_id: parse_tui_request_id(request_id)?,
+                        request: checkpoint_restore_request(checkpoint_id, checkpoint_digest)?,
+                    },
+                    ApplicationRecoveryAction::ForkCheckpoint {
+                        checkpoint_id,
+                        checkpoint_digest,
+                        request_id,
+                    } => WorkerCommand::ForkConversationAtCheckpoint {
+                        request_id: parse_tui_request_id(request_id)?,
+                        request: checkpoint_restore_request(checkpoint_id, checkpoint_digest)?,
+                    },
+                    ApplicationRecoveryAction::LoadIntentStack { request_id } => {
+                        WorkerCommand::LoadIntentStack {
+                            request_id: parse_tui_request_id(request_id)?,
+                        }
+                    }
+                    ApplicationRecoveryAction::PreviewIntentDrop {
+                        request_id,
+                        intent_ref,
+                    } => WorkerCommand::PreviewIntentDrop {
+                        request_id: parse_tui_request_id(request_id)?,
+                        intent_ref: intent_ref.clone(),
+                    },
+                    ApplicationRecoveryAction::ExecuteIntentDrop {
+                        request_id,
+                        request,
+                    } => WorkerCommand::ExecuteIntentDrop {
+                        request_id: parse_tui_request_id(request_id)?,
+                        request: request.clone(),
+                    },
+                    ApplicationRecoveryAction::PrepareCompaction { .. }
+                    | ApplicationRecoveryAction::RestoreCheckpoint { .. }
+                    | ApplicationRecoveryAction::ForkConversation { .. } => {
+                        return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(
+                            sigil_application::CommandRejection {
+                                kind: "unsupported_tui_recovery_command".to_owned(),
+                                reason:
+                                    "the TUI adapter only accepts its lossless recovery actions"
+                                        .to_owned(),
+                            },
+                        ));
+                    }
+                }
+            }
             ApplicationCommand::Conversation(ConversationCommand::Queue { action, .. }) => {
                 match action {
                     ApplicationQueueAction::Enqueue {
@@ -933,6 +1132,27 @@ impl TuiWorkerCommandExecutor {
             },
         ))
     }
+}
+
+fn parse_tui_request_id(value: &sigil_application::SafeText) -> Result<u64, ApplicationError> {
+    value.as_str().parse::<u64>().map_err(|_| {
+        ApplicationError::InvalidRequest("TUI recovery request id must be an integer".to_owned())
+    })
+}
+
+fn checkpoint_restore_request(
+    checkpoint_id: &sigil_application::SafeText,
+    checkpoint_digest: &sigil_application::SafeText,
+) -> Result<sigil_kernel::ControlledCheckpointRestoreRequest, ApplicationError> {
+    if checkpoint_id.as_str().is_empty() || checkpoint_digest.as_str().is_empty() {
+        return Err(ApplicationError::InvalidRequest(
+            "checkpoint restore binding is incomplete".to_owned(),
+        ));
+    }
+    Ok(sigil_kernel::ControlledCheckpointRestoreRequest {
+        checkpoint_id: checkpoint_id.as_str().to_owned(),
+        checkpoint_digest: checkpoint_digest.as_str().to_owned(),
+    })
 }
 
 fn parse_approval_binding(binding: &str) -> Result<(String, String, String), ApplicationError> {

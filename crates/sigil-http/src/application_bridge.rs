@@ -924,6 +924,7 @@ pub(crate) fn application_recovery_action(
         } => ApplicationRecoveryAction::RestoreCheckpoint {
             checkpoint_id: safe(checkpoint_id)?,
             checkpoint_digest: safe(checkpoint_digest)?,
+            request_id: None,
         },
         crate::HttpConversationRecoveryCommandAction::ForkConversation {
             source_turn_digest,
@@ -932,6 +933,7 @@ pub(crate) fn application_recovery_action(
             source_turn_digest: safe(source_turn_digest)?,
             connection_id: safe(&model_ref.connection_id)?,
             model_id: safe(&model_ref.model_id)?,
+            request_id: None,
         },
     })
 }
@@ -941,6 +943,19 @@ fn http_recovery_action(
 ) -> Result<crate::HttpConversationRecoveryCommandAction, ApplicationError> {
     let text = |value: &sigil_application::SafeText| value.as_str().to_owned();
     Ok(match action {
+        ApplicationRecoveryAction::StartCompaction
+        | ApplicationRecoveryAction::PreviewCompaction
+        | ApplicationRecoveryAction::CancelCompactionReview { .. }
+        | ApplicationRecoveryAction::PreviewCheckpointRestore { .. }
+        | ApplicationRecoveryAction::ExecuteCheckpointRestore { .. }
+        | ApplicationRecoveryAction::ForkCheckpoint { .. }
+        | ApplicationRecoveryAction::LoadIntentStack { .. }
+        | ApplicationRecoveryAction::PreviewIntentDrop { .. }
+        | ApplicationRecoveryAction::ExecuteIntentDrop { .. } => {
+            return Err(ApplicationError::InvalidRequest(
+                "HTTP does not expose this TUI-only recovery action".to_owned(),
+            ));
+        }
         ApplicationRecoveryAction::PrepareCompaction { preview_id } => {
             crate::HttpConversationRecoveryCommandAction::PrepareCompaction {
                 preview_id: text(preview_id),
@@ -959,6 +974,7 @@ fn http_recovery_action(
         ApplicationRecoveryAction::RestoreCheckpoint {
             checkpoint_id,
             checkpoint_digest,
+            request_id: _,
         } => crate::HttpConversationRecoveryCommandAction::RestoreCheckpoint {
             checkpoint_id: text(checkpoint_id),
             checkpoint_digest: text(checkpoint_digest),
@@ -967,6 +983,7 @@ fn http_recovery_action(
             source_turn_digest,
             connection_id,
             model_id,
+            request_id: _,
         } => crate::HttpConversationRecoveryCommandAction::ForkConversation {
             source_turn_digest: text(source_turn_digest),
             model_ref: crate::HttpProviderModelRef {
