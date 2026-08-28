@@ -2964,7 +2964,8 @@ R70.x
 - implementation commits：`d9b57da3`（`rfc-0070(R70.4): establish transport-neutral application contract`）、
   `efc7851b`（`rfc-0070(R70.4): consume durable application outbox in projection`）、`b5c0a37e`
   （`rfc-0070(R70.4): route TUI through application port`）与 `8608d6aa`
-  （`rfc-0070(R70.4): cut over HTTP reservations to application authority`）。
+  （`rfc-0070(R70.4): cut over HTTP reservations to application authority`），以及 `ffc3df4e`
+  （`rfc-0070(R70.4): stream bounded transcript pages`）。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -2992,12 +2993,14 @@ R70.x
 - snapshot-feed：`OpenProjectionRequest` 可携带 resume frontier；runtime 以 durable session stream sequence 为
   application frontier，在 bounded feed 中逐 record 生成 scope/generation/digest/前后 frontier 一致的
   `ProjectionReplaced` event。outbox projection 保留 durable record order，不再用跨 run 不唯一的 run-local sequence
-  排序；缺序、过旧或超出 feed bound 返回 reset/gap，不能拼接不连续状态。
+  排序；缺序、过旧或超出 feed bound 返回 reset/gap，不能拼接不连续状态。transcript page 通过 kernel
+  `SessionStreamRecordReader` 逐行验证 V2 envelope/session identity，并只保留有界消息、工具名称和 UTF-8 安全文本；
+  不再把整个 durable session 读入 runtime 内存。
 - validation：`cargo fmt --all --check`、`cargo check -p sigil-application -p sigil-runtime`、
   `cargo check -p sigil-tui --tests`、application/runtime strict clippy、application tests `3 passed`、runtime
   projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
   `2 passed`、TUI launcher regression `1 passed`，以及 runtime application-filtered regression `106 passed`、
-  `git diff --check`。
+  `git diff --check`；`transcript_page` scope/boundary/reasoning/UTF-8 regression `3 passed`。
 - remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
   HTTP reservation cutover 与 resumable snapshot-feed 基础已分别落地，但不关闭 R70.4。TUI 尚有未迁移旧动作，
   HTTP command domain execution 尚未完全收敛到同一 application service；feed 的跨 surface ACK/restart
