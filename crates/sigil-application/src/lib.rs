@@ -157,6 +157,12 @@ pub enum ConversationCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options: Option<Box<RunStartOptions>>,
     },
+    SubmitPromptWithAttachments {
+        prompt: SafeText,
+        attachments: Vec<sigil_kernel::ImageAttachment>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Box<RunStartOptions>>,
+    },
     Queue {
         expected_generation: SafeText,
         action: ApplicationQueueAction,
@@ -681,6 +687,13 @@ impl ApplicationCommand {
                 settlement: EffectSettlementClass::ExternalOrWorkspaceEffect,
                 requires_session: true,
             },
+            Self::Conversation(ConversationCommand::SubmitPromptWithAttachments { .. }) => {
+                CommandPolicy {
+                    lane: CommandLane::Interactive,
+                    settlement: EffectSettlementClass::ExternalOrWorkspaceEffect,
+                    requires_session: true,
+                }
+            }
             Self::Conversation(
                 ConversationCommand::Queue { .. } | ConversationCommand::Recovery { .. },
             ) => CommandPolicy {

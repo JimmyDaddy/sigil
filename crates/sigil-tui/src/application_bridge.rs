@@ -118,6 +118,7 @@ impl TuiApplicationSession {
         if !matches!(
             action,
             AppAction::SubmitPrompt(_)
+                | AppAction::SubmitPromptWithAttachments { .. }
                 | AppAction::CancelRun
                 | AppAction::ApprovalDecision { .. }
                 | AppAction::ActivateLazyMcp {
@@ -180,6 +181,16 @@ impl TuiApplicationSession {
             AppAction::SubmitPrompt(prompt) => Some(ApplicationCommand::Conversation(
                 ConversationCommand::SubmitPrompt {
                     prompt: Some(sigil_application::SafeText::new(prompt.clone())?),
+                    options: None,
+                },
+            )),
+            AppAction::SubmitPromptWithAttachments {
+                prompt,
+                attachments,
+            } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::SubmitPromptWithAttachments {
+                    prompt: sigil_application::SafeText::new(prompt.clone())?,
+                    attachments: attachments.clone(),
                     options: None,
                 },
             )),
@@ -867,6 +878,24 @@ impl TuiWorkerCommandExecutor {
                         reason: "the TUI worker adapter requires a prompt".to_owned(),
                     },
                 ));
+            }
+            ApplicationCommand::Conversation(
+                ConversationCommand::SubmitPromptWithAttachments {
+                    prompt,
+                    attachments,
+                    options,
+                },
+            ) => {
+                let reasoning_effort = options
+                    .as_ref()
+                    .and_then(|options| options.reasoning_effort)
+                    .map(tui_reasoning_effort)
+                    .unwrap_or_else(|| self.reasoning_effort.clone());
+                WorkerCommand::SubmitPromptWithAttachments {
+                    prompt: prompt.as_str().to_owned(),
+                    attachments: attachments.clone(),
+                    reasoning_effort,
+                }
             }
             ApplicationCommand::Run(RunCommand::Cancel { .. }) => WorkerCommand::CancelRun,
             ApplicationCommand::Run(RunCommand::UpdatePermissionMode { mode }) => {
