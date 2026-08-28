@@ -2880,7 +2880,7 @@ R70.x
 
 ### R70.0：冻结基线、能力清单与 profiler（2026-08-28）
 
-- implementation commit：`rfc-0070(R70.0): establish post-R71 TUI baseline`；基线提交为
+- implementation commit：`c30cd3846b2dfe05e4287fc2fb98045d0e4146f2`（`rfc-0070(R70.0): establish post-R71 TUI baseline`）；基线提交为
   `c3b3982388e8e97a19ac1adb3576b6f8063d806f`，R71 qualified implementation candidate 为
   `ec5459d829e086fbb73f090dcb3201f649d99d7b`。
 - moved authority：没有移动 Resource Authority、Sandbox 或 permission/resource/recovery owner；本 slice
