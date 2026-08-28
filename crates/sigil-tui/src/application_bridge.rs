@@ -37,6 +37,7 @@ pub(crate) struct TuiApplicationSession {
     reasoning_effort: ApplicationReasoningEffort,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
+    mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,12 @@ struct TuiSessionMaintenanceBinding {
     current_model_route: Option<sigil_kernel::ResolvedModelRoute>,
     delete_preview: Option<sigil_runtime::SessionDeletePreview>,
     retention_preview: Option<sigil_runtime::SessionRetentionPreview>,
+}
+
+#[derive(Debug, Clone)]
+struct TuiMcpOAuthBinding {
+    server_name: String,
+    callback: Option<sigil_kernel::SecretString>,
 }
 
 impl std::fmt::Debug for TuiApplicationSession {
@@ -74,6 +81,7 @@ impl TuiApplicationSession {
         session_maintenance_bindings: Arc<
             Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>,
         >,
+        mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
     ) -> Result<Self, ApplicationError> {
         Ok(Self {
             client: ApplicationClient::new(
@@ -86,6 +94,7 @@ impl TuiApplicationSession {
             reasoning_effort,
             session_bindings,
             session_maintenance_bindings,
+            mcp_oauth_bindings,
         })
     }
 
@@ -140,6 +149,37 @@ impl TuiApplicationSession {
         Ok(binding)
     }
 
+    fn bind_mcp_oauth(
+        &self,
+        server_name: &str,
+        action: &crate::runner::McpOAuthUserAction,
+    ) -> Result<String, ApplicationError> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"sigil-tui-mcp-oauth-binding-v1\0");
+        hasher.update(server_name.as_bytes());
+        hasher.update(format!("{action:?}").as_bytes());
+        let digest = hasher.finalize();
+        let binding = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let callback = match action {
+            crate::runner::McpOAuthUserAction::ManualCallback(callback) => Some(callback.clone()),
+            _ => None,
+        };
+        self.mcp_oauth_bindings
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .insert(
+                binding.clone(),
+                TuiMcpOAuthBinding {
+                    server_name: server_name.to_owned(),
+                    callback,
+                },
+            );
+        Ok(binding)
+    }
+
     pub(crate) async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
         self.client.refresh().await
     }
@@ -164,6 +204,7 @@ impl TuiApplicationSession {
                     server_name: Some(_),
                 }
                 | AppAction::RefreshMcpServer { .. }
+                | AppAction::McpOAuth { .. }
                 | AppAction::SubmitUserInputDecision { .. }
                 | AppAction::UpdateActiveRunPermissionMode { .. }
                 | AppAction::QueueConversationInput { .. }
@@ -295,6 +336,15 @@ impl TuiApplicationSession {
                     binding: server_name.clone(),
                 }))
             }
+            AppAction::McpOAuth {
+                server_name,
+                action,
+            } => Some(ApplicationCommand::Mcp(McpCommand::OAuth {
+                binding: sigil_application::SafeText::new(
+                    self.bind_mcp_oauth(server_name, action)?,
+                )?,
+                action: application_mcp_oauth_action(action),
+            })),
             AppAction::SubmitUserInputDecision {
                 command_id: _,
                 request_id,
@@ -955,12 +1005,14 @@ pub(crate) fn build_for_worker(
     let application_reasoning_effort = application_reasoning_effort(&reasoning_effort);
     let session_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let session_maintenance_bindings = Arc::new(Mutex::new(BTreeMap::new()));
+    let mcp_oauth_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let executor = Arc::new(TuiWorkerCommandExecutor {
         worker_tx,
         reasoning_effort,
         session_id: session_scope_id,
         session_bindings: Arc::clone(&session_bindings),
         session_maintenance_bindings: Arc::clone(&session_maintenance_bindings),
+        mcp_oauth_bindings: Arc::clone(&mcp_oauth_bindings),
     });
     let service = Arc::new(sigil_runtime::RuntimeApplicationService::new(
         Arc::new(projection),
@@ -979,6 +1031,7 @@ pub(crate) fn build_for_worker(
         application_reasoning_effort,
         session_bindings,
         session_maintenance_bindings,
+        mcp_oauth_bindings,
     )
     .map_err(|error| anyhow!(error))
 }
@@ -999,6 +1052,34 @@ fn application_permission_mode(mode: &sigil_kernel::PermissionMode) -> Applicati
         sigil_kernel::PermissionMode::AutoEdit => ApplicationPermissionMode::AutoEdit,
         sigil_kernel::PermissionMode::DangerFullAccess => {
             ApplicationPermissionMode::DangerFullAccess
+        }
+    }
+}
+
+fn application_mcp_oauth_action(
+    action: &crate::runner::McpOAuthUserAction,
+) -> sigil_application::ApplicationMcpOAuthAction {
+    match action {
+        crate::runner::McpOAuthUserAction::Inspect => {
+            sigil_application::ApplicationMcpOAuthAction::Inspect
+        }
+        crate::runner::McpOAuthUserAction::SignIn => {
+            sigil_application::ApplicationMcpOAuthAction::SignIn
+        }
+        crate::runner::McpOAuthUserAction::ManualCallback(_) => {
+            sigil_application::ApplicationMcpOAuthAction::ManualCallback
+        }
+        crate::runner::McpOAuthUserAction::Cancel => {
+            sigil_application::ApplicationMcpOAuthAction::Cancel
+        }
+        crate::runner::McpOAuthUserAction::Refresh => {
+            sigil_application::ApplicationMcpOAuthAction::Refresh
+        }
+        crate::runner::McpOAuthUserAction::Revoke => {
+            sigil_application::ApplicationMcpOAuthAction::Revoke
+        }
+        crate::runner::McpOAuthUserAction::ClearLocal => {
+            sigil_application::ApplicationMcpOAuthAction::ClearLocal
         }
     }
 }
@@ -1032,6 +1113,7 @@ struct TuiWorkerCommandExecutor {
     session_id: String,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
+    mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecutor {
@@ -1128,6 +1210,42 @@ impl TuiWorkerCommandExecutor {
             ApplicationCommand::Mcp(McpCommand::Refresh { binding }) => {
                 WorkerCommand::RefreshMcpServer {
                     server_name: binding.clone(),
+                }
+            }
+            ApplicationCommand::Mcp(McpCommand::OAuth { binding, action }) => {
+                let target = self.resolve_mcp_oauth_binding(binding.as_str())?;
+                let worker_action = match action {
+                    sigil_application::ApplicationMcpOAuthAction::Inspect => {
+                        crate::runner::McpOAuthUserAction::Inspect
+                    }
+                    sigil_application::ApplicationMcpOAuthAction::SignIn => {
+                        crate::runner::McpOAuthUserAction::SignIn
+                    }
+                    sigil_application::ApplicationMcpOAuthAction::ManualCallback => {
+                        crate::runner::McpOAuthUserAction::ManualCallback(
+                            target.callback.ok_or_else(|| {
+                                ApplicationError::InvalidRequest(
+                                    "MCP OAuth callback binding has no callback secret".to_owned(),
+                                )
+                            })?,
+                        )
+                    }
+                    sigil_application::ApplicationMcpOAuthAction::Cancel => {
+                        crate::runner::McpOAuthUserAction::Cancel
+                    }
+                    sigil_application::ApplicationMcpOAuthAction::Refresh => {
+                        crate::runner::McpOAuthUserAction::Refresh
+                    }
+                    sigil_application::ApplicationMcpOAuthAction::Revoke => {
+                        crate::runner::McpOAuthUserAction::Revoke
+                    }
+                    sigil_application::ApplicationMcpOAuthAction::ClearLocal => {
+                        crate::runner::McpOAuthUserAction::ClearLocal
+                    }
+                };
+                WorkerCommand::McpOAuth {
+                    server_name: target.server_name,
+                    action: worker_action,
                 }
             }
             ApplicationCommand::UserInput(UserInputCommand::Resolve {
@@ -1617,6 +1735,22 @@ impl TuiWorkerCommandExecutor {
             .ok_or_else(|| {
                 ApplicationError::InvalidRequest(
                     "session maintenance binding is not owned by this TUI connection".to_owned(),
+                )
+            })
+    }
+
+    fn resolve_mcp_oauth_binding(
+        &self,
+        binding: &str,
+    ) -> Result<TuiMcpOAuthBinding, ApplicationError> {
+        self.mcp_oauth_bindings
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .get(binding)
+            .cloned()
+            .ok_or_else(|| {
+                ApplicationError::InvalidRequest(
+                    "MCP OAuth binding is not owned by this TUI connection".to_owned(),
                 )
             })
     }

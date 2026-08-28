@@ -673,8 +673,27 @@ pub enum ProviderCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum McpCommand {
-    Activate { binding: String },
-    Refresh { binding: String },
+    Activate {
+        binding: String,
+    },
+    Refresh {
+        binding: String,
+    },
+    OAuth {
+        binding: SafeText,
+        action: ApplicationMcpOAuthAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationMcpOAuthAction {
+    Inspect,
+    SignIn,
+    ManualCallback,
+    Cancel,
+    Refresh,
+    Revoke,
+    ClearLocal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
