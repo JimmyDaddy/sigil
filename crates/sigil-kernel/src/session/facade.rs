@@ -1972,6 +1972,17 @@ impl Session {
         crate::ProviderPhysicalAttemptProjection::from_records(&records)
     }
 
+    /// Closes provider physical attempts that crossed the send barrier before a process loss.
+    ///
+    /// Restart reconciliation owns this repair boundary. It is idempotent and deliberately does
+    /// not retry the provider request; callers must still require an explicit task continuation
+    /// before admitting a replacement execution attempt.
+    pub fn recover_unfinished_provider_physical_attempts(&self, now_unix_ms: u64) -> Result<usize> {
+        self.store.as_ref().map_or(Ok(0), |store| {
+            store.recover_unfinished_provider_physical_attempts(now_unix_ms)
+        })
+    }
+
     /// Rebuilds provider-turn recovery authority from the durable stream without dispatching a
     /// replacement request. Runtime restart recovery must claim this projection before I/O.
     pub fn provider_turn_recovery_projection(

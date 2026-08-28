@@ -2231,3 +2231,18 @@ fn shutdown_without_active_run_does_not_emit_events() -> Result<()> {
     worker.join()?;
     Ok(())
 }
+
+#[test]
+fn managed_records_leaf_keeps_its_logical_session_reference() -> Result<()> {
+    let managed = std::path::Path::new("/state/managed/session-log/session-123/records.jsonl");
+    assert_eq!(
+        session_ref_for_log_path(managed).map_err(anyhow::Error::msg)?,
+        SessionRef::new_relative("session-123.jsonl")?
+    );
+    let direct = std::path::Path::new("/state/sessions/records.jsonl");
+    assert_eq!(
+        session_ref_for_log_path(direct).map_err(anyhow::Error::msg)?,
+        SessionRef::new_relative("records.jsonl")?
+    );
+    Ok(())
+}

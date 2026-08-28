@@ -212,6 +212,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             let managed_extension_execution = authority_composition
                 .as_ref()
                 .map(|composition| Arc::clone(&composition.extension_execution));
+            let managed_command_execution = authority_composition
+                .as_ref()
+                .map(|composition| Arc::clone(&composition.command_execution));
             let managed_verification_execution = authority_composition.as_ref().map(|composition| {
                 Arc::clone(&composition.command_execution)
                     as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
@@ -317,7 +320,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 dyn sigil_kernel::TerminalLifecycleSinkFactory,
             > =
                 Arc::new(terminal_lifecycle_router.clone());
-            let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution(
+            let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
                     &root_config,
                     &provider_capabilities,
                     workspace_root.clone(),
@@ -326,6 +329,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     workspace_trust,
                     terminal_lifecycle_factory,
                     managed_extension_execution.clone(),
+                    managed_command_execution.clone(),
                 ) {
                     Ok(surface) => surface,
                     Err(error) => {

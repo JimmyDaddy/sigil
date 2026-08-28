@@ -1159,6 +1159,38 @@ pub(in crate::runner) async fn build_skill_child_role_runtime(
         root_config.task.max_planning_research_agents,
     )
     .with_integration_verification_port(verification_execution_port.clone());
+    let tool_authority = options.tool_authority.clone();
+    let mut planner_options = sigil_runtime::build_role_run_options(
+        root_config,
+        workspace_root.clone(),
+        interaction_mode,
+        AgentRole::Planner,
+    );
+    let mut executor_options = sigil_runtime::build_role_run_options(
+        root_config,
+        workspace_root.clone(),
+        interaction_mode,
+        AgentRole::Executor,
+    );
+    let mut subagent_read_options = sigil_runtime::build_role_run_options(
+        root_config,
+        workspace_root.clone(),
+        interaction_mode,
+        AgentRole::SubagentRead,
+    );
+    let mut subagent_write_options = sigil_runtime::build_role_run_options(
+        root_config,
+        workspace_root,
+        interaction_mode,
+        AgentRole::SubagentWrite,
+    );
+    if let Some(tool_authority) = tool_authority {
+        planner_options = planner_options.with_tool_authority(Arc::clone(&tool_authority));
+        executor_options = executor_options.with_tool_authority(Arc::clone(&tool_authority));
+        subagent_read_options =
+            subagent_read_options.with_tool_authority(Arc::clone(&tool_authority));
+        subagent_write_options = subagent_write_options.with_tool_authority(tool_authority);
+    }
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
             .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
@@ -1166,30 +1198,10 @@ pub(in crate::runner) async fn build_skill_child_role_runtime(
                 &root_config.task,
             ))
             .with_verification_execution_port(verification_execution_port),
-        planner_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::Planner,
-        ),
-        executor_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::Executor,
-        ),
-        subagent_read_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::SubagentRead,
-        ),
-        subagent_write_options: sigil_runtime::build_role_run_options(
-            root_config,
-            workspace_root,
-            interaction_mode,
-            AgentRole::SubagentWrite,
-        ),
+        planner_options,
+        executor_options,
+        subagent_read_options,
+        subagent_write_options,
     })
 }
 
@@ -1573,7 +1585,28 @@ pub(in crate::runner) fn session_ref_for_log_path(
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("session.jsonl");
-    SessionRef::new_relative(file_name)
+    // Managed session leaves are physically stored as `<key>/records.jsonl`, while the
+    // durable SessionRef contract remains the direct logical `<key>.jsonl` name. Preserve that
+    // identity when artifact/lifecycle code converts a physical managed path back to a ref;
+    // otherwise `records.jsonl` resolves against the configured legacy directory and GC emits a
+    // misleading missing-file failure for every managed session.
+    let logical_file_name = if file_name == "records.jsonl"
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("session-log")
+    {
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .map(|key| format!("{key}.jsonl"))
+            .unwrap_or_else(|| file_name.to_owned())
+    } else {
+        file_name.to_owned()
+    };
+    SessionRef::new_relative(&logical_file_name)
         .map_err(|error| format!("failed to build parent session ref: {error:#}"))
 }
 

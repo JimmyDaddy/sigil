@@ -260,6 +260,54 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
 }
 
 #[tokio::test]
+async fn r71_managed_terminal_route_accepts_runtime_shell_environment_and_readiness() {
+    use sigil_tools_builtin::{ManagedTerminalExecutionPortV1, ManagedTerminalStartRequestV1};
+
+    let root = tempfile::tempdir().expect("workspace");
+    let execution_temp = tempfile::tempdir().expect("execution temp");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let route = RuntimeManagedCommandExecutionRouteV1::new(
+        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+        execution_temp.path().to_path_buf(),
+    )
+    .with_process_inventory(test_process_inventory());
+    let readiness = "runtime-terminal-ready";
+    let mut handle = route
+        .start_persistent(ManagedTerminalStartRequestV1 {
+            program: "sh".to_owned(),
+            args: vec![
+                "-lc".to_owned(),
+                format!("printf '{readiness}\\n'; while :; do sleep 1; done"),
+            ],
+            cwd: root.path().to_path_buf(),
+            environment: [(
+                "SIGIL_SCRATCH_DIR".to_owned(),
+                scratch.path().to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            pty_size: None,
+        })
+        .await
+        .expect("managed terminal route with runtime environment");
+    let mut stream = handle.take_output_stream().expect("managed stream");
+    let frame = stream
+        .next_frame()
+        .await
+        .expect("output frame")
+        .expect("readiness output");
+    assert!(String::from_utf8_lossy(&frame.payload).contains(readiness));
+    handle
+        .cancel(sigil_kernel::managed_execution::ProcessCancelReasonV1::UserCancelled)
+        .await
+        .expect("cancel terminal");
+    handle.wait_and_finalize().await.expect("terminal receipt");
+}
+
+#[tokio::test]
 async fn r71_managed_terminal_manager_cancel_waits_for_persistent_receipt() -> anyhow::Result<()> {
     let root = tempfile::tempdir().expect("workspace");
     let artifact_root = tempfile::tempdir().expect("artifacts");

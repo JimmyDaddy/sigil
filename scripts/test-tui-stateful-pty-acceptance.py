@@ -52,6 +52,11 @@ def session_evidence() -> dict[str, dict[str, str]]:
 
 
 class VtScreenTests(unittest.TestCase):
+    def test_main_tui_does_not_treat_workspace_trust_as_ready(self) -> None:
+        trust_screen = "Workspace trust\ntrust this workspace\nBuild · agent: main"
+        self.assertFalse(MODULE.looks_like_main_tui(trust_screen))
+        self.assertTrue(MODULE.looks_like_main_tui("Build · agent: main\nsigil ready"))
+
     def test_cache_fixture_is_cold_then_warm_and_aggregates_to_8_percent(self) -> None:
         observations = [MODULE.cache_usage_for_request(index) for index in range(1, 6)]
 

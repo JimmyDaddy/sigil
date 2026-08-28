@@ -1707,6 +1707,47 @@ fn seed_current_resumable_direct_task(session: &mut Session) -> Result<TaskId> {
 }
 
 #[test]
+fn coordinator_interrupts_started_direct_attempts_during_restart_reconciliation() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let mut session = Session::new("direct-recovery", "model");
+    let task_id = seed_current_resumable_direct_task(&mut session)?;
+    let admission = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .and_then(|task| task.direct_execution_admission.clone())
+        .expect("direct task admission");
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(
+        sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 1),
+    ))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_ref()?,
+        objective: "execute the approved objective directly".to_owned(),
+        title: None,
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+
+    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 42)?;
+    assert!(actions.is_empty());
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .expect("reconciled direct task");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(
+        task.direct_execution_attempts
+            .values()
+            .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Interrupted)
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn coordinator_keeps_latest_resumable_task_as_a_typed_continuation_candidate() -> Result<()> {
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {

@@ -1014,6 +1014,7 @@ impl AppState {
             );
         }
         self.load_input_history();
+        self.refresh_session_history();
     }
 
     pub fn set_boot_cutover(

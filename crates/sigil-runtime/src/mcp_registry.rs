@@ -698,6 +698,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust(
         workspace_trust,
         None,
         None,
+        None,
     )
 }
 
@@ -732,6 +733,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
             terminal_lifecycle_sink,
         )),
         None,
+        None,
     )
 }
 
@@ -749,7 +751,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
     workspace_trust: WorkspaceTrust,
     terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
 ) -> Result<RuntimeToolSurface> {
-    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution(
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
         root_config,
         provider_capabilities,
         workspace_root,
@@ -757,6 +759,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
         runtime_event_handler,
         workspace_trust,
         terminal_lifecycle_factory,
+        None,
         None,
     )
 }
@@ -775,6 +778,41 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) -> Result<RuntimeToolSurface> {
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        workspace_trust,
+        terminal_lifecycle_factory,
+        managed_extension_execution,
+        None,
+    )
+}
+
+/// Builds the lazy-MCP tool surface with both managed Extension and command execution routes.
+///
+/// The command route is required by shipping Terminal, code-intelligence, and verification
+/// tools. Keeping it on the same composition-owned surface prevents those tools from silently
+/// falling back to direct process spawning when the worker is bootstrapped through the lazy-MCP
+/// entrypoint.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    workspace_trust: WorkspaceTrust,
+    terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
+) -> Result<RuntimeToolSurface> {
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_terminal_lifecycle(
         root_config,
         provider_capabilities,
@@ -786,6 +824,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
             terminal_lifecycle_factory,
         )),
         managed_extension_execution,
+        managed_command_execution,
     )
 }
 
@@ -806,6 +845,9 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     let _declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -818,7 +860,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         terminal_lifecycle_route,
         None,
         None,
-        None,
+        managed_command_execution,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);

@@ -51,6 +51,27 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             self.assertEqual(audit.cancelled_run_count, 1)
             self.assertEqual(audit.failed_run_count, 2)
 
+    def test_session_audit_does_not_call_controlled_paused_finalization_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory) / "session.jsonl"
+            session.write_text(
+                json.dumps(
+                    {
+                        "event_type": "run_finalized",
+                        "payload": {
+                            "run_status": "paused",
+                            "terminal_reason": "provider_recovery_cancelled",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            audit = MODULE.read_session_audit(session)
+
+            self.assertEqual(audit.failed_run_count, 0)
+
     def test_write_config_uses_v2_unauthenticated_loopback_connection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -94,6 +115,27 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             runner.sent,
             ["\x1b[<0;4;2M", "\x1b[<0;4;2m"],
         )
+
+    def test_plan_approval_accepts_workbench_that_already_replaced_card(self) -> None:
+        self.assertTrue(
+            MODULE.plan_review_workbench_visible(
+                "Plan Review · 1 steps\nRun [R]  Save [S]  Reject [X]"
+            )
+        )
+        self.assertFalse(MODULE.plan_review_workbench_visible("Plan ready"))
+
+    def test_latest_plan_surface_reads_only_the_current_plan_notice_suffix(self) -> None:
+        raw = (
+            b"validated plan draft recorded old"
+            b"\x1b[1mPlan\x1b[22m ready old\n"
+            b"validated plan draft recorded current"
+            b"\x1b[1mPlan\x1b[22m ready current\n"
+            b"\x1b[1mPlan Review\x1b[22m\nRun [R]  Reject [X]"
+        )
+        surface = MODULE.latest_plan_surface(raw)
+        self.assertNotIn("old", surface)
+        self.assertIn("Plan ready current", surface)
+        self.assertTrue(MODULE.plan_review_workbench_visible(surface))
 
     def test_request_classification_uses_typed_tools_and_role_contracts(self) -> None:
         self.assertEqual(
@@ -307,6 +349,68 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             "terminal:after_cancel",
         )
 
+    def test_request_classification_selects_current_step_from_approved_plan(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Execute the following user-approved Plan.\n"
+                        "Steps:\n"
+                        "1. Inspect kernel route\n"
+                        "Step: inspect_kernel\n"
+                        "Role: subagent_read\n"
+                        "2. Inspect runtime route\n"
+                        "Step: inspect_runtime\n"
+                        "Role: subagent_read\n"
+                        "Execute this delegated subagent step.\n"
+                        "Step: inspect_kernel\n"
+                        "Role: subagent_read"
+                    ),
+                }
+            ],
+            "tools": [],
+        }
+        self.assertEqual(MODULE.classify_request(payload), "read:inspect_kernel")
+
+    def test_managed_parent_session_files_excludes_child_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "session-parent" / "records.jsonl"
+            child = root / "pr-child" / "records.jsonl"
+            parent.parent.mkdir()
+            child.parent.mkdir()
+            parent.write_text(
+                json.dumps({"event_type": "user_message_recorded"}) + "\n",
+                encoding="utf-8",
+            )
+            child.write_text("{}\n", encoding="utf-8")
+            self.assertEqual(MODULE.managed_parent_session_files(root), [parent])
+
+    def test_managed_parent_session_files_ignores_resume_boot_identity_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "session-parent" / "records.jsonl"
+            boot = root / "session-boot" / "records.jsonl"
+            parent.parent.mkdir()
+            boot.parent.mkdir()
+            parent.write_text(
+                json.dumps({"event_type": "task_created_from_plan"}) + "\n",
+                encoding="utf-8",
+            )
+            boot.write_text(
+                "\n".join(
+                    json.dumps({"event_type": event_type})
+                    for event_type in (
+                        "workspace_trust_decision",
+                        "session_entry_recorded",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(MODULE.managed_parent_session_files(root), [parent])
+
     def test_unknown_request_fails_closed(self) -> None:
         with self.assertRaises(MODULE.AcceptanceError):
             MODULE.classify_request(
@@ -339,6 +443,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             terminal_max_output_bytes=0,
             paused_task_run_count=0,
             interrupted_step_count=0,
+            interrupted_task_run_count=0,
             cancelled_task_run_count=0,
             promotion_preview_count=0,
             promotion_authority_count=0,
@@ -391,6 +496,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             ),
             paused_task_run_count=1,
             interrupted_step_count=1,
+            interrupted_task_run_count=1,
             cancelled_task_run_count=1,
             promotion_preview_count=1,
             promotion_authority_count=1,
@@ -403,19 +509,17 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             request_counts={
                 "routing:plan_review": 6,
                 "plan_review": 6,
-                f"read:{MODULE.READ_STEP_IDS[0]}": 1,
-                f"read:{MODULE.READ_STEP_IDS[1]}": 1,
-                "write:request": 1,
-                "write:after_tool": 1,
-                "continue:step": 2,
-                "cancel:step": 1,
-                "integration:step:a": 2,
-                "integration:step:b": 2,
-                "terminal:start": 1,
-                "terminal:after_start": 1,
-                "terminal:after_cancel": 1,
-                "synthesis": 5,
-                "title": 1,
+                "direct:read": 1,
+                "direct:write:request": 1,
+                "direct:write:after_tool": 1,
+                "direct:continue": 2,
+                "direct:cancel": 1,
+                "direct:integration:a": 1,
+                "direct:integration:b": 1,
+                "direct:integration:final": 1,
+                "direct:terminal:start": 1,
+                "direct:terminal:after_start": 1,
+                "direct:terminal:after_cancel": 1,
             }
         )
 

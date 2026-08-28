@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::ComposerMode;
 use crate::app::modal_flow::ModelCatalogState;
 use crate::app::tests::common::adaptive_test_compaction_preview;
 use crate::runner::{
@@ -615,6 +616,53 @@ fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
         action,
         Some(AppAction::SubmitPlanPrompt(prompt)) if prompt == "revise this plan"
     ));
+    Ok(())
+}
+
+#[test]
+fn completed_rehydrated_plan_attention_does_not_capture_next_prompt() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text("Resume task", "Continue the approved Task", "README.md"),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("structured plan should create draft");
+    let task_id = sigil_kernel::TaskId::new("rehydrated-task")?;
+    app.set_pending_plan_approval_from_draft(&draft, None);
+    app.composer.mode = ComposerMode::Plan;
+    app.session_browser.current_entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(
+            sigil_kernel::PlanDecisionRecordedEntry {
+                plan_id: draft.plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                decision: sigil_kernel::PlanDecision::Accepted,
+                decided_by: sigil_kernel::PlanDecisionActor::User,
+                decided_at_ms: 2,
+                reason: Some("accepted and materialized".to_owned()),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(
+            sigil_kernel::TaskCreatedFromPlanEntry {
+                plan_id: draft.plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                task_id,
+                task_plan_version: 0,
+                step_mapping: Vec::new(),
+                stale_reason: None,
+                created_at_ms: 2,
+            },
+        )),
+    ];
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.pending_plan_approval().is_none());
+    assert_eq!(app.composer_mode_label(), "Build");
+    assert_eq!(app.composer.input, "x");
     Ok(())
 }
 

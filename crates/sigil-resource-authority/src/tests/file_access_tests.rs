@@ -496,6 +496,22 @@ fn r71_f_fil_006_preview_is_bounded_and_side_effect_free() {
 }
 
 #[test]
+fn r71_f_fil_013_absent_write_preview_is_an_empty_current_document() {
+    let (_workspace, service, plan) =
+        registered_plan_for_operation(None, ManagedFileOperationV1::Write);
+    let preview = service
+        .preview(ManagedFilePreviewRequestV1 {
+            plan_hash: plan.plan_hash,
+            operation: ManagedFileOperationV1::Write,
+            max_bytes: 128,
+        })
+        .expect("absent write preview");
+    assert!(preview.payload.is_empty());
+    assert_eq!(preview.observed_bytes, 0);
+    assert!(!preview.truncated);
+}
+
+#[test]
 fn r71_f_fil_007_executor_replay_is_rejected() {
     let (_workspace, service, plan) = registered_read_plan(Some("once"));
     let (request, token) = execution_request_for_plan(

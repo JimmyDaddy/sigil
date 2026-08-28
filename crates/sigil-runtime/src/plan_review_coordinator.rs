@@ -4741,6 +4741,25 @@ fn session_ref_for_log_path(path: &Path) -> Result<SessionRef> {
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("session.jsonl");
-    SessionRef::new_relative(file_name)
+    // Managed session leaves are physically `<key>/records.jsonl`, but review references use the
+    // logical direct `<key>.jsonl` identity. Never turn a managed path into `records.jsonl`, which
+    // would make lifecycle/artifact resolution fall back to the configured legacy directory.
+    let logical_file_name = if file_name == "records.jsonl"
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("session-log")
+    {
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .map(|key| format!("{key}.jsonl"))
+            .unwrap_or_else(|| file_name.to_owned())
+    } else {
+        file_name.to_owned()
+    };
+    SessionRef::new_relative(&logical_file_name)
         .map_err(|error| anyhow!("failed to build parent session ref: {error}"))
 }

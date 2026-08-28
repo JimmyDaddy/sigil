@@ -504,6 +504,29 @@ impl AppState {
 
     pub(super) fn refresh_session_history(&mut self) {
         let mut sessions = Vec::new();
+        let mut add_session = |path: PathBuf, label: String, metadata: fs::Metadata| {
+            if !session_log_has_resumable_activity(&path) {
+                return;
+            }
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let modified_epoch_secs = modified
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let bytes = metadata.len();
+            let title = session_history_title_from_log(&path);
+            sessions.push((
+                modified,
+                SessionHistoryEntry {
+                    path,
+                    label,
+                    title,
+                    modified_epoch_secs,
+                    bytes,
+                },
+            ));
+        };
+
         if let Ok(entries) = fs::read_dir(&self.session_log_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -512,37 +535,51 @@ impl AppState {
                     .and_then(|value| value.to_str())
                     .map(|value| value.eq_ignore_ascii_case("jsonl"))
                     .unwrap_or(false);
-                if !is_jsonl {
+                if is_jsonl && entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+                    let label = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("unknown")
+                        .to_owned();
+                    if let Ok(metadata) = entry.metadata() {
+                        add_session(path, label, metadata);
+                    }
+                }
+            }
+        }
+
+        // Current-schema sessions live below the authority-declared managed leaf, one opaque
+        // directory per session, rather than beside the configured legacy JSONL directory.
+        // Include those leaves in the same history projection so `resume` can resolve the exact
+        // managed source after a fresh process boot.
+        let managed_session_root = self.managed_history_writer.as_ref().and_then(|writer| {
+            writer
+                .managed_leaf_path(
+                    sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                )
+                .ok()
+        });
+        if let Some(root) = managed_session_root
+            && let Ok(entries) = fs::read_dir(root)
+        {
+            for entry in entries.flatten() {
+                let key_dir = entry.path();
+                if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
                     continue;
                 }
-                if !session_log_has_resumable_activity(&path) {
+                let path = key_dir.join("records.jsonl");
+                let Ok(metadata) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
                     continue;
                 }
-                let modified = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                let label = path
+                let label = key_dir
                     .file_name()
                     .and_then(|value| value.to_str())
                     .unwrap_or("unknown")
                     .to_owned();
-                let modified_epoch_secs = modified
-                    .duration_since(UNIX_EPOCH)
-                    .map(|duration| duration.as_secs())
-                    .unwrap_or(0);
-                let bytes = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-                let title = session_history_title_from_log(&path);
-                sessions.push((
-                    modified,
-                    SessionHistoryEntry {
-                        path,
-                        label,
-                        title,
-                        modified_epoch_secs,
-                        bytes,
-                    },
-                ));
+                add_session(path, label, metadata);
             }
         }
         sessions.sort_by(|left, right| right.0.cmp(&left.0));
@@ -715,6 +752,13 @@ impl AppState {
         notice: &str,
     ) {
         self.clear_pending_session_route_startup();
+        // A task pause/cancel/interruption restores an actual Task view, not the Plan that
+        // admitted it. Clear any plan workbench left by a prior redraw before the durable
+        // attention projection gets a chance to reopen a genuinely unresolved materialization
+        // blocker below. Without this boundary, a resumed Task can leave its accepted Plan as an
+        // input owner and capture the next user prompt.
+        self.clear_pending_plan_approval();
+        self.composer.mode = super::ComposerMode::Build;
         self.review.checkpoint_restore_preview = None;
         self.review.checkpoint_expected_request = None;
         self.review.checkpoint_request_id = None;

@@ -656,7 +656,17 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         if current_root != plan.root_identity {
             return Err(ManagedFileAccessErrorV1::SubjectIdentityDrift);
         }
-        let raw = read_relative_text(&plan)?;
+        // A write plan may intentionally target an absent leaf.  Previewing that plan is still
+        // required before the user can approve it, so an absent target is the empty current
+        // document rather than a physical failure.  The effectful path remains create-new and
+        // identity-bound in `open_relative_path_for_write`.
+        let raw = if request.operation == ManagedFileOperationV1::Write
+            && plan.expected_physical_identity.is_none()
+        {
+            String::new()
+        } else {
+            read_relative_text(&plan)?
+        };
         let safe = sigil_kernel::safe_persistence_text(&raw);
         let truncated = safe.len() > request.max_bytes;
         let payload = if truncated {

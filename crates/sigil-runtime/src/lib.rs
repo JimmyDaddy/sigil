@@ -442,6 +442,7 @@ pub use mcp_registry::{
     build_tool_surface_without_eager_mcp_with_workspace_trust,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory,
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution,
     mcp_process_receipts_summary, mcp_stdio_boundary_summary,
     refresh_mcp_server_tools_from_product_surface,

@@ -243,6 +243,60 @@ fn r71_current_boot_advances_manifest_for_a_new_persisted_config_generation() {
     assert_eq!(published, *second.cutover().manifest());
 }
 
+#[tokio::test]
+async fn r71_current_boot_command_route_starts_terminal_with_durable_inventory()
+-> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let config = dir.path().join("sigil.toml");
+    let boot = {
+        let _environment_guard = crate::test_env::lock();
+        write_r71_boot_config(&config);
+        boot_current_schema(&config, dir.path())?
+    };
+    let scratch = boot.resolved_paths().scratch_root.clone();
+    std::fs::create_dir_all(&scratch)?;
+
+    use sigil_tools_builtin::{ManagedTerminalExecutionPortV1, ManagedTerminalStartRequestV1};
+    let mut handle = boot
+        .composition()
+        .command_execution
+        .start_persistent(ManagedTerminalStartRequestV1 {
+            program: "/bin/zsh".to_owned(),
+            args: vec![
+                "-lc".to_owned(),
+                "printf 'boot-terminal-ready\\n'; while :; do sleep 1; done".to_owned(),
+            ],
+            cwd: boot.workspace_root().to_path_buf(),
+            environment: [(
+                "SIGIL_SCRATCH_DIR".to_owned(),
+                scratch.to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            pty_size: None,
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("durable boot terminal route: {error}"))?;
+    let mut stream = handle
+        .take_output_stream()
+        .map_err(|error| anyhow::anyhow!("durable boot terminal output stream: {error}"))?;
+    let frame = stream
+        .next_frame()
+        .await
+        .map_err(|error| anyhow::anyhow!("durable boot terminal output: {error}"))?
+        .ok_or_else(|| anyhow::anyhow!("durable boot terminal ended before readiness"))?;
+    assert!(String::from_utf8_lossy(&frame.payload).contains("boot-terminal-ready"));
+    handle
+        .cancel(sigil_kernel::managed_execution::ProcessCancelReasonV1::UserCancelled)
+        .await
+        .map_err(|error| anyhow::anyhow!("durable boot terminal cancel: {error}"))?;
+    handle
+        .wait_and_finalize()
+        .await
+        .map_err(|error| anyhow::anyhow!("durable boot terminal finalize: {error}"))?;
+    Ok(())
+}
+
 #[test]
 fn r71_bootstrap_metadata_missing_requires_typed_reconciliation() {
     let _environment_guard = crate::test_env::lock();

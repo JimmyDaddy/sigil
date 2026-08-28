@@ -537,6 +537,10 @@ impl ConversationCoordinator {
         parent_session_ref: &SessionRef,
         now_ms: u64,
     ) -> Result<Vec<StartDurableTaskAction>> {
+        // Close any provider physical attempt whose owner disappeared before it could append a
+        // terminal. This is a durable, idempotent repair only; task reconciliation below still
+        // pauses the affected Task and requires an explicit Continue before new provider I/O.
+        session.recover_unfinished_provider_physical_attempts(now_ms)?;
         let projection = session.task_handoff_projection();
         if projection.has_conflicts() {
             bail!("task handoff projection contains conflicting durable facts");
@@ -1288,6 +1292,18 @@ fn pause_uncertain_task(
             "interrupted during crash recovery; explicit task continue is required".to_owned(),
         );
         session.append_control(ControlEntry::TaskParticipantAttempt(interrupted))?;
+    }
+    for attempt in task
+        .direct_execution_attempts
+        .values()
+        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
+    {
+        let mut interrupted = attempt.clone();
+        interrupted.status = TaskParticipantAttemptStatus::Interrupted;
+        interrupted.reason = Some(
+            "interrupted during crash recovery; explicit task continue is required".to_owned(),
+        );
+        session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(interrupted))?;
     }
     for step in task
         .steps

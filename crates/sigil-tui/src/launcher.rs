@@ -749,6 +749,7 @@ where
             }
             let may_change_state = key.may_change_state();
             let action = app.handle_key_event(key.to_crossterm())?;
+            let break_batch = matches!(action, Some(AppAction::TrustWorkspace));
             let damage = apply_key_action_with_host(
                 app,
                 worker,
@@ -761,7 +762,10 @@ where
                 spawn_worker,
                 host_effects,
             )?;
-            Ok((false, damage))
+            // Trust installs the worker and application port synchronously, while the first
+            // application projection is committed on the next owner-loop iteration. Stop this
+            // input batch so buffered prompt bytes cannot race that initial frontier.
+            Ok((break_batch, damage))
         }
         InputEvent::Key(_) => Ok((false, Damage::NONE)),
     }
@@ -881,8 +885,12 @@ where
             app.set_frozen_boot_paths(workspace_root, paths);
             app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
             app.set_authority_composition(std::sync::Arc::new(composition));
+            // Restore the requested target before evaluating trust. A managed session log is
+            // the durable source of both the target timeline and its workspace-trust decision;
+            // checking the freshly-created bootstrap session first would send `resume` back to
+            // the trust gate and then start a new session instead of the requested one.
+            restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
             if app.workspace_is_trusted_from_history() {
-                restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
                 let trust_ready = match app.ensure_current_workspace_trust_decision(
                     "trusted workspace carried into session",
                 ) {
@@ -1601,6 +1609,31 @@ where
                 let command = app.into_worker_command(action);
                 send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
             }
+            Err(_error)
+                if matches!(
+                    action,
+                    AppAction::ApprovalDecision { .. }
+                        | AppAction::ContinueTask { .. }
+                        | AppAction::PauseTask { .. }
+                ) =>
+            {
+                // These controls are first surfaced by the worker event stream. The application
+                // projection may still be one frontier behind after a fresh resume, so do not
+                // turn a temporarily missing projection binding into a deadlocked approval or
+                // task recovery action. The worker command carries the exact durable identity
+                // and remains the lossless fallback until the application port catches up.
+                let command = app.into_worker_command(action);
+                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            }
+            Err(error) if application_action_has_lossless_worker_fallback(&action, &error) => {
+                // After resume the worker can be ready before the application projection client
+                // has reconnected. These submissions carry the same durable session identity
+                // through the worker command path and are safe to admit exactly once; waiting
+                // for the projection would otherwise discard a user prompt while the UI reports
+                // an unavailable session. Other application errors remain fail-closed above.
+                let command = app.into_worker_command(action);
+                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            }
             Err(error) => {
                 report_worker_unavailable(
                     app,
@@ -1643,6 +1676,37 @@ fn try_execute_application_action(
     {
         let _ = (app, worker, action);
         Ok(None)
+    }
+}
+
+fn application_action_has_lossless_worker_fallback(
+    action: &AppAction,
+    error: &anyhow::Error,
+) -> bool {
+    let application_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<sigil_application::ApplicationError>());
+    let Some(application_error) = application_error else {
+        return false;
+    };
+    match action {
+        AppAction::SubmitPrompt(_)
+        | AppAction::SubmitPromptWithAttachments { .. }
+        | AppAction::SubmitPlanPrompt(_)
+        | AppAction::CreateTaskFromPlan { .. } => {
+            matches!(
+                application_error,
+                sigil_application::ApplicationError::Unavailable
+            )
+        }
+        AppAction::CancelRun => match application_error {
+            sigil_application::ApplicationError::Unavailable => true,
+            sigil_application::ApplicationError::InvalidRequest(message) => {
+                message == "cannot cancel without an active application run binding"
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
