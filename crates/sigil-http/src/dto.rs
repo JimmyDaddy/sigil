@@ -3458,6 +3458,7 @@ pub struct HttpRunCancelCommandReceipt {
 }
 
 impl HttpRunCancelCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

@@ -294,6 +294,9 @@ impl ApplicationPort for RuntimeApplicationService {
                         ApplicationCommandReceipt::Settled(domain) => {
                             ApplicationCommandReceipt::Replayed(domain)
                         }
+                        ApplicationCommandReceipt::Uncertain(receipt) => {
+                            ApplicationCommandReceipt::ReplayedUncertain(receipt)
+                        }
                         receipt => receipt,
                     });
                 }
@@ -371,7 +374,8 @@ mod tests {
         ApplicationInstanceId, ApplicationScope, AuthenticatedSubject, CommandAdmissionContext,
         CommandConflict, CommandReservationKey, ConversationCommand, ExpectedFrontier,
         HostConnectionInstanceId, OpenProjectionRequest, ProjectionDeliveryAck, ProjectionPage,
-        ProjectionPageRequest, ProjectionSnapshot, SafeText, SessionScopeId, WorkspaceScopeId,
+        ProjectionPageRequest, ProjectionSnapshot, SafeText, SessionScopeId,
+        UncertainCommandReceipt, WorkspaceScopeId,
     };
 
     use super::*;
@@ -419,6 +423,26 @@ mod tests {
                 summary: "settled in test executor".to_owned(),
             };
             Box::pin(async move { Ok(RuntimeApplicationDispatch::Settled(receipt)) })
+        }
+    }
+
+    struct UncertainExecutor;
+
+    impl RuntimeApplicationCommandExecutor for UncertainExecutor {
+        fn dispatch(
+            &self,
+            request: ApplicationCommandRequest,
+        ) -> BoxFuture<'static, Result<RuntimeApplicationDispatch, ApplicationError>> {
+            Box::pin(async move {
+                Ok(RuntimeApplicationDispatch::Uncertain(
+                    UncertainCommandReceipt {
+                        command_id: request.envelope.command_id,
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        reservation_fingerprint: "fingerprint".to_owned(),
+                        recovery_binding: "test-reconcile".to_owned(),
+                    },
+                ))
+            })
         }
     }
 
@@ -632,6 +656,25 @@ mod tests {
             TestReservationState::Terminal(receipt)
                 if matches!(receipt.as_ref(), ApplicationCommandReceipt::Uncertain(_))
         )));
+    }
+
+    #[test]
+    fn runtime_service_replays_an_uncertain_terminal_without_redispatching() {
+        let service = RuntimeApplicationService::new(
+            Arc::new(UnavailableProjection),
+            Arc::new(UncertainExecutor),
+            Arc::new(TestReservationStore::default()),
+            Arc::new(Acker),
+        );
+        let first = futures::executor::block_on(service.execute(request("hello", 1)))
+            .expect("uncertain command");
+        assert!(matches!(first, ApplicationCommandReceipt::Uncertain(_)));
+        let replay = futures::executor::block_on(service.execute(request("hello", 1)))
+            .expect("uncertain replay");
+        assert!(matches!(
+            replay,
+            ApplicationCommandReceipt::ReplayedUncertain(_)
+        ));
     }
 
     #[test]

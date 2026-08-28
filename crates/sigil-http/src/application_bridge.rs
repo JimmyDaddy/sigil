@@ -239,7 +239,7 @@ impl HttpApplicationCommandExecutor {
         request: &ApplicationCommandRequest,
     ) -> Result<RuntimeApplicationDispatch, ApplicationError> {
         match &request.envelope.command {
-            ApplicationCommand::Run(RunCommand::Cancel { binding }) => {
+            ApplicationCommand::Run(RunCommand::Cancel { binding, reason }) => {
                 if binding.trim().is_empty() {
                     return Err(ApplicationError::InvalidRequest(
                         "run cancellation binding is empty".to_owned(),
@@ -253,7 +253,10 @@ impl HttpApplicationCommandExecutor {
                     return Err(ApplicationError::ScopeMismatch);
                 }
                 self.registry
-                    .cancel_run(binding)
+                    .cancel_run_with_reason(
+                        binding,
+                        reason.as_ref().map(|reason| reason.as_str().to_owned()),
+                    )
                     .map_err(|_| ApplicationError::Unavailable)?;
                 let fingerprint = sigil_application::command_fingerprint(request)?;
                 Ok(RuntimeApplicationDispatch::Uncertain(

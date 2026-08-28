@@ -158,8 +158,14 @@ pub enum ConversationCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunCommand {
     Start,
-    Cancel { binding: String },
-    Pause { binding: String },
+    Cancel {
+        binding: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<SafeText>,
+    },
+    Pause {
+        binding: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +429,7 @@ pub struct UncertainCommandReceipt {
 pub enum ApplicationCommandReceipt {
     Settled(ApplicationDomainReceipt),
     Replayed(ApplicationDomainReceipt),
+    ReplayedUncertain(UncertainCommandReceipt),
     Rejected(CommandRejection),
     PayloadConflict(CommandConflict),
     InFlight(ApplicationInFlightReceipt),
@@ -1932,6 +1939,7 @@ mod tests {
 
         let command = ApplicationCommand::Run(RunCommand::Cancel {
             binding: "run-1".to_owned(),
+            reason: None,
         });
         let receipts = clients
             .iter()

@@ -92,7 +92,12 @@ impl TuiApplicationSession {
                 .run
                 .active_binding
                 .clone()
-                .map(|binding| ApplicationCommand::Run(RunCommand::Cancel { binding }))
+                .map(|binding| {
+                    ApplicationCommand::Run(RunCommand::Cancel {
+                        binding,
+                        reason: None,
+                    })
+                })
                 .ok_or_else(|| {
                     ApplicationError::InvalidRequest(
                         "cannot cancel without an active application run binding".to_owned(),

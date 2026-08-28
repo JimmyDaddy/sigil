@@ -319,6 +319,7 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
                 ApplicationCommandReceipt::PayloadConflict(_)
                     | ApplicationCommandReceipt::InFlight(_)
                     | ApplicationCommandReceipt::Replayed(_)
+                    | ApplicationCommandReceipt::ReplayedUncertain(_)
             ) {
                 return Err(ApplicationError::InvalidRequest(
                     "non-terminal replay response cannot be persisted".to_owned(),

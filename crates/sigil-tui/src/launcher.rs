@@ -1403,12 +1403,12 @@ fn try_execute_application_action(
 ) -> Result<Option<sigil_application::ApplicationCommandReceipt>> {
     #[cfg(not(test))]
     {
-        return worker
+        worker
             .as_ref()
             .map(|runtime| runtime.application.try_execute_action(action))
             .transpose()?
             .flatten()
-            .map_or(Ok(None), |receipt| Ok(Some(receipt)));
+            .map_or(Ok(None), |receipt| Ok(Some(receipt)))
     }
     #[cfg(test)]
     {
@@ -1441,6 +1441,9 @@ fn report_application_receipt(
     let notice = match receipt {
         sigil_application::ApplicationCommandReceipt::Settled(_) => return Ok(()),
         sigil_application::ApplicationCommandReceipt::Replayed(_) => "application command replayed",
+        sigil_application::ApplicationCommandReceipt::ReplayedUncertain(_) => {
+            "application command replayed; waiting for durable outcome"
+        }
         sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
             return app.handle_worker_message(WorkerMessage::Notice(format!(
                 "application command rejected: {}",
