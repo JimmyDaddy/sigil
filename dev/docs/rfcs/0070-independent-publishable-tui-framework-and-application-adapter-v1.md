@@ -2966,7 +2966,8 @@ R70.x
   （`rfc-0070(R70.4): route TUI through application port`）与 `8608d6aa`
   （`rfc-0070(R70.4): cut over HTTP reservations to application authority`），以及 `ffc3df4e`
   （`rfc-0070(R70.4): stream bounded transcript pages`），以及 `f44d8c10`
-  （`rfc-0070(R70.4): journal application command reservations`）。
+  （`rfc-0070(R70.4): journal application command reservations`），以及本轮新增的 ApplicationClient
+  resumable reducer/ACK 与 cross-surface contract tests。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -2988,9 +2989,10 @@ R70.x
   只在首次重开时迁移，重复记录可安全重放，孤立 transition、指纹冲突和终态改写 fail-closed。dispatch marker
   写入失败时会尽力将已存在的 reservation settlement 为显式 `Uncertain`，避免永久卡在无恢复语义的 `Reserved`。
 - TUI adapter：生产 launcher 为每个 worker 绑定 runtime `ApplicationPort`，用同一 application scope/frontier
-  刷新 projection；prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application reservation
-  service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造 `Settled`；
-  未有无损 V1 payload 的旧动作仍保留在迁移期 adapter，不能把 R70.4 误记为最终闭合。
+  刷新 projection；共享 ApplicationClient 统一处理 snapshot、reducer、resumable feed、delivery ACK、page/cancel
+  与保留 command id 的 retry。prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application
+  reservation service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造
+  `Settled`；未有无损 V1 payload 的旧动作仍保留在迁移期 adapter，不能把 R70.4 误记为最终闭合。
 - HTTP adapter：生产 command store 在 `ApplicationControlLog` 的独占 managed namespace 中完成 legacy
   identity/terminal/unfinished/aborted tombstone 导入；旧 compatibility file 只有在 managed snapshot 成功替换
   后才退役，重启会优先 managed state 并重试旧文件退役。HTTP command registry 的 domain execution 仍需后续
@@ -3005,7 +3007,8 @@ R70.x
   `cargo check -p sigil-tui --tests`、application/runtime strict clippy、application tests `3 passed`、runtime
   projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
   `2 passed`、TUI launcher regression `1 passed`，以及 runtime application-filtered regression `106 passed`、
-  `git diff --check`；`transcript_page` scope/boundary/reasoning/UTF-8 regression `3 passed`。
+  `git diff --check`；`transcript_page` scope/boundary/reasoning/UTF-8 regression `3 passed`；本轮
+  `sigil-application` client/reducer/ACK/conformance tests `6 passed`。
 - remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
   HTTP reservation cutover 与 resumable snapshot-feed 基础已分别落地，但不关闭 R70.4。TUI 尚有未迁移旧动作，
   HTTP command domain execution 尚未完全收敛到同一 application service；feed 的跨 surface ACK/restart

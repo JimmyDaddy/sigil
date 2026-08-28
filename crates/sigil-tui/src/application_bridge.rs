@@ -4,16 +4,14 @@
 //! receives only an application snapshot and submits grouped, bounded commands; a worker
 //! enqueue is reported as `Uncertain` until the durable application event stream settles it.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use futures::future::BoxFuture;
 use sigil_application::{
-    ApplicationCommand, ApplicationCommandEnvelope, ApplicationCommandId,
-    ApplicationCommandReceipt, ApplicationCommandRequest, ApplicationError, ApplicationPort,
-    ApplicationScope, AuthenticatedSubject, CommandAdmissionContext, ConversationCommand,
-    ExpectedFrontier, HostConnectionInstanceId, McpCommand, OpenProjectionRequest,
-    ProjectionSnapshot, RunCommand,
+    ApplicationClient, ApplicationCommand, ApplicationCommandReceipt, ApplicationCommandRequest,
+    ApplicationError, ApplicationPort, ApplicationProjection, ApplicationScope,
+    AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId, McpCommand, RunCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -25,23 +23,14 @@ use crate::{
 /// A TUI-local application client.  It caches only the latest bounded frontier/projection needed
 /// to construct a CAS-bound command; paths and physical authority objects remain in the runtime.
 pub(crate) struct TuiApplicationSession {
-    port: Arc<dyn ApplicationPort>,
-    scope: ApplicationScope,
-    observer_generation: u64,
-    client_epoch: u64,
-    connection_instance: HostConnectionInstanceId,
-    latest: Mutex<Option<ProjectionSnapshot>>,
+    client: ApplicationClient,
 }
 
 impl std::fmt::Debug for TuiApplicationSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TuiApplicationSession")
-            .field("scope", &self.scope)
-            .field("observer_generation", &self.observer_generation)
-            .field("client_epoch", &self.client_epoch)
-            .field("connection_instance", &self.connection_instance)
-            .field("latest", &"<bounded projection>")
+            .field("client", &self.client)
             .finish()
     }
 }
@@ -54,41 +43,19 @@ impl TuiApplicationSession {
         client_epoch: u64,
         connection_instance: HostConnectionInstanceId,
     ) -> Result<Self, ApplicationError> {
-        if observer_generation == 0 || client_epoch == 0 {
-            return Err(ApplicationError::InvalidRequest(
-                "TUI application generations and client epoch must be non-zero".to_owned(),
-            ));
-        }
         Ok(Self {
-            port,
-            scope,
-            observer_generation,
-            client_epoch,
-            connection_instance,
-            latest: Mutex::new(None),
+            client: ApplicationClient::new(
+                port,
+                scope,
+                observer_generation,
+                client_epoch,
+                connection_instance,
+            )?,
         })
     }
 
-    pub(crate) async fn refresh(&self) -> Result<ProjectionSnapshot, ApplicationError> {
-        let snapshot = self
-            .port
-            .open_projection(OpenProjectionRequest {
-                scope: self.scope.clone(),
-                observer_generation: self.observer_generation,
-                resume_from: None,
-            })
-            .await?;
-        if snapshot.envelope.scope != self.scope
-            || snapshot.envelope.observer_generation != self.observer_generation
-        {
-            return Err(ApplicationError::ScopeMismatch);
-        }
-        let mut latest = self
-            .latest
-            .lock()
-            .map_err(|_| ApplicationError::Unavailable)?;
-        *latest = Some(snapshot.clone());
-        Ok(snapshot)
+    pub(crate) async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
+        self.client.refresh().await
     }
 
     /// Converts only commands with a lossless V1 application representation.  Unsupported TUI
@@ -111,10 +78,8 @@ impl TuiApplicationSession {
             return Ok(None);
         }
         let latest = self
-            .latest
-            .lock()
-            .map_err(|_| ApplicationError::Unavailable)?
-            .clone()
+            .client
+            .current_projection()?
             .ok_or(ApplicationError::Unavailable)?;
         let command = match action {
             AppAction::SubmitPrompt(prompt) => Some(ApplicationCommand::Conversation(
@@ -123,8 +88,6 @@ impl TuiApplicationSession {
                 },
             )),
             AppAction::CancelRun => latest
-                .envelope
-                .projection
                 .run
                 .active_binding
                 .clone()
@@ -136,8 +99,6 @@ impl TuiApplicationSession {
                 })
                 .map(Some)?,
             AppAction::ApprovalDecision { approved, .. } => latest
-                .envelope
-                .projection
                 .approval
                 .binding
                 .clone()
@@ -168,30 +129,9 @@ impl TuiApplicationSession {
         let Some(command) = command else {
             return Ok(None);
         };
-        let command_id =
-            ApplicationCommandId::new(format!("tui-command-{}", uuid::Uuid::new_v4()))?;
-        let expected_frontier = &latest.envelope.cut;
-        let request = ApplicationCommandRequest {
-            envelope: ApplicationCommandEnvelope {
-                schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
-                command_id,
-                correlation_id: None,
-                expected_frontier: ExpectedFrontier {
-                    scope: self.scope.clone(),
-                    writer_generation: expected_frontier.writer_generation,
-                    through_sequence: expected_frontier.through_sequence,
-                },
-                command,
-            },
-            admission: CommandAdmissionContext::host_bound(
-                self.scope.authenticated_subject.clone(),
-                self.client_epoch,
-                self.connection_instance.clone(),
-                self.scope.clone(),
-            )?,
-        };
+        let _ = latest;
         Ok(Some(futures::executor::block_on(
-            self.port.execute(request),
+            self.client.execute(command),
         )?))
     }
 }

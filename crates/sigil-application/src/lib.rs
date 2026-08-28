@@ -848,6 +848,214 @@ pub trait ApplicationPort: Send + Sync {
     ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>>;
 }
 
+#[derive(Debug, Default)]
+struct ApplicationClientState {
+    reducer: Option<ProjectionReducer>,
+}
+
+/// Transport-neutral client used by product adapters.
+///
+/// The client owns only bounded renderer-safe projection state and the durable client identity
+/// supplied by its host.  It never manufactures authority, resource paths, or settlement policy.
+/// A refresh is an atomic snapshot/feed operation: the returned envelope is opened by the same
+/// reducer used for incremental events, and every event is acknowledged only after that reducer
+/// accepts it.  A surface can therefore reconnect with the last committed frontier without
+/// reimplementing scope, generation, or ACK rules.
+pub struct ApplicationClient {
+    port: Arc<dyn ApplicationPort>,
+    scope: ApplicationScope,
+    observer_generation: u64,
+    client_epoch: u64,
+    connection_instance: HostConnectionInstanceId,
+    state: Mutex<ApplicationClientState>,
+}
+
+impl fmt::Debug for ApplicationClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApplicationClient")
+            .field("scope", &self.scope)
+            .field("observer_generation", &self.observer_generation)
+            .field("client_epoch", &self.client_epoch)
+            .field("connection_instance", &self.connection_instance)
+            .field("state", &"bounded projection reducer")
+            .finish()
+    }
+}
+
+impl ApplicationClient {
+    pub fn new(
+        port: Arc<dyn ApplicationPort>,
+        scope: ApplicationScope,
+        observer_generation: u64,
+        client_epoch: u64,
+        connection_instance: HostConnectionInstanceId,
+    ) -> Result<Self, ApplicationError> {
+        if observer_generation == 0 || client_epoch == 0 {
+            return Err(ApplicationError::InvalidRequest(
+                "application observer generation and client epoch must be non-zero".to_owned(),
+            ));
+        }
+        Ok(Self {
+            port,
+            scope,
+            observer_generation,
+            client_epoch,
+            connection_instance,
+            state: Mutex::new(ApplicationClientState::default()),
+        })
+    }
+
+    pub fn scope(&self) -> &ApplicationScope {
+        &self.scope
+    }
+
+    pub fn observer_generation(&self) -> u64 {
+        self.observer_generation
+    }
+
+    pub fn client_epoch(&self) -> u64 {
+        self.client_epoch
+    }
+
+    pub fn current_projection(&self) -> Result<Option<ApplicationProjection>, ApplicationError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .reducer
+            .as_ref()
+            .map(|reducer| reducer.projection().clone()))
+    }
+
+    pub fn current_frontier(&self) -> Result<Option<ApplicationFrontier>, ApplicationError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .reducer
+            .as_ref()
+            .map(|reducer| reducer.frontier().clone()))
+    }
+
+    pub async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
+        let resume_from = self.current_frontier()?;
+        let snapshot = self
+            .port
+            .open_projection(OpenProjectionRequest {
+                scope: self.scope.clone(),
+                observer_generation: self.observer_generation,
+                resume_from: resume_from.clone(),
+            })
+            .await?;
+        snapshot.envelope.validate()?;
+        if snapshot.envelope.scope != self.scope
+            || snapshot.envelope.observer_generation != self.observer_generation
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        if let Some(resume_from) = resume_from {
+            if !snapshot.envelope.cut.same_cut(&resume_from) {
+                return Err(ApplicationError::ResetRequired);
+            }
+        }
+
+        let mut reducer = ProjectionReducer::open(snapshot.envelope)?;
+        for item in snapshot.feed {
+            let ProjectionFeedItem::Event(event) = item else {
+                return Err(ApplicationError::ResetRequired);
+            };
+            let acknowledgement = ProjectionDeliveryAck {
+                scope: event.scope.clone(),
+                observer_generation: event.observer_generation,
+                event_id: event.event_id.clone(),
+                frontier: event.next_frontier.clone(),
+            };
+            reducer.apply(ProjectionFeedItem::Event(event))?;
+            self.port.acknowledge(acknowledgement).await?;
+        }
+        let projection = reducer.projection().clone();
+        self.state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .reducer = Some(reducer);
+        Ok(projection)
+    }
+
+    pub async fn page(
+        &self,
+        request_id: PageRequestId,
+        source_generation: u64,
+        query: PageQueryFingerprint,
+        anchor: PageAnchor,
+        direction: PageDirection,
+        limit: NonZeroUsize,
+        width_bucket: u16,
+    ) -> Result<ProjectionPage, ApplicationError> {
+        let frontier = self
+            .current_frontier()?
+            .ok_or(ApplicationError::Unavailable)?;
+        self.port
+            .page(ProjectionPageRequest {
+                request_id,
+                scope: self.scope.clone(),
+                source_generation,
+                at_frontier: frontier,
+                query,
+                anchor,
+                direction,
+                limit,
+                width_bucket,
+            })
+            .await
+    }
+
+    pub async fn cancel_page(&self, request_id: PageRequestId) -> PageCancellationReceipt {
+        self.port.cancel_page(request_id).await
+    }
+
+    pub async fn execute(
+        &self,
+        command: ApplicationCommand,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let command_id =
+            ApplicationCommandId::new(format!("application-command-{}", uuid::Uuid::new_v4()))?;
+        self.execute_with_id(command_id, command).await
+    }
+
+    /// Executes with a caller-retained id so a response-lost transport can retry the exact
+    /// reservation rather than manufacturing a new mutation.
+    pub async fn execute_with_id(
+        &self,
+        command_id: ApplicationCommandId,
+        command: ApplicationCommand,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let expected_frontier = self
+            .current_frontier()?
+            .ok_or(ApplicationError::Unavailable)?;
+        let request = ApplicationCommandRequest {
+            envelope: ApplicationCommandEnvelope {
+                schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+                command_id,
+                correlation_id: None,
+                expected_frontier: ExpectedFrontier {
+                    scope: self.scope.clone(),
+                    writer_generation: expected_frontier.writer_generation,
+                    through_sequence: expected_frontier.through_sequence,
+                },
+                command,
+            },
+            admission: CommandAdmissionContext::host_bound(
+                self.scope.authenticated_subject.clone(),
+                self.client_epoch,
+                self.connection_instance.clone(),
+                self.scope.clone(),
+            )?,
+        };
+        self.port.execute(request).await
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Reservation {
     fingerprint: String,
@@ -1318,6 +1526,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn scope() -> ApplicationScope {
         ApplicationScope {
@@ -1503,5 +1712,237 @@ mod tests {
         assert!(broker.attest(&session, &capability, observation).is_err());
         assert!(!format!("{session:?}").contains("42"));
         assert!(!format!("{broker:?}").contains("42"));
+    }
+
+    #[derive(Clone)]
+    struct RecordingPort {
+        inner: FakeApplication,
+        opens: Arc<Mutex<Vec<OpenProjectionRequest>>>,
+        acknowledgements: Arc<Mutex<Vec<ProjectionDeliveryAck>>>,
+    }
+
+    impl ApplicationPort for RecordingPort {
+        fn open_projection(
+            &self,
+            request: OpenProjectionRequest,
+        ) -> BoxFuture<'static, Result<ProjectionSnapshot, ApplicationError>> {
+            let opens = Arc::clone(&self.opens);
+            let inner = self.inner.clone();
+            Box::pin(async move {
+                opens
+                    .lock()
+                    .map_err(|_| ApplicationError::Unavailable)?
+                    .push(request.clone());
+                inner.open_projection(request).await
+            })
+        }
+
+        fn page(
+            &self,
+            request: ProjectionPageRequest,
+        ) -> BoxFuture<'static, Result<ProjectionPage, ApplicationError>> {
+            self.inner.page(request)
+        }
+
+        fn cancel_page(
+            &self,
+            request: PageRequestId,
+        ) -> BoxFuture<'static, PageCancellationReceipt> {
+            self.inner.cancel_page(request)
+        }
+
+        fn acknowledge(
+            &self,
+            acknowledgement: ProjectionDeliveryAck,
+        ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+            let acknowledgements = Arc::clone(&self.acknowledgements);
+            Box::pin(async move {
+                acknowledgements
+                    .lock()
+                    .map_err(|_| ApplicationError::Unavailable)?
+                    .push(acknowledgement.clone());
+                acknowledgement.validate()
+            })
+        }
+
+        fn execute(
+            &self,
+            request: ApplicationCommandRequest,
+        ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
+            self.inner.execute(request)
+        }
+    }
+
+    #[test]
+    fn application_client_resumes_with_the_committed_frontier() {
+        let fake = FakeApplication::new(snapshot()).expect("valid snapshot");
+        let opens = Arc::new(Mutex::new(Vec::new()));
+        let acknowledgements = Arc::new(Mutex::new(Vec::new()));
+        let port = Arc::new(RecordingPort {
+            inner: fake,
+            opens: Arc::clone(&opens),
+            acknowledgements,
+        });
+        let client = ApplicationClient::new(
+            port,
+            scope(),
+            9,
+            1,
+            HostConnectionInstanceId::new("connection").expect("valid id"),
+        )
+        .expect("client");
+
+        futures::executor::block_on(client.refresh()).expect("initial refresh");
+        futures::executor::block_on(client.refresh()).expect("resumed refresh");
+
+        let opens = opens.lock().expect("open log");
+        assert_eq!(opens.len(), 2);
+        assert!(opens[0].resume_from.is_none());
+        assert_eq!(opens[1].resume_from, Some(snapshot().cut));
+    }
+
+    #[test]
+    fn application_client_acknowledges_only_reducer_commits() {
+        let base = snapshot();
+        let mut next_projection = base.projection.clone();
+        next_projection.frontier.through_sequence = 1;
+        next_projection.frontier.durable_cursor = "cursor-1".to_owned();
+        let payload = ApplicationEvent::ProjectionReplaced(Box::new(next_projection.clone()));
+        let feed = ProjectionFeedItem::Event(Box::new(ApplicationEventEnvelope {
+            schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+            scope: base.scope.clone(),
+            writer_generation: base.writer_generation,
+            stream_generation: base.stream_generation,
+            observer_generation: base.observer_generation,
+            event_id: "event-1".to_owned(),
+            base_frontier: base.cut.clone(),
+            next_frontier: next_projection.frontier.clone(),
+            payload_digest: event_payload_digest(&payload).expect("digest"),
+            payload,
+        }));
+        let port = Arc::new(FeedPort {
+            snapshot: ProjectionSnapshot {
+                envelope: base,
+                feed: vec![feed],
+            },
+            acknowledgements: Arc::new(AtomicUsize::new(0)),
+        });
+        let acknowledgements = Arc::clone(&port.acknowledgements);
+        let client = ApplicationClient::new(
+            port,
+            scope(),
+            9,
+            1,
+            HostConnectionInstanceId::new("connection").expect("valid id"),
+        )
+        .expect("client");
+
+        let projection = futures::executor::block_on(client.refresh()).expect("refresh");
+        assert_eq!(projection.frontier.through_sequence, 1);
+        assert_eq!(acknowledgements.load(Ordering::SeqCst), 1);
+    }
+
+    struct FeedPort {
+        snapshot: ProjectionSnapshot,
+        acknowledgements: Arc<AtomicUsize>,
+    }
+
+    impl ApplicationPort for FeedPort {
+        fn open_projection(
+            &self,
+            _request: OpenProjectionRequest,
+        ) -> BoxFuture<'static, Result<ProjectionSnapshot, ApplicationError>> {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
+        }
+
+        fn page(
+            &self,
+            _request: ProjectionPageRequest,
+        ) -> BoxFuture<'static, Result<ProjectionPage, ApplicationError>> {
+            Box::pin(async { Err(ApplicationError::Unavailable) })
+        }
+
+        fn cancel_page(
+            &self,
+            _request: PageRequestId,
+        ) -> BoxFuture<'static, PageCancellationReceipt> {
+            Box::pin(async { PageCancellationReceipt::UnknownRequest })
+        }
+
+        fn acknowledge(
+            &self,
+            _acknowledgement: ProjectionDeliveryAck,
+        ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+            let acknowledgements = Arc::clone(&self.acknowledgements);
+            Box::pin(async move {
+                acknowledgements.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+
+        fn execute(
+            &self,
+            _request: ApplicationCommandRequest,
+        ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
+            Box::pin(async { Err(ApplicationError::Unavailable) })
+        }
+    }
+
+    #[test]
+    fn four_surface_clients_share_the_same_domain_receipt() {
+        let application = FakeApplication::new(snapshot()).expect("valid snapshot");
+        let expected_frontier = snapshot().cut;
+        let command_id = ApplicationCommandId::new("shared-command").expect("valid id");
+        let clients = ["tui", "desktop", "http", "cli"]
+            .into_iter()
+            .map(|surface| {
+                ApplicationClient::new(
+                    Arc::new(application.clone()),
+                    scope(),
+                    9,
+                    1,
+                    HostConnectionInstanceId::new(format!("connection-{surface}"))
+                        .expect("valid id"),
+                )
+                .expect("client")
+            })
+            .collect::<Vec<_>>();
+        for client in &clients {
+            futures::executor::block_on(client.refresh()).expect("refresh");
+        }
+
+        let command = ApplicationCommand::Run(RunCommand::Cancel {
+            binding: "run-1".to_owned(),
+        });
+        let receipts = clients
+            .iter()
+            .map(|client| {
+                futures::executor::block_on(
+                    client.execute_with_id(command_id.clone(), command.clone()),
+                )
+                .expect("execute")
+            })
+            .collect::<Vec<_>>();
+        let domains = receipts
+            .iter()
+            .map(|receipt| match receipt {
+                ApplicationCommandReceipt::Settled(domain)
+                | ApplicationCommandReceipt::Replayed(domain) => domain,
+                other => panic!("unexpected receipt: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(receipts[0], ApplicationCommandReceipt::Settled(_)));
+        assert!(
+            receipts[1..]
+                .iter()
+                .all(|receipt| matches!(receipt, ApplicationCommandReceipt::Replayed(_)))
+        );
+        assert!(domains.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(
+            domains
+                .iter()
+                .all(|domain| domain.frontier.scope == expected_frontier.scope)
+        );
     }
 }

@@ -1426,7 +1426,7 @@ async fn refresh_application_projection(
         return false;
     };
     match application.refresh().await {
-        Ok(snapshot) => app.apply_application_projection(&snapshot.envelope.projection),
+        Ok(projection) => app.apply_application_projection(&projection),
         Err(error) => {
             tracing::debug!(%error, "application projection refresh unavailable");
             false
