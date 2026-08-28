@@ -10,11 +10,12 @@ use anyhow::{Context, Result, anyhow};
 use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
 use sigil_application::{
-    ApplicationClient, ApplicationCommand, ApplicationCommandReceipt, ApplicationCommandRequest,
-    ApplicationError, ApplicationPort, ApplicationProjection, ApplicationQueueAction,
-    ApplicationQueueItemKind, ApplicationQueueMoveDirection, ApplicationQueueTarget,
-    ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject, ConversationCommand,
-    HostConnectionInstanceId, McpCommand, RunCommand, UserInputCommand,
+    AgentCommand, ApplicationClient, ApplicationCommand, ApplicationCommandReceipt,
+    ApplicationCommandRequest, ApplicationError, ApplicationPort, ApplicationProjection,
+    ApplicationQueueAction, ApplicationQueueItemKind, ApplicationQueueMoveDirection,
+    ApplicationQueueTarget, ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject,
+    ConversationCommand, HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand,
+    UserInputCommand,
 };
 use sigil_kernel::ReasoningEffort;
 
@@ -89,6 +90,21 @@ impl TuiApplicationSession {
                 | AppAction::PromoteQueuedConversationInput { .. }
                 | AppAction::SendQueuedConversationInputNow { .. }
                 | AppAction::SetConversationQueuePaused { .. }
+                | AppAction::SubmitPlanPrompt(_)
+                | AppAction::CreateTaskFromPlan { .. }
+                | AppAction::RejectPlan { .. }
+                | AppAction::SavePlan { .. }
+                | AppAction::RevisePlan { .. }
+                | AppAction::SubmitTask(_)
+                | AppAction::ContinueTask { .. }
+                | AppAction::PauseTask { .. }
+                | AppAction::InvokeInlineSkill { .. }
+                | AppAction::InvokeChildSessionSkill { .. }
+                | AppAction::InvokeAgentProfile { .. }
+                | AppAction::BackgroundActiveAgent
+                | AppAction::CloseAgent { .. }
+                | AppAction::CancelAgent { .. }
+                | AppAction::MessageAgent { .. }
         ) {
             return Ok(None);
         }
@@ -161,6 +177,123 @@ impl TuiApplicationSession {
                 decision: decision.clone(),
                 permission_mode: None,
             })),
+            AppAction::SubmitPlanPrompt(prompt) => Some(ApplicationCommand::PlanTask(
+                PlanTaskCommand::SubmitPlanPrompt {
+                    prompt: sigil_application::SafeText::new(prompt.clone())?,
+                    reasoning_effort: Some(self.reasoning_effort),
+                },
+            )),
+            AppAction::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                start_mode,
+                permission_grant,
+            } => Some(ApplicationCommand::PlanTask(
+                PlanTaskCommand::CreateTaskFromPlan {
+                    plan_id: sigil_application::SafeText::new(plan_id.clone())?,
+                    expected_plan_hash: sigil_application::SafeText::new(
+                        expected_plan_hash.clone(),
+                    )?,
+                    start_mode: *start_mode,
+                    permission_grant: *permission_grant,
+                },
+            )),
+            AppAction::RejectPlan {
+                plan_id,
+                expected_plan_hash,
+            } => Some(ApplicationCommand::PlanTask(PlanTaskCommand::RejectPlan {
+                plan_id: sigil_application::SafeText::new(plan_id.clone())?,
+                expected_plan_hash: sigil_application::SafeText::new(expected_plan_hash.clone())?,
+            })),
+            AppAction::SavePlan {
+                plan_id,
+                expected_plan_hash,
+            } => Some(ApplicationCommand::PlanTask(PlanTaskCommand::SavePlan {
+                plan_id: sigil_application::SafeText::new(plan_id.clone())?,
+                expected_plan_hash: sigil_application::SafeText::new(expected_plan_hash.clone())?,
+            })),
+            AppAction::RevisePlan {
+                plan_id,
+                expected_plan_hash,
+            } => Some(ApplicationCommand::PlanTask(PlanTaskCommand::RevisePlan {
+                plan_id: sigil_application::SafeText::new(plan_id.clone())?,
+                expected_plan_hash: sigil_application::SafeText::new(expected_plan_hash.clone())?,
+            })),
+            AppAction::SubmitTask(prompt) => {
+                Some(ApplicationCommand::PlanTask(PlanTaskCommand::SubmitTask {
+                    prompt: sigil_application::SafeText::new(prompt.clone())?,
+                }))
+            }
+            AppAction::ContinueTask { task_id, guidance } => Some(ApplicationCommand::PlanTask(
+                PlanTaskCommand::ContinueTask {
+                    task_id: task_id
+                        .as_ref()
+                        .map(|task_id| sigil_application::SafeText::new(task_id.clone()))
+                        .transpose()?,
+                    guidance: guidance
+                        .as_ref()
+                        .map(|guidance| sigil_application::SafeText::new(guidance.clone()))
+                        .transpose()?,
+                },
+            )),
+            AppAction::PauseTask { request } => {
+                Some(ApplicationCommand::PlanTask(PlanTaskCommand::PauseTask {
+                    request: request.clone(),
+                }))
+            }
+            AppAction::InvokeInlineSkill {
+                skill_id,
+                arguments,
+            } => Some(ApplicationCommand::Agent(AgentCommand::InvokeInlineSkill {
+                skill_id: sigil_application::SafeText::new(skill_id.clone())?,
+                arguments: sigil_application::SafeText::new(arguments.clone())?,
+                reasoning_effort: Some(self.reasoning_effort),
+            })),
+            AppAction::InvokeChildSessionSkill {
+                skill_id,
+                arguments,
+            } => Some(ApplicationCommand::Agent(
+                AgentCommand::InvokeChildSessionSkill {
+                    skill_id: sigil_application::SafeText::new(skill_id.clone())?,
+                    arguments: sigil_application::SafeText::new(arguments.clone())?,
+                },
+            )),
+            AppAction::InvokeAgentProfile {
+                profile_id,
+                prompt,
+                parent_prompt,
+            } => Some(ApplicationCommand::Agent(AgentCommand::InvokeProfile {
+                profile_id: sigil_application::SafeText::new(profile_id.clone())?,
+                prompt: sigil_application::SafeText::new(prompt.clone())?,
+                parent_prompt: sigil_application::SafeText::new(parent_prompt.clone())?,
+            })),
+            AppAction::BackgroundActiveAgent => {
+                Some(ApplicationCommand::Agent(AgentCommand::Background))
+            }
+            AppAction::CloseAgent { thread_id, reason } => {
+                Some(ApplicationCommand::Agent(AgentCommand::Close {
+                    thread_id: sigil_application::SafeText::new(thread_id.as_str().to_owned())?,
+                    reason: reason
+                        .as_ref()
+                        .map(|reason| sigil_application::SafeText::new(reason.clone()))
+                        .transpose()?,
+                }))
+            }
+            AppAction::CancelAgent { thread_id, reason } => {
+                Some(ApplicationCommand::Agent(AgentCommand::Cancel {
+                    thread_id: sigil_application::SafeText::new(thread_id.as_str().to_owned())?,
+                    reason: reason
+                        .as_ref()
+                        .map(|reason| sigil_application::SafeText::new(reason.clone()))
+                        .transpose()?,
+                }))
+            }
+            AppAction::MessageAgent { thread_id, prompt } => {
+                Some(ApplicationCommand::Agent(AgentCommand::Message {
+                    thread_id: sigil_application::SafeText::new(thread_id.as_str().to_owned())?,
+                    prompt: sigil_application::SafeText::new(prompt.clone())?,
+                }))
+            }
             AppAction::QueueConversationInput {
                 prompt,
                 kind,
@@ -535,6 +668,122 @@ impl TuiWorkerCommandExecutor {
                 expected_request_hash: expected_request_hash.as_str().to_owned(),
                 decision: decision.clone(),
             },
+            ApplicationCommand::PlanTask(PlanTaskCommand::SubmitPlanPrompt {
+                prompt,
+                reasoning_effort,
+            }) => WorkerCommand::SubmitPlanPrompt {
+                prompt: prompt.as_str().to_owned(),
+                reasoning_effort: reasoning_effort
+                    .map(tui_reasoning_effort)
+                    .unwrap_or_else(|| self.reasoning_effort.clone()),
+            },
+            ApplicationCommand::PlanTask(PlanTaskCommand::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                start_mode,
+                permission_grant,
+            }) => WorkerCommand::CreateTaskFromPlan {
+                plan_id: plan_id.as_str().to_owned(),
+                expected_plan_hash: expected_plan_hash.as_str().to_owned(),
+                start_mode: *start_mode,
+                permission_grant: *permission_grant,
+            },
+            ApplicationCommand::PlanTask(PlanTaskCommand::RejectPlan {
+                plan_id,
+                expected_plan_hash,
+            }) => WorkerCommand::RejectPlan {
+                plan_id: plan_id.as_str().to_owned(),
+                expected_plan_hash: expected_plan_hash.as_str().to_owned(),
+            },
+            ApplicationCommand::PlanTask(PlanTaskCommand::SavePlan {
+                plan_id,
+                expected_plan_hash,
+            }) => WorkerCommand::SavePlan {
+                plan_id: plan_id.as_str().to_owned(),
+                expected_plan_hash: expected_plan_hash.as_str().to_owned(),
+            },
+            ApplicationCommand::PlanTask(PlanTaskCommand::RevisePlan {
+                plan_id,
+                expected_plan_hash,
+            }) => WorkerCommand::RevisePlan {
+                plan_id: plan_id.as_str().to_owned(),
+                expected_plan_hash: expected_plan_hash.as_str().to_owned(),
+            },
+            ApplicationCommand::PlanTask(PlanTaskCommand::SubmitTask { prompt }) => {
+                WorkerCommand::SubmitTask {
+                    prompt: prompt.as_str().to_owned(),
+                }
+            }
+            ApplicationCommand::PlanTask(PlanTaskCommand::ContinueTask { task_id, guidance }) => {
+                WorkerCommand::ContinueTask {
+                    task_id: task_id.as_ref().map(|task_id| task_id.as_str().to_owned()),
+                    guidance: guidance
+                        .as_ref()
+                        .map(|guidance| guidance.as_str().to_owned()),
+                }
+            }
+            ApplicationCommand::PlanTask(PlanTaskCommand::PauseTask { request }) => {
+                WorkerCommand::PauseTask {
+                    request: request.clone(),
+                }
+            }
+            ApplicationCommand::Agent(AgentCommand::InvokeProfile {
+                profile_id,
+                prompt,
+                parent_prompt,
+            }) => WorkerCommand::InvokeAgentProfile {
+                profile_id: profile_id.as_str().to_owned(),
+                prompt: prompt.as_str().to_owned(),
+                parent_prompt: parent_prompt.as_str().to_owned(),
+            },
+            ApplicationCommand::Agent(AgentCommand::InvokeInlineSkill {
+                skill_id,
+                arguments,
+                reasoning_effort,
+            }) => WorkerCommand::InvokeInlineSkill {
+                skill_id: skill_id.as_str().to_owned(),
+                arguments: arguments.as_str().to_owned(),
+                reasoning_effort: reasoning_effort
+                    .map(tui_reasoning_effort)
+                    .unwrap_or_else(|| self.reasoning_effort.clone()),
+            },
+            ApplicationCommand::Agent(AgentCommand::InvokeChildSessionSkill {
+                skill_id,
+                arguments,
+            }) => WorkerCommand::InvokeChildSessionSkill {
+                skill_id: skill_id.as_str().to_owned(),
+                arguments: arguments.as_str().to_owned(),
+            },
+            ApplicationCommand::Agent(AgentCommand::Close { thread_id, reason }) => {
+                WorkerCommand::CloseAgent {
+                    thread_id: sigil_kernel::AgentThreadId::new(thread_id.as_str().to_owned())
+                        .map_err(|_| {
+                            ApplicationError::InvalidRequest("invalid agent thread id".to_owned())
+                        })?,
+                    reason: reason.as_ref().map(|reason| reason.as_str().to_owned()),
+                }
+            }
+            ApplicationCommand::Agent(AgentCommand::Cancel { thread_id, reason }) => {
+                WorkerCommand::CancelAgent {
+                    thread_id: sigil_kernel::AgentThreadId::new(thread_id.as_str().to_owned())
+                        .map_err(|_| {
+                            ApplicationError::InvalidRequest("invalid agent thread id".to_owned())
+                        })?,
+                    reason: reason.as_ref().map(|reason| reason.as_str().to_owned()),
+                }
+            }
+            ApplicationCommand::Agent(AgentCommand::Message { thread_id, prompt }) => {
+                WorkerCommand::MessageAgent {
+                    thread_id: sigil_kernel::AgentThreadId::new(thread_id.as_str().to_owned())
+                        .map_err(|_| {
+                            ApplicationError::InvalidRequest("invalid agent thread id".to_owned())
+                        })?,
+                    prompt: prompt.as_str().to_owned(),
+                }
+            }
+            ApplicationCommand::Agent(AgentCommand::Background) => {
+                WorkerCommand::BackgroundActiveAgent
+            }
             ApplicationCommand::Conversation(ConversationCommand::Queue { action, .. }) => {
                 match action {
                     ApplicationQueueAction::Enqueue {

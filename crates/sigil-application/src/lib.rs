@@ -426,14 +426,88 @@ pub enum ApprovalCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlanTaskCommand {
-    Accept { binding: String },
-    Reject { binding: String },
+    Accept {
+        binding: String,
+    },
+    Reject {
+        binding: String,
+    },
+    SubmitPlanPrompt {
+        prompt: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<ApplicationReasoningEffort>,
+    },
+    CreateTaskFromPlan {
+        plan_id: SafeText,
+        expected_plan_hash: SafeText,
+        start_mode: sigil_kernel::PlanTaskStartMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_grant: Option<sigil_kernel::PlanApprovalPermission>,
+    },
+    RejectPlan {
+        plan_id: SafeText,
+        expected_plan_hash: SafeText,
+    },
+    SavePlan {
+        plan_id: SafeText,
+        expected_plan_hash: SafeText,
+    },
+    RevisePlan {
+        plan_id: SafeText,
+        expected_plan_hash: SafeText,
+    },
+    SubmitTask {
+        prompt: SafeText,
+    },
+    ContinueTask {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<SafeText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guidance: Option<SafeText>,
+    },
+    PauseTask {
+        request: sigil_kernel::TaskPauseRequest,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentCommand {
-    Start { binding: String },
-    Stop { binding: String },
+    Start {
+        binding: String,
+    },
+    Stop {
+        binding: String,
+    },
+    InvokeProfile {
+        profile_id: SafeText,
+        prompt: SafeText,
+        parent_prompt: SafeText,
+    },
+    InvokeInlineSkill {
+        skill_id: SafeText,
+        arguments: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<ApplicationReasoningEffort>,
+    },
+    InvokeChildSessionSkill {
+        skill_id: SafeText,
+        arguments: SafeText,
+    },
+    Close {
+        thread_id: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<SafeText>,
+    },
+    Cancel {
+        thread_id: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<SafeText>,
+    },
+    Message {
+        thread_id: SafeText,
+        prompt: SafeText,
+    },
+    Background,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
