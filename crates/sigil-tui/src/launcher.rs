@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     panic,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,7 +9,6 @@ use std::{
 use std::{
     env, io,
     panic::AssertUnwindSafe,
-    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,9 +23,8 @@ use crossterm::{
     cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
-        KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, EventStream,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
@@ -48,11 +45,19 @@ use sigil_runtime::support::SupportBuildInfo;
 #[cfg(not(test))]
 use sigil_updater::BuildMetadata;
 
+#[cfg(not(test))]
+use crate::host_effects::SystemHostEffects;
+#[cfg(test)]
+use crate::host_effects::{ExternalLaunchPlatform, TestHostEffects, external_launch_plan};
+#[cfg(not(test))]
+use crate::input_event::{FocusChange, InputEvent, InputKeyCode, InputKeyEventKind, Modifiers};
 use crate::ui;
 use crate::{
     app::{AppAction, AppState},
     attention::AttentionController,
-    clipboard::{self, ClipboardCopyOutcome},
+    damage::Damage,
+    host_effects::{ExternalLaunchTarget, HostEffects},
+    input_event::{EventEffect, HostRequest},
     mouse::AppMouseOutcome,
     presentation::PresentationSession,
     runner::{self, WorkerCommand, WorkerMessage},
@@ -509,6 +514,7 @@ async fn run_app(
     let mut needs_render = true;
     let mut last_spinner_tick = live_spinner_tick();
     let mut presentation = PresentationSession::new();
+    let mut host_effects = SystemHostEffects;
     let mut attention =
         AttentionController::from_current_process(app.terminal_notification_config());
 
@@ -623,26 +629,32 @@ async fn run_app(
         };
         match wake {
             WakeEvent::Terminal(event) => {
-                let mut next_event = Some(event?);
+                let mut next_event = Some(InputEvent::from(event?));
+                let mut batch_damage = Damage::NONE;
                 for processed_events in 0..EVENT_BATCH_LIMIT {
                     let Some(crossterm_event) = next_event.take() else {
                         break;
                     };
-                    let break_batch = process_terminal_event(
+                    let (break_batch, event_damage) = process_terminal_event(
                         terminal,
                         app,
                         worker,
-                        &mut needs_render,
                         &presentation,
                         crossterm_event,
                         &mut attention,
                         spawn_worker,
+                        &mut host_effects,
                     )?;
+                    batch_damage = batch_damage.union(event_damage);
                     if break_batch || processed_events + 1 >= EVENT_BATCH_LIMIT {
                         break;
                     }
-                    next_event = event::poll(Duration::ZERO)?.then(event::read).transpose()?;
+                    next_event = event::poll(Duration::ZERO)?
+                        .then(event::read)
+                        .transpose()?
+                        .map(InputEvent::from);
                 }
+                needs_render |= !batch_damage.is_empty();
             }
             WakeEvent::Worker(message) => {
                 needs_render |=
@@ -668,69 +680,78 @@ fn process_terminal_event<F>(
     terminal: &mut TuiTerminal,
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
-    needs_render: &mut bool,
     presentation: &PresentationSession,
-    crossterm_event: CrosstermEvent,
+    input_event: InputEvent,
     attention: &mut AttentionController,
     spawn_worker: F,
-) -> Result<bool>
+    host_effects: &mut impl HostEffects,
+) -> Result<(bool, Damage)>
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
-    match crossterm_event {
-        CrosstermEvent::Resize(_, _) => {
+    match input_event {
+        InputEvent::Resize { .. } => {
             terminal.autoresize()?;
-            *needs_render = true;
-            Ok(true)
+            Ok((true, Damage::TERMINAL))
         }
-        CrosstermEvent::Mouse(mouse) => {
+        InputEvent::Mouse(mouse) => {
             let Some(committed) = presentation.current() else {
                 // There is no safe coordinate authority before the first successful frame or
                 // while the terminal epoch is poisoned. The owner loop will either present a
                 // fresh frame or terminate after a present fault.
-                return Ok(false);
+                return Ok((false, Damage::NONE));
             };
             let outcome = app.handle_committed_mouse_event(mouse.into(), committed)?;
-            *needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
-            Ok(false)
+            let damage =
+                apply_mouse_outcome_with_host(app, worker, outcome, spawn_worker, host_effects)?;
+            Ok((false, damage))
         }
-        CrosstermEvent::Paste(text) => {
+        InputEvent::Paste(text) => {
             app.handle_paste_text(&text);
-            *needs_render = true;
-            Ok(false)
+            Ok((false, Damage::INPUT))
         }
-        CrosstermEvent::FocusGained => {
+        InputEvent::Focus(FocusChange::Gained) => {
             attention.observe_focus(true);
-            Ok(false)
+            Ok((false, Damage::NONE))
         }
-        CrosstermEvent::FocusLost => {
+        InputEvent::Focus(FocusChange::Lost) => {
             attention.observe_focus(false);
-            Ok(false)
+            Ok((false, Damage::NONE))
         }
-        CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-            if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
-                && key.modifiers == KeyModifiers::CONTROL
+        InputEvent::Key(key) if key.kind == InputKeyEventKind::Press => {
+            if matches!(key.code, InputKeyCode::Char('v') | InputKeyCode::Char('V'))
+                && key.modifiers == Modifiers::CONTROL
                 && app.can_accept_image_attachment_input()
             {
-                match crate::clipboard_image::read_clipboard_image_png() {
+                match host_effects.read_clipboard_image_png() {
                     Ok(Some(encoded_png)) => {
                         app.handle_clipboard_image(encoded_png);
-                        *needs_render = true;
-                        return Ok(false);
+                        return Ok((false, Damage::HOST_EFFECT));
                     }
                     Ok(None) => {}
                     Err(_) => {
                         app.report_clipboard_image_failure();
-                        *needs_render = true;
-                        return Ok(false);
+                        return Ok((false, Damage::HOST_EFFECT));
                     }
                 }
             }
-            let action = app.handle_key_event(key)?;
-            *needs_render |= apply_key_action(app, worker, action, spawn_worker)?;
-            Ok(false)
+            let may_change_state = key.may_change_state();
+            let action = app.handle_key_event(key.to_crossterm())?;
+            let damage = apply_key_action_with_host(
+                app,
+                worker,
+                action,
+                if may_change_state {
+                    Damage::INPUT
+                } else {
+                    Damage::NONE
+                },
+                spawn_worker,
+                host_effects,
+            )?;
+            Ok((false, damage))
         }
-        _ => Ok(false),
+        InputEvent::Key(_) => Ok((false, Damage::NONE)),
     }
 }
 
@@ -977,14 +998,36 @@ fn restore_initial_session_from_disk(
     }
 }
 
+#[cfg(test)]
 fn process_app_action_with_spawner<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     action: AppAction,
-    mut spawn_worker_fn: F,
+    spawn_worker_fn: F,
 ) -> Result<()>
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    let mut host_effects = TestHostEffects;
+    process_app_action_with_spawner_and_host(
+        app,
+        worker,
+        action,
+        spawn_worker_fn,
+        &mut host_effects,
+    )
+}
+
+fn process_app_action_with_spawner_and_host<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: AppAction,
+    mut spawn_worker_fn: F,
+    host_effects: &mut H,
+) -> Result<()>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
 {
     match action {
         AppAction::SetupCompleted {
@@ -1264,47 +1307,44 @@ where
             }
         }
         AppAction::CopyToClipboard { text } => {
-            match clipboard::copy_text(&text, app.terminal_osc52_clipboard_enabled()) {
-                ClipboardCopyOutcome::Copied => app.record_clipboard_copy_success(&text),
-                ClipboardCopyOutcome::Unavailable(reason) => {
-                    app.record_clipboard_copy_unavailable(&reason);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::CopyText {
+                    text,
+                    secret: false,
+                },
+                host_effects,
+            )?;
         }
         AppAction::CopySecretToClipboard { text } => {
-            match clipboard::copy_text(text.expose_secret(), app.terminal_osc52_clipboard_enabled())
-            {
-                ClipboardCopyOutcome::Copied => {
-                    app.record_clipboard_copy_success(text.expose_secret());
-                }
-                ClipboardCopyOutcome::Unavailable(reason) => {
-                    app.record_clipboard_copy_unavailable(&reason);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::CopyText {
+                    text: text.expose_secret().to_owned(),
+                    secret: true,
+                },
+                host_effects,
+            )?;
         }
         AppAction::OpenExternalUrl { url } => {
-            match launch_external_target(ExternalLaunchTarget::Url(&url)) {
-                Ok(()) => app.record_feedback_external_action_success("opening bug report form"),
-                Err(error) => {
-                    app.record_feedback_external_action_failure("open bug report form", &error);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::OpenExternalUrl { url, secret: false },
+                host_effects,
+            )?;
         }
         AppAction::OpenSecretExternalUrl { url } => {
-            match launch_external_target(ExternalLaunchTarget::Url(url.expose_secret())) {
-                Ok(()) => app.record_feedback_external_action_success("opening authorization page"),
-                Err(error) => {
-                    app.record_feedback_external_action_failure("open authorization page", &error);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::OpenExternalUrl {
+                    url: url.expose_secret().to_owned(),
+                    secret: true,
+                },
+                host_effects,
+            )?;
         }
         AppAction::RevealFile { path } => {
-            match launch_external_target(ExternalLaunchTarget::RevealFile(&path)) {
-                Ok(()) => app.record_feedback_external_action_success("revealing feedback report"),
-                Err(error) => {
-                    app.record_feedback_external_action_failure("reveal feedback report", &error);
-                }
-            }
+            process_host_request(app, HostRequest::RevealFile(path), host_effects)?;
         }
         AppAction::CheckForUpdate {
             force_refresh,
@@ -1321,6 +1361,52 @@ where
         }
     }
     flush_pending_worker_commands(app, worker)?;
+    Ok(())
+}
+
+fn process_host_request<H: HostEffects>(
+    app: &mut AppState,
+    request: HostRequest,
+    host_effects: &mut H,
+) -> Result<()> {
+    match request {
+        HostRequest::CopyText {
+            text,
+            secret: _secret,
+        } => match host_effects.copy_text(&text, app.terminal_osc52_clipboard_enabled()) {
+            crate::clipboard::ClipboardCopyOutcome::Copied => {
+                app.record_clipboard_copy_success(&text)
+            }
+            crate::clipboard::ClipboardCopyOutcome::Unavailable(reason) => {
+                app.record_clipboard_copy_unavailable(&reason)
+            }
+        },
+        HostRequest::OpenExternalUrl { url, secret } => {
+            let target = ExternalLaunchTarget::Url(&url);
+            let success_notice = if secret {
+                "opening authorization page"
+            } else {
+                "opening bug report form"
+            };
+            let failure_notice = if secret {
+                "open authorization page"
+            } else {
+                "open bug report form"
+            };
+            match host_effects.launch_external(target) {
+                Ok(()) => app.record_feedback_external_action_success(success_notice),
+                Err(error) => app.record_feedback_external_action_failure(failure_notice, &error),
+            }
+        }
+        HostRequest::RevealFile(path) => {
+            match host_effects.launch_external(ExternalLaunchTarget::RevealFile(&path)) {
+                Ok(()) => app.record_feedback_external_action_success("revealing feedback report"),
+                Err(error) => {
+                    app.record_feedback_external_action_failure("reveal feedback report", &error)
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1341,114 +1427,6 @@ fn apply_worker_startup_recovery(
             target_session: None,
         });
     app.handle_worker_message(recovery)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExternalLaunchPlatform {
-    MacOs,
-    Windows,
-    Freedesktop,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ExternalLaunchTarget<'a> {
-    Url(&'a str),
-    RevealFile(&'a Path),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ExternalLaunchPlan {
-    program: &'static str,
-    args: Vec<OsString>,
-}
-
-fn external_launch_plan(
-    target: ExternalLaunchTarget<'_>,
-    platform: ExternalLaunchPlatform,
-) -> Result<ExternalLaunchPlan> {
-    if let ExternalLaunchTarget::Url(url) = target
-        && (!url.starts_with("https://") || url.chars().any(char::is_control))
-    {
-        anyhow::bail!("external URL must be a valid HTTPS URL");
-    }
-
-    let plan = match (platform, target) {
-        (ExternalLaunchPlatform::MacOs, ExternalLaunchTarget::Url(url)) => ExternalLaunchPlan {
-            program: "/usr/bin/open",
-            args: vec![OsString::from(url)],
-        },
-        (ExternalLaunchPlatform::MacOs, ExternalLaunchTarget::RevealFile(path)) => {
-            ExternalLaunchPlan {
-                program: "/usr/bin/open",
-                args: vec![OsString::from("-R"), path.as_os_str().to_owned()],
-            }
-        }
-        (ExternalLaunchPlatform::Windows, ExternalLaunchTarget::Url(url)) => ExternalLaunchPlan {
-            program: "rundll32.exe",
-            args: vec![
-                OsString::from("url.dll,FileProtocolHandler"),
-                OsString::from(url),
-            ],
-        },
-        (ExternalLaunchPlatform::Windows, ExternalLaunchTarget::RevealFile(path)) => {
-            let mut select_arg = OsString::from("/select,");
-            select_arg.push(path.as_os_str());
-            ExternalLaunchPlan {
-                program: "explorer.exe",
-                args: vec![select_arg],
-            }
-        }
-        (ExternalLaunchPlatform::Freedesktop, ExternalLaunchTarget::Url(url)) => {
-            ExternalLaunchPlan {
-                program: "xdg-open",
-                args: vec![OsString::from(url)],
-            }
-        }
-        (ExternalLaunchPlatform::Freedesktop, ExternalLaunchTarget::RevealFile(path)) => {
-            let parent = path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("support report has no parent directory"))?;
-            ExternalLaunchPlan {
-                program: "xdg-open",
-                args: vec![parent.as_os_str().to_owned()],
-            }
-        }
-        (ExternalLaunchPlatform::Unsupported, _) => {
-            anyhow::bail!("external opening is not supported on this platform");
-        }
-    };
-    Ok(plan)
-}
-
-const fn current_external_launch_platform() -> ExternalLaunchPlatform {
-    if cfg!(target_os = "macos") {
-        ExternalLaunchPlatform::MacOs
-    } else if cfg!(target_os = "windows") {
-        ExternalLaunchPlatform::Windows
-    } else if cfg!(unix) {
-        ExternalLaunchPlatform::Freedesktop
-    } else {
-        ExternalLaunchPlatform::Unsupported
-    }
-}
-
-#[cfg(not(test))]
-fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
-    let plan = external_launch_plan(target, current_external_launch_platform())?;
-    Command::new(plan.program)
-        .args(plan.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to launch {}", plan.program))?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
-    external_launch_plan(target, current_external_launch_platform()).map(|_| ())
 }
 
 #[cfg(test)]
@@ -1727,6 +1705,7 @@ fn shutdown_and_join_worker(worker: &mut Option<WorkerRuntime>) {
     }
 }
 
+#[cfg(test)]
 fn apply_mouse_outcome<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
@@ -1736,16 +1715,38 @@ fn apply_mouse_outcome<F>(
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
-    match outcome {
-        AppMouseOutcome::Noop => Ok(false),
-        AppMouseOutcome::Redraw => Ok(true),
-        AppMouseOutcome::Action(action) => {
-            process_app_action_with_spawner(app, worker, action, &mut spawn_worker_fn)?;
-            Ok(true)
-        }
-    }
+    let mut host_effects = TestHostEffects;
+    let damage = apply_mouse_outcome_with_host(
+        app,
+        worker,
+        outcome,
+        &mut spawn_worker_fn,
+        &mut host_effects,
+    )?;
+    Ok(!damage.is_empty())
 }
 
+fn apply_mouse_outcome_with_host<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    outcome: AppMouseOutcome,
+    mut spawn_worker_fn: F,
+    host_effects: &mut H,
+) -> Result<Damage>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
+{
+    apply_event_effect(
+        app,
+        worker,
+        outcome.into_event_effect(),
+        &mut spawn_worker_fn,
+        host_effects,
+    )
+}
+
+#[cfg(test)]
 fn apply_key_action<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
@@ -1755,10 +1756,66 @@ fn apply_key_action<F>(
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
-    if let Some(action) = action {
-        process_app_action_with_spawner(app, worker, action, &mut spawn_worker_fn)?;
+    let mut host_effects = TestHostEffects;
+    let damage = apply_key_action_with_host(
+        app,
+        worker,
+        action,
+        Damage::FULL,
+        &mut spawn_worker_fn,
+        &mut host_effects,
+    )?;
+    Ok(!damage.is_empty())
+}
+
+fn apply_key_action_with_host<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: Option<AppAction>,
+    no_action_damage: Damage,
+    mut spawn_worker_fn: F,
+    host_effects: &mut H,
+) -> Result<Damage>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
+{
+    let effect = action.map_or(
+        EventEffect::LocalUpdate(no_action_damage),
+        AppAction::into_event_effect,
+    );
+    apply_event_effect(app, worker, effect, &mut spawn_worker_fn, host_effects)
+}
+
+fn apply_event_effect<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    effect: EventEffect,
+    spawn_worker_fn: &mut F,
+    host_effects: &mut H,
+) -> Result<Damage>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
+{
+    match effect {
+        EventEffect::Ignored => Ok(Damage::NONE),
+        EventEffect::LocalUpdate(damage) => Ok(damage),
+        EventEffect::OpaqueAction(action) => {
+            process_app_action_with_spawner_and_host(
+                app,
+                worker,
+                action,
+                spawn_worker_fn,
+                host_effects,
+            )?;
+            Ok(Damage::ASYNC)
+        }
+        EventEffect::HostRequest(request) => {
+            process_host_request(app, request, host_effects)?;
+            Ok(Damage::HOST_EFFECT)
+        }
     }
-    Ok(true)
 }
 
 fn next_mouse_capture_action(active: bool, desired: bool) -> Option<bool> {

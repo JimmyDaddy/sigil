@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.1 Complete / R70.2 Pending（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.1 已完成 committed presentation slice）
+状态：R70.2 Complete / R70.3 Pending（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.2 已完成 normalized input/damage/host-effects slice）
 
 创建日期：2026-08-23
 
@@ -2921,3 +2921,23 @@ R70.x
 - remaining deviations：R70.1 尚未完成 full-resync backend、normalized input、framework package split、
   application contract、renderer decoupling 与旧 runner removal；这些继续由 R70.2-R70.8 交付，不能将本 slice
   解释为 RFC-0070 总体完成。
+
+### R70.2：normalized input、Damage 与 host effects（2026-08-28）
+
+- implementation commit：待本 slice 提交后记录；基线为 R70.1 evidence follow-up `1dc22eaf50edeea5b1898162c7ba70acc02db2c7`。
+- moved authority：没有移动 Resource Authority、Sandbox、permission、worker 或 durable event owner；本 slice
+  只收窄 terminal adapter 与 launcher 的输入/host capability 边界。
+- delivered：新增不依赖 Crossterm 类型的 `InputEvent`/`InputKeyEvent`/`InputMouseEvent`/`FocusChange`，并在
+  launcher 入口完成一次性 Crossterm normalization；增加 `EventEffect` 将 ignored/local update/opaque action/
+  host request 分开；增加可合并的 `Damage`，input batch 在同一轮中 union damage，最多在 batch 后触发一次 present。
+- host boundary：clipboard text、clipboard image capture、external URL/file opening 通过 launcher 注入的
+  `HostEffects` 执行；生产使用 `SystemHostEffects`，测试通过 `TestHostEffects`，normalized input 与 app/action
+  层不再直接调用 host process/capability。
+- behavior parity：既有 AppAction、AppMouseOutcome、worker command 与反馈文案保持兼容；旧测试 helper 只作为
+  test-only wrapper 保留，生产事件循环走 typed effect path；unsupported/repeat/release/focus-only input 不生成
+  render damage。
+- tests/gates run：`cargo fmt --all --check`、`cargo check -p sigil-tui`、完整
+  `cargo test -p sigil-tui --lib -- --test-threads=2`（1714 passed / 3 ignored）、normalized input 3 项定向
+  测试、clipboard/external host 行为测试、`git diff --check` 通过。
+- remaining deviations：R70.2 尚未交付 renderer-only SurfaceModel、virtualization/UAX #9、`sigil-application`
+  contract、public package split、runner 下沉或 release qualification；这些继续由 R70.3-R70.8 完成。
