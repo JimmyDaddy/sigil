@@ -60,6 +60,7 @@ impl Rect {
 pub const MAX_SURFACE_NODES: usize = 4_096;
 pub const MAX_SURFACE_TEXT_BYTES: usize = 64 * 1024;
 
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SurfaceNodeKind {
     Text(String),
@@ -68,10 +69,28 @@ pub enum SurfaceNodeKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SurfaceNode {
-    pub id: NodeId,
-    pub key: NodeKey,
-    pub bounds: Rect,
-    pub kind: SurfaceNodeKind,
+    id: NodeId,
+    key: NodeKey,
+    bounds: Rect,
+    kind: SurfaceNodeKind,
+}
+
+impl SurfaceNode {
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+
+    pub fn key(&self) -> &NodeKey {
+        &self.key
+    }
+
+    pub fn bounds(&self) -> Rect {
+        self.bounds
+    }
+
+    pub fn kind(&self) -> &SurfaceNodeKind {
+        &self.kind
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,11 +216,11 @@ fn bounded_text(value: String) -> Result<String, CoreError> {
 /// projection refresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VirtualSequence<T> {
-    pub generation: u64,
-    pub first_item: usize,
-    pub total_items: usize,
-    pub items: Vec<T>,
-    pub item_ids: Vec<SurfaceItemId>,
+    generation: u64,
+    first_item: usize,
+    total_items: usize,
+    items: Vec<T>,
+    item_ids: Vec<SurfaceItemId>,
 }
 
 impl<T> VirtualSequence<T> {
@@ -223,6 +242,40 @@ impl<T> VirtualSequence<T> {
 
     pub fn resident_len(&self) -> usize {
         self.items.len()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn first_item(&self) -> usize {
+        self.first_item
+    }
+
+    pub fn total_items(&self) -> usize {
+        self.total_items
+    }
+
+    pub fn items(&self) -> &[T] {
+        &self.items
+    }
+
+    pub fn item_ids(&self) -> &[SurfaceItemId] {
+        &self.item_ids
+    }
+
+    pub fn validate(&self) -> Result<(), CoreError> {
+        if self.generation == 0 {
+            return Err(CoreError::InvalidValue(
+                "virtual sequence generation must be non-zero",
+            ));
+        }
+        if !self.is_bounded_by(MAX_SURFACE_NODES) {
+            return Err(CoreError::InvalidValue(
+                "virtual sequence metadata is invalid",
+            ));
+        }
+        Ok(())
     }
 
     pub fn is_bounded_by(&self, max_resident_items: usize) -> bool {
@@ -484,6 +537,40 @@ impl fmt::Display for CoreError {
 }
 
 impl std::error::Error for CoreError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SURFACE_NODES, NodeKey, Rect, Surface, VirtualSequence};
+
+    #[test]
+    fn surface_nodes_expose_only_validated_read_access() {
+        let viewport = Rect::new(0, 0, 10, 2);
+        let mut surface = Surface::new(viewport, 1).expect("surface");
+        surface
+            .push_action(
+                NodeKey::new("save").expect("key"),
+                viewport,
+                "Save",
+                NodeKey::new("save.command").expect("binding"),
+            )
+            .expect("action");
+        let node = &surface.nodes()[0];
+        assert_eq!(node.id().generation, 1);
+        assert_eq!(node.key().as_str(), "save");
+        assert_eq!(node.bounds(), viewport);
+    }
+
+    #[test]
+    fn virtual_sequence_validation_rejects_unusable_generation() {
+        let invalid = VirtualSequence::new(0, 0, 1, vec!["item"]);
+        assert!(invalid.validate().is_err());
+
+        let valid = VirtualSequence::new(1, 3, 4, vec!["item"]);
+        assert!(valid.validate().is_ok());
+        assert!(valid.is_bounded_by(MAX_SURFACE_NODES));
+        assert_eq!(valid.item_ids()[0].ordinal, 3);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScrollAnchor {

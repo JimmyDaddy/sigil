@@ -66,7 +66,7 @@ pub(crate) fn render_live_panel_surface(
     theme: &Theme,
 ) {
     debug_assert!(transcript.is_bounded_by(transcript.resident_len()));
-    render_live_panel_with_lines(frame, area, view_model, transcript.items.clone(), theme);
+    render_live_panel_with_lines(frame, area, view_model, transcript.items().to_vec(), theme);
 }
 
 fn render_live_panel_with_lines(
