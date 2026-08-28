@@ -118,6 +118,20 @@ impl PublicEventOutboxProjectionV1 {
             })
             .collect()
     }
+
+    /// Returns the durable public events in stream order for rebuilding a surface projection.
+    /// Delivery receipts intentionally do not affect this view: an adapter receipt records
+    /// transport progress, not whether the event is still part of the session's state history.
+    #[must_use]
+    pub fn events_in_order(&self) -> Vec<&PublicEventOutboxEntryV1> {
+        let mut entries: Vec<_> = self.entries.values().collect();
+        entries.sort_by(|left, right| {
+            left.sequence
+                .cmp(&right.sequence)
+                .then_with(|| left.public_event_id.cmp(&right.public_event_id))
+        });
+        entries
+    }
 }
 
 /// Store-backed writer for the public outbox and adapter receipts.
@@ -273,6 +287,33 @@ mod tests {
         })?;
         assert!(projection.pending_for_adapter("http").is_empty());
         assert_eq!(projection.pending_for_adapter("desktop").len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn outbox_projection_orders_state_events_independently_of_delivery() -> Result<()> {
+        let first = entry(1);
+        let second = entry(2);
+        let mut projection = PublicEventOutboxProjectionV1::default();
+        projection.apply_outbox(second)?;
+        projection.apply_outbox(first.clone())?;
+        projection.apply_delivery(PublicEventDeliveryReceiptV1 {
+            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: first.public_event_id,
+            adapter: "tui".to_owned(),
+            delivered_at_unix_ms: 1,
+        })?;
+
+        let events = projection.events_in_order();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(events.len(), 2);
+        assert!(projection.pending_for_adapter("tui").len() == 1);
         Ok(())
     }
 }
