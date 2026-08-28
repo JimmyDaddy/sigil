@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use sigil_application::{ApplicationCommand, ApplicationCommandReceipt, McpCommand};
 use sigil_kernel::{
     AgentRole, ApprovalMode, AssistantMessageKind, CandidateCheck, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
@@ -240,6 +241,50 @@ async fn production_driver_attaches_the_shared_application_task_executor() {
     let driver = production_queue_driver(&temp, "task-executor");
 
     assert!(driver.services.task_executor_attached());
+}
+
+#[tokio::test]
+async fn production_http_application_client_uses_runtime_projection_page_and_reservation() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "application-port");
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-application.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+    let client = registry
+        .application_client(&session.id, "http-application-test")
+        .expect("application client should bind");
+    let (projection, page, receipt) = tokio::task::spawn_blocking(move || {
+        let projection = client
+            .refresh()
+            .expect("application projection should refresh");
+        let page = client
+            .page(None, 1)
+            .expect("application page should use the same frontier");
+        let receipt = client
+            .execute(
+                "application-unsupported-command",
+                ApplicationCommand::Mcp(McpCommand::Refresh {
+                    binding: "test-server".to_owned(),
+                }),
+            )
+            .expect("unsupported command should receive a typed rejection");
+        (projection, page, receipt)
+    })
+    .await
+    .expect("blocking application client task should complete");
+
+    assert_eq!(
+        projection.scope.session.as_ref().map(ToString::to_string),
+        Some(session.durable_session_scope_id)
+    );
+    assert_eq!(page.scope, projection.scope);
+    assert!(matches!(receipt, ApplicationCommandReceipt::Rejected(_)));
 }
 
 #[tokio::test]

@@ -194,9 +194,12 @@ impl HttpDurableCommandStore {
         })
     }
 
-    /// Attaches command identity persistence to the composed managed idempotency ledger.
-    /// Existing legacy state is imported once and the server epoch advances when a managed
-    /// ledger from a previous process is reopened.
+    /// Attaches command identity persistence to the legacy managed idempotency ledger.
+    ///
+    /// Production current-schema callers use [`Self::attach_application_writer`]. This
+    /// compatibility helper remains test-only so legacy import behavior can stay covered without
+    /// keeping a second production attachment seam alive.
+    #[cfg(test)]
     pub(crate) fn attach_managed_writer(
         &self,
         writer: Arc<ManagedStorageWriterAdapterV1>,

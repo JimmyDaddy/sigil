@@ -815,6 +815,26 @@ impl HttpSessionRunRegistry {
             })
     }
 
+    /// Builds the host-bound transport-neutral application client for one HTTP session.
+    ///
+    /// The client is created only after this registry resolves the process-local session handle;
+    /// the driver then injects the current application scope, managed journals, and live
+    /// connection identity. The HTTP payload cannot select any of those values.
+    pub(crate) fn application_client(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<crate::application_bridge::HttpApplicationClient, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        self.driver
+            .application_client(&session, client_id)
+            .map_err(|error| HttpRegistryError::DriverRejected {
+                operation: "application client",
+                run_id: session_id.to_owned(),
+                message: error.message,
+            })
+    }
+
     pub(crate) fn record_session_route_transition(
         &self,
         durable_session_scope_id: &str,

@@ -6631,6 +6631,7 @@ fn crate_dependency_boundary_excludes_tui_and_unrelated_sigil_crates() {
     assert_eq!(
         sigil_dependencies,
         vec![
+            ("dependencies".to_owned(), "sigil-application".to_owned()),
             ("dependencies".to_owned(), "sigil-kernel".to_owned()),
             (
                 "dependencies".to_owned(),

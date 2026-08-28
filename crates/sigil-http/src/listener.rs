@@ -22,6 +22,7 @@ use tokio::{
 };
 
 use crate::{
+    application_bridge::HttpApplicationCommandRequest,
     auth::HttpAuthValidator,
     config::HttpServerConfig,
     disclosure::HttpDurableEgressDisclosureJournal,
@@ -65,6 +66,7 @@ const HTTP_GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_SESSION_ID_HEADER: &str = "x-sigil-session-id";
 const HTTP_OWNER_REVISION_HEADER: &str = "x-sigil-owner-revision";
 const HTTP_MAX_CONVERSATION_DISPLAY_CURSOR_BYTES: usize = 4 * 1024;
+const HTTP_APPLICATION_CLIENT_ID_HEADER: &str = "x-sigil-application-client-id";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1001,6 +1003,95 @@ fn route_http_request(
         return match registry.open_session(body) {
             Ok(session) => json_response(200, json!(session)),
             Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/application/page"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Some(client_id) = request.header(HTTP_APPLICATION_CLIENT_ID_HEADER) else {
+            return http_error_response(
+                400,
+                "application_client_id_required",
+                "the application page requires x-sigil-application-client-id",
+            );
+        };
+        let (before, limit) = match parse_transcript_query(request.query.as_deref()) {
+            Ok(query) => query,
+            Err(message) => return http_error_response(400, "invalid_query", message),
+        };
+        let client = match registry.application_client(session_id, client_id) {
+            Ok(client) => client,
+            Err(error) => return registry_error_response(error),
+        };
+        if let Err(error) = client.refresh() {
+            return application_error_response(error);
+        }
+        return match client.page(before, limit) {
+            Ok(page) => json_response(200, json!(page)),
+            Err(error) => application_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/application"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Some(client_id) = request.header(HTTP_APPLICATION_CLIENT_ID_HEADER) else {
+            return http_error_response(
+                400,
+                "application_client_id_required",
+                "the application projection requires x-sigil-application-client-id",
+            );
+        };
+        let client = match registry.application_client(session_id, client_id) {
+            Ok(client) => client,
+            Err(error) => return registry_error_response(error),
+        };
+        return match client.refresh() {
+            Ok(projection) => json_response(200, json!(projection)),
+            Err(error) => application_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/application/commands"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Some(client_id) = request.header(HTTP_APPLICATION_CLIENT_ID_HEADER) else {
+            return http_error_response(
+                400,
+                "application_client_id_required",
+                "application commands require x-sigil-application-client-id",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpApplicationCommandRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_application_command",
+                "invalid transport-neutral application command body",
+            );
+        };
+        let client = match registry.application_client(session_id, client_id) {
+            Ok(client) => client,
+            Err(error) => return registry_error_response(error),
+        };
+        if let Err(error) = client.refresh() {
+            return application_error_response(error);
+        }
+        return match client.execute(&body.command_id, body.command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => application_error_response(error),
         };
     }
 
@@ -2337,6 +2428,20 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         _ => "registry_error",
     };
     http_error_response(status, code, error.to_string())
+}
+
+fn application_error_response(error: sigil_application::ApplicationError) -> HttpResponse {
+    let status = match error {
+        sigil_application::ApplicationError::UnknownSchema(_)
+        | sigil_application::ApplicationError::InvalidRequest(_)
+        | sigil_application::ApplicationError::ScopeRequired => 400,
+        sigil_application::ApplicationError::ScopeMismatch
+        | sigil_application::ApplicationError::ResetRequired
+        | sigil_application::ApplicationError::CorruptProjection(_) => 409,
+        sigil_application::ApplicationError::NotFound => 404,
+        sigil_application::ApplicationError::Unavailable => 503,
+    };
+    http_error_response(status, "application_error", error.to_string())
 }
 
 fn session_catalog_batch_error_response(error: SessionCatalogBatchError) -> HttpResponse {

@@ -9,10 +9,12 @@ anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 fs2.workspace = true
+futures.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sigil-application = { path = "../sigil-application" }
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-resource-authority = { path = "../sigil-resource-authority" }
 sigil-runtime = { path = "../sigil-runtime" }

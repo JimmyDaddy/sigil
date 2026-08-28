@@ -327,6 +327,9 @@ pub struct HttpProductionRunDriver {
     event_bus: Arc<HttpLiveEventBus>,
     runtime: Handle,
     registry: OnceLock<Weak<HttpSessionRunRegistry>>,
+    application_reservations: OnceLock<Arc<sigil_runtime::ManagedApplicationReservationStore>>,
+    application_delivery_acks:
+        Mutex<BTreeMap<String, Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
     active_runs_ready: Arc<Condvar>,
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
@@ -899,6 +902,8 @@ impl HttpProductionRunDriver {
             event_bus,
             runtime,
             registry: OnceLock::new(),
+            application_reservations: OnceLock::new(),
+            application_delivery_acks: Mutex::new(BTreeMap::new()),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
             terminal_owners: Arc::new(Mutex::new(BTreeMap::new())),
@@ -977,6 +982,100 @@ impl HttpProductionRunDriver {
             .set(Arc::downgrade(&registry))
             .map_err(|_| HttpRunDriverError::new("production driver registry already attached"))?;
         Ok(registry)
+    }
+
+    fn application_reservation_store(
+        &self,
+    ) -> Result<Arc<sigil_runtime::ManagedApplicationReservationStore>, HttpRunDriverError> {
+        if let Some(store) = self.application_reservations.get() {
+            return Ok(Arc::clone(store));
+        }
+        let composition = self
+            .services
+            .authority_composition()
+            .ok_or_else(|| HttpRunDriverError::new("application authority is unavailable"))?;
+        let store = Arc::new(
+            sigil_runtime::ManagedApplicationReservationStore::open(
+                Arc::clone(&composition.storage_writer),
+                "http-application",
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "application reservation journal is unavailable: {error}"
+                ))
+            })?,
+        );
+        if self
+            .application_reservations
+            .set(Arc::clone(&store))
+            .is_err()
+        {
+            return self
+                .application_reservations
+                .get()
+                .map(Arc::clone)
+                .ok_or_else(|| HttpRunDriverError::new("application reservation owner lost"));
+        }
+        Ok(store)
+    }
+
+    fn application_context(
+        &self,
+        session: &HttpSessionSnapshot,
+    ) -> Result<crate::application_bridge::HttpApplicationContext, HttpRunDriverError> {
+        self.require_current_schema_authority()?;
+        let cutover = self
+            .services
+            .cutover()
+            .ok_or_else(|| HttpRunDriverError::new("application cutover is unavailable"))?;
+        let composition = self
+            .services
+            .authority_composition()
+            .ok_or_else(|| HttpRunDriverError::new("application authority is unavailable"))?;
+        let registry = self.attached_registry()?;
+        let application_instance_id = cutover.manifest().application_instance_id.clone();
+        let scope = crate::application_bridge::application_scope(&application_instance_id, session)
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let mut delivery_acks = self
+            .application_delivery_acks
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("application delivery ACK state unavailable"))?;
+        let delivery_key = session.durable_session_scope_id.clone();
+        let delivery_store = if let Some(store) = delivery_acks.get(&delivery_key) {
+            Arc::clone(store)
+        } else {
+            if delivery_acks.len() >= MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES {
+                return Err(HttpRunDriverError::new(
+                    "application delivery ACK owner reached its bounded session capacity",
+                ));
+            }
+            let store = Arc::new(
+                sigil_runtime::RuntimeApplicationDeliveryAckStore::open(
+                    Arc::clone(&composition.storage_writer),
+                    &format!("http-application-delivery-{delivery_key}"),
+                    scope,
+                    1,
+                )
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "application delivery ACK journal is unavailable: {error}"
+                    ))
+                })?,
+            );
+            delivery_acks.insert(delivery_key, Arc::clone(&store));
+            store
+        };
+        drop(delivery_acks);
+        Ok(crate::application_bridge::HttpApplicationContext {
+            config_path: self.options.config_path.clone(),
+            launch_cwd: self.options.launch_cwd.clone(),
+            application_instance_id,
+            application_generation: cutover.manifest().application_generation,
+            reservations: self.application_reservation_store()?,
+            delivery_acks: delivery_store,
+            registry,
+            runtime: self.runtime.clone(),
+        })
     }
 
     /// Returns the number of owned run supervisors that have not completed cleanup.
@@ -1734,6 +1833,15 @@ impl AuthorityArtifactStoreLease {
 impl HttpRunDriver for HttpProductionRunDriver {
     fn requires_run_release_barrier(&self) -> bool {
         true
+    }
+
+    fn application_client(
+        &self,
+        session: &HttpSessionSnapshot,
+        client_id: &str,
+    ) -> Result<crate::application_bridge::HttpApplicationClient, HttpRunDriverError> {
+        let context = self.application_context(session)?;
+        crate::application_bridge::build_client(&context, session, client_id)
     }
 
     fn bind_session(
