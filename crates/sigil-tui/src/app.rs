@@ -907,12 +907,23 @@ pub enum AppAction {
     },
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub struct ConfigurationSaveRequest {
     pub(crate) expected: RootConfig,
     pub(crate) next_base: RootConfig,
     pub(crate) config_path: PathBuf,
+    pub(crate) follow_up: ConfigurationSaveFollowUp,
+    pub(crate) root_only: bool,
     #[cfg(not(test))]
     pub(crate) draft: Mutex<Option<sigil_runtime::provider_connections::ConnectionSaveDraft>>,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigurationSaveFollowUp {
+    RebootRuntime,
+    ApplyActiveRunPermissionMode(sigil_kernel::PermissionMode),
+    ApplyPersistedDefaultModel,
 }
 
 impl std::fmt::Debug for ConfigurationSaveRequest {

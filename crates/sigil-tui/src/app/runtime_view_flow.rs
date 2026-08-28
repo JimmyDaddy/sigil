@@ -111,6 +111,7 @@ impl AppState {
         .flatten()
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_pending_session_transition_target(
         &mut self,
         session_log_path: std::path::PathBuf,

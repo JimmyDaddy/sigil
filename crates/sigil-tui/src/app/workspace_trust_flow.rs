@@ -101,6 +101,7 @@ impl AppState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn ensure_target_workspace_trust_decision_with_attachment(
         &self,
         session_log_path: &std::path::Path,

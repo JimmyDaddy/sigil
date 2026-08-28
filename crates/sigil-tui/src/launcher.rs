@@ -35,11 +35,13 @@ use ratatui::backend::CrosstermBackend;
 #[cfg(test)]
 use ratatui::layout::Rect;
 use ratatui::{Terminal, backend::Backend, layout::Position};
+#[cfg(test)]
+use sigil_kernel::JsonlSessionStore;
+use sigil_kernel::RootConfig;
 #[cfg(not(test))]
 use sigil_kernel::TerminalKeyboardEnhancement;
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
-use sigil_kernel::{JsonlSessionStore, RootConfig};
 #[cfg(not(test))]
 use sigil_runtime::support::SupportBuildInfo;
 #[cfg(not(test))]
@@ -1139,15 +1141,33 @@ where
             );
             report_application_receipt(app, &receipt)?;
             if settled {
-                return process_app_action_with_spawner_and_host(
-                    app,
-                    worker,
-                    AppAction::ConfigSaved {
-                        root_config: Box::new(request.next_base.clone()),
-                    },
-                    spawn_worker_fn,
-                    host_effects,
-                );
+                app.apply_persisted_config_snapshot(&request.next_base);
+                match request.follow_up {
+                    crate::app::ConfigurationSaveFollowUp::RebootRuntime => {
+                        return process_app_action_with_spawner_and_host(
+                            app,
+                            worker,
+                            AppAction::ConfigSaved {
+                                root_config: Box::new(request.next_base.clone()),
+                            },
+                            spawn_worker_fn,
+                            host_effects,
+                        );
+                    }
+                    crate::app::ConfigurationSaveFollowUp::ApplyActiveRunPermissionMode(mode) => {
+                        return process_app_action_with_spawner_and_host(
+                            app,
+                            worker,
+                            AppAction::UpdateActiveRunPermissionMode { mode },
+                            spawn_worker_fn,
+                            host_effects,
+                        );
+                    }
+                    crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel => {
+                        app.apply_saved_default_model(request.next_base.clone());
+                        return Ok(());
+                    }
+                }
             }
         }
         AppAction::ConfigSaved { .. } | AppAction::RuntimeConfigUpdated { .. } => {
@@ -1183,6 +1203,40 @@ where
             }
         }
         AppAction::SessionRuntimeRouteUpdated { route } => {
+            #[cfg(not(test))]
+            {
+                let receipt = match try_execute_application_action(
+                    app,
+                    worker,
+                    &AppAction::SessionRuntimeRouteUpdated {
+                        route: route.clone(),
+                    },
+                ) {
+                    Ok(Some(receipt)) => receipt,
+                    Ok(None) => {
+                        report_worker_unavailable(
+                            app,
+                            "model route selection requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        report_worker_unavailable(
+                            app,
+                            &format!("model route selection was not admitted: {error}"),
+                        )?;
+                        return Ok(());
+                    }
+                };
+                report_application_receipt(app, &receipt)?;
+                if !matches!(
+                    receipt,
+                    sigil_application::ApplicationCommandReceipt::Settled(_)
+                        | sigil_application::ApplicationCommandReceipt::Replayed(_)
+                ) {
+                    return Ok(());
+                }
+            }
             let persisted_config = app
                 .persisted_config_snapshot()
                 .cloned()
@@ -1202,7 +1256,50 @@ where
             root_config,
             expected_root_config,
         } => {
+            #[cfg(not(test))]
+            {
+                let request = std::sync::Arc::new(crate::app::ConfigurationSaveRequest {
+                    expected: *expected_root_config.clone(),
+                    next_base: *root_config.clone(),
+                    config_path: app.config_path.clone(),
+                    follow_up: crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel,
+                    root_only: true,
+                    draft: std::sync::Mutex::new(None),
+                });
+                let receipt = match try_execute_application_action(
+                    app,
+                    worker,
+                    &AppAction::PersistConfiguration { request },
+                ) {
+                    Ok(Some(receipt)) => receipt,
+                    Ok(None) => {
+                        report_worker_unavailable(
+                            app,
+                            "default model save requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        report_worker_unavailable(
+                            app,
+                            &format!("default model save was not admitted: {error}"),
+                        )?;
+                        return Ok(());
+                    }
+                };
+                report_application_receipt(app, &receipt)?;
+                if matches!(
+                    receipt,
+                    sigil_application::ApplicationCommandReceipt::Settled(_)
+                        | sigil_application::ApplicationCommandReceipt::Replayed(_)
+                ) {
+                    app.apply_saved_default_model(*root_config);
+                }
+                return Ok(());
+            }
+            #[cfg(test)]
             root_config.save_if_unchanged(&app.config_path, &expected_root_config)?;
+            #[cfg(test)]
             app.apply_saved_default_model(*root_config);
         }
         AppAction::StartNewSession { session_log_path } => {
@@ -1217,7 +1314,16 @@ where
                     report_application_receipt(app, &receipt)?;
                     return Ok(());
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    #[cfg(not(test))]
+                    {
+                        report_worker_unavailable(
+                            app,
+                            "application session creation requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                }
                 Err(error) => {
                     report_worker_unavailable(
                         app,
@@ -1226,6 +1332,7 @@ where
                     return Ok(());
                 }
             }
+            #[cfg(test)]
             if let Some(runtime) = worker.as_ref()
                 && runtime
                     .worker_tx
@@ -1236,10 +1343,12 @@ where
             {
                 return Ok(());
             }
+            #[cfg(test)]
             let root_config = app
                 .session_runtime_config_snapshot()
                 .cloned()
                 .context("new session requires the current runtime config")?;
+            #[cfg(test)]
             let preparation = (|| -> Result<_> {
                 let (_, fallback_route) =
                     sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
@@ -1261,6 +1370,7 @@ where
                 .map_err(anyhow::Error::new)?;
                 Ok((attachment, session))
             })();
+            #[cfg(test)]
             let (attachment, session) = match preparation {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -1268,9 +1378,13 @@ where
                     return Ok(());
                 }
             };
+            #[cfg(test)]
             let provider_name = session.provider_name().to_owned();
+            #[cfg(test)]
             let model_name = session.model_name().to_owned();
+            #[cfg(test)]
             let mut entries = session.entries().to_vec();
+            #[cfg(test)]
             if let Err(error) = app.ensure_target_workspace_trust_decision_with_attachment(
                 &session_log_path,
                 &mut entries,
@@ -1280,15 +1394,20 @@ where
                 apply_worker_startup_recovery(app, &error, &session_log_path)?;
                 return Ok(());
             }
+            #[cfg(test)]
             shutdown_and_join_worker(worker);
+            #[cfg(test)]
             app.handle_worker_message(WorkerMessage::NewSessionStarted {
                 session_log_path: session_log_path.clone(),
                 provider_name,
                 model_name,
                 entries,
             })?;
+            #[cfg(test)]
             let _ = app.take_worker_rebind_required();
+            #[cfg(test)]
             app.retain_worker_session_attachment(session_log_path, attachment);
+            #[cfg(test)]
             match spawn_worker_fn(root_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
@@ -1309,7 +1428,16 @@ where
                     report_application_receipt(app, &receipt)?;
                     return Ok(());
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    #[cfg(not(test))]
+                    {
+                        report_worker_unavailable(
+                            app,
+                            "application session switch requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                }
                 Err(error) => {
                     report_worker_unavailable(
                         app,
@@ -1318,10 +1446,13 @@ where
                     return Ok(());
                 }
             }
+            #[cfg(test)]
             let attachment_recovery_binding = app
                 .pending_session_attachment_recovery_binding_for(&session_log_path)
                 .map(str::to_owned);
+            #[cfg(test)]
             app.mark_pending_session_transition_target(session_log_path.clone());
+            #[cfg(test)]
             if let Some(runtime) = worker.as_ref()
                 && runtime
                     .worker_tx
@@ -1333,10 +1464,12 @@ where
             {
                 return Ok(());
             }
+            #[cfg(test)]
             let root_config = app
                 .session_runtime_config_snapshot()
                 .cloned()
                 .context("session switch requires the current runtime config")?;
+            #[cfg(test)]
             let preparation = (|| -> Result<_> {
                 let (_, fallback_route) =
                     sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
@@ -1365,6 +1498,7 @@ where
                 .map_err(anyhow::Error::new)?;
                 Ok((target_attachment, target))
             })();
+            #[cfg(test)]
             let (target_attachment, target) = match preparation {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -1372,9 +1506,13 @@ where
                     return Ok(());
                 }
             };
+            #[cfg(test)]
             let provider_name = target.provider_name().to_owned();
+            #[cfg(test)]
             let model_name = target.model_name().to_owned();
+            #[cfg(test)]
             let mut entries = target.entries().to_vec();
+            #[cfg(test)]
             if let Err(error) = app.ensure_target_workspace_trust_decision_with_attachment(
                 &session_log_path,
                 &mut entries,
@@ -1384,14 +1522,18 @@ where
                 apply_worker_startup_recovery(app, &error, &session_log_path)?;
                 return Ok(());
             }
+            #[cfg(test)]
             shutdown_and_join_worker(worker);
+            #[cfg(test)]
             app.handle_worker_message(WorkerMessage::SessionSwitched {
                 session_log_path: session_log_path.clone(),
                 provider_name,
                 model_name,
                 entries,
             })?;
+            #[cfg(test)]
             app.retain_worker_session_attachment(session_log_path, target_attachment);
+            #[cfg(test)]
             match spawn_worker_fn(root_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(

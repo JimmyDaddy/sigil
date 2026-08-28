@@ -1968,6 +1968,8 @@ impl AppState {
                 expected: persisted_root_config(&expected_root_config),
                 next_base: next_base_root_config,
                 config_path: self.config_path.clone(),
+                follow_up: super::ConfigurationSaveFollowUp::RebootRuntime,
+                root_only: false,
                 draft: std::sync::Mutex::new(Some(connection_save)),
             });
             self.last_notice = Some("saving config through application authority".to_owned());
