@@ -75,6 +75,7 @@ impl TuiApplicationSession {
             .open_projection(OpenProjectionRequest {
                 scope: self.scope.clone(),
                 observer_generation: self.observer_generation,
+                resume_from: None,
             })
             .await?;
         if snapshot.envelope.scope != self.scope

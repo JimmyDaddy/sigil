@@ -5,19 +5,24 @@ use std::path::PathBuf;
 use futures::future::BoxFuture;
 use sigil_application::{
     APPLICATION_CONTRACT_SCHEMA_VERSION, AgentSurfaceProjection, ApplicationError,
-    ApplicationFrontier, ApplicationInstanceId, ApplicationProjection, ApplicationScope,
-    AttentionSurfaceProjection, CapabilitySurfaceProjection, ConfigurationSurfaceProjection,
-    ConversationSurfaceProjection, OpenProjectionRequest, PageDirection, PlanTaskSurfaceProjection,
+    ApplicationEvent, ApplicationEventEnvelope, ApplicationFrontier, ApplicationInstanceId,
+    ApplicationProjection, ApplicationScope, AttentionSurfaceProjection,
+    CapabilitySurfaceProjection, ConfigurationSurfaceProjection, ConversationSurfaceProjection,
+    OpenProjectionRequest, PageDirection, PlanTaskSurfaceProjection, ProjectionFeedItem,
     ProjectionPage, ProjectionPageRequest, ProjectionSnapshot, ProjectionSnapshotEnvelope,
     ResourceRecoverySurfaceContractV1, RunSurfaceProjection, SafeText, SessionItemId,
     SessionScopeId, SessionSurfaceProjection, StablePageCursor, UserInputSurfaceProjection,
 };
-use sigil_kernel::{JsonlSessionStore, PublicEventOutboxProjectionV1, PublicRunEventKind};
+use sigil_kernel::{
+    JsonlSessionStore, PublicEventOutboxEntryV1, PublicEventOutboxProjectionV1, PublicRunEventKind,
+};
 
 use crate::application_run::{
     application_run_context_view, application_session_frontier_view,
     application_session_transcript_page,
 };
+
+const MAX_PROJECTION_FEED_ITEMS: usize = 256;
 
 /// Runtime-owned binding used to construct an application projection without exposing its durable
 /// paths to the application contract or renderer.
@@ -96,7 +101,41 @@ impl RuntimeSessionProjectionBinding {
         })
     }
 
-    fn build_projection(&self) -> Result<ProjectionSnapshotEnvelope, ApplicationError> {
+    fn build_projection(
+        &self,
+    ) -> Result<
+        (
+            ProjectionSnapshotEnvelope,
+            Vec<sigil_kernel::SessionStreamRecord>,
+            Vec<(u64, PublicEventOutboxEntryV1)>,
+        ),
+        ApplicationError,
+    > {
+        let records = JsonlSessionStore::read_event_records(&self.session_path)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let actual_session_scope_id = records
+            .first()
+            .map(|record| record.session_id())
+            .ok_or(ApplicationError::Unavailable)?;
+        if actual_session_scope_id != self.expected_session_scope_id
+            || records
+                .iter()
+                .any(|record| record.session_id() != self.expected_session_scope_id)
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        let last_sequence = records
+            .last()
+            .map(sigil_kernel::SessionStreamRecord::stream_sequence)
+            .ok_or(ApplicationError::Unavailable)?;
+        let frontier = ApplicationFrontier {
+            schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+            scope: self.scope.clone(),
+            writer_generation: self.writer_generation,
+            stream_generation: self.stream_generation,
+            through_sequence: last_sequence,
+            durable_cursor: format!("session-stream:{last_sequence}"),
+        };
         let context = application_run_context_view(
             &self.config_path,
             &self.launch_cwd,
@@ -111,15 +150,37 @@ impl RuntimeSessionProjectionBinding {
             1,
         )
         .map_err(|_| ApplicationError::Unavailable)?;
-        let frontier = self.current_frontier()?;
-        let public_events = JsonlSessionStore::read_event_records(&self.session_path)
-            .map_err(|_| ApplicationError::Unavailable)
-            .and_then(|records| {
-                PublicEventOutboxProjectionV1::from_records(&records).map_err(|_| {
-                    ApplicationError::CorruptProjection("invalid public event outbox".to_owned())
-                })
+        let public_events =
+            PublicEventOutboxProjectionV1::from_records(&records).map_err(|_| {
+                ApplicationError::CorruptProjection("invalid public event outbox".to_owned())
             })?;
-        let events = public_events.events_in_order();
+        let public_stream_events = records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_kind()
+                    == Some(sigil_kernel::DurableEventType::PublicEventOutbox)
+            })
+            .map(|record| {
+                let entry = serde_json::from_value::<PublicEventOutboxEntryV1>(
+                    record.stored_event().payload.clone(),
+                )
+                .map_err(|_| {
+                    ApplicationError::CorruptProjection(
+                        "invalid public event outbox payload".to_owned(),
+                    )
+                })?;
+                if public_events.entry(&entry.public_event_id).is_none() {
+                    return Err(ApplicationError::CorruptProjection(
+                        "public event outbox projection lost its entry".to_owned(),
+                    ));
+                }
+                Ok((record.stream_sequence(), entry))
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let events = public_stream_events
+            .iter()
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>();
         let route_recovery = context.route_recovery.as_ref();
         let event_state = ProjectionEventState::from_events(&events);
         let status = route_recovery
@@ -188,7 +249,7 @@ impl RuntimeSessionProjectionBinding {
                 last_notice: event_state.last_notice,
             },
         };
-        Ok(ProjectionSnapshotEnvelope {
+        let envelope = ProjectionSnapshotEnvelope {
             schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
             scope: self.scope.clone(),
             writer_generation: self.writer_generation,
@@ -196,6 +257,125 @@ impl RuntimeSessionProjectionBinding {
             observer_generation: self.observer_generation,
             cut: frontier,
             projection,
+        };
+        Ok((envelope, records, public_stream_events))
+    }
+
+    fn build_snapshot(
+        &self,
+        resume_from: Option<ApplicationFrontier>,
+    ) -> Result<ProjectionSnapshot, ApplicationError> {
+        let (current, records, public_events) = self.build_projection()?;
+        let Some(resume_from) = resume_from else {
+            return Ok(ProjectionSnapshot {
+                envelope: current,
+                feed: Vec::new(),
+            });
+        };
+        if resume_from.scope != self.scope
+            || resume_from.writer_generation != self.writer_generation
+            || resume_from.stream_generation != self.stream_generation
+        {
+            return Err(ApplicationError::ResetRequired);
+        }
+        if resume_from.through_sequence > current.cut.through_sequence {
+            return Err(ApplicationError::ResetRequired);
+        }
+        if resume_from.through_sequence > 0
+            && !records
+                .iter()
+                .any(|record| record.stream_sequence() == resume_from.through_sequence)
+        {
+            return Err(ApplicationError::ResetRequired);
+        }
+
+        let all_public = public_events
+            .iter()
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>();
+        let prefix_public = public_events
+            .iter()
+            .filter(|(sequence, _)| *sequence <= resume_from.through_sequence)
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>();
+        let mut base_projection = current.projection.clone();
+        let base_state = ProjectionEventState::from_events(&prefix_public);
+        apply_projection_event_state(&mut base_projection, &base_state)?;
+        base_projection.frontier = resume_from.clone();
+        let mut base = ProjectionSnapshotEnvelope {
+            schema_version: current.schema_version,
+            scope: current.scope.clone(),
+            writer_generation: current.writer_generation,
+            stream_generation: current.stream_generation,
+            observer_generation: current.observer_generation,
+            cut: resume_from,
+            projection: base_projection,
+        };
+        base.validate()?;
+
+        let mut feed = Vec::new();
+        let mut public_index = prefix_public.len();
+        let resume_sequence = base.cut.through_sequence;
+        for record in records
+            .iter()
+            .filter(|record| record.stream_sequence() > resume_sequence)
+        {
+            if feed.len() == MAX_PROJECTION_FEED_ITEMS {
+                return Ok(ProjectionSnapshot {
+                    envelope: base,
+                    feed: vec![ProjectionFeedItem::ResetRequired {
+                        reason: "projection-feed-overflow",
+                    }],
+                });
+            }
+            let expected_sequence = base.cut.through_sequence.saturating_add(1);
+            if record.stream_sequence() != expected_sequence {
+                return Ok(ProjectionSnapshot {
+                    envelope: base,
+                    feed: vec![ProjectionFeedItem::Gap {
+                        expected: expected_sequence,
+                        observed: record.stream_sequence(),
+                    }],
+                });
+            }
+            if public_index < all_public.len()
+                && public_events[public_index].0 == record.stream_sequence()
+            {
+                public_index += 1;
+            }
+            let state = ProjectionEventState::from_events(&all_public[..public_index]);
+            let mut next_projection = base.projection.clone();
+            apply_projection_event_state(&mut next_projection, &state)?;
+            let next_frontier = ApplicationFrontier {
+                through_sequence: record.stream_sequence(),
+                durable_cursor: format!("session-stream:{}", record.stream_sequence()),
+                ..base.cut.clone()
+            };
+            next_projection.frontier = next_frontier.clone();
+            let payload = ApplicationEvent::ProjectionReplaced(Box::new(next_projection.clone()));
+            let event = ApplicationEventEnvelope {
+                schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+                scope: self.scope.clone(),
+                writer_generation: self.writer_generation,
+                stream_generation: self.stream_generation,
+                observer_generation: self.observer_generation,
+                event_id: format!(
+                    "application-stream:{}:{}",
+                    record.stream_sequence(),
+                    record.event_id()
+                ),
+                base_frontier: base.cut.clone(),
+                next_frontier: next_frontier.clone(),
+                payload_digest: sigil_application::event_payload_digest(&payload)?,
+                payload,
+            };
+            feed.push(ProjectionFeedItem::Event(Box::new(event)));
+            base.cut = next_frontier;
+            base.projection = next_projection;
+        }
+        Ok(ProjectionSnapshot {
+            envelope: base,
+            feed,
         })
     }
 
@@ -266,6 +446,7 @@ impl RuntimeSessionProjectionBinding {
     }
 }
 
+#[derive(Clone)]
 struct ProjectionEventState {
     run_status: &'static str,
     run_active: bool,
@@ -281,6 +462,34 @@ struct ProjectionEventState {
     user_input_binding: Option<String>,
     user_input_prompt: Option<SafeText>,
     last_notice: Option<SafeText>,
+}
+
+fn apply_projection_event_state(
+    projection: &mut ApplicationProjection,
+    state: &ProjectionEventState,
+) -> Result<(), ApplicationError> {
+    let status = if projection.session.status.as_str() == "recovery-required" {
+        "recovery-required"
+    } else {
+        state.run_status
+    };
+    projection.session.status = safe_text(status)?;
+    projection.run.status = safe_text(status)?;
+    projection.run.active_binding = state.run_binding.clone();
+    projection.plan_task.status = safe_text(state.plan_status)?;
+    projection.plan_task.action_binding = state.plan_binding.clone();
+    projection.agents.active_count = state.active_agents;
+    projection.agents.summary = state.agent_summary.clone();
+    projection.approval.pending = state.approval_pending;
+    projection.approval.binding = state.approval_binding.clone();
+    projection.approval.summary = state.approval_summary.clone();
+    projection.user_input.pending = state.user_input_pending;
+    projection.user_input.binding = state.user_input_binding.clone();
+    projection.user_input.prompt = state.user_input_prompt.clone();
+    projection.capabilities.can_submit = status != "recovery-required" && !state.run_active;
+    projection.capabilities.can_cancel = state.run_active;
+    projection.attention.last_notice = state.last_notice.clone();
+    Ok(())
 }
 
 impl ProjectionEventState {
@@ -426,14 +635,11 @@ impl crate::RuntimeApplicationProjectionSource for RuntimeSessionProjectionBindi
                 return Err(ApplicationError::ScopeMismatch);
             }
             tokio::task::spawn_blocking(move || {
-                let envelope = binding.build_projection()?;
-                envelope.validate().map_err(|_| {
+                let snapshot = binding.build_snapshot(request.resume_from)?;
+                snapshot.envelope.validate().map_err(|_| {
                     ApplicationError::CorruptProjection("invalid runtime projection".to_owned())
                 })?;
-                Ok(ProjectionSnapshot {
-                    envelope,
-                    feed: Vec::new(),
-                })
+                Ok(snapshot)
             })
             .await
             .map_err(|_| ApplicationError::Unavailable)?

@@ -38,6 +38,7 @@ pub struct PublicEventDeliveryReceiptV1 {
 pub struct PublicEventOutboxProjectionV1 {
     cursor: Option<ProjectionCursor>,
     entries: BTreeMap<String, PublicEventOutboxEntryV1>,
+    ordered_ids: Vec<String>,
     deliveries: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -75,13 +76,15 @@ impl PublicEventOutboxProjectionV1 {
 
     pub fn apply_outbox(&mut self, entry: PublicEventOutboxEntryV1) -> Result<()> {
         validate_outbox_entry(&entry)?;
+        let public_event_id = entry.public_event_id.clone();
         if self
             .entries
-            .insert(entry.public_event_id.clone(), entry)
+            .insert(public_event_id.clone(), entry)
             .is_some()
         {
             bail!("public event outbox entry was recorded more than once");
         }
+        self.ordered_ids.push(public_event_id);
         Ok(())
     }
 
@@ -124,13 +127,10 @@ impl PublicEventOutboxProjectionV1 {
     /// transport progress, not whether the event is still part of the session's state history.
     #[must_use]
     pub fn events_in_order(&self) -> Vec<&PublicEventOutboxEntryV1> {
-        let mut entries: Vec<_> = self.entries.values().collect();
-        entries.sort_by(|left, right| {
-            left.sequence
-                .cmp(&right.sequence)
-                .then_with(|| left.public_event_id.cmp(&right.public_event_id))
-        });
-        entries
+        self.ordered_ids
+            .iter()
+            .filter_map(|event_id| self.entries.get(event_id))
+            .collect()
     }
 }
 
@@ -295,8 +295,8 @@ mod tests {
         let first = entry(1);
         let second = entry(2);
         let mut projection = PublicEventOutboxProjectionV1::default();
-        projection.apply_outbox(second)?;
         projection.apply_outbox(first.clone())?;
+        projection.apply_outbox(second)?;
         projection.apply_delivery(PublicEventDeliveryReceiptV1 {
             schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
             public_event_id: first.public_event_id,

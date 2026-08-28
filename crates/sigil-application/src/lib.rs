@@ -791,6 +791,9 @@ pub enum PageCancellationReceipt {
 pub struct OpenProjectionRequest {
     pub scope: ApplicationScope,
     pub observer_generation: u64,
+    /// Optional durable frontier previously committed by this observer.  A runtime may return
+    /// the bounded event chain after this cut; an absent value requests a fresh full snapshot.
+    pub resume_from: Option<ApplicationFrontier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -900,6 +903,14 @@ impl ApplicationPort for FakeApplication {
                 || envelope.observer_generation != request.observer_generation
             {
                 return Err(ApplicationError::ScopeMismatch);
+            }
+            if let Some(resume_from) = request.resume_from
+                && (resume_from.scope != envelope.scope
+                    || resume_from.writer_generation != envelope.writer_generation
+                    || resume_from.stream_generation != envelope.stream_generation
+                    || resume_from.through_sequence > envelope.cut.through_sequence)
+            {
+                return Err(ApplicationError::ResetRequired);
             }
             Ok(ProjectionSnapshot {
                 envelope,
@@ -1292,6 +1303,11 @@ fn digest_event(event: &ApplicationEvent) -> Result<String, ApplicationError> {
         ApplicationError::CorruptProjection("event could not be encoded".to_owned())
     })?;
     Ok(hex_digest(&bytes))
+}
+
+/// Returns the canonical digest used by an application event envelope.
+pub fn event_payload_digest(event: &ApplicationEvent) -> Result<String, ApplicationError> {
+    digest_event(event)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
