@@ -2989,13 +2989,17 @@ R70.x
   identity/terminal/unfinished/aborted tombstone 导入；旧 compatibility file 只有在 managed snapshot 成功替换
   后才退役，重启会优先 managed state 并重试旧文件退役。HTTP command registry 的 domain execution 仍需后续
   完整迁移到同一 `ApplicationPort`，不能把本次 reservation cutover 误记为四表面 conformance。
+- snapshot-feed：`OpenProjectionRequest` 可携带 resume frontier；runtime 以 durable session stream sequence 为
+  application frontier，在 bounded feed 中逐 record 生成 scope/generation/digest/前后 frontier 一致的
+  `ProjectionReplaced` event。outbox projection 保留 durable record order，不再用跨 run 不唯一的 run-local sequence
+  排序；缺序、过旧或超出 feed bound 返回 reset/gap，不能拼接不连续状态。
 - validation：`cargo fmt --all --check`、`cargo check -p sigil-application -p sigil-runtime`、
   `cargo check -p sigil-tui --tests`、application/runtime strict clippy、application tests `3 passed`、runtime
   projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
   `2 passed`、TUI launcher regression `1 passed`，以及 runtime application-filtered regression `106 passed`、
   `git diff --check`。
-- remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge 与
-  HTTP reservation cutover 已分别落地，但不关闭 R70.4。TUI 尚有未迁移旧动作，HTTP command domain execution
-  尚未完全收敛到同一 application service；snapshot-feed durable outbox、所有 shared command 的四表面
-  conformance、cold-cache 100k page e2e 与完整 migration manifest gate 仍需继续完成。R70.5 package split 不得
-  在这些条件未满足前开始。
+- remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
+  HTTP reservation cutover 与 resumable snapshot-feed 基础已分别落地，但不关闭 R70.4。TUI 尚有未迁移旧动作，
+  HTTP command domain execution 尚未完全收敛到同一 application service；feed 的跨 surface ACK/restart
+  conformance、所有 shared command 的四表面 conformance、cold-cache 100k page e2e 与完整 migration manifest
+  gate 仍需继续完成。R70.5 package split 不得在这些条件未满足前开始。
