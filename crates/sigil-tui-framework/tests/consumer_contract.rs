@@ -1,4 +1,7 @@
-use sigil_tui::{App, Damage, InputEvent, NodeKey, Rect, Surface, Text, UpdateOutcome};
+use sigil_tui::{
+    App, Damage, InputEvent, NodeKey, Rect, Surface, Text, UpdateOutcome, WidgetKind, WidgetSpec,
+    WidgetTree,
+};
 
 struct Consumer {
     label: String,
@@ -66,4 +69,21 @@ fn surface_rejects_duplicate_keys_and_unbounded_text() {
             .is_err()
     );
     assert!(Text::new("x".repeat(sigil_tui::MAX_SURFACE_TEXT_BYTES + 1)).is_err());
+}
+
+#[test]
+fn independent_consumer_can_use_standard_widget_specs_without_sigil_domain_types() {
+    let viewport = Rect::new(0, 0, 20, 2);
+    let mut tree = WidgetTree::new(viewport, 1).expect("tree");
+    tree.push(
+        WidgetSpec::new(
+            NodeKey::new("todo").expect("key"),
+            WidgetKind::VirtualList,
+            viewport,
+            "one item",
+        )
+        .expect("widget"),
+    )
+    .expect("widget should be bounded");
+    assert_eq!(tree.surface().nodes().len(), 1);
 }
