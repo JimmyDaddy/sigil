@@ -3014,6 +3014,12 @@ R70.x
   adapter 只依赖 core 与 Ratatui、facade 只依赖 core/adapter；CLI 已切换到 app package。
 - 该切片只建立真实 package identity 与依赖拓扑，现有 Sigil product modules 尚未全部物理移出 app package，
   因此 R70.5 package-identity/public-source exit gate、R70.4 四表面 conformance 与 R70.6 runner 下沉仍未闭合。
+- `rfc-0070(R70.4): route TUI terminal cancellation through application port`（`c593e5c5`）新增
+  transport-neutral `ApplicationTerminalTaskIdentity` 与 `RunCommand::CancelTerminalTask`。TUI production adapter
+  先通过 application reservation/dispatch，再在 worker 边界还原为私有 `TerminalTaskControlIdentity`；owner
+  scope、run/task identity 与 expected generation 均保持不透明且有界。application `7/7`、TUI package check、
+  application/TUI strict library clippy 与 diff check 通过；terminal PTY 生命周期、configuration save/reboot、
+  四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
