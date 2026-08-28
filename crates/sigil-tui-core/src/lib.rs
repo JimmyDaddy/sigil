@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod theme;
+
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -59,6 +61,7 @@ impl Rect {
 
 pub const MAX_SURFACE_NODES: usize = 4_096;
 pub const MAX_SURFACE_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_INPUT_TEXT_BYTES: usize = 64 * 1024;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -431,6 +434,21 @@ pub enum InputEvent {
     Paste(String),
 }
 
+impl InputEvent {
+    /// Validates the bounded, normalized input representation before a host dispatches it.
+    pub fn validate(&self) -> Result<(), CoreError> {
+        match self {
+            Self::Key { code } if code.is_empty() || code.len() > 256 => {
+                Err(CoreError::InvalidValue("input key code must be bounded"))
+            }
+            Self::Paste(value) if value.len() > MAX_INPUT_TEXT_BYTES => {
+                Err(CoreError::InvalidValue("input paste exceeds its bound"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HitTarget {
     pub node: NodeId,
@@ -540,7 +558,10 @@ impl std::error::Error for CoreError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SURFACE_NODES, NodeKey, Rect, Surface, VirtualSequence};
+    use super::{
+        InputEvent, MAX_INPUT_TEXT_BYTES, MAX_SURFACE_NODES, NodeKey, Rect, Surface,
+        VirtualSequence,
+    };
 
     #[test]
     fn surface_nodes_expose_only_validated_read_access() {
@@ -569,6 +590,30 @@ mod tests {
         assert!(valid.validate().is_ok());
         assert!(valid.is_bounded_by(MAX_SURFACE_NODES));
         assert_eq!(valid.item_ids()[0].ordinal, 3);
+    }
+
+    #[test]
+    fn input_validation_rejects_unbounded_payloads() {
+        assert!(
+            InputEvent::Key {
+                code: String::new()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            InputEvent::Paste("x".repeat(MAX_INPUT_TEXT_BYTES + 1))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            InputEvent::Resize {
+                width: 80,
+                height: 24,
+            }
+            .validate()
+            .is_ok()
+        );
     }
 }
 

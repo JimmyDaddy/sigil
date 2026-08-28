@@ -71,6 +71,9 @@ impl App for TuiApplicationAdapter {
     type Action = TuiApplicationAction;
 
     fn handle_input(&mut self, input: InputEvent) -> UpdateOutcome<Self::Action> {
+        if input.validate().is_err() {
+            return UpdateOutcome::Ignored;
+        }
         match input {
             InputEvent::Key { code } if code == "enter" => {
                 UpdateOutcome::Action(TuiApplicationAction::Refresh)
