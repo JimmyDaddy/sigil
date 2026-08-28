@@ -1265,50 +1265,164 @@ impl HttpSessionRunRegistry {
         }
         validate_conversation_recovery_command(&command.payload)?;
 
-        let request = HttpReservedCommand::recovery(session_id, &command)?;
-        let reservation =
-            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
-                HttpCommandClaim::Execute(reservation) => reservation,
-                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_recovery(),
-            };
-        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-        let action = command.payload.kind();
-        let result = (|| {
-            let session = self.get_session(session_id)?;
-            let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
-            let driver_command = HttpConversationRecoveryDriverCommand {
-                command_id: command.command_id.clone(),
-                client_id: command.client_id.clone(),
-                action: command.payload.clone(),
-            };
-            let output = catch_unwind(AssertUnwindSafe(|| {
-                self.driver
-                    .mutate_conversation_recovery(&session, &driver_command)
-            }))
-            .map_err(|_| HttpRegistryError::DriverPanicked {
-                operation: "conversation recovery mutation",
-                run_id: session_id.to_owned(),
-            })?
-            .map_err(recovery_driver_registry_error);
-            guard.finish(false);
-            let output = output?;
-            Ok(HttpConversationRecoveryCommandReceipt {
-                command_id: command.command_id.clone(),
-                client_id: command.client_id.clone(),
-                session_id: command.session_id.clone(),
-                action,
-                compaction: output.compaction,
-                compaction_review: output.compaction_review,
-                tool_output_shrink: output.tool_output_shrink,
-                restore: output.restore,
-                fork: output.fork,
-                recovery: output.recovery,
-                correlation_id: command.correlation_id.clone(),
-                replayed: false,
-            })
-        })();
-        completion.complete(HttpCommandCompletion::Recovery(Box::new(result.clone())))?;
-        result
+        #[cfg(not(test))]
+        {
+            let client = self.application_client(session_id, &command.client_id)?;
+            self.command_conversation_recovery_via_application(session_id, command, client)
+        }
+        #[cfg(test)]
+        if let Ok(client) = self.application_client(session_id, &command.client_id) {
+            return self.command_conversation_recovery_via_application(session_id, command, client);
+        }
+
+        #[cfg(test)]
+        {
+            let request = HttpReservedCommand::recovery(session_id, &command)?;
+            let reservation =
+                match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                    HttpCommandClaim::Execute(reservation) => reservation,
+                    HttpCommandClaim::Wait(reservation) => return reservation.wait_for_recovery(),
+                };
+            let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+            let result = self.command_conversation_recovery_effect(
+                session_id,
+                &command.command_id,
+                &command.client_id,
+                &command.payload,
+                command.correlation_id.as_deref(),
+            );
+            completion.complete(HttpCommandCompletion::Recovery(Box::new(result.clone())))?;
+            result
+        }
+    }
+
+    pub(crate) fn command_conversation_recovery_from_application(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        client_id: &str,
+        action: HttpConversationRecoveryCommandAction,
+        correlation_id: Option<String>,
+    ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
+        validate_conversation_recovery_command(&action)?;
+        self.command_conversation_recovery_effect(
+            session_id,
+            command_id,
+            client_id,
+            &action,
+            correlation_id.as_deref(),
+        )
+    }
+
+    fn command_conversation_recovery_effect(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        client_id: &str,
+        action: &HttpConversationRecoveryCommandAction,
+        correlation_id: Option<&str>,
+    ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let driver_command = HttpConversationRecoveryDriverCommand {
+            command_id: command_id.to_owned(),
+            client_id: client_id.to_owned(),
+            action: action.clone(),
+        };
+        let output = catch_unwind(AssertUnwindSafe(|| {
+            self.driver
+                .mutate_conversation_recovery(&session, &driver_command)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "conversation recovery mutation",
+            run_id: session_id.to_owned(),
+        })
+        .and_then(|result| result.map_err(recovery_driver_registry_error));
+        guard.finish(false);
+        let output = output?;
+        Ok(HttpConversationRecoveryCommandReceipt {
+            command_id: command_id.to_owned(),
+            client_id: client_id.to_owned(),
+            session_id: session_id.to_owned(),
+            action: action.kind(),
+            compaction: output.compaction,
+            compaction_review: output.compaction_review,
+            tool_output_shrink: output.tool_output_shrink,
+            restore: output.restore,
+            fork: output.fork,
+            recovery: output.recovery,
+            correlation_id: correlation_id.map(str::to_owned),
+            replayed: false,
+        })
+    }
+
+    fn command_conversation_recovery_via_application(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpConversationRecoveryCommandAction>,
+        client: crate::application_bridge::HttpApplicationClient,
+    ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
+        client.refresh().map_err(application_registry_error)?;
+        let action = crate::application_bridge::application_recovery_action(&command.payload)
+            .map_err(application_registry_error)?;
+        let receipt = client
+            .execute(
+                &command.command_id,
+                sigil_application::ApplicationCommand::Conversation(
+                    sigil_application::ConversationCommand::Recovery { action },
+                ),
+            )
+            .map_err(application_registry_error)?;
+        let (outcome, replayed) = match receipt {
+            sigil_application::ApplicationCommandReceipt::Settled(receipt) => {
+                (receipt.outcome.map(|outcome| *outcome), false)
+            }
+            sigil_application::ApplicationCommandReceipt::Replayed(receipt) => {
+                (receipt.outcome.map(|outcome| *outcome), true)
+            }
+            sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application conversation recovery",
+                    run_id: session_id.to_owned(),
+                    message: rejection.reason,
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
+                return Err(HttpRegistryError::CommandKeyConflict {
+                    session_id: command.session_id,
+                    client_id: command.client_id,
+                    command_id: command.command_id,
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::InFlight(_) => {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "application conversation recovery",
+                    run_id: session_id.to_owned(),
+                    message: "application conversation recovery command is already in flight"
+                        .to_owned(),
+                });
+            }
+            sigil_application::ApplicationCommandReceipt::Uncertain(_)
+            | sigil_application::ApplicationCommandReceipt::ReplayedUncertain(_) => {
+                return Err(HttpRegistryError::ConversationRecoveryUnavailable);
+            }
+        };
+        let Some(sigil_application::ApplicationCommandOutcome::Recovery(outcome)) = outcome else {
+            return Err(HttpRegistryError::ConversationRecoveryUnavailable);
+        };
+        let recovery = self.conversation_recovery(session_id)?;
+        let mapped = crate::application_bridge::http_recovery_receipt(
+            command.command_id,
+            command.client_id,
+            command.session_id,
+            command.payload.kind(),
+            outcome,
+            recovery,
+            command.correlation_id,
+            replayed,
+        )
+        .map_err(application_registry_error)?;
+        Ok(mapped)
     }
 
     /// Projects the bounded durable follow-up queue for one adapter session.
@@ -4513,6 +4627,7 @@ impl HttpReservedCommand {
         Self::new_encoded(HttpCommandKind::Queue, &[path_session_id], &encoded)
     }
 
+    #[cfg(test)]
     fn recovery(
         path_session_id: &str,
         command: &HttpCommandEnvelope<HttpConversationRecoveryCommandAction>,
@@ -5165,6 +5280,7 @@ impl HttpCommandReservation {
         }
     }
 
+    #[cfg(test)]
     fn wait_for_recovery(
         &self,
     ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {

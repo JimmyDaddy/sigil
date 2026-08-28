@@ -3218,6 +3218,7 @@ pub struct HttpConversationRecoveryCommandReceipt {
 }
 
 impl HttpConversationRecoveryCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

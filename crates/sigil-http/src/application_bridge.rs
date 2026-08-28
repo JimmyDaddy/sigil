@@ -13,11 +13,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_application::{
     ApplicationApprovalDecision, ApplicationApprovalResolution, ApplicationClient,
-    ApplicationCommand, ApplicationCommandId, ApplicationCommandReceipt, ApplicationCommandRequest,
-    ApplicationError, ApplicationPermissionMode, ApplicationPort, ApplicationQueueAction,
-    ApplicationQueueItemKind, ApplicationReasoningEffort, ApplicationScope, AuthenticatedSubject,
-    ConversationCommand, HostConnectionInstanceId, PageAnchor, PageDirection, PageQueryFingerprint,
-    PageRequestId, ProjectionPage, RunCommand, RunStartOptions, SessionScopeId, StablePageCursor,
+    ApplicationCommand, ApplicationCommandId, ApplicationCommandOutcome, ApplicationCommandReceipt,
+    ApplicationCommandRequest, ApplicationDomainReceipt, ApplicationError,
+    ApplicationPermissionMode, ApplicationPort, ApplicationQueueAction, ApplicationQueueItemKind,
+    ApplicationReasoningEffort, ApplicationRecoveryAction, ApplicationRecoveryOutcome,
+    ApplicationScope, AuthenticatedSubject, ConversationCommand, HostConnectionInstanceId,
+    PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId, ProjectionPage, RunCommand,
+    RunStartOptions, SessionScopeId, StablePageCursor,
 };
 use sigil_runtime::{
     ManagedApplicationReservationStore, RuntimeApplicationDeliveryAckStore,
@@ -464,6 +466,62 @@ impl HttpApplicationCommandExecutor {
                     },
                 ))
             }
+            ApplicationCommand::Conversation(ConversationCommand::Recovery { action }) => {
+                if matches!(action, ApplicationRecoveryAction::PrepareCompaction { .. }) {
+                    return Ok(RuntimeApplicationDispatch::Rejected(
+                        sigil_application::CommandRejection {
+                            kind: "http_recovery_preview_required".to_owned(),
+                            reason: "compaction preparation remains on the preview boundary"
+                                .to_owned(),
+                        },
+                    ));
+                }
+                let receipt = match self
+                    .registry
+                    .command_conversation_recovery_from_application(
+                        &self.session_id,
+                        request.envelope.command_id.as_str(),
+                        request.admission.principal.as_str(),
+                        crate::application_bridge::http_recovery_action(action)?,
+                        request
+                            .envelope
+                            .correlation_id
+                            .as_ref()
+                            .map(|id| id.to_string()),
+                    ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        return Ok(RuntimeApplicationDispatch::Rejected(
+                            sigil_application::CommandRejection {
+                                kind: "http_conversation_recovery_rejected".to_owned(),
+                                reason: error.to_string(),
+                            },
+                        ));
+                    }
+                };
+                let outcome = crate::application_bridge::application_recovery_outcome(&receipt)?;
+                let frontier = sigil_application::ApplicationFrontier {
+                    schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+                    scope: request.admission.scope.clone(),
+                    writer_generation: request.envelope.expected_frontier.writer_generation,
+                    stream_generation: 1,
+                    through_sequence: receipt.recovery.through_stream_sequence,
+                    durable_cursor: format!(
+                        "session-stream:{}",
+                        receipt.recovery.through_stream_sequence
+                    ),
+                };
+                Ok(RuntimeApplicationDispatch::Settled(
+                    ApplicationDomainReceipt {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        frontier,
+                        settlement: request.envelope.command.policy().settlement,
+                        summary: "HTTP conversation recovery mutation committed".to_owned(),
+                        outcome: Some(Box::new(ApplicationCommandOutcome::Recovery(outcome))),
+                    },
+                ))
+            }
             ApplicationCommand::Run(RunCommand::Cancel { binding, reason }) => {
                 if binding.trim().is_empty() {
                     return Err(ApplicationError::InvalidRequest(
@@ -797,6 +855,246 @@ fn http_queue_request_action(
             foreground_owner_revision: safe(foreground_owner_revision),
         },
     })
+}
+
+pub(crate) fn application_recovery_action(
+    action: &crate::HttpConversationRecoveryCommandAction,
+) -> Result<ApplicationRecoveryAction, ApplicationError> {
+    let safe = |value: &str| sigil_application::SafeText::new(value.to_owned());
+    Ok(match action {
+        crate::HttpConversationRecoveryCommandAction::PrepareCompaction { preview_id } => {
+            ApplicationRecoveryAction::PrepareCompaction {
+                preview_id: safe(preview_id)?,
+            }
+        }
+        crate::HttpConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
+            ApplicationRecoveryAction::ApplyCompaction {
+                preview_id: safe(preview_id)?,
+            }
+        }
+        crate::HttpConversationRecoveryCommandAction::ApplyStandaloneToolOutputShrink {
+            preview_id,
+        } => ApplicationRecoveryAction::ApplyStandaloneToolOutputShrink {
+            preview_id: safe(preview_id)?,
+        },
+        crate::HttpConversationRecoveryCommandAction::RestoreCheckpoint {
+            checkpoint_id,
+            checkpoint_digest,
+        } => ApplicationRecoveryAction::RestoreCheckpoint {
+            checkpoint_id: safe(checkpoint_id)?,
+            checkpoint_digest: safe(checkpoint_digest)?,
+        },
+        crate::HttpConversationRecoveryCommandAction::ForkConversation {
+            source_turn_digest,
+            model_ref,
+        } => ApplicationRecoveryAction::ForkConversation {
+            source_turn_digest: safe(source_turn_digest)?,
+            connection_id: safe(&model_ref.connection_id)?,
+            model_id: safe(&model_ref.model_id)?,
+        },
+    })
+}
+
+fn http_recovery_action(
+    action: &ApplicationRecoveryAction,
+) -> Result<crate::HttpConversationRecoveryCommandAction, ApplicationError> {
+    let text = |value: &sigil_application::SafeText| value.as_str().to_owned();
+    Ok(match action {
+        ApplicationRecoveryAction::PrepareCompaction { preview_id } => {
+            crate::HttpConversationRecoveryCommandAction::PrepareCompaction {
+                preview_id: text(preview_id),
+            }
+        }
+        ApplicationRecoveryAction::ApplyCompaction { preview_id } => {
+            crate::HttpConversationRecoveryCommandAction::ApplyCompaction {
+                preview_id: text(preview_id),
+            }
+        }
+        ApplicationRecoveryAction::ApplyStandaloneToolOutputShrink { preview_id } => {
+            crate::HttpConversationRecoveryCommandAction::ApplyStandaloneToolOutputShrink {
+                preview_id: text(preview_id),
+            }
+        }
+        ApplicationRecoveryAction::RestoreCheckpoint {
+            checkpoint_id,
+            checkpoint_digest,
+        } => crate::HttpConversationRecoveryCommandAction::RestoreCheckpoint {
+            checkpoint_id: text(checkpoint_id),
+            checkpoint_digest: text(checkpoint_digest),
+        },
+        ApplicationRecoveryAction::ForkConversation {
+            source_turn_digest,
+            connection_id,
+            model_id,
+        } => crate::HttpConversationRecoveryCommandAction::ForkConversation {
+            source_turn_digest: text(source_turn_digest),
+            model_ref: crate::HttpProviderModelRef {
+                connection_id: text(connection_id),
+                model_id: text(model_id),
+            },
+        },
+    })
+}
+
+pub(crate) fn application_recovery_outcome(
+    receipt: &crate::HttpConversationRecoveryCommandReceipt,
+) -> Result<ApplicationRecoveryOutcome, ApplicationError> {
+    let safe = |value: String| sigil_application::SafeText::new(value);
+    let count = |value: usize| {
+        u64::try_from(value).map_err(|_| {
+            ApplicationError::InvalidRequest("recovery count exceeds application bounds".to_owned())
+        })
+    };
+    if let Some(compaction) = &receipt.compaction {
+        return Ok(ApplicationRecoveryOutcome::Compaction {
+            compaction_id: safe(compaction.compaction_id.clone())?,
+            attempt_id: safe(compaction.attempt_id.clone())?,
+            task_memory_id: safe(compaction.task_memory_id.clone())?,
+            folded_event_count: count(compaction.folded_event_count)?,
+            tool_output_projection_recorded: compaction.tool_output_projection_recorded,
+            native_carrier_materialized: compaction.native_carrier_materialized,
+            native_carrier_status: compaction
+                .native_carrier_status
+                .clone()
+                .map(safe)
+                .transpose()?,
+        });
+    }
+    if let Some(shrink) = &receipt.tool_output_shrink {
+        return Ok(ApplicationRecoveryOutcome::ToolOutputShrink {
+            context_epoch_id: safe(shrink.context_epoch_id.clone())?,
+            projected_output_count: count(shrink.projected_output_count)?,
+        });
+    }
+    if let Some(restore) = &receipt.restore {
+        return Ok(ApplicationRecoveryOutcome::Restore {
+            checkpoint_id: safe(restore.checkpoint_id.clone())?,
+            batch_id: safe(restore.batch_id.clone())?,
+            restored_file_count: count(restore.restored_file_count)?,
+            verification_stale: restore.verification_stale,
+        });
+    }
+    if let Some(fork) = &receipt.fork {
+        return Ok(ApplicationRecoveryOutcome::Fork {
+            session_ref: safe(fork.session_ref.clone())?,
+            session_id: safe(fork.session_id.clone())?,
+            copied_message_count: count(fork.copied_message_count)?,
+            copied_external_provenance_count: count(fork.copied_external_provenance_count)?,
+        });
+    }
+    Err(ApplicationError::InvalidRequest(
+        "recovery mutation returned no typed domain outcome".to_owned(),
+    ))
+}
+
+pub(crate) fn http_recovery_receipt(
+    command_id: String,
+    client_id: String,
+    session_id: String,
+    action: crate::HttpConversationRecoveryCommandActionKind,
+    outcome: ApplicationRecoveryOutcome,
+    recovery: crate::HttpConversationRecoveryView,
+    correlation_id: Option<String>,
+    replayed: bool,
+) -> Result<crate::HttpConversationRecoveryCommandReceipt, ApplicationError> {
+    let as_usize = |value: u64| {
+        usize::try_from(value).map_err(|_| {
+            ApplicationError::InvalidRequest("recovery count exceeds host bounds".to_owned())
+        })
+    };
+    let mut receipt = crate::HttpConversationRecoveryCommandReceipt {
+        command_id,
+        client_id,
+        session_id,
+        action,
+        compaction: None,
+        compaction_review: None,
+        tool_output_shrink: None,
+        restore: None,
+        fork: None,
+        recovery,
+        correlation_id,
+        replayed,
+    };
+    match outcome {
+        ApplicationRecoveryOutcome::Compaction {
+            compaction_id,
+            attempt_id,
+            task_memory_id,
+            folded_event_count,
+            tool_output_projection_recorded,
+            native_carrier_materialized,
+            native_carrier_status,
+        } => {
+            if action != crate::HttpConversationRecoveryCommandActionKind::ApplyCompaction {
+                return Err(ApplicationError::InvalidRequest(
+                    "recovery outcome does not match action".to_owned(),
+                ));
+            }
+            receipt.compaction = Some(crate::HttpCompactionReceipt {
+                compaction_id: compaction_id.as_str().to_owned(),
+                attempt_id: attempt_id.as_str().to_owned(),
+                task_memory_id: task_memory_id.as_str().to_owned(),
+                folded_event_count: as_usize(folded_event_count)?,
+                tool_output_projection_recorded,
+                native_carrier_materialized,
+                native_carrier_status: native_carrier_status.map(|value| value.as_str().to_owned()),
+            });
+        }
+        ApplicationRecoveryOutcome::ToolOutputShrink {
+            context_epoch_id,
+            projected_output_count,
+        } => {
+            if action
+                != crate::HttpConversationRecoveryCommandActionKind::ApplyStandaloneToolOutputShrink
+            {
+                return Err(ApplicationError::InvalidRequest(
+                    "recovery outcome does not match action".to_owned(),
+                ));
+            }
+            receipt.tool_output_shrink = Some(crate::HttpToolOutputShrinkReceipt {
+                context_epoch_id: context_epoch_id.as_str().to_owned(),
+                projected_output_count: as_usize(projected_output_count)?,
+            });
+        }
+        ApplicationRecoveryOutcome::Restore {
+            checkpoint_id,
+            batch_id,
+            restored_file_count,
+            verification_stale,
+        } => {
+            if action != crate::HttpConversationRecoveryCommandActionKind::RestoreCheckpoint {
+                return Err(ApplicationError::InvalidRequest(
+                    "recovery outcome does not match action".to_owned(),
+                ));
+            }
+            receipt.restore = Some(crate::HttpCheckpointRestoreReceipt {
+                checkpoint_id: checkpoint_id.as_str().to_owned(),
+                batch_id: batch_id.as_str().to_owned(),
+                restored_file_count: as_usize(restored_file_count)?,
+                verification_stale,
+            });
+        }
+        ApplicationRecoveryOutcome::Fork {
+            session_ref,
+            session_id,
+            copied_message_count,
+            copied_external_provenance_count,
+        } => {
+            if action != crate::HttpConversationRecoveryCommandActionKind::ForkConversation {
+                return Err(ApplicationError::InvalidRequest(
+                    "recovery outcome does not match action".to_owned(),
+                ));
+            }
+            receipt.fork = Some(crate::HttpConversationForkReceipt {
+                session_ref: session_ref.as_str().to_owned(),
+                session_id: session_id.as_str().to_owned(),
+                copied_message_count: as_usize(copied_message_count)?,
+                copied_external_provenance_count: as_usize(copied_external_provenance_count)?,
+            });
+        }
+    }
+    Ok(receipt)
 }
 
 fn approval_route_token(route: crate::HttpApprovalRouteState) -> &'static str {

@@ -421,6 +421,7 @@ mod tests {
                 },
                 settlement: request.envelope.command.policy().settlement,
                 summary: "settled in test executor".to_owned(),
+                outcome: None,
             };
             Box::pin(async move { Ok(RuntimeApplicationDispatch::Settled(receipt)) })
         }

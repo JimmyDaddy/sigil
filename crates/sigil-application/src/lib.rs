@@ -161,6 +161,9 @@ pub enum ConversationCommand {
         expected_generation: SafeText,
         action: ApplicationQueueAction,
     },
+    Recovery {
+        action: ApplicationRecoveryAction,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +265,87 @@ pub enum ApplicationQueueAction {
         foreground_run_id: SafeText,
         foreground_owner_revision: SafeText,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationRecoveryActionKind {
+    PrepareCompaction,
+    ApplyCompaction,
+    ApplyStandaloneToolOutputShrink,
+    RestoreCheckpoint,
+    ForkConversation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationRecoveryAction {
+    PrepareCompaction {
+        preview_id: SafeText,
+    },
+    ApplyCompaction {
+        preview_id: SafeText,
+    },
+    ApplyStandaloneToolOutputShrink {
+        preview_id: SafeText,
+    },
+    RestoreCheckpoint {
+        checkpoint_id: SafeText,
+        checkpoint_digest: SafeText,
+    },
+    ForkConversation {
+        source_turn_digest: SafeText,
+        connection_id: SafeText,
+        model_id: SafeText,
+    },
+}
+
+impl ApplicationRecoveryAction {
+    #[must_use]
+    pub const fn kind(&self) -> ApplicationRecoveryActionKind {
+        match self {
+            Self::PrepareCompaction { .. } => ApplicationRecoveryActionKind::PrepareCompaction,
+            Self::ApplyCompaction { .. } => ApplicationRecoveryActionKind::ApplyCompaction,
+            Self::ApplyStandaloneToolOutputShrink { .. } => {
+                ApplicationRecoveryActionKind::ApplyStandaloneToolOutputShrink
+            }
+            Self::RestoreCheckpoint { .. } => ApplicationRecoveryActionKind::RestoreCheckpoint,
+            Self::ForkConversation { .. } => ApplicationRecoveryActionKind::ForkConversation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationRecoveryOutcome {
+    Compaction {
+        compaction_id: SafeText,
+        attempt_id: SafeText,
+        task_memory_id: SafeText,
+        folded_event_count: u64,
+        tool_output_projection_recorded: bool,
+        native_carrier_materialized: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_carrier_status: Option<SafeText>,
+    },
+    ToolOutputShrink {
+        context_epoch_id: SafeText,
+        projected_output_count: u64,
+    },
+    Restore {
+        checkpoint_id: SafeText,
+        batch_id: SafeText,
+        restored_file_count: u64,
+        verification_stale: bool,
+    },
+    Fork {
+        session_ref: SafeText,
+        session_id: SafeText,
+        copied_message_count: u64,
+        copied_external_provenance_count: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApplicationCommandOutcome {
+    Recovery(ApplicationRecoveryOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,7 +486,9 @@ impl ApplicationCommand {
                 settlement: EffectSettlementClass::ExternalOrWorkspaceEffect,
                 requires_session: true,
             },
-            Self::Conversation(ConversationCommand::Queue { .. }) => CommandPolicy {
+            Self::Conversation(
+                ConversationCommand::Queue { .. } | ConversationCommand::Recovery { .. },
+            ) => CommandPolicy {
                 lane: CommandLane::Interactive,
                 settlement: EffectSettlementClass::AtomicDurableMutation,
                 requires_session: true,
@@ -563,6 +649,8 @@ pub struct ApplicationDomainReceipt {
     pub frontier: ApplicationFrontier,
     pub settlement: EffectSettlementClass,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Box<ApplicationCommandOutcome>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1415,6 +1503,7 @@ impl ApplicationPort for FakeApplication {
                 frontier,
                 settlement: request.envelope.command.policy().settlement,
                 summary: "fake application command committed".to_owned(),
+                outcome: None,
             });
             state.reservations.insert(
                 reservation_key.clone(),

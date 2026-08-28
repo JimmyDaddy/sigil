@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use sigil_application::{
     ApplicationCommand, ApplicationCommandReceipt, ApplicationPermissionMode,
-    ApplicationQueueAction, ApplicationQueueItemKind, ConversationCommand, McpCommand,
-    RunStartOptions, SafeText,
+    ApplicationQueueAction, ApplicationQueueItemKind, ApplicationRecoveryAction,
+    ConversationCommand, McpCommand, RunStartOptions, SafeText,
 };
 use sigil_kernel::{
     AgentRole, ApprovalMode, AssistantMessageKind, CandidateCheck, CheckCommand,
@@ -268,7 +268,7 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
     let client = registry
         .application_client(&session.id, "http-application-test")
         .expect("application client should bind");
-    let (projection, page, receipt, start_receipt, queue_receipt) =
+    let (projection, page, receipt, start_receipt, queue_receipt, recovery_receipt) =
         tokio::task::spawn_blocking(move || {
             let projection = client
                 .refresh()
@@ -318,7 +318,24 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                     }),
                 )
                 .expect("queue mutation should receive a durable uncertain receipt");
-            (projection, page, receipt, start_receipt, queue_receipt)
+            let recovery_receipt = client
+                .execute(
+                    "application-recovery-test",
+                    ApplicationCommand::Conversation(ConversationCommand::Recovery {
+                        action: ApplicationRecoveryAction::PrepareCompaction {
+                            preview_id: SafeText::new("preview").expect("preview"),
+                        },
+                    }),
+                )
+                .expect("recovery command should receive a typed rejection");
+            (
+                projection,
+                page,
+                receipt,
+                start_receipt,
+                queue_receipt,
+                recovery_receipt,
+            )
         })
         .await
         .expect("blocking application client task should complete");
@@ -341,6 +358,14 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
         panic!("queue mutation should be represented as an uncertain application receipt");
     };
     assert!(queue_receipt.recovery_binding.starts_with("http-queue:"));
+    let ApplicationCommandReceipt::Rejected(recovery_rejection) = recovery_receipt else {
+        panic!("invalid recovery binding should be represented as a typed rejection");
+    };
+    assert!(
+        recovery_rejection.reason.contains("preview boundary"),
+        "unexpected recovery rejection: {}",
+        recovery_rejection.reason
+    );
 }
 
 #[tokio::test]
