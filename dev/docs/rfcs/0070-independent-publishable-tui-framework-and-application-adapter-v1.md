@@ -3123,3 +3123,10 @@ R70.x
   reservation service 后再进入 worker edge，继续用 uncertain delivery 等待 durable worker event。TUI permission
   回归 `20/20`、application `6/6`、四包 strict clippy 与 diff check 通过。persisted configuration CAS、verification、
   terminal、recovery preview 与剩余 surface conformance 仍开放。
+- recovery follow-up：`9eddfd6c` 将 TUI compaction start/preview/cancel、checkpoint preview/execute/fork 与 Intent
+  Stack load/preview/execute 加入 transport-neutral `ApplicationRecoveryAction`；TUI production 先经过 host-bound
+  ApplicationPort reservation，再在 worker edge 还原为既有 typed kernel request，HTTP 对 TUI-only variant 显式
+  typed reject。compaction `47/47`、checkpoint `6/6`、Intent Stack `12/12`、application `6/6` 与四包 production
+  library strict clippy 通过；all-target strict clippy 仍被本 slice 之外既有
+  `sigil-http/src/registry.rs:3344` redundant-closure warning 阻断。该 slice 只关闭 TUI recovery dispatch seam；configuration CAS、verification/maintenance、
+  terminal、HTTP compaction preview、四表面 conformance 与完整 migration manifest 仍未闭合。
