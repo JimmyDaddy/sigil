@@ -3219,3 +3219,16 @@ R70.x
   并为 virtual sequence generation/identity invariant 增加 core regression。TUI live panel 已迁移到只读 accessor。
   manifest `276/276`、core/ratatui/facade tests、app check 与 diff check 通过；该 slice 仍不关闭 R70.4
   四表面 conformance、R70.5 完整模块迁移或后续 R70.6-R70.8。
+
+- R70.4 surface conformance follow-up：`b6a853f9` 将 application fixture 扩展为 TUI keyboard、TUI mouse、Desktop、
+  HTTP、CLI 五个入口；每个入口都从同一 scoped snapshot/frontier 执行 bounded page/cancel，再用相同 command id
+  验证 settled/replay 的 domain receipt、settlement 与 frontier 完全一致。application `7/7`、定向 conformance、
+  strict clippy 与 diff check 通过。该 fixture 关闭了 contract-level surface parity 缺口；真实 HTTP/Desktop
+  transport smoke、legacy cutover、terminal lifecycle 和完整 R70.4 exit gate 仍需继续收口。
+
+- R70.4 terminal projection follow-up：`4a1b6341` 将 kernel durable `TerminalTaskProjection` 重放为有界、无路径的
+  `TerminalSurfaceProjection`，纳入 application snapshot/feed；每个 task 只暴露 task id、generation、状态、readiness
+  与输出计数/摘要 hash，owner、进程句柄、命令和取消路由仍留在 host/runtime。TUI refresh 保存该 projection，并优先
+  用它校验 terminal cancel 的 active 状态与 generation，缺失 projection 时才保留既有 durable-entry fallback。
+  application `7/7`、runtime projection `3/3`、TUI app check、fmt 与 diff check 通过；本 slice 不宣称关闭 PTY
+  owner lifecycle、四表面真实 transport smoke 或完整 R70.4 exit gate。
