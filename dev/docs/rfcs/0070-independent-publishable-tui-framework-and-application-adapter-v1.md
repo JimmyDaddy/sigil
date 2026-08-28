@@ -2962,8 +2962,9 @@ R70.x
 ### R70.4：transport-neutral application contract 与 runtime port（2026-08-28）
 
 - implementation commits：`d9b57da3`（`rfc-0070(R70.4): establish transport-neutral application contract`）、
-  `efc7851b`（`rfc-0070(R70.4): consume durable application outbox in projection`）与 `b5c0a37e`
-  （`rfc-0070(R70.4): route TUI through application port`）。
+  `efc7851b`（`rfc-0070(R70.4): consume durable application outbox in projection`）、`b5c0a37e`
+  （`rfc-0070(R70.4): route TUI through application port`）与 `8608d6aa`
+  （`rfc-0070(R70.4): cut over HTTP reservations to application authority`）。
 - contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
   sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
   command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
@@ -2984,13 +2985,17 @@ R70.x
   刷新 projection；prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application reservation
   service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造 `Settled`；
   未有无损 V1 payload 的旧动作仍保留在迁移期 adapter，不能把 R70.4 误记为最终闭合。
+- HTTP adapter：生产 command store 在 `ApplicationControlLog` 的独占 managed namespace 中完成 legacy
+  identity/terminal/unfinished/aborted tombstone 导入；旧 compatibility file 只有在 managed snapshot 成功替换
+  后才退役，重启会优先 managed state 并重试旧文件退役。HTTP command registry 的 domain execution 仍需后续
+  完整迁移到同一 `ApplicationPort`，不能把本次 reservation cutover 误记为四表面 conformance。
 - validation：`cargo fmt --all --check`、`cargo check -p sigil-application -p sigil-runtime`、
   `cargo check -p sigil-tui --tests`、application/runtime strict clippy、application tests `3 passed`、runtime
   projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
   `2 passed`、TUI launcher regression `1 passed`，以及 runtime application-filtered regression `106 passed`、
   `git diff --check`。
-- remaining deviations / exit gate：本记录只证明 contract/runtime implementation foundation，不关闭 R70.4。生产
-  TUI 尚未经 `ApplicationPort` 读取 projection/提交 shared command；现有 HTTP command-store 尚未在 exclusive
-  lease 下导入 application reservation journal；snapshot-feed durable outbox、所有 shared command 的四表面
-  conformance、cold-cache 100k page e2e 与完整 migration manifest gate 仍需在 R70.4 继续完成。R70.5 package split
-  不得在这些条件未满足前开始。
+- remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge 与
+  HTTP reservation cutover 已分别落地，但不关闭 R70.4。TUI 尚有未迁移旧动作，HTTP command domain execution
+  尚未完全收敛到同一 application service；snapshot-feed durable outbox、所有 shared command 的四表面
+  conformance、cold-cache 100k page e2e 与完整 migration manifest gate 仍需继续完成。R70.5 package split 不得
+  在这些条件未满足前开始。
