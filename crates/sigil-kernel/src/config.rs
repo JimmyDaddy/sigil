@@ -2120,10 +2120,14 @@ where
             {
                 use std::os::windows::fs::OpenOptionsExt;
                 use windows_sys::Win32::Storage::FileSystem::{
-                    FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC, WRITE_OWNER,
+                    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                    FILE_SHARE_WRITE, WRITE_DAC, WRITE_OWNER,
                 };
                 options
-                    .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
+                    .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER)
+                    // Keep the temporary publication handle share-compatible with the
+                    // handle-based native ACL hardening performed below.
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
             }
             options
                 .open(&temp_path)
