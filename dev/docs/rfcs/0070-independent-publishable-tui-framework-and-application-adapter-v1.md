@@ -3470,3 +3470,11 @@ line to `set /P`, which did not submit the console line and left the child waiti
 platform-native input (`\n` on Unix, `\r\n` on Windows) while retaining the same PTY resize, output, exit-code and
 resource-receipt assertions. Local targeted validation passes (`1/1`), and the same 708-test remainder passes locally
 (`705 passed / 3 ignored`). A fresh exact-SHA hosted run is required; this cancelled run is not qualification evidence.
+
+### R70.8 desktop package cache-boundary follow-up（2026-08-30）
+
+独立桌面打包 run `33271832007` 的 Linux 与 macOS job 已成功，但 Windows NSIS job 在完成构建后长期停留于
+`Post Cache cargo artifacts`，没有继续到 job completion；该缓存 post-step 阻塞了独立 package job，而不是平台
+构建或验证失败。已将 `desktop-package.yml` 的 Rust cache 保存条件收紧为仅默认分支 push：PR 与手动验证仍可
+恢复已有 cache，但不再上传 release target，避免 cache post-save 消耗整段 job timeout。此次变更不放宽包内容、
+sidecar 或签名验证；取消的旧 package run 不作为资格证据，需在新 exact SHA 上重跑 package workflow。
