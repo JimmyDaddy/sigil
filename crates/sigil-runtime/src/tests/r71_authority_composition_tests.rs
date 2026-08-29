@@ -552,11 +552,28 @@ fn r71_bootstrap_pointer_loss_after_generation_publication_reconciles_on_reboot(
     let bootstrap =
         sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(&config)
             .expect("bootstrap store");
+    let persisted_snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+        .expect("reload persisted snapshot")
+        .expect("persisted snapshot");
+    let publication = bootstrap.acquire_publication().expect("publication");
+    let generation = load_authority_config_generation(&bootstrap, &publication)
+        .expect("generation record")
+        .expect("generation record exists");
+    assert_eq!(generation.config_hash, persisted_snapshot.config_hash());
+    assert_eq!(generation.generation, expected.application_generation);
+    drop(publication);
     std::fs::remove_file(bootstrap.path(
         sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
     ))
     .expect("simulate crash before pointer publication");
 
+    let replay_snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+        .expect("reload replay snapshot")
+        .expect("replay snapshot");
+    assert_eq!(
+        replay_snapshot.config_hash(),
+        persisted_snapshot.config_hash()
+    );
     let replay = boot_current_schema(&config, dir.path()).expect("reconcile reboot");
     assert_eq!(*replay.cutover().manifest(), expected);
     std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
