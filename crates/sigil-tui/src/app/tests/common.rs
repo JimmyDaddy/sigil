@@ -797,6 +797,7 @@ mod r71_fixture_root_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn r71_fixture_root_cleans_up_with_no_follow_symlink() {
         use std::os::unix::fs::symlink;
@@ -809,6 +810,23 @@ mod r71_fixture_root_tests {
         symlink(&outside, inside.join("leaf-link")).expect("symlink fixture");
         // Stale TempDir removal must not follow the symlink (cleanup is no-follow).
         assert!(root_path.exists());
+        fixture.assert_cleaned();
+        assert!(
+            !root_path.exists(),
+            "no-follow cleanup must remove the whole fixture root"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn r71_fixture_root_cleans_up_without_following_reparse_points() {
+        let mut fixture = TestFixtureRoot::new("r71-cleanup-assert");
+        let root_path = fixture.path().to_path_buf();
+        let inside = root_path.join("nested");
+        fs::create_dir_all(&inside).expect("nested fixture dir");
+        fs::write(inside.join("leaf"), b"fixture").expect("fixture leaf");
+        // Keep the Windows test free of symlink privilege requirements while still exercising
+        // the platform cleanup path for a nested fixture tree.
         fixture.assert_cleaned();
         assert!(
             !root_path.exists(),
