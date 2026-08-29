@@ -23,7 +23,10 @@ fn output_command(output: &str) -> (PathBuf, Vec<String>) {
         vec![
             "/D".to_owned(),
             "/C".to_owned(),
-            format!(r#"<nul set /p "={output}""#),
+            // `set /p` does not emit its prompt when its input is redirected directly from NUL
+            // on all hosted Windows images. A pipe supplies the empty input record while keeping
+            // the command's stdout free of the trailing newline produced by `echo`.
+            format!(r#"echo|set /p "={output}""#),
         ],
     )
 }

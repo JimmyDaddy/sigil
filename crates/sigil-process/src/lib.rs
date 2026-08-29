@@ -21,7 +21,19 @@ fn configure_process_tree_platform(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn configure_process_tree_platform(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+
+    // Hosted Windows runners may place the test/application process inside an outer Job Object.
+    // Requesting breakaway lets the child enter the authority-owned kill-on-close Job Object
+    // created after spawn. If the host rejects breakaway, spawn or assignment fails closed; the
+    // child is never treated as managed without an owner.
+    command.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn configure_process_tree_platform(_command: &mut Command) {}
 
 #[cfg(windows)]
