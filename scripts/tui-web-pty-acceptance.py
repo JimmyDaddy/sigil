@@ -626,14 +626,23 @@ egress_logging = true
 
 
 def inspect_session(state_dir: Path) -> SessionAudit:
-    sessions = sorted(
-        state_dir.glob("workspaces/*/sessions/session-*.jsonl"),
-        key=lambda candidate: candidate.stat().st_mtime,
-        reverse=True,
-    )
+    sessions = []
+    for pattern in (
+        "workspaces/*/sessions/session-*.jsonl",
+        "managed/session-log/session-*/records.jsonl",
+    ):
+        for candidate in state_dir.glob(pattern):
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            sessions.append((metadata.st_mtime, candidate))
+    sessions.sort(key=lambda item: item[0], reverse=True)
     if not sessions:
         return SessionAudit(None, 0, 0, 0, False)
-    session_path = sessions[0]
+    session_path = sessions[0][1]
     event_types: list[str] = []
     raw = session_path.read_text(encoding="utf-8", errors="replace")
     for line in raw.splitlines():

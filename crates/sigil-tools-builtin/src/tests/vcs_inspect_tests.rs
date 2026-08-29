@@ -139,7 +139,10 @@ async fn vcs_inspect_reports_status_names_and_stats_as_bounded_json() -> Result<
     let index_before_reads = fs::read(repo.path().join(".git/index"))?;
 
     let status = execute(repo.path(), "status", 10).await?;
-    assert!(matches!(status.status, ToolResultStatus::Ok));
+    assert!(
+        matches!(status.status, ToolResultStatus::Ok),
+        "vcs status failed: {status:?}"
+    );
     let status_content = content(&status)?;
     assert_eq!(status_content["operation"], "status");
     let entries = status_content["entries"]
@@ -205,7 +208,10 @@ async fn vcs_inspect_reports_unmerged_paths_without_arbitrary_git_arguments() ->
     assert!(!merge.status.success(), "fixture merge should conflict");
 
     let result = execute(repo.path(), "unmerged", 10).await?;
-    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert!(
+        matches!(result.status, ToolResultStatus::Ok),
+        "vcs unmerged failed: {result:?}"
+    );
     let value = content(&result)?;
     assert_eq!(value["entries"][0]["path"], "tracked.txt");
     Ok(())

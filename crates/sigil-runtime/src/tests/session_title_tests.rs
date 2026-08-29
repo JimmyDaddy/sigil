@@ -114,7 +114,9 @@ fn title_session_ref_accepts_a_canonical_source_path() -> Result<()> {
     let session_path = session_dir.join("session-title.jsonl");
     std::fs::write(&session_path, b"")?;
 
-    let session_ref = session_ref_for_title(&session_dir, &session_path.canonicalize()?)?;
+    let managed_root = temp.path().join("managed/session-log");
+    let session_ref =
+        session_ref_for_title(&session_dir, &managed_root, &session_path.canonicalize()?)?;
 
     assert_eq!(
         session_ref.as_path(),
@@ -131,13 +133,37 @@ fn title_session_ref_rejects_a_source_outside_the_session_directory() -> Result<
     let outside_path = temp.path().join("outside.jsonl");
     std::fs::write(&outside_path, b"")?;
 
-    let error = session_ref_for_title(&session_dir, &outside_path)
-        .expect_err("an outside source must not become a session reference");
+    let error = session_ref_for_title(
+        &session_dir,
+        &temp.path().join("managed/session-log"),
+        &outside_path,
+    )
+    .expect_err("an outside source must not become a session reference");
 
     assert!(
         error
             .to_string()
             .contains("outside the configured session directory")
+    );
+    Ok(())
+}
+
+#[test]
+fn title_session_ref_maps_a_managed_session_source_to_its_logical_key() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    let managed_root = temp.path().join("managed/session-log");
+    let managed_dir = managed_root.join("session-managed");
+    std::fs::create_dir_all(&session_dir)?;
+    std::fs::create_dir_all(&managed_dir)?;
+    let managed_path = managed_dir.join("records.jsonl");
+    std::fs::write(&managed_path, b"")?;
+
+    let session_ref = session_ref_for_title(&session_dir, &managed_root, &managed_path)?;
+
+    assert_eq!(
+        session_ref.as_path(),
+        std::path::Path::new("session-managed.jsonl")
     );
     Ok(())
 }
