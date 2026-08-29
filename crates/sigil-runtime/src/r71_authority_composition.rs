@@ -302,6 +302,7 @@ impl ValidatedAuthorityConfigSnapshotV1 {
     fn from_loaded_with_identity(
         config_path: &Path,
         config: sigil_kernel::RootConfig,
+        raw_config: &[u8],
         launch_cwd: &Path,
         config_path_identity: CanonicalHash,
     ) -> Result<Self, BootAuthorityErrorV1> {
@@ -323,6 +324,7 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let config_hash = snapshot_binding_hash(
             &encoded,
+            raw_config,
             &config_path,
             &launch_cwd,
             &workspace_root,
@@ -357,8 +359,14 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let config = sigil_kernel::RootConfig::parse_with_model_request_env(raw)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-        Self::from_loaded_with_identity(config_path, config, launch_cwd, config_path_identity)
-            .map(Some)
+        Self::from_loaded_with_identity(
+            config_path,
+            config,
+            raw.as_bytes(),
+            launch_cwd,
+            config_path_identity,
+        )
+        .map(Some)
     }
 
     #[must_use]
@@ -745,6 +753,7 @@ fn ensure_authority_anchors(paths: &crate::paths::SigilPaths) -> Result<(), Boot
 
 fn snapshot_binding_hash(
     encoded_config: &[u8],
+    raw_config: &[u8],
     config_path: &Path,
     launch_cwd: &Path,
     workspace_root: &Path,
@@ -755,6 +764,9 @@ fn snapshot_binding_hash(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"validated-authority-config-snapshot-v2");
+    hasher.update(b"raw-config\0");
+    hasher.update(raw_config);
+    hasher.update(b"effective-config\0");
     hasher.update(encoded_config);
     for path in [
         config_path,

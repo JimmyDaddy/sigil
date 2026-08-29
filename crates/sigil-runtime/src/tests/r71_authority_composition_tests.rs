@@ -216,6 +216,25 @@ fn r71_current_boot_publishes_one_green_current_manifest_and_replays_it() {
 }
 
 #[test]
+fn r71_validated_snapshot_binding_is_stable_across_reload() {
+    let _environment_guard = crate::test_env::lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("sigil.toml");
+    write_r71_boot_config(&config);
+
+    let first = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+        .expect("load first snapshot")
+        .expect("first snapshot");
+    let second = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+        .expect("load second snapshot")
+        .expect("second snapshot");
+
+    assert_eq!(first.config_hash(), second.config_hash());
+    assert_eq!(first.workspace_root(), second.workspace_root());
+    assert_eq!(first.resolved_paths(), second.resolved_paths());
+}
+
+#[test]
 fn r71_current_boot_advances_manifest_for_a_new_persisted_config_generation() {
     let _environment_guard = crate::test_env::lock();
     let dir = tempfile::tempdir().expect("tempdir");
