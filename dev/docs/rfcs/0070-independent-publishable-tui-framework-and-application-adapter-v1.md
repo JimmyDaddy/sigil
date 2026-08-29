@@ -3500,3 +3500,6 @@ readiness marker, and keeps CRLF input. Readiness, stdin write/close, output dra
 job budget. The existing Unix shell fixture and managed receipt assertions remain unchanged. The in-flight
 `33276143271` run must be replaced by a fresh exact-SHA run because the source SHA changes; no hosted pass is claimed
 from the still-running prior attempt.
+
+The same test now bounds `start_persistent` and `resize_pty` with the same 30-second diagnostic deadline. This closes
+the remaining unbounded portion of the PTY fixture lifecycle; it does not convert a failed stage into success.

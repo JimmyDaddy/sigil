@@ -326,8 +326,9 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     )
     .with_process_inventory(test_process_inventory());
     let (program, args) = pty_line_command();
-    let mut handle = route
-        .start_persistent(ManagedTerminalStartRequestV1 {
+    let mut handle = tokio::time::timeout(
+        Duration::from_secs(30),
+        route.start_persistent(ManagedTerminalStartRequestV1 {
             program,
             args,
             cwd: root.path().to_path_buf(),
@@ -336,16 +337,21 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
                 rows: 24,
                 cols: 80,
             }),
-        })
-        .await
-        .expect("managed pty terminal route");
-    handle
-        .resize_pty(sigil_kernel::managed_execution::BoundedPtySizeV1 {
+        }),
+    )
+    .await
+    .expect("pty start timed out")
+    .expect("managed pty terminal route");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        handle.resize_pty(sigil_kernel::managed_execution::BoundedPtySizeV1 {
             rows: 32,
             cols: 100,
-        })
-        .await
-        .expect("resize");
+        }),
+    )
+    .await
+    .expect("pty resize timed out")
+    .expect("resize");
     let mut stream = handle.take_output_stream().expect("managed stream");
     let readiness = b"runtime-pty-ready";
     let mut output = Vec::new();
