@@ -3439,3 +3439,15 @@ command-store 完成 legacy 文件退休时返回 `Access is denied. (os error 5
 兼容文件后不再尝试不受支持的目录同步。该修复只消除平台错误，不放宽 authority、managed writer 或 durability
 断言；本地 `sigil-http --lib -- --test-threads=1` 为 `224 passed / 0 failed`。需在新 exact SHA 上重跑 hosted
 Windows HTTP 与完整 CI，当前仍不宣称 R70.8 完成。
+
+### R70.8 Windows runtime test sharding follow-up（2026-08-30）
+
+Replacement run `33265825116` confirmed that the split MCP, builtin, HTTP and kernel jobs no longer depend on the
+long-running runtime test: those jobs completed successfully and retained their independent evidence. The remaining
+`sigil-runtime --lib -- --test-threads=1` job itself reached its 45-minute budget and was cancelled, so the prior
+runtime slice was still too large even after platform-level isolation. The workflow now shards Windows runtime tests
+into agent-tools, agent-supervisor, session-lifecycle, application-run, provider-connections, doctor, plan-review and
+an explicit remainder shard. The remainder uses `--skip` for the named shards, so the union still covers the complete
+runtime test binary; `cargo test -- --list` enumerated 1,232 tests across the shard selection and remainder checks.
+Each shard has its own timeout and `fail-fast: false`, while the test-level `--test-threads=1` resource-safety boundary
+is retained. A fresh exact-SHA hosted run is required; the timed-out run does not count as a hosted pass.

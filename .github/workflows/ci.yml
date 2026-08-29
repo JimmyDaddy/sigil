@@ -419,10 +419,45 @@ jobs:
         run: cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
 
   platform-windows-runtime:
-    name: Platform reliability (Windows runtime)
+    name: "Platform reliability (Windows runtime: ${{ matrix.name }})"
     needs: check
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agent-tools
+            timeout: 30
+            test-args: agent_tools
+          - name: agent-supervisor
+            timeout: 30
+            test-args: agent_supervisor
+          - name: session-lifecycle
+            timeout: 30
+            test-args: session_lifecycle
+          - name: application-run
+            timeout: 30
+            test-args: application_run
+          - name: provider-connections
+            timeout: 30
+            test-args: provider_connections
+          - name: doctor
+            timeout: 30
+            test-args: doctor
+          - name: plan-review
+            timeout: 30
+            test-args: plan_review_coordinator_tests
+          - name: remainder
+            timeout: 45
+            test-args: >-
+              --skip agent_tools
+              --skip agent_supervisor
+              --skip session_lifecycle
+              --skip application_run
+              --skip provider_connections
+              --skip doctor
+              --skip plan_review_coordinator_tests
 
     steps:
       - name: Checkout
@@ -439,8 +474,8 @@ jobs:
       - name: Compile Windows runtime targets
         run: cargo check --locked -p sigil-runtime --all-targets
 
-      - name: Test Windows runtime integration
-        run: cargo test --locked -p sigil-runtime --lib -- --test-threads=1
+      - name: Test Windows runtime integration (${{ matrix.name }})
+        run: cargo test --locked -p sigil-runtime --lib -- --test-threads=1 ${{ matrix.test-args }}
 
   platform-windows-http:
     name: Platform reliability (Windows HTTP)
