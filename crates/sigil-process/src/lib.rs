@@ -21,7 +21,18 @@ fn configure_process_tree_platform(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn configure_process_tree_platform(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    // Hosted Windows runners place the test process in an outer Job Object. Ask Windows to
+    // break the child out of that inherited job so it can be assigned to the exact kill-on-close
+    // Job Object owned by `ProcessTreeOwnerGuard`. Without this flag, AssignProcessToJobObject
+    // can fail before the managed route has an auditable owner.
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn configure_process_tree_platform(_command: &mut Command) {}
 
 #[cfg(windows)]

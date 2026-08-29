@@ -26,7 +26,7 @@ fn output_command(output: &str) -> (PathBuf, Vec<String>) {
             // `set /p` does not emit its prompt when its input is redirected directly from NUL
             // on all hosted Windows images. A pipe supplies the empty input record while keeping
             // the command's stdout free of the trailing newline produced by `echo`.
-            format!(r#"echo|set /p "={output}""#),
+            format!("echo|set /p output={output}"),
         ],
     )
 }
@@ -50,7 +50,7 @@ fn pty_line_command() -> (String, Vec<String>) {
             "/V:ON".to_owned(),
             "/D".to_owned(),
             "/C".to_owned(),
-            "set /P \"line=\"& echo(!line!".to_owned(),
+            "set /P line=& echo(!line!".to_owned(),
         ],
     )
 }
