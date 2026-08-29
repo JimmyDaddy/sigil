@@ -392,7 +392,7 @@ jobs:
         run: cargo check --locked -p sigil-process -p sigil-mcp --all-targets
 
       - name: Test Windows MCP transport
-        run: cargo test --locked -p sigil-process -p sigil-mcp --lib
+        run: cargo test --locked -p sigil-process -p sigil-mcp --lib -- --test-threads=1
 
   platform-windows-builtin:
     name: Platform reliability (Windows builtin)

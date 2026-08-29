@@ -3421,3 +3421,11 @@ kernel error taxonomy，并将 frozen hash 定义为去除 `#[cfg(test)]` module
 
 当前仍未声称 R70.8 完成：真实 crates.io `0.1.0` preview publish、至少一个 release cycle、真实用户验证和对应
 immutable evidence 仍待 release operator；RFC 状态继续为 R70.8 In Progress。
+
+### R70.8 Windows MCP test scheduling follow-up（2026-08-30）
+
+首轮拆分后的 hosted run 显示 Windows MCP slice 中 183 个进程/协议测试以 cargo 默认并发度运行时，四个彼此独立的
+用例同时在 15 秒 startup deadline 内超时；失败均发生在初始化阶段，未出现协议断言或进程清理失败。该 slice 已将
+Windows MCP job 改为 `--test-threads=1`，保留测试内部显式验证的 MCP 并发 barrier，因此只降低 runner 级资源竞争，
+不放宽启动 deadline、协议检查或进程树清理条件。本地串行验证为 `sigil-mcp 193 passed / 0 failed / 1 ignored`、
+`sigil-process 2 passed`；新的 hosted exact-SHA 结果仍待本次提交完成后重新运行。
