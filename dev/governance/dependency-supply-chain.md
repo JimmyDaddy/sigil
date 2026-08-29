@@ -247,6 +247,13 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 
 复扫结果为 `cargo audit` 零已知漏洞；`cargo deny check` 的 advisories/bans/licenses/sources 四项均通过。当时建立的两项例外为`RUSTSEC-2025-0141`（`syntect`只用`bincode 1.3.3`读取版本固定、编译进二进制的dump）与上文记录的`RUSTSEC-2024-0436`。当前完整例外集合还包括R44.2在本文件开头逐项说明的Tauri传递路径；唯一事实源以`deny.toml`为准，所有例外都必须随上游迁移复核并删除。
 
+R70.8 Windows hosted ConPTY qualification 另将 `portable-pty` 在 Windows target 固定到 `0.8.1`；该版本
+依赖已停止维护的 `serial 0.4.0`（`RUSTSEC-2017-0008`），而 `portable-pty 0.9.0` 在当前 Windows
+hosted ConPTY runner 上无法可靠读出 PTY 帧。该例外只覆盖这一条传递依赖和 Windows PTY 兼容性隔离，
+不表示 `serial` 得到维护或安全背书；Unix target 仍使用 `portable-pty 0.9.0`。升级到包含 Windows
+ConPTY 修复且不引入该传递依赖的上游版本后，必须删除 `deny.toml`、workflow 和本台账中的该例外，
+并重跑 cargo-deny、cargo-audit、Windows PTY 和 full qualification。
+
 上述证据覆盖 E21.17 public WebFetch、stable websearch 与 user-root Streamable HTTP MCP cutover；最终发布结论仍以同一工作区的完整测试、Clippy、格式、文档和站点 gate 全绿为前提。
 
 ## 常规自动化门禁（RFC-0037）
@@ -288,7 +295,8 @@ cargo audit \
   --ignore RUSTSEC-2025-0081 \
   --ignore RUSTSEC-2025-0098 \
   --ignore RUSTSEC-2025-0100 \
-  --ignore RUSTSEC-2025-0141
+  --ignore RUSTSEC-2025-0141 \
+  --ignore RUSTSEC-2017-0008
 ```
 
 workflow 定时运行只能证明默认分支的最新依赖状态；发布仍需按对应 release RFC 执行完整
