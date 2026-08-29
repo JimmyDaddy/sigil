@@ -61,6 +61,32 @@ fn powershell_path() -> PathBuf {
 }
 
 #[cfg(unix)]
+fn pty_environment() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::new()
+}
+
+#[cfg(windows)]
+fn pty_environment() -> std::collections::BTreeMap<String, String> {
+    let mut environment = std::collections::BTreeMap::new();
+    for name in [
+        "PATH",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "PROGRAMDATA",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            environment.insert(name.to_owned(), value.to_string_lossy().into_owned());
+        }
+    }
+    environment
+}
+
+#[cfg(unix)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
         "/bin/sh".to_owned(),
@@ -354,7 +380,7 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
             program,
             args,
             cwd: root.path().to_path_buf(),
-            environment: std::collections::BTreeMap::new(),
+            environment: pty_environment(),
             pty_size: Some(sigil_kernel::managed_execution::BoundedPtySizeV1 {
                 rows: 24,
                 cols: 80,

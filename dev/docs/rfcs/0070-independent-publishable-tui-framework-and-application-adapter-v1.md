@@ -3515,3 +3515,14 @@ than a 45-minute remainder cancellation. The fixture therefore resolves an absol
 Windows environment and uses explicit `Console.WriteLine`/`Console.ReadLine` calls, while retaining the CRLF input,
 readiness handshake, lifecycle deadlines, PTY resize and managed receipt assertions. The source correction requires a
 new exact-SHA hosted run; `33278615214` is not qualification evidence.
+
+### R70.8 Windows hosted PTY environment correction（2026-08-30）
+
+The replacement run `33279368713` showed that the absolute PowerShell fixture still reached its bounded readiness
+deadline without an output frame; six of seven adapter tests passed. The managed PTY launcher intentionally clears the
+ambient environment and only materializes authority-reserved variables, while the Windows console runtime also needs
+the same bounded host-toolchain baseline used by the managed one-shot route (`PATH`, `USERPROFILE`, `HOMEDRIVE`,
+`HOMEPATH`, `LOCALAPPDATA`, `APPDATA`, `PROGRAMDATA` and `ProgramFiles` entries). The PTY fixture now supplies only
+that explicit allowlisted baseline; it does not restore ambient secrets or arbitrary environment inheritance. Local
+targeted and complete adapter validation are `1/1` and `7/7`. A new exact-SHA hosted run is required; `33279368713`
+is not qualification evidence.
