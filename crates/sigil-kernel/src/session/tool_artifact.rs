@@ -5329,13 +5329,17 @@ fn open_read_write_private_file(path: &Path) -> Result<File> {
         // after sudden power loss, so grace GC remains the cross-platform fallback.
         use std::os::windows::fs::OpenOptionsExt as _;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE,
+            FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
         };
         OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
-            .share_mode(FILE_SHARE_DELETE)
+            // The live capture handle shares all access modes so the authority can open a second
+            // no-follow handle and apply/verify the native ACL while this handle remains live.
+            // The parent staging directory is already private before this file is created.
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE)
             .open(path)
             .with_context(|| format!("failed to create private tool artifact {}", path.display()))
