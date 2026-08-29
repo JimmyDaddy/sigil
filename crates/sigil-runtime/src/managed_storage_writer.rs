@@ -619,6 +619,7 @@ impl ManagedStorageWriterAdapterV1 {
                 let mut file = options
                     .open(&record_file)
                     .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                #[cfg(not(windows))]
                 file.sync_all()
                     .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
                 let mut bytes = Vec::new();
@@ -797,9 +798,10 @@ fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorage
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
-            WRITE_OWNER,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, WRITE_DAC, WRITE_OWNER,
         };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         options.access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
