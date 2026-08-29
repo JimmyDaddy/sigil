@@ -3527,6 +3527,16 @@ that explicit allowlisted baseline; it does not restore ambient secrets or arbit
 targeted and complete adapter validation are `1/1` and `7/7`. A new exact-SHA hosted run is required; `33279368713`
 is not qualification evidence.
 
+### R70.8 Desktop dependency audit refresh（2026-08-30）
+
+The Windows PTY target pin exposed a separate desktop dependency audit failure in the PR gate. The desktop lockfile
+now upgrades `dompurify` to `3.4.13`, `mermaid` to `11.16.1`, `postcss` to `8.5.23`, and `nanoid` to `3.3.18`;
+WDIO's `deepmerge-ts` is constrained to `8.0.0`. The WDIO range currently resolves `@puppeteer/browsers 2.x`,
+which brings an unfixable `extract-zip 2.0.1` advisory; the dev-only browser setup is therefore pinned to
+`@puppeteer/browsers 3.2.1`, which uses `modern-tar`. Frozen install, WDIO CLI smoke, full desktop check, and
+`pnpm audit --audit-level high` pass locally. This is a dev-toolchain dependency correction and does not close
+R70.8's exact-SHA hosted qualification, real crates.io preview publication, release cycle, or user validation.
+
 ### R70.8 Windows hosted ConPTY dependency correction（2026-08-30）
 
 The exact-SHA run `33280134869` isolated the remaining failure to the dedicated
