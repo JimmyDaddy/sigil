@@ -3460,3 +3460,13 @@ in 109.69 seconds). The failure was a test scheduling budget, not a production c
 locally in 4.16 seconds and still verifies the terminal event, failed run projection and durable replay. Its observation
 budget is now a finite 30 seconds to account for cold managed-authority/provider preparation on hosted Windows while
 retaining a bounded failure detector. The new exact-SHA hosted run must revalidate the HTTP slice and all runtime shards.
+
+### R70.8 Windows hosted PTY line-ending follow-up（2026-08-30）
+
+The sharded hosted run `33269236970` completed 28 jobs successfully but its Windows runtime `remainder` job was
+cancelled at the 45-minute limit. The retained job log identified the exact last-started test:
+`r71_managed_terminal_route_supports_pty_control_and_receipt`; the Windows `cmd.exe` ConPTY fixture sent an LF-only
+line to `set /P`, which did not submit the console line and left the child waiting indefinitely. The fixture now sends
+platform-native input (`\n` on Unix, `\r\n` on Windows) while retaining the same PTY resize, output, exit-code and
+resource-receipt assertions. Local targeted validation passes (`1/1`), and the same 708-test remainder passes locally
+(`705 passed / 3 ignored`). A fresh exact-SHA hosted run is required; this cancelled run is not qualification evidence.

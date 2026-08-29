@@ -345,10 +345,14 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
         .await
         .expect("resize");
     let mut stream = handle.take_output_stream().expect("managed stream");
+    #[cfg(unix)]
+    let input = b"runtime-pty\n".to_vec();
+    #[cfg(windows)]
+    // ConPTY presents a real Windows console line discipline to cmd.exe; CRLF is required to
+    // submit the line to `set /P`, whereas the Unix shell test consumes LF directly.
+    let input = b"runtime-pty\r\n".to_vec();
     handle
-        .write_stdin(sigil_kernel::managed_execution::BoundedProcessInputV1 {
-            payload: b"runtime-pty\n".to_vec(),
-        })
+        .write_stdin(sigil_kernel::managed_execution::BoundedProcessInputV1 { payload: input })
         .await
         .expect("write");
     handle.close_stdin().await.expect("close");
