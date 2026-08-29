@@ -52,13 +52,12 @@ fn pty_line_command() -> (String, Vec<String>) {
 #[cfg(windows)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
-        "pwsh.exe".to_owned(),
+        comspec_path().to_string_lossy().into_owned(),
         vec![
-            "-NoLogo".to_owned(),
-            "-NoProfile".to_owned(),
-            "-NonInteractive".to_owned(),
-            "-Command".to_owned(),
-            "[Console]::WriteLine('runtime-pty-ready'); [Console]::Out.Flush(); $line = [Console]::ReadLine(); [Console]::WriteLine($line)".to_owned(),
+            "/V:ON".to_owned(),
+            "/D".to_owned(),
+            "/C".to_owned(),
+            "echo runtime-pty-ready& set /P line=& echo(!line!".to_owned(),
         ],
     )
 }
@@ -375,8 +374,8 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     #[cfg(unix)]
     let input = b"runtime-pty\n".to_vec();
     #[cfg(windows)]
-    // ConPTY presents a real Windows console line discipline to PowerShell; CRLF is required to
-    // submit the line to `Console.ReadLine`, whereas the Unix shell test consumes LF directly.
+    // ConPTY presents a real Windows console line discipline to cmd.exe; CRLF is required to
+    // submit the line to `set /P`, whereas the Unix shell test consumes LF directly.
     let input = b"runtime-pty\r\n".to_vec();
     tokio::time::timeout(
         Duration::from_secs(30),

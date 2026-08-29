@@ -3493,12 +3493,13 @@ qualification evidence.
 
 ### R70.8 Windows PTY fixture deadline and console-reader follow-up（2026-08-30）
 
-The new adapter shard showed that the earlier `cmd.exe`/`set /P` readiness fixture was still too dependent on hosted
-ConPTY behavior. The Windows fixture now uses the runner-provided PowerShell console reader, explicitly flushes the
-readiness marker, and keeps CRLF input. Readiness, stdin write/close, output drain and finalization each have a bounded
-30-second test deadline, so a platform regression becomes a diagnostic test failure instead of consuming the whole
-job budget. The existing Unix shell fixture and managed receipt assertions remain unchanged. The in-flight
-`33276143271` run must be replaced by a fresh exact-SHA run because the source SHA changes; no hosted pass is claimed
+The new adapter shard showed that the earlier `pwsh.exe` fixture used a relative executable name that the managed
+launcher correctly rejected as `ProviderUnavailable`; the Windows fixture now restores the absolute `ComSpec` path,
+uses `cmd.exe` with an explicit readiness marker, and keeps CRLF input. Readiness, stdin write/close, output drain and
+finalization each have a bounded 30-second test deadline, so a platform regression becomes a diagnostic test failure
+instead of consuming the whole job budget. The existing Unix shell fixture and managed receipt assertions remain
+unchanged. The in-flight
+`33277739733` run must be replaced by a fresh exact-SHA run because the source SHA changes; no hosted pass is claimed
 from the still-running prior attempt.
 
 The same test now bounds `start_persistent` and `resize_pty` with the same 30-second diagnostic deadline. This closes
