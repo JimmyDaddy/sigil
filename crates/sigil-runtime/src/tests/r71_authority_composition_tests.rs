@@ -546,6 +546,9 @@ fn r71_bootstrap_pointer_loss_after_generation_publication_reconciles_on_reboot(
     let dir = tempfile::tempdir().expect("tempdir");
     let config = dir.path().join("sigil.toml");
     write_r71_boot_config(&config);
+    let initial_snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+        .expect("load initial persisted snapshot")
+        .expect("initial snapshot");
     let first = boot_current_schema(&config, dir.path()).expect("first boot");
     let expected = first.cutover().manifest().clone();
     drop(first);
@@ -570,6 +573,11 @@ fn r71_bootstrap_pointer_loss_after_generation_publication_reconciles_on_reboot(
     let replay_snapshot = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
         .expect("reload replay snapshot")
         .expect("replay snapshot");
+    assert_eq!(
+        replay_snapshot.config_hash(),
+        initial_snapshot.config_hash(),
+        "workspace bootstrap side effects must not change the persisted authority binding"
+    );
     assert_eq!(
         replay_snapshot.config_hash(),
         persisted_snapshot.config_hash()

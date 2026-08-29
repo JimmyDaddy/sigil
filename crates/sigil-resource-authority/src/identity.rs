@@ -161,7 +161,14 @@ pub fn canonical_identity_from_handle(
     } else {
         u64::from(info.nNumberOfLinks)
     };
-    let size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
+    // Directory file size is mutable implementation detail on Windows: creating an entry
+    // beneath the directory can change it without changing the directory identity. A snapshot
+    // binding must therefore use the stable directory sentinel, just like the metadata path.
+    let size = if is_directory {
+        0
+    } else {
+        (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow)
+    };
     let mut digest_material = Vec::new();
     digest_material.extend_from_slice(path.to_string_lossy().as_bytes());
     digest_material.extend_from_slice(&info.dwVolumeSerialNumber.to_le_bytes());
