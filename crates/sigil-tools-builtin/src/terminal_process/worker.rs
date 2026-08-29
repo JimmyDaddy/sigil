@@ -152,6 +152,12 @@ pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
                             Ok(_) => {
                                 cancel_requested = true;
                                 cancel_waiters.push(respond_to);
+                                // Cancellation owns the terminal outcome from this point on. A
+                                // PTY output reader (notably ConPTY) may remain open after the
+                                // process tree has been terminated, so waiting for an EOF frame
+                                // here would prevent wait_and_finalize from closing the PTY and
+                                // publishing the persistent cancellation receipt.
+                                stream_open = false;
                             }
                             Err(error) => {
                                 let _ = respond_to.send(Err(error.to_string()));

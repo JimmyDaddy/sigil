@@ -373,12 +373,52 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
 
+  platform-windows-runtime:
+    name: Platform reliability (Windows runtime)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile complete workspace and targets
+        run: cargo check --locked --workspace --all-targets
+
       - name: Test Windows runtime integration
-        if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-runtime --lib -- --test-threads=1
 
+  platform-windows-http:
+    name: Platform reliability (Windows HTTP)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile complete workspace and targets
+        run: cargo check --locked --workspace --all-targets
+
       - name: Test Windows HTTP durable journal
-        if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-http --all-targets
 
   oauth-keyring-conformance:
