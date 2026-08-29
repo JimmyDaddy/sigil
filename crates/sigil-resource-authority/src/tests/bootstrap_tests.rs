@@ -38,3 +38,14 @@ fn r71_bootstrap_hash_is_stable() {
         canonical_bootstrap_hash(b"payload")
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn r71_bootstrap_verbatim_path_walk_skips_the_uninspectable_prefix() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let nested = temp.path().join("nested");
+    std::fs::create_dir(&nested).expect("nested");
+    let canonical = std::fs::canonicalize(&nested).expect("canonical nested path");
+
+    reject_symlink_components(&canonical).expect("verbatim path prefix is not a filesystem entry");
+}

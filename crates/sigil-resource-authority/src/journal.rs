@@ -995,9 +995,10 @@ impl ResourceJournalFileV1 {
         serde_json::to_writer(&mut temporary, &snapshot)
             .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
         temporary.as_file().sync_all().map_err(map_io)?;
-        temporary
-            .persist(&self.path)
-            .map_err(|error| map_io(error.error))?;
+        #[cfg(windows)]
+        persist_snapshot_file(&temporary, &self.path).map_err(map_io)?;
+        #[cfg(not(windows))]
+        persist_snapshot_file(temporary, &self.path).map_err(map_io)?;
         sync_parent_directory(parent).map_err(|error| {
             JournalErrorV1::DurabilityUncertain(format!(
                 "journal snapshot was renamed but parent directory sync failed: {error}"
@@ -1005,6 +1006,56 @@ impl ResourceJournalFileV1 {
         })?;
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn persist_snapshot_file(
+    temporary: &tempfile::NamedTempFile,
+    destination: &Path,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = temporary
+        .path()
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // The snapshot file is flushed before this call. WRITE_THROUGH makes the same-volume rename
+    // wait for the replacement to reach stable storage; Windows does not provide a portable
+    // directory-handle fsync equivalent for the parent-entry durability step below.
+    // SAFETY: both paths are valid NUL-terminated UTF-16 buffers alive for the call.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn persist_snapshot_file(
+    temporary: tempfile::NamedTempFile,
+    destination: &Path,
+) -> std::io::Result<()> {
+    temporary
+        .persist(destination)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 fn remove_pending_admission(
@@ -1043,11 +1094,9 @@ fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::fs::MetadataExt;
 
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
     let metadata = fs::symlink_metadata(parent)?;
     if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -1056,11 +1105,11 @@ fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
             "journal parent is not a real Windows directory",
         ));
     }
-    let mut options = fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-    options.open(parent)?.sync_all()
+    // Windows does not expose a stable, portable directory-entry flush through Rust's standard
+    // library. The snapshot contents are synced and the replacement uses MOVEFILE_WRITE_THROUGH
+    // above, so treating this unsupported metadata flush as complete avoids turning every
+    // otherwise durable journal append into a false DurabilityUncertain failure.
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]

@@ -2455,6 +2455,12 @@ fn reject_symlink_components(path: &Path) -> Result<(), BootstrapErrorV1> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            // A Windows drive or verbatim prefix is not inspectable until the following root
+            // component has been appended (for example, `\\?\C:` becomes `\\?\C:\`).
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(BootstrapErrorV1::NotPlainDirectory(
