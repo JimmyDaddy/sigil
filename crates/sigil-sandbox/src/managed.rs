@@ -254,7 +254,6 @@ impl ManagedOneShotLaunchServiceV1 for CommandManagedOneShotLaunchServiceV1 {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        sigil_process::configure_process_tree(&mut command);
         command
             .spawn()
             .map_err(|error| ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string()))
@@ -364,7 +363,9 @@ impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        sigil_process::configure_process_tree(&mut command);
+        if self.enforcement.requested.require_process_tree_ownership || cfg!(unix) {
+            sigil_process::configure_process_tree(&mut command);
+        }
         command
             .spawn()
             .map_err(|error| ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string()))
@@ -855,11 +856,13 @@ async fn poll_termination(child: &mut Child, max_runtime_ms: u64) -> ProcessTerm
 
 fn terminate_reap_and_settle(
     child: &mut Child,
-    process_owner: &sigil_process::ProcessTreeOwnerGuard,
+    process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
     inventory: &dyn sigil_resource_authority::AuthorityProcessInventoryPortV1,
     claim: &mut Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
 ) -> Result<(), ManagedExecutionErrorV1> {
-    let _ = process_owner.terminate();
+    if let Some(process_owner) = process_owner {
+        let _ = process_owner.terminate();
+    }
     let _ = child.kill();
     child
         .wait()
@@ -1007,17 +1010,25 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             }
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
-        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
-            Ok(owner) => owner,
-            Err(error) => {
-                let _ = child.kill();
-                if child.wait().is_ok() {
-                    let _ = inventory.settle_spawn(claim);
+        let process_owner = if prepared
+            .requested_enforcement
+            .require_process_tree_ownership
+            || cfg!(unix)
+        {
+            match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
+                Ok(owner) => Some(owner),
+                Err(error) => {
+                    let _ = child.kill();
+                    if child.wait().is_ok() {
+                        let _ = inventory.settle_spawn(claim);
+                    }
+                    return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
+                        error.to_string(),
+                    ));
                 }
-                return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
-                    error.to_string(),
-                ));
             }
+        } else {
+            None
         };
         let mut claim = Some(claim);
         let cap = request.limits.max_output_bytes;
@@ -1026,7 +1037,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             None => {
                 terminate_reap_and_settle(
                     &mut child,
-                    &process_owner,
+                    process_owner.as_ref(),
                     inventory.as_ref(),
                     &mut claim,
                 )?;
@@ -1038,7 +1049,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             None => {
                 terminate_reap_and_settle(
                     &mut child,
-                    &process_owner,
+                    process_owner.as_ref(),
                     inventory.as_ref(),
                     &mut claim,
                 )?;
@@ -1052,7 +1063,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             Err(_) => {
                 terminate_reap_and_settle(
                     &mut child,
-                    &process_owner,
+                    process_owner.as_ref(),
                     inventory.as_ref(),
                     &mut claim,
                 )?;
@@ -1064,7 +1075,7 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             Err(_) => {
                 terminate_reap_and_settle(
                     &mut child,
-                    &process_owner,
+                    process_owner.as_ref(),
                     inventory.as_ref(),
                     &mut claim,
                 )?;
@@ -1073,7 +1084,9 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         };
         let termination = poll_termination(&mut child, request.limits.max_runtime_ms).await;
         if matches!(termination, ProcessTerminationV1::OutcomeUncertain { .. }) {
-            let _ = process_owner.terminate();
+            if let Some(process_owner) = process_owner.as_ref() {
+                let _ = process_owner.terminate();
+            }
             let _ = child.kill();
             if child.wait().is_ok() {
                 inventory
@@ -1191,7 +1204,6 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                sigil_process::configure_process_tree(&mut command);
                 command.spawn().map_err(|error| {
                     ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string())
                 })
@@ -1213,22 +1225,32 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             }
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
-        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
-            Ok(owner) => owner,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = inventory.settle_spawn(claim);
-                return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
-                    error.to_string(),
-                ));
+        let process_owner = if prepared
+            .requested_enforcement
+            .require_process_tree_ownership
+            || cfg!(unix)
+        {
+            match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
+                Ok(owner) => Some(owner),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = inventory.settle_spawn(claim);
+                    return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
+                        error.to_string(),
+                    ));
+                }
             }
+        } else {
+            None
         };
         let cap = request.limits.max_output_bytes;
         let stdout_pipe = match child.stdout.take() {
             Some(pipe) => pipe,
             None => {
-                let _ = process_owner.terminate();
+                if let Some(process_owner) = process_owner.as_ref() {
+                    let _ = process_owner.terminate();
+                }
                 let _ = child.kill();
                 if child.wait().is_ok() {
                     let _ = inventory.settle_spawn(claim);
@@ -1239,7 +1261,9 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         let stderr_pipe = match child.stderr.take() {
             Some(pipe) => pipe,
             None => {
-                let _ = process_owner.terminate();
+                if let Some(process_owner) = process_owner.as_ref() {
+                    let _ = process_owner.terminate();
+                }
                 let _ = child.kill();
                 if child.wait().is_ok() {
                     let _ = inventory.settle_spawn(claim);
@@ -1314,18 +1338,26 @@ impl SandboxManagedExecutionServiceV1 {
             }
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
-        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(process_id)) {
-            Ok(owner) => owner,
-            Err(error) => {
-                let mut child = launch.child;
-                let _ = child.kill();
-                if child.wait().is_ok() {
-                    let _ = process_inventory.settle_spawn(process_claim);
+        let process_owner = if prepared
+            .requested_enforcement
+            .require_process_tree_ownership
+            || cfg!(unix)
+        {
+            match sigil_process::ProcessTreeOwnerGuard::assign(Some(process_id)) {
+                Ok(owner) => Some(owner),
+                Err(error) => {
+                    let mut child = launch.child;
+                    let _ = child.kill();
+                    if child.wait().is_ok() {
+                        let _ = process_inventory.settle_spawn(process_claim);
+                    }
+                    return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
+                        error.to_string(),
+                    ));
                 }
-                return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
-                    error.to_string(),
-                ));
             }
+        } else {
+            None
         };
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
         let stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
@@ -1359,7 +1391,7 @@ impl SandboxManagedExecutionServiceV1 {
 /// Local persistent process handle (non-clone, non-serialize).
 struct LocalPersistentProcessHandleV1 {
     child: Arc<Mutex<Child>>,
-    process_owner: sigil_process::ProcessTreeOwnerGuard,
+    process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdin_open: Arc<AtomicBool>,
     frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
@@ -1481,7 +1513,9 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         _reason: ProcessCancelReasonV1,
     ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
         self.cancelled.store(true, Ordering::SeqCst);
-        let _ = self.process_owner.terminate();
+        if let Some(process_owner) = self.process_owner.as_ref() {
+            let _ = process_owner.terminate();
+        }
         let mut guard = self
             .child
             .lock()
@@ -1594,7 +1628,7 @@ fn resource_receipt_from_prepared(prepared: &PreparedLocalRunV1) -> ExecutionRes
 
 struct LocalPersistentPtyProcessHandleV1 {
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
-    process_owner: sigil_process::ProcessTreeOwnerGuard,
+    process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     stdin: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
     stdin_open: Arc<AtomicBool>,
@@ -1725,9 +1759,11 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
         _reason: ProcessCancelReasonV1,
     ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
         self.cancelled.store(true, Ordering::SeqCst);
-        self.process_owner
-            .terminate()
-            .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
+        if let Some(process_owner) = self.process_owner.as_ref() {
+            process_owner
+                .terminate()
+                .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
+        }
         let mut child = self
             .child
             .lock()
