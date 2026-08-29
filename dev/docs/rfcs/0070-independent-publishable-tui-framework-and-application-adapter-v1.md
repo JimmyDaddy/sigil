@@ -3490,3 +3490,13 @@ observed, and only then writes and closes stdin. The Windows runtime matrix also
 covers every other runtime test. This is a scheduling/fixture reliability correction, not a reduction of coverage or a
 relaxation of the managed process receipt assertions. Fresh exact-SHA CI is required; the cancelled run is not
 qualification evidence.
+
+### R70.8 Windows PTY fixture deadline and console-reader follow-up（2026-08-30）
+
+The new adapter shard showed that the earlier `cmd.exe`/`set /P` readiness fixture was still too dependent on hosted
+ConPTY behavior. The Windows fixture now uses the runner-provided PowerShell console reader, explicitly flushes the
+readiness marker, and keeps CRLF input. Readiness, stdin write/close, output drain and finalization each have a bounded
+30-second test deadline, so a platform regression becomes a diagnostic test failure instead of consuming the whole
+job budget. The existing Unix shell fixture and managed receipt assertions remain unchanged. The in-flight
+`33276143271` run must be replaced by a fresh exact-SHA run because the source SHA changes; no hosted pass is claimed
+from the still-running prior attempt.

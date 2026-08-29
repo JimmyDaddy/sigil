@@ -3,6 +3,7 @@ use sigil_kernel::resource::CanonicalHash;
 use sigil_resource_authority::storage::{
     AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
 };
+use std::time::Duration;
 
 fn test_process_inventory() -> Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> {
     Arc::new(sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default())
@@ -51,12 +52,13 @@ fn pty_line_command() -> (String, Vec<String>) {
 #[cfg(windows)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
-        comspec_path().to_string_lossy().into_owned(),
+        "pwsh.exe".to_owned(),
         vec![
-            "/V:ON".to_owned(),
-            "/D".to_owned(),
-            "/C".to_owned(),
-            "echo runtime-pty-ready& set /P line=& echo(!line!".to_owned(),
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            "[Console]::WriteLine('runtime-pty-ready'); [Console]::Out.Flush(); $line = [Console]::ReadLine(); [Console]::WriteLine($line)".to_owned(),
         ],
     )
 }
@@ -348,9 +350,10 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     let readiness = b"runtime-pty-ready";
     let mut output = Vec::new();
     loop {
-        let frame = stream
-            .next_frame()
+        let frame = stream.next_frame();
+        let frame = tokio::time::timeout(Duration::from_secs(30), frame)
             .await
+            .expect("pty readiness timed out")
             .expect("output frame")
             .expect("pty ended before readiness marker");
         if !frame.end_of_stream {
@@ -366,20 +369,34 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     #[cfg(unix)]
     let input = b"runtime-pty\n".to_vec();
     #[cfg(windows)]
-    // ConPTY presents a real Windows console line discipline to cmd.exe; CRLF is required to
-    // submit the line to `set /P`, whereas the Unix shell test consumes LF directly.
+    // ConPTY presents a real Windows console line discipline to PowerShell; CRLF is required to
+    // submit the line to `Console.ReadLine`, whereas the Unix shell test consumes LF directly.
     let input = b"runtime-pty\r\n".to_vec();
-    handle
-        .write_stdin(sigil_kernel::managed_execution::BoundedProcessInputV1 { payload: input })
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        handle
+            .write_stdin(sigil_kernel::managed_execution::BoundedProcessInputV1 { payload: input }),
+    )
+    .await
+    .expect("pty write timed out")
+    .expect("write");
+    tokio::time::timeout(Duration::from_secs(30), handle.close_stdin())
         .await
-        .expect("write");
-    handle.close_stdin().await.expect("close");
-    while let Some(frame) = stream.next_frame().await.expect("output frame") {
+        .expect("pty close timed out")
+        .expect("close");
+    while let Some(frame) = tokio::time::timeout(Duration::from_secs(30), stream.next_frame())
+        .await
+        .expect("pty output timed out")
+        .expect("output frame")
+    {
         if !frame.end_of_stream {
             output.extend(frame.payload);
         }
     }
-    let receipt = handle.wait_and_finalize().await.expect("terminal receipt");
+    let receipt = tokio::time::timeout(Duration::from_secs(30), handle.wait_and_finalize())
+        .await
+        .expect("pty finalization timed out")
+        .expect("terminal receipt");
     assert!(
         output
             .windows(b"runtime-pty".len())
