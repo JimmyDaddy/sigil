@@ -331,15 +331,22 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
 #[tokio::test]
 async fn terminal_lifecycle_fast_exit_preserves_readiness_and_generation() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let shell = test_shell(temp.path())?;
+    #[cfg(unix)]
+    let shell = Some(test_shell(temp.path())?);
+    #[cfg(windows)]
+    let shell = None;
+    #[cfg(unix)]
+    let command = "printf 'READY\\n'";
+    #[cfg(windows)]
+    let command = "Write-Output 'READY'";
     let manager = TerminalProcessManager::new(temp.path())?;
     let entry = manager
         .start_with_readiness(
             TerminalStartRequest {
                 task_id: Some(TerminalTaskId::new("terminal-fast-ready")?),
-                command: "printf 'READY\\n'".to_owned(),
+                command: command.to_owned(),
                 cwd: None,
-                shell: Some(shell),
+                shell,
                 env: Default::default(),
             },
             TerminalReadinessCondition::OutputContains {
