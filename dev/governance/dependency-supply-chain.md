@@ -62,8 +62,8 @@ Sigil release admission 后由 replacement engine 使用。升级 `self_update` 
 |---|---|---|---|---|---|
 | `remark-math` / `rehype-katex` / `katex` | `6.0.0` / `7.0.1` / `0.18.1` | `apps/desktop/src/markdown` | 从 Markdown AST 识别 inline/display math，并由 KaTeX 生成本地 HTML/MathML；不开启 `trust`，不允许任意 URL、HTML 或远程字体 | MIT；remarkjs/remark-math、remarkjs/remark-math、KaTeX/KaTeX | 数学渲染独立 lazy chunk；失败局部降级为原始 LaTeX，TUI 不新增数学引擎而显示保真 source |
 | `rehype-sanitize` | `6.0.0` | `apps/desktop/src/markdown` | 在 React 渲染前执行显式 Markdown schema，只允许 Sigil 使用的结构、class 与受限属性；不启用 `rehype-raw` | MIT；rehypejs/rehype-sanitize | 模型、历史 session 和 provider 内容均视为不可信；raw HTML、script、iframe、object 与不受控 URL 不进入 DOM |
-| `mermaid` | `11.16.0` | `apps/desktop/src/markdown` | 只对闭合、限额且通过 admission 的 `mermaid` fence 按需渲染；`securityLevel=strict`、`htmlLabels=false`，不加载 CDN、remote theme、image 或 plugin | MIT；mermaid-js/mermaid | 不进入主 renderer chunk；交互 directive、外链、HTML 标签、control character 与过大输入先拒绝，失败保留源码；TUI 永不执行 Mermaid |
-| `dompurify` | `3.4.12` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
+| `mermaid` | `11.16.1` | `apps/desktop/src/markdown` | 只对闭合、限额且通过 admission 的 `mermaid` fence 按需渲染；`securityLevel=strict`、`htmlLabels=false`，不加载 CDN、remote theme、image 或 plugin | MIT；mermaid-js/mermaid | 不进入主 renderer chunk；交互 directive、外链、HTML 标签、control character 与过大输入先拒绝，失败保留源码；TUI 永不执行 Mermaid |
+| `dompurify` | `3.4.13` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
 
 RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也不启动额外进程、不创建临时文件、
 不访问网络。Desktop CSP 保持 `default-src 'self'`、`img-src 'self' data:`、`object-src 'none'`、
@@ -76,8 +76,12 @@ Vite 拆分。`pnpm audit --audit-level high` 当前无 high-severity 漏洞；`
 `js-yaml` 通过 workspace override 固定为 `4.3.1`；其
 `@redocly/openapi-core -> minimatch` 路径中的 `brace-expansion` 也固定为 `5.0.9`，以覆盖
 `GHSA-mh99-v99m-4gvg` 与后续 expansion-array DoS 修复，直到上游约束自然覆盖对应版本。
-`webdriverio -> cheerio` 与 `jsdom` 的 `undici` 固定为 `7.29.0`，`vite -> postcss` 的
-`nanoid` 固定为 `3.3.17`，避免已知 high-severity advisory。以上 override 均由 contract
+`webdriverio -> cheerio` 与 `jsdom` 的 `undici` 固定为 `7.29.0`，`vite -> postcss` 固定为 `8.5.23`，并将
+`nanoid` 固定为 `3.3.18`，避免已知 high-severity advisory。WDIO 当前仍声明 `@puppeteer/browsers` 的
+2.x 范围，但该范围依赖无修复的 `extract-zip 2.0.1`；`apps/desktop` 将该开发期工具链 override 到
+`@puppeteer/browsers 3.2.1`，其改用 `modern-tar`，并已通过 frozen install、WDIO CLI smoke、完整
+desktop check 和 high-severity audit。该 override 仅影响 dev-only WDIO/Puppeteer browser setup；若上游
+WDIO 收敛到 3.x 或提供兼容修复，必须移除 override 并重跑相同 gate。以上 override 均由 contract
 regeneration、完整 desktop check 和 high-severity audit 验证。升级
 KaTeX、Mermaid、DOMPurify 或 sanitize pipeline 时必须重跑不可信 URL/HTML/SVG 语料、安全审计和
 bundle 差异检查，不得只以视觉 smoke 通过作为升级依据。
