@@ -4492,8 +4492,26 @@ async fn application_continuation_recovers_safe_selection_only_guidance_after_re
     Ok(())
 }
 
-#[tokio::test]
-async fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload()
+#[test]
+fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload()
+-> Result<()> {
+    std::thread::Builder::new()
+        .name("application-selection-retry-recovery".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| -> Result<()> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(
+                    application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload_async(),
+                )
+        })
+        .expect("application recovery test thread should spawn")
+        .join()
+        .map_err(|_| anyhow::anyhow!("application recovery test thread should not panic"))?
+}
+
+async fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload_async()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let fixture = application_guidance_recovery_fixture(
