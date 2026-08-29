@@ -996,7 +996,17 @@ impl ResourceJournalFileV1 {
             .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
         temporary.as_file().sync_all().map_err(map_io)?;
         #[cfg(windows)]
-        persist_snapshot_file(&temporary, &self.path).map_err(map_io)?;
+        {
+            // `NamedTempFile` keeps its Windows handle open until it is dropped. MoveFileExW
+            // cannot reliably replace an open source (the tempfile handle is not opened with
+            // delete sharing), and the runner reports that failure as ERROR_INVALID_FUNCTION.
+            // Convert to a cleanup-owning path first so the file is closed before publication.
+            let temporary_path = temporary.into_temp_path();
+            if let Err(error) = persist_snapshot_file(temporary_path.as_ref(), &self.path) {
+                let _ = temporary_path.close();
+                return Err(map_io(error));
+            }
+        }
         #[cfg(not(windows))]
         persist_snapshot_file(temporary, &self.path).map_err(map_io)?;
         sync_parent_directory(parent).map_err(|error| {
@@ -1009,10 +1019,7 @@ impl ResourceJournalFileV1 {
 }
 
 #[cfg(windows)]
-fn persist_snapshot_file(
-    temporary: &tempfile::NamedTempFile,
-    destination: &Path,
-) -> std::io::Result<()> {
+fn persist_snapshot_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1020,7 +1027,6 @@ fn persist_snapshot_file(
     };
 
     let source = temporary
-        .path()
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
