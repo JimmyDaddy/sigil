@@ -186,10 +186,14 @@ fn isolated_storage_toml(config_path: &std::path::Path) -> String {
     let root = config_path
         .parent()
         .expect("production test config should have a parent");
+    // TOML basic strings treat Windows backslashes as escape introducers (for example, `\\U`).
+    // Forward slashes are accepted by Windows path APIs and keep the generated fixture valid on
+    // every host platform.
+    let toml_path = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
     format!(
         "[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"",
-        root.join("state").display(),
-        root.join("cache").display()
+        toml_path(&root.join("state")),
+        toml_path(&root.join("cache"))
     )
 }
 

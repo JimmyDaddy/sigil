@@ -419,7 +419,7 @@ jobs:
         run: cargo check --locked --workspace --all-targets
 
       - name: Test Windows HTTP durable journal
-        run: cargo test --locked -p sigil-http --all-targets
+        run: cargo test --locked -p sigil-http --all-targets -- --test-threads=1
 
   oauth-keyring-conformance:
     name: Provider and OAuth keyring conformance (${{ matrix.name }})
