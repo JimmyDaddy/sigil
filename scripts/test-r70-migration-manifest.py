@@ -37,6 +37,22 @@ class R70MigrationManifestTests(unittest.TestCase):
         self.assertEqual(len(clean.splitlines()), len(source.splitlines()))
         self.assertEqual(MODULE._discover_variants_from_text(clean, "Example"), ["One", "Two"])
 
+    def test_frozen_contract_hash_ignores_test_module_placement(self) -> None:
+        inline = "pub struct Contract;\n#[cfg(test)]\nmod tests { fn test() {} }\n"
+        sibling = "pub struct Contract;\n#[cfg(test)]\n#[path = \"tests/contract_tests.rs\"]\nmod tests;\n"
+        self.assertEqual(
+            MODULE._strip_cfg_test_modules(inline),
+            MODULE._strip_cfg_test_modules(sibling),
+        )
+
+    def test_frozen_contract_hash_rejects_production_changes(self) -> None:
+        source = "pub struct Contract;\n#[cfg(test)]\nmod tests {}\n"
+        changed = source.replace("Contract", "Changed")
+        self.assertNotEqual(
+            MODULE._strip_cfg_test_modules(source),
+            MODULE._strip_cfg_test_modules(changed),
+        )
+
     def test_manifest_has_no_wildcard_or_duplicate_rows(self) -> None:
         import tomllib
 

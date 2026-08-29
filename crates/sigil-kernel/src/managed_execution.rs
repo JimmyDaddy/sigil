@@ -518,10 +518,6 @@ pub enum ManagedExecutionErrorV1 {
     ExecutionPlanDrift,
     #[error("sandbox provider is unavailable; refusing implicit Local fallback")]
     ProviderUnavailable,
-    #[error("managed process launch failed: {0}")]
-    ProcessLaunchFailed(String),
-    #[error("process tree ownership is unavailable: {0}")]
-    ProcessOwnershipUnavailable(String),
     #[error("required confinement not proven")]
     ConfinementUnproven,
     #[error("process settlement is outcome-uncertain")]

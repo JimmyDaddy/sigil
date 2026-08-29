@@ -308,7 +308,7 @@ mapping = [
 name = "ResourceRecoverySurfaceContractV1"
 path = "crates/sigil-kernel/src/resource_recovery_surface.rs"
 schema_version = 1
-sha256 = "a79de060b2496237a7c75acaa4e1a79897fbaa3626c5a5164a5447b249d28ff4"
+sha256 = "afb532c06d5723d39ad419804e6b29df30387cf9153c55a3a8fa52fa72725e2a"
 
 [[frozen_contracts]]
 name = "ToolPermissionPlanV3"
@@ -320,13 +320,13 @@ sha256 = "0158b6c46b11b102bd0adc8d2af7e0d89fe13d98a05c9e89eb22783171159e9b"
 name = "ManagedExecutionContractV1"
 path = "crates/sigil-kernel/src/managed_execution.rs"
 schema_version = 1
-sha256 = "aab7fc26eed04038f38770c370ff15361a43f3b5d27447b6d86c4274b79bd3d5"
+sha256 = "5bce1476937fdb7f2bfe852c99df54542115e7617281e45eb0c4ce8c37eba5bb"
 
 [[frozen_contracts]]
 name = "BorrowedMutationContractV1"
 path = "crates/sigil-kernel/src/borrowed_mutation.rs"
 schema_version = 1
-sha256 = "961a4eea2106bd3fceed2bba682f978c1557664aee964ee99bf01d100a1c58d9"
+sha256 = "0399ecf08f78335fa41ea56d5c5e1f0d05e7326415e216e538fd0b445d41b93a"
 
 [[smoke_matrix]]
 id = "doctor_terminal_rows"

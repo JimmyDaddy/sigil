@@ -256,7 +256,7 @@ impl ManagedOneShotLaunchServiceV1 for CommandManagedOneShotLaunchServiceV1 {
             .stderr(Stdio::piped());
         command
             .spawn()
-            .map_err(|error| ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string()))
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
     }
 }
 
@@ -368,7 +368,7 @@ impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 
         }
         command
             .spawn()
-            .map_err(|error| ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string()))
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
     }
 }
 
@@ -1017,14 +1017,12 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         {
             match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
                 Ok(owner) => Some(owner),
-                Err(error) => {
+                Err(_error) => {
                     let _ = child.kill();
                     if child.wait().is_ok() {
                         let _ = inventory.settle_spawn(claim);
                     }
-                    return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
-                        error.to_string(),
-                    ));
+                    return Err(ManagedExecutionErrorV1::ConfinementUnproven);
                 }
             }
         } else {
@@ -1204,9 +1202,9 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                command.spawn().map_err(|error| {
-                    ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string())
-                })
+                command
+                    .spawn()
+                    .map_err(|_error| ManagedExecutionErrorV1::ProviderUnavailable)
             }
         };
         let mut child = match launched {
@@ -1232,13 +1230,11 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         {
             match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
                 Ok(owner) => Some(owner),
-                Err(error) => {
+                Err(_error) => {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = inventory.settle_spawn(claim);
-                    return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
-                        error.to_string(),
-                    ));
+                    return Err(ManagedExecutionErrorV1::ConfinementUnproven);
                 }
             }
         } else {
@@ -1345,15 +1341,13 @@ impl SandboxManagedExecutionServiceV1 {
         {
             match sigil_process::ProcessTreeOwnerGuard::assign(Some(process_id)) {
                 Ok(owner) => Some(owner),
-                Err(error) => {
+                Err(_error) => {
                     let mut child = launch.child;
                     let _ = child.kill();
                     if child.wait().is_ok() {
                         let _ = process_inventory.settle_spawn(process_claim);
                     }
-                    return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
-                        error.to_string(),
-                    ));
+                    return Err(ManagedExecutionErrorV1::ConfinementUnproven);
                 }
             }
         } else {

@@ -198,12 +198,63 @@ def _git_exists(revision: str) -> bool:
     return result.returncode == 0
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _strip_cfg_test_modules(text: str) -> str:
+    """Remove Rust test modules before hashing a frozen production contract.
+
+    Test placement is governed by a separate physical-layout gate.  It must not change the
+    identity of the production contract when an inline module moves to a sibling test file.
+    This intentionally recognizes only a ``#[cfg(test)]`` module and keeps all other source
+    bytes unchanged.
+    """
+
+    while True:
+        match = re.search(r"(?m)^\s*#\[cfg\(test\)\]", text)
+        if match is None:
+            return text
+        module_match = re.search(r"\bmod\s+tests\b", text[match.end() :])
+        if module_match is None:
+            raise ValueError("cfg(test) item is not a tests module")
+        body_start = match.end() + module_match.end()
+        while body_start < len(text) and text[body_start].isspace():
+            body_start += 1
+        if body_start >= len(text):
+            raise ValueError("tests module has no body or terminator")
+        if text[body_start] == ";":
+            end = body_start + 1
+        elif text[body_start] == "{":
+            depth = 0
+            quote: str | None = None
+            escaped = False
+            index = body_start
+            while index < len(text):
+                char = text[index]
+                if quote:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == quote:
+                        quote = None
+                elif char in ('"', "'", "`"):
+                    quote = char
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = index + 1
+                        break
+                index += 1
+            else:
+                raise ValueError("unterminated cfg(test) tests module")
+        else:
+            raise ValueError("tests module has no body or terminator")
+        text = text[: match.start()] + text[end:]
+
+
+def _sha256_frozen_contract(path: Path) -> str:
+    canonical = _strip_cfg_test_modules(path.read_text(encoding="utf-8"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def main() -> int:
@@ -258,7 +309,7 @@ def main() -> int:
             expected = contract.get("sha256")
             if not path.is_file():
                 errors.append(f"frozen contract path does not exist: {path}")
-            elif _sha256(path) != expected:
+            elif _sha256_frozen_contract(path) != expected:
                 errors.append(f"frozen contract changed: {path}")
 
     discovered = discover()

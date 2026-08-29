@@ -3405,3 +3405,19 @@ generated TypeScript DTO 未同步。已按仓库规定的 `pnpm --dir apps/desk
 `apps/desktop/contracts/sigil-openapi.json` 与 `apps/desktop/src/generated/http-schema.ts`，并通过完整
 `pnpm --dir apps/desktop check`（contract、UI system、typecheck、287 个前端测试和 production build）。该修复
 不改变 transport contract 的定义，也不伪造 R70.8 的 crates.io preview、release-cycle 或 user-validation evidence。
+
+### R70.8 hosted reliability slicing and frozen-contract gate correction（2026-08-30）
+
+Windows platform reliability 已按故障边界拆分为 required kernel、MCP、builtin/terminal、runtime 与 HTTP jobs；
+各 job 拥有独立 timeout 和 cargo cache 生命周期。完整 workspace/all-targets check 由共享 Ubuntu `check` job
+负责，Windows platform jobs 只编译自身 crate 后运行对应测试，避免 isolated runner 重复冷编译完整 workspace
+耗尽 timeout。此调整只改善 evidence isolation，不放宽任何测试条件。
+
+R70.8 gate 同时发现 migration manifest 对 frozen contract 使用整文件 hash，把 physical-test-layout 的测试模块
+迁移和两个 R70.8 诊断错误变体误判为 R71 canonical contract 变化。已恢复 `ManagedExecutionContractV1` 的 frozen
+kernel error taxonomy，并将 frozen hash 定义为去除 `#[cfg(test)]` module 后的 production bytes；新增 checker regression
+覆盖 inline/sibling test placement 等价和 production change 拒绝。migration manifest `276/276`、sandbox/kernel
+定向测试、legacy-retirement gate 与 current exact HEAD package gate 通过。
+
+当前仍未声称 R70.8 完成：真实 crates.io `0.1.0` preview publish、至少一个 release cycle、真实用户验证和对应
+immutable evidence 仍待 release operator；RFC 状态继续为 R70.8 In Progress。
