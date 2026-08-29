@@ -3526,3 +3526,16 @@ the same bounded host-toolchain baseline used by the managed one-shot route (`PA
 that explicit allowlisted baseline; it does not restore ambient secrets or arbitrary environment inheritance. Local
 targeted and complete adapter validation are `1/1` and `7/7`. A new exact-SHA hosted run is required; `33279368713`
 is not qualification evidence.
+
+### R70.8 Windows hosted ConPTY dependency correction（2026-08-30）
+
+The exact-SHA run `33280134869` isolated the remaining failure to the dedicated
+`managed-resource-adapters` shard: six tests passed, while
+`r71_managed_terminal_route_supports_pty_control_and_receipt` received no readiness frame and failed at its bounded
+30-second deadline. The failure was not a pipeline timeout; the job completed diagnostically. The hosted runner uses
+`portable-pty 0.9.0`, whose Windows ConPTY path has a known regression in this release line, so changing only the
+fixture command or its allowlisted environment cannot make the reader reliable. The dependency is now target-pinned
+to `portable-pty 0.8.1` on Windows, while Unix keeps `0.9.0` for its signal-status API; the lockfile records both
+target-resolved versions. This is a compatibility containment change, not a coverage reduction or fallback to direct
+process spawning. Local Unix `sigil-runtime` managed-resource adapter tests pass `7/7`; a new exact-SHA Windows run is
+required before R70.8 can be considered qualified.

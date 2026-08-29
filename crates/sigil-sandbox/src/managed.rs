@@ -1835,6 +1835,7 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
 }
 
 fn classify_pty_status(status: portable_pty::ExitStatus) -> ProcessTerminationV1 {
+    #[cfg(unix)]
     if let Some(signal) = status.signal() {
         return ProcessTerminationV1::Signaled {
             signal: pty_signal_number(signal),
@@ -1845,6 +1846,7 @@ fn classify_pty_status(status: portable_pty::ExitStatus) -> ProcessTerminationV1
     }
 }
 
+#[cfg(unix)]
 fn pty_signal_number(signal: &str) -> u32 {
     match signal.to_ascii_uppercase().as_str() {
         "SIGKILL" | "KILLED" => 9,

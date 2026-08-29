@@ -16,7 +16,6 @@ fs2.workspace = true
 futures.workspace = true
 globset.workspace = true
 ignore.workspace = true
-portable-pty.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -34,9 +33,11 @@ sigil-kernel = { path = "../sigil-kernel" }
 sigil-process = { path = "../sigil-process" }
 
 [target.'cfg(unix)'.dependencies]
+portable-pty = "=0.9.0"
 nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+portable-pty = "=0.8.1"
 uuid.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

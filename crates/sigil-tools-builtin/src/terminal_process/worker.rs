@@ -1028,12 +1028,15 @@ pub(super) fn status_from_pty_wait_result(
     wait_result: std::io::Result<portable_pty::ExitStatus>,
 ) -> TerminalTaskStatus {
     match wait_result {
-        Ok(status) => TerminalTaskStatus::Exited {
-            exit_code: status
-                .signal()
-                .is_none()
-                .then(|| i32::try_from(status.exit_code()).unwrap_or(i32::MAX)),
-        },
+        Ok(status) => {
+            #[cfg(unix)]
+            let exited = status.signal().is_none();
+            #[cfg(windows)]
+            let exited = status.success();
+            TerminalTaskStatus::Exited {
+                exit_code: exited.then(|| i32::try_from(status.exit_code()).unwrap_or(i32::MAX)),
+            }
+        }
         Err(error) => TerminalTaskStatus::Failed {
             reason: format!("terminal pty wait failed: {error}"),
         },
