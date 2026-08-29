@@ -359,7 +359,7 @@ jobs:
 
       - name: Test macOS runtime and execution surfaces
         if: runner.os == 'macOS'
-        run: cargo test --locked -p sigil-kernel -p sigil-process -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib
+        run: cargo test --locked -p sigil-kernel -p sigil-process -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib -- --test-threads=1
 
       - name: Test Windows kernel durability
         if: runner.os == 'Windows'
@@ -375,7 +375,7 @@ jobs:
 
       - name: Test Windows runtime integration
         if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-runtime --lib
+        run: cargo test --locked -p sigil-runtime --lib -- --test-threads=1
 
       - name: Test Windows HTTP durable journal
         if: runner.os == 'Windows'

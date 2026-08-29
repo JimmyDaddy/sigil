@@ -1548,6 +1548,10 @@ impl Drop for EnvironmentGuard {
 }
 
 fn enter_isolated_environment_test(test_name: &str, marker: &'static str) -> bool {
+    // The child inherits the parent's environment at spawn time. Acquire the same process-wide
+    // lock used by EnvironmentGuard before inspecting the marker or spawning it, otherwise a
+    // concurrent model-eval parent can leak transient provider variables into this child.
+    let _env_lock = crate::test_env::lock();
     if env::var_os(marker).is_some() {
         return true;
     }

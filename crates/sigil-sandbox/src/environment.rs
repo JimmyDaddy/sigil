@@ -80,6 +80,16 @@ pub fn standard_reserved_environment(execution_temp_root: &Path) -> BTreeMap<Str
         SigilCacheHome.as_str().to_owned(),
         root.join("sigil-cache").to_string_lossy().into_owned(),
     );
+    // Windows process creation still needs the small OS loader/shell baseline after the
+    // authority clears ambient variables. These names describe the platform installation, not
+    // user credentials or writable state, and are the same bounded set used by the kernel's
+    // isolated extension environment policy.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"] {
+        if let Some(value) = std::env::var_os(name) {
+            env.insert(name.to_owned(), value.to_string_lossy().into_owned());
+        }
+    }
     env
 }
 
