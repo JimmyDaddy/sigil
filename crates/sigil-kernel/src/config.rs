@@ -2074,6 +2074,15 @@ where
         let mut file = {
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC, WRITE_OWNER,
+                };
+                options
+                    .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
+            }
             options
                 .open(&temp_path)
                 .with_context(|| format!("failed to create {}", temp_path.display()))?

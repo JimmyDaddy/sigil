@@ -23,7 +23,7 @@ fn output_command(output: &str) -> (PathBuf, Vec<String>) {
         vec![
             "/D".to_owned(),
             "/C".to_owned(),
-            format!("echo|set /p={output}"),
+            format!(r#"<nul set /p "={output}""#),
         ],
     )
 }

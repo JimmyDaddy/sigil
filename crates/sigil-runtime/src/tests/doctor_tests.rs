@@ -13,6 +13,10 @@ use tempfile::tempdir;
 use super::*;
 use crate::doctor::mcp::command_status_with_search_path;
 
+fn toml_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 #[test]
 fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result<()> {
     let _environment_guard = crate::test_env::lock();
@@ -28,8 +32,8 @@ fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result
     let config = |state: &Path, cache: &Path| {
         format!(
             "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
-            state.display(),
-            cache.display(),
+            toml_path(state),
+            toml_path(cache),
         )
     };
     fs::write(&config_path, config(&state_a, &cache_a))?;

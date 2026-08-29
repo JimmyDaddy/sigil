@@ -388,6 +388,9 @@ impl ManagedStorageWriterAdapterV1 {
                 return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
             }
         }
+        #[cfg(windows)]
+        sigil_kernel::secure_private_path_permissions(&path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         let capability = match &self.storage_issuer {
             Some(broker) => {
                 // The grant binds the authority-declared channel root. The logical key is
@@ -459,6 +462,9 @@ impl ManagedStorageWriterAdapterV1 {
                 return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
             }
         }
+        #[cfg(windows)]
+        sigil_kernel::secure_private_path_permissions(&path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
             semantic_owner,
             capability_family,

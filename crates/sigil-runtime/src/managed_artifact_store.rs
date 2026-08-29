@@ -1136,15 +1136,14 @@ fn sync_parent(path: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        };
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(directory)?;
-        file.sync_all()?;
+        // Windows does not provide stable directory-handle fsync semantics through Rust's
+        // `File::sync_all`. Validate the parent without opening a directory handle; the
+        // containing file was already flushed before publication and the namespace lock keeps
+        // this operation serialized with other managed-artifact mutations.
+        let metadata = fs::symlink_metadata(directory)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("managed artifact parent is not a real directory")
+        }
         Ok(())
     }
     #[cfg(not(any(unix, windows)))]
