@@ -365,12 +365,52 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-kernel --lib
 
+  platform-windows-mcp:
+    name: Platform reliability (Windows MCP)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile complete workspace and targets
+        run: cargo check --locked --workspace --all-targets
+
       - name: Test Windows MCP transport
-        if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-process -p sigil-mcp --lib
 
+  platform-windows-builtin:
+    name: Platform reliability (Windows builtin)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile complete workspace and targets
+        run: cargo check --locked --workspace --all-targets
+
       - name: Test Windows builtin tools and terminal semantics
-        if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
 
   platform-windows-runtime:
