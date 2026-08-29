@@ -796,6 +796,9 @@ fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorage
     let file = options
         .open(&path)
         .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    #[cfg(windows)]
+    sigil_kernel::secure_private_path_permissions(&path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
     if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
@@ -922,11 +925,9 @@ fn sync_parent_directory(path: &Path) -> Result<(), ManagedStorageWriterErrorV1>
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::windows::fs::MetadataExt;
 
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        };
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
         let metadata = std::fs::symlink_metadata(parent)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
@@ -935,14 +936,9 @@ fn sync_parent_directory(path: &Path) -> Result<(), ManagedStorageWriterErrorV1>
                 "managed record parent is not a real Windows directory".to_owned(),
             ));
         }
-        let mut options = std::fs::OpenOptions::new();
-        options
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        options
-            .open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        // Stable Windows does not support syncing a directory handle with `File::sync_all()`.
+        // The record file was already synced above; its private atomic publication is
+        // write-through on Windows, so the parent directory is only validated here.
     }
     #[cfg(not(any(unix, windows)))]
     {

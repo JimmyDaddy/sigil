@@ -1706,6 +1706,9 @@ fn open_physical_namespace_lock(directory: &Path) -> Result<File, ManagedStorage
     let file = options
         .open(&path)
         .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
+    #[cfg(windows)]
+    sigil_kernel::secure_private_path_permissions(&path)
+        .map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
     let metadata =
         fs::symlink_metadata(&path).map_err(|_| ManagedStorageErrorV1::JournalUnavailable)?;
     if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {

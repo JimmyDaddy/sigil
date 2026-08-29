@@ -625,6 +625,13 @@ fn open_private_lock_file(path: &Path) -> Result<File, BootstrapErrorV1> {
             path.display()
         ))
     })?;
+    #[cfg(windows)]
+    sigil_kernel::secure_private_path_permissions(path).map_err(|error| {
+        BootstrapErrorV1::HardeningFailed(format!(
+            "failed to secure private bootstrap lock {}: {error}",
+            path.display()
+        ))
+    })?;
     validate_private_open_file(path, &file, false)?;
     Ok(file)
 }
