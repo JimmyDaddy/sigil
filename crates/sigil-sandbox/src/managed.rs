@@ -257,7 +257,7 @@ impl ManagedOneShotLaunchServiceV1 for CommandManagedOneShotLaunchServiceV1 {
         sigil_process::configure_process_tree(&mut command);
         command
             .spawn()
-            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
+            .map_err(|error| ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string()))
     }
 }
 
@@ -367,7 +367,7 @@ impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 
         sigil_process::configure_process_tree(&mut command);
         command
             .spawn()
-            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
+            .map_err(|error| ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string()))
     }
 }
 
@@ -1192,9 +1192,9 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
                 sigil_process::configure_process_tree(&mut command);
-                command
-                    .spawn()
-                    .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
+                command.spawn().map_err(|error| {
+                    ManagedExecutionErrorV1::ProcessLaunchFailed(error.to_string())
+                })
             }
         };
         let mut child = match launched {
