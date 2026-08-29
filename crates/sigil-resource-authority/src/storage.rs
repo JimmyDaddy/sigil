@@ -1744,6 +1744,12 @@ fn reject_reparse_components(path: &Path, allow_missing_leaf: bool) -> std::io::
     let mut current = PathBuf::new();
     for (index, component) in components.into_iter().enumerate() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            // A Windows drive/verbatim prefix is not an inspectable filesystem entry. Wait for
+            // the root component before checking the real path hierarchy.
+            continue;
+        }
         let metadata = match fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
             Err(error)

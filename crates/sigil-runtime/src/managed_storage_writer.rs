@@ -838,6 +838,12 @@ fn reject_reparse_components(
     let mut current = PathBuf::new();
     for (index, component) in components.into_iter().enumerate() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            // A drive or verbatim prefix (for example, `C:`) is not a filesystem entry. The
+            // following root component produces the first inspectable path (`C:\`).
+            continue;
+        }
         let metadata = match std::fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
             Err(error)
@@ -867,6 +873,10 @@ fn reject_existing_reparse_components(path: &Path) -> Result<(), ManagedStorageW
     let mut current = PathBuf::new();
     for component in components {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
         let metadata = match std::fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
