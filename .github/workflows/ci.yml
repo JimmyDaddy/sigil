@@ -354,8 +354,13 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile complete workspace and targets
+      - name: Compile macOS workspace and targets
+        if: runner.os == 'macOS'
         run: cargo check --locked --workspace --all-targets
+
+      - name: Compile Windows kernel targets
+        if: runner.os == 'Windows'
+        run: cargo check --locked -p sigil-kernel --all-targets
 
       - name: Test macOS runtime and execution surfaces
         if: runner.os == 'macOS'
@@ -383,8 +388,8 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile complete workspace and targets
-        run: cargo check --locked --workspace --all-targets
+      - name: Compile Windows MCP targets
+        run: cargo check --locked -p sigil-process -p sigil-mcp --all-targets
 
       - name: Test Windows MCP transport
         run: cargo test --locked -p sigil-process -p sigil-mcp --lib
@@ -407,8 +412,8 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile complete workspace and targets
-        run: cargo check --locked --workspace --all-targets
+      - name: Compile Windows builtin targets
+        run: cargo check --locked -p sigil-tools-builtin --all-targets
 
       - name: Test Windows builtin tools and terminal semantics
         run: cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
@@ -431,8 +436,8 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile complete workspace and targets
-        run: cargo check --locked --workspace --all-targets
+      - name: Compile Windows runtime targets
+        run: cargo check --locked -p sigil-runtime --all-targets
 
       - name: Test Windows runtime integration
         run: cargo test --locked -p sigil-runtime --lib -- --test-threads=1
@@ -455,8 +460,8 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile complete workspace and targets
-        run: cargo check --locked --workspace --all-targets
+      - name: Compile Windows HTTP targets
+        run: cargo check --locked -p sigil-http --all-targets
 
       - name: Test Windows HTTP durable journal
         run: cargo test --locked -p sigil-http --all-targets -- --test-threads=1
