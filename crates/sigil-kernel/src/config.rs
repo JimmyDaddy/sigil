@@ -1713,8 +1713,7 @@ pub fn private_path_permissions_are_restricted(path: &Path) -> Result<bool> {
 ///
 /// Unix callers receive owner-only mode (`0600` for files, `0700` for directories). Windows
 /// callers receive a protected DACL that grants full access only to the current process user and
-/// Local System. The path must already be owned by the current process user; this helper does not
-/// attempt a privileged ownership transfer.
+/// Local System, and the current process user becomes the object owner.
 /// Symbolic links and Windows reparse points are rejected.
 ///
 /// # Errors
@@ -1739,16 +1738,26 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+        use std::os::windows::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawHandle,
+        };
 
         use windows_sys::Win32::{
             Foundation::LocalFree,
             Security::{
                 Authorization::{
                     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                    SE_FILE_OBJECT, SetSecurityInfo,
                 },
-                DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-                PSECURITY_DESCRIPTOR, SetFileSecurityW,
+                DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+                OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+                PSECURITY_DESCRIPTOR,
+            },
+            Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+                FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                WRITE_DAC, WRITE_OWNER,
             },
         };
 
@@ -1759,16 +1768,11 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
             path.display()
         );
         let current_user_sid = current_windows_user_sid_string()?;
-        let existing_sddl = windows_private_dacl_sddl(path)?;
-        anyhow::ensure!(
-            windows_private_sddl_owner_is_current_user(&existing_sddl, &current_user_sid),
-            "cannot secure Windows path not owned by the current user: {}",
-            path.display()
-        );
-        let sddl = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{current_user_sid})")
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
+        let sddl =
+            format!("O:{current_user_sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{current_user_sid})")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: the SDDL buffer is NUL terminated and descriptor is writable for the duration of
         // the call. Windows owns the returned allocation until LocalFree below.
@@ -1784,27 +1788,61 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
             return Err(std::io::Error::last_os_error())
                 .context("failed to construct private Windows DACL");
         }
-        let wide_path = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        // SAFETY: the path is NUL terminated and descriptor remains valid until LocalFree.
-        let applied = unsafe {
-            SetFileSecurityW(
-                wide_path.as_ptr(),
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        let mut options = fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options
+            .open(path)
+            .with_context(|| format!("failed to open private Windows path {}", path.display()))?;
+        let mut owner = std::ptr::null_mut();
+        let mut owner_defaulted = 0;
+        let owner_read =
+            unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) };
+        anyhow::ensure!(
+            owner_read != 0 && !owner.is_null(),
+            "failed to read private Windows owner descriptor"
+        );
+        let mut dacl = std::ptr::null_mut();
+        let mut dacl_present = 0;
+        let mut dacl_defaulted = 0;
+        let dacl_read = unsafe {
+            GetSecurityDescriptorDacl(
                 descriptor,
+                &mut dacl_present,
+                &mut dacl,
+                &mut dacl_defaulted,
             )
         };
-        let source = (applied == 0).then(std::io::Error::last_os_error);
+        anyhow::ensure!(
+            dacl_read != 0 && dacl_present != 0 && !dacl.is_null(),
+            "failed to read private Windows DACL descriptor"
+        );
+        // SAFETY: the handle is live, descriptor and its owner/DACL remain valid until after this
+        // call, and all other security components are intentionally left unchanged.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                owner,
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
         // SAFETY: descriptor was allocated by LocalAlloc through the conversion API and is freed
         // exactly once here.
         unsafe {
             let _ = LocalFree(descriptor);
         }
-        if let Some(source) = source {
-            return Err(source)
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status as i32))
                 .with_context(|| format!("failed to secure Windows ACL for {}", path.display()));
         }
     }
@@ -1896,21 +1934,6 @@ fn windows_private_sddl_has_current_user(sddl: &str, current_user_sid: &str) -> 
     };
     has_principal(current_user_sid)
         || windows_current_user_sddl_alias(current_user_sid).is_some_and(has_principal)
-}
-
-#[cfg(windows)]
-fn windows_private_sddl_owner_is_current_user(sddl: &str, current_user_sid: &str) -> bool {
-    let Some(rest) = sddl.strip_prefix("O:") else {
-        return false;
-    };
-    let owner_end = ["G:", "D:", "S:"]
-        .iter()
-        .filter_map(|marker| rest.find(marker))
-        .min()
-        .unwrap_or(rest.len());
-    let owner = &rest[..owner_end];
-    owner == current_user_sid
-        || windows_current_user_sddl_alias(current_user_sid).is_some_and(|alias| owner == alias)
 }
 
 #[cfg(windows)]
