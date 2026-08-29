@@ -790,7 +790,11 @@ fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorage
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
+            WRITE_OWNER,
+        };
+        options.access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     let file = options

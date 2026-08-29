@@ -30,6 +30,29 @@ fn toml_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+#[cfg(unix)]
+fn boot_terminal_command() -> (String, Vec<String>) {
+    (
+        "/bin/sh".to_owned(),
+        vec![
+            "-lc".to_owned(),
+            "printf 'boot-terminal-ready\\n'; while :; do sleep 1; done".to_owned(),
+        ],
+    )
+}
+
+#[cfg(windows)]
+fn boot_terminal_command() -> (String, Vec<String>) {
+    (
+        "cmd.exe".to_owned(),
+        vec![
+            "/D".to_owned(),
+            "/C".to_owned(),
+            "echo boot-terminal-ready& ping -n 30 127.0.0.1 >NUL".to_owned(),
+        ],
+    )
+}
+
 #[test]
 fn r71_composition_tool_authority_facade_is_wired() {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
@@ -203,10 +226,13 @@ fn r71_current_boot_advances_manifest_for_a_new_persisted_config_generation() {
     let cache_b = state_b.join("cache");
     std::fs::create_dir_all(&cache_a).expect("cache a");
     std::fs::create_dir_all(&cache_b).expect("cache b");
+    let state_a_text = toml_path(&state_a);
+    let cache_a_text = toml_path(&cache_a);
+    let state_b_text = toml_path(&state_b);
+    let cache_b_text = toml_path(&cache_b);
     let config_a = format!(
         "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"old-model\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
-        state_a.display(),
-        cache_a.display(),
+        state_a_text, cache_a_text,
     );
     std::fs::write(&config, config_a).expect("config");
 
@@ -216,14 +242,8 @@ fn r71_current_boot_advances_manifest_for_a_new_persisted_config_generation() {
     let updated = std::fs::read_to_string(&config)
         .expect("read config")
         .replace("old-model", "new-model")
-        .replace(
-            &state_a.display().to_string(),
-            &state_b.display().to_string(),
-        )
-        .replace(
-            &cache_a.display().to_string(),
-            &cache_b.display().to_string(),
-        );
+        .replace(&state_a_text, &state_b_text)
+        .replace(&cache_a_text, &cache_b_text);
     std::fs::write(&config, updated).expect("update config");
     let second = boot_current_schema(&config, dir.path()).expect("updated config boot");
 
@@ -265,15 +285,13 @@ async fn r71_current_boot_command_route_starts_terminal_with_durable_inventory()
     std::fs::create_dir_all(&scratch)?;
 
     use sigil_tools_builtin::{ManagedTerminalExecutionPortV1, ManagedTerminalStartRequestV1};
+    let (program, args) = boot_terminal_command();
     let mut handle = boot
         .composition()
         .command_execution
         .start_persistent(ManagedTerminalStartRequestV1 {
-            program: "/bin/zsh".to_owned(),
-            args: vec![
-                "-lc".to_owned(),
-                "printf 'boot-terminal-ready\\n'; while :; do sleep 1; done".to_owned(),
-            ],
+            program,
+            args,
             cwd: boot.workspace_root().to_path_buf(),
             environment: [(
                 "SIGIL_SCRATCH_DIR".to_owned(),

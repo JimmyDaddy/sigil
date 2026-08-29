@@ -8,6 +8,83 @@ fn test_process_inventory() -> Arc<dyn sigil_resource_authority::AuthorityProces
     Arc::new(sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default())
 }
 
+#[cfg(unix)]
+fn output_command(output: &str) -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("/bin/sh"),
+        vec!["-c".to_owned(), format!("printf {output}")],
+    )
+}
+
+#[cfg(windows)]
+fn output_command(output: &str) -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("cmd.exe"),
+        vec![
+            "/D".to_owned(),
+            "/C".to_owned(),
+            format!("echo|set /p={output}"),
+        ],
+    )
+}
+
+#[cfg(unix)]
+fn pty_line_command() -> (String, Vec<String>) {
+    (
+        "/bin/sh".to_owned(),
+        vec![
+            "-c".to_owned(),
+            "read line; printf '%s\\n' \"$line\"".to_owned(),
+        ],
+    )
+}
+
+#[cfg(windows)]
+fn pty_line_command() -> (String, Vec<String>) {
+    (
+        "cmd.exe".to_owned(),
+        vec![
+            "/V:ON".to_owned(),
+            "/D".to_owned(),
+            "/C".to_owned(),
+            "set /P \"line=\"& echo(!line!".to_owned(),
+        ],
+    )
+}
+
+#[cfg(unix)]
+fn readiness_command(readiness: &str) -> (String, Vec<String>) {
+    (
+        "sh".to_owned(),
+        vec![
+            "-lc".to_owned(),
+            format!("printf '{readiness}\\n'; while :; do sleep 1; done"),
+        ],
+    )
+}
+
+#[cfg(windows)]
+fn readiness_command(readiness: &str) -> (String, Vec<String>) {
+    (
+        "cmd.exe".to_owned(),
+        vec![
+            "/D".to_owned(),
+            "/C".to_owned(),
+            format!("echo {readiness}& ping -n 30 127.0.0.1 >NUL"),
+        ],
+    )
+}
+
+#[cfg(unix)]
+fn manager_persistent_command() -> (String, String) {
+    ("sleep 30".to_owned(), "/bin/sh".to_owned())
+}
+
+#[cfg(windows)]
+fn manager_persistent_command() -> (String, String) {
+    ("ping -n 30 127.0.0.1 >NUL".to_owned(), "cmd.exe".to_owned())
+}
+
 #[test]
 fn r71_runtime_compose_holds_only_pathless_ports() {
     let storage = Arc::new(AuthorityManagedStorageServiceV1::new(
@@ -55,22 +132,48 @@ async fn r71_managed_command_route_seals_and_executes_one_shot() {
     let mut environment = std::collections::BTreeMap::new();
     environment.insert("TMPDIR".to_owned(), "/ambient-override".to_owned());
     environment.insert("HOME".to_owned(), "/ambient-home".to_owned());
+    #[cfg(unix)]
+    let (program, args) = (
+        "/bin/sh".to_owned(),
+        vec![
+            "-c".to_owned(),
+            concat!(
+                "test -d \"$TMPDIR\" && test -d \"$HOME\" && ",
+                "test -d \"$XDG_STATE_HOME\" && test -d \"$XDG_CACHE_HOME\" && ",
+                "test -d \"$SIGIL_STATE_HOME\" && test -d \"$SIGIL_CACHE_HOME\" && ",
+                "test \"$TMPDIR\" != /ambient-override && ",
+                "test \"$HOME\" != /ambient-home && ",
+                "touch \"$TMPDIR/child-created\" && printf managed-route"
+            )
+            .to_owned(),
+        ],
+    );
+    #[cfg(windows)]
+    let (program, args) = (
+        "cmd.exe".to_owned(),
+        vec![
+            "/D".to_owned(),
+            "/C".to_owned(),
+            concat!(
+                "if not exist \"%TMPDIR%\\.\" exit /b 1 & ",
+                "if not exist \"%HOME%\\.\" exit /b 1 & ",
+                "if not exist \"%XDG_STATE_HOME%\\.\" exit /b 1 & ",
+                "if not exist \"%XDG_CACHE_HOME%\\.\" exit /b 1 & ",
+                "if not exist \"%SIGIL_STATE_HOME%\\.\" exit /b 1 & ",
+                "if not exist \"%SIGIL_CACHE_HOME%\\.\" exit /b 1 & ",
+                "if \"%TMPDIR%\"==\"/ambient-override\" exit /b 1 & ",
+                "if \"%HOME%\"==\"/ambient-home\" exit /b 1 & ",
+                "type nul > \"%TMPDIR%\\child-created\" & ",
+                "echo|set /p=managed-route"
+            )
+            .to_owned(),
+        ],
+    );
     let receipt = route
         .execute_with_cancellation(
             sigil_kernel::ExecutionRequest {
-                program: "/bin/sh".to_owned(),
-                args: vec![
-                    "-c".to_owned(),
-                    concat!(
-                        "test -d \"$TMPDIR\" && test -d \"$HOME\" && ",
-                        "test -d \"$XDG_STATE_HOME\" && test -d \"$XDG_CACHE_HOME\" && ",
-                        "test -d \"$SIGIL_STATE_HOME\" && test -d \"$SIGIL_CACHE_HOME\" && ",
-                        "test \"$TMPDIR\" != /ambient-override && ",
-                        "test \"$HOME\" != /ambient-home && ",
-                        "touch \"$TMPDIR/child-created\" && printf managed-route"
-                    )
-                    .to_owned(),
-                ],
+                program,
+                args,
                 cwd: root.path().to_path_buf(),
                 env: environment,
                 environment_policy: sigil_kernel::ProcessEnvironmentPolicy::default(),
@@ -116,11 +219,12 @@ async fn r71_managed_code_intel_route_bridges_stdout_and_finalizes_process() {
         execution_temp.path().to_path_buf(),
     )
     .with_process_inventory(test_process_inventory());
+    let (program, args) = output_command("managed-code-intel");
     let io = route
         .launch(sigil_code_intel::LanguageServerLaunchRequestV1 {
             server_name: "fake-lsp".to_owned(),
-            program: PathBuf::from("/bin/sh"),
-            args: vec!["-c".to_owned(), "printf managed-code-intel".to_owned()],
+            program,
+            args,
             cwd: root.path().to_path_buf(),
             environment: Vec::new(),
         })
@@ -156,10 +260,11 @@ async fn r71_managed_terminal_route_seals_and_owns_persistent_process() {
         execution_temp.path().to_path_buf(),
     )
     .with_process_inventory(test_process_inventory());
+    let (program, args) = output_command("terminal-route");
     let mut handle = route
         .start_persistent(ManagedTerminalStartRequestV1 {
-            program: "/bin/sh".to_owned(),
-            args: vec!["-c".to_owned(), "printf terminal-route".to_owned()],
+            program: program.to_string_lossy().into_owned(),
+            args,
             cwd: root.path().to_path_buf(),
             environment: std::collections::BTreeMap::new(),
             pty_size: None,
@@ -206,13 +311,11 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
         execution_temp.path().to_path_buf(),
     )
     .with_process_inventory(test_process_inventory());
+    let (program, args) = pty_line_command();
     let mut handle = route
         .start_persistent(ManagedTerminalStartRequestV1 {
-            program: "/bin/sh".to_owned(),
-            args: vec![
-                "-c".to_owned(),
-                "read line; printf '%s\\n' \"$line\"".to_owned(),
-            ],
+            program,
+            args,
             cwd: root.path().to_path_buf(),
             environment: std::collections::BTreeMap::new(),
             pty_size: Some(sigil_kernel::managed_execution::BoundedPtySizeV1 {
@@ -275,13 +378,11 @@ async fn r71_managed_terminal_route_accepts_runtime_shell_environment_and_readin
     )
     .with_process_inventory(test_process_inventory());
     let readiness = "runtime-terminal-ready";
+    let (program, args) = readiness_command(readiness);
     let mut handle = route
         .start_persistent(ManagedTerminalStartRequestV1 {
-            program: "sh".to_owned(),
-            args: vec![
-                "-lc".to_owned(),
-                format!("printf '{readiness}\\n'; while :; do sleep 1; done"),
-            ],
+            program,
+            args,
             cwd: root.path().to_path_buf(),
             environment: [(
                 "SIGIL_SCRATCH_DIR".to_owned(),
@@ -328,11 +429,12 @@ async fn r71_managed_terminal_manager_cancel_waits_for_persistent_receipt() -> a
         "state/artifacts/tasks",
     )?
     .with_managed_execution(route);
+    let (command, shell) = manager_persistent_command();
     let entry = manager
         .start_pty(
             sigil_tools_builtin::TerminalStartRequest {
-                command: "sleep 30".to_owned(),
-                shell: Some("/bin/sh".to_owned()),
+                command,
+                shell: Some(shell),
                 ..Default::default()
             },
             Some(sigil_tools_builtin::TerminalPtySize { rows: 24, cols: 80 }),
