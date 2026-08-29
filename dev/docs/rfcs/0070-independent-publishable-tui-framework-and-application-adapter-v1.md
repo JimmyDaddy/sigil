@@ -3429,3 +3429,13 @@ immutable evidence 仍待 release operator；RFC 状态继续为 R70.8 In Progre
 Windows MCP job 改为 `--test-threads=1`，保留测试内部显式验证的 MCP 并发 barrier，因此只降低 runner 级资源竞争，
 不放宽启动 deadline、协议检查或进程树清理条件。本地串行验证为 `sigil-mcp 193 passed / 0 failed / 1 ignored`、
 `sigil-process 2 passed`；新的 hosted exact-SHA 结果仍待本次提交完成后重新运行。
+
+### R70.8 Windows HTTP managed-store portability follow-up（2026-08-30）
+
+拆分后的 hosted Windows HTTP job 已完成编译并进入测试，但发现 17 个 production-driver 测试在 managed
+command-store 完成 legacy 文件退休时返回 `Access is denied. (os error 5)`。根因是迁移代码在删除兼容文件后
+无条件对父目录调用 `std::fs::File::sync_all()`；该 Unix 目录 fsync 语义不能直接用于 Windows 目录句柄。
+现已限制父目录 fsync 到非 Windows 路径；Windows 继续依赖 `durable_io` 的 write-through 原子替换边界，删除
+兼容文件后不再尝试不受支持的目录同步。该修复只消除平台错误，不放宽 authority、managed writer 或 durability
+断言；本地 `sigil-http --lib -- --test-threads=1` 为 `224 passed / 0 failed`。需在新 exact SHA 上重跑 hosted
+Windows HTTP 与完整 CI，当前仍不宣称 R70.8 完成。

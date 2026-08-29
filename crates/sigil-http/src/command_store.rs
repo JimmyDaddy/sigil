@@ -278,6 +278,11 @@ impl HttpDurableCommandStore {
         // second durable-looking source that future code could accidentally reopen.
         if self.path.exists() {
             std::fs::remove_file(&self.path).map_err(HttpCommandStoreError::io)?;
+            // Unix directory fsync closes the unlink durability boundary. Windows uses the
+            // write-through replacement in durable_io for the managed record and does not
+            // provide a portable directory-fsync equivalent; opening the directory with the
+            // default std::fs handle returns ERROR_ACCESS_DENIED on hosted runners.
+            #[cfg(not(windows))]
             if let Some(parent) = self.path.parent() {
                 File::open(parent)
                     .and_then(|file| file.sync_all())
