@@ -3648,7 +3648,11 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
         )
         .expect("owned production supervisor should accept the run");
 
-    let terminal = tokio::time::timeout(Duration::from_secs(10), async {
+    // Windows hosted runners can spend several seconds in the first managed authority/provider
+    // preparation while the production failure remains fully bounded. Keep this as a finite
+    // regression budget, but do not mistake the local 10-second scheduling budget for the
+    // production cancellation deadline.
+    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let event = subscriber
                 .recv()

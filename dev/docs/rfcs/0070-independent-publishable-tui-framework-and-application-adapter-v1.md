@@ -3451,3 +3451,12 @@ an explicit remainder shard. The remainder uses `--skip` for the named shards, s
 runtime test binary; `cargo test -- --list` enumerated 1,232 tests across the shard selection and remainder checks.
 Each shard has its own timeout and `fail-fast: false`, while the test-level `--test-threads=1` resource-safety boundary
 is retained. A fresh exact-SHA hosted run is required; the timed-out run does not count as a hosted pass.
+
+### R70.8 Windows HTTP hosted timing-budget follow-up（2026-08-30）
+
+The first hosted run after runtime sharding isolated one independent HTTP regression: the production preparation
+failure test timed out its event observation at 10 seconds on Windows (`222 passed / 1 failed`, test binary completed
+in 109.69 seconds). The failure was a test scheduling budget, not a production cancellation hang; the same test passes
+locally in 4.16 seconds and still verifies the terminal event, failed run projection and durable replay. Its observation
+budget is now a finite 30 seconds to account for cold managed-authority/provider preparation on hosted Windows while
+retaining a bounded failure detector. The new exact-SHA hosted run must revalidate the HTTP slice and all runtime shards.
