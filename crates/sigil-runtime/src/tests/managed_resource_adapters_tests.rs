@@ -162,7 +162,7 @@ async fn r71_managed_command_route_seals_and_executes_one_shot() {
     );
     #[cfg(windows)]
     let (program, args) = (
-        PathBuf::from("pwsh.exe"),
+        "pwsh.exe".to_owned(),
         vec![
             "-NoLogo".to_owned(),
             "-NoProfile".to_owned(),
