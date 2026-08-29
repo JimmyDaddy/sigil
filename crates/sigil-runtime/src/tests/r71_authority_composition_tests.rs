@@ -11,15 +11,23 @@ fn write_r71_boot_config(config: &Path) {
     let state = fixture_root.join(".r71-test-state");
     let cache = fixture_root.join(".r71-test-cache");
     std::fs::create_dir_all(&cache).expect("test cache");
+    let state_text = toml_path(&state);
+    let cache_text = toml_path(&cache);
     std::fs::write(
             config,
             format!(
                 "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
-                state.display(),
-                cache.display(),
+                state_text,
+                cache_text,
             ),
         )
         .expect("config");
+}
+
+fn toml_path(path: &Path) -> String {
+    // TOML basic strings treat Windows backslashes as escapes. Forward slashes are accepted
+    // by Windows path APIs and keep absolute test roots valid without producing invalid TOML.
+    path.to_string_lossy().replace('\\', "/")
 }
 
 #[test]
@@ -571,8 +579,8 @@ fn r71_concurrent_boots_publish_monotonic_generation_under_one_lock() {
     let config_text = |state: &Path, cache: &Path, model: &str| {
         format!(
             "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"{}\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n",
-            state.display(),
-            cache.display(),
+            toml_path(state),
+            toml_path(cache),
             model,
         )
     };
