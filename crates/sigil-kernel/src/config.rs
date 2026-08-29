@@ -1713,7 +1713,8 @@ pub fn private_path_permissions_are_restricted(path: &Path) -> Result<bool> {
 ///
 /// Unix callers receive owner-only mode (`0600` for files, `0700` for directories). Windows
 /// callers receive a protected DACL that grants full access only to the current process user and
-/// Local System, and the current user becomes the object owner.
+/// Local System. The path must already be owned by the current process user; this helper does not
+/// attempt a privileged ownership transfer.
 /// Symbolic links and Windows reparse points are rejected.
 ///
 /// # Errors
@@ -1746,8 +1747,8 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
                 Authorization::{
                     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
                 },
-                DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-                PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+                DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+                PSECURITY_DESCRIPTOR, SetFileSecurityW,
             },
         };
 
@@ -1758,11 +1759,16 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
             path.display()
         );
         let current_user_sid = current_windows_user_sid_string()?;
-        let sddl =
-            format!("O:{current_user_sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{current_user_sid})")
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect::<Vec<_>>();
+        let existing_sddl = windows_private_dacl_sddl(path)?;
+        anyhow::ensure!(
+            windows_private_sddl_owner_is_current_user(&existing_sddl, &current_user_sid),
+            "cannot secure Windows path not owned by the current user: {}",
+            path.display()
+        );
+        let sddl = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{current_user_sid})")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: the SDDL buffer is NUL terminated and descriptor is writable for the duration of
         // the call. Windows owns the returned allocation until LocalFree below.
@@ -1787,9 +1793,7 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
         let applied = unsafe {
             SetFileSecurityW(
                 wide_path.as_ptr(),
-                OWNER_SECURITY_INFORMATION
-                    | DACL_SECURITY_INFORMATION
-                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 descriptor,
             )
         };
@@ -1892,6 +1896,21 @@ fn windows_private_sddl_has_current_user(sddl: &str, current_user_sid: &str) -> 
     };
     has_principal(current_user_sid)
         || windows_current_user_sddl_alias(current_user_sid).is_some_and(has_principal)
+}
+
+#[cfg(windows)]
+fn windows_private_sddl_owner_is_current_user(sddl: &str, current_user_sid: &str) -> bool {
+    let Some(rest) = sddl.strip_prefix("O:") else {
+        return false;
+    };
+    let owner_end = ["G:", "D:", "S:"]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min()
+        .unwrap_or(rest.len());
+    let owner = &rest[..owner_end];
+    owner == current_user_sid
+        || windows_current_user_sddl_alias(current_user_sid).is_some_and(|alias| owner == alias)
 }
 
 #[cfg(windows)]
