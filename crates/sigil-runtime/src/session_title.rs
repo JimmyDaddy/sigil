@@ -296,5 +296,5 @@ pub(crate) fn session_ref_for_title(
     if record_metadata.file_type().is_symlink() || !record_metadata.is_file() {
         bail!("managed session title source is not a regular file");
     }
-    Ok(SessionRef::new_relative(&format!("{key}.jsonl"))?)
+    SessionRef::new_relative(format!("{key}.jsonl"))
 }
