@@ -43,7 +43,7 @@ fn pty_line_command() -> (String, Vec<String>) {
         "/bin/sh".to_owned(),
         vec![
             "-c".to_owned(),
-            "read line; printf '%s\\n' \"$line\"".to_owned(),
+            "printf 'runtime-pty-ready\\n'; read line; printf '%s\\n' \"$line\"".to_owned(),
         ],
     )
 }
@@ -56,7 +56,7 @@ fn pty_line_command() -> (String, Vec<String>) {
             "/V:ON".to_owned(),
             "/D".to_owned(),
             "/C".to_owned(),
-            "set /P line=& echo(!line!".to_owned(),
+            "echo runtime-pty-ready& set /P line=& echo(!line!".to_owned(),
         ],
     )
 }
@@ -345,6 +345,24 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
         .await
         .expect("resize");
     let mut stream = handle.take_output_stream().expect("managed stream");
+    let readiness = b"runtime-pty-ready";
+    let mut output = Vec::new();
+    loop {
+        let frame = stream
+            .next_frame()
+            .await
+            .expect("output frame")
+            .expect("pty ended before readiness marker");
+        if !frame.end_of_stream {
+            output.extend(frame.payload);
+            if output
+                .windows(readiness.len())
+                .any(|window| window == readiness)
+            {
+                break;
+            }
+        }
+    }
     #[cfg(unix)]
     let input = b"runtime-pty\n".to_vec();
     #[cfg(windows)]
@@ -356,7 +374,6 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
         .await
         .expect("write");
     handle.close_stdin().await.expect("close");
-    let mut output = Vec::new();
     while let Some(frame) = stream.next_frame().await.expect("output frame") {
         if !frame.end_of_stream {
             output.extend(frame.payload);

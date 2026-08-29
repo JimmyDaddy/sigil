@@ -3478,3 +3478,15 @@ resource-receipt assertions. Local targeted validation passes (`1/1`), and the s
 构建或验证失败。已将 `desktop-package.yml` 的 Rust cache 保存条件收紧为仅默认分支 push：PR 与手动验证仍可
 恢复已有 cache，但不再上传 release target，避免 cache post-save 消耗整段 job timeout。此次变更不放宽包内容、
 sidecar 或签名验证；取消的旧 package run 不作为资格证据，需在新 exact SHA 上重跑 package workflow。
+
+### R70.8 Windows runtime PTY synchronization and adapter shard（2026-08-30）
+
+The replacement CI run `33273509938` again isolated the only cancelled job to Windows runtime `remainder`; the last
+started test was `r71_managed_terminal_route_supports_pty_control_and_receipt`. The platform-native `\r\n` input
+correction was necessary but did not remove the startup race: the test could write before the ConPTY child had entered
+its input-read state. The fixture now emits `runtime-pty-ready`, drains the managed output stream until that marker is
+observed, and only then writes and closes stdin. The Windows runtime matrix also gives the seven
+`managed_resource_adapters` tests their own 30-minute shard and excludes them from `remainder`; the remainder still
+covers every other runtime test. This is a scheduling/fixture reliability correction, not a reduction of coverage or a
+relaxation of the managed process receipt assertions. Fresh exact-SHA CI is required; the cancelled run is not
+qualification evidence.
