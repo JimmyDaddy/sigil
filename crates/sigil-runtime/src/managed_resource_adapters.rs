@@ -994,6 +994,25 @@ impl RuntimeManagedCommandExecutionRouteV1 {
                     });
                 }
             }
+            #[cfg(windows)]
+            // Cargo and rustup are host toolchain adapters, not application credentials. Keep
+            // the bounded Windows profile variables they use to locate the installed toolchain
+            // after the managed child clears the ambient environment. HOME remains authority-
+            // owned and is intentionally excluded from this list.
+            for name in [
+                "USERPROFILE",
+                "HOMEDRIVE",
+                "HOMEPATH",
+                "LOCALAPPDATA",
+                "APPDATA",
+                "PROGRAMDATA",
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+            ] {
+                if let Some(value) = std::env::var_os(name) {
+                    environment.insert(OsString::from(name), value);
+                }
+            }
         }
         environment.extend(
             request

@@ -30,6 +30,13 @@ fn output_command(output: &str) -> (PathBuf, Vec<String>) {
     )
 }
 
+#[cfg(windows)]
+fn comspec_path() -> PathBuf {
+    std::env::var_os("ComSpec")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"))
+}
+
 #[cfg(unix)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
@@ -44,7 +51,7 @@ fn pty_line_command() -> (String, Vec<String>) {
 #[cfg(windows)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
-        "cmd.exe".to_owned(),
+        comspec_path().to_string_lossy().into_owned(),
         vec![
             "/V:ON".to_owned(),
             "/D".to_owned(),
@@ -84,7 +91,10 @@ fn manager_persistent_command() -> (String, String) {
 
 #[cfg(windows)]
 fn manager_persistent_command() -> (String, String) {
-    ("ping -n 30 127.0.0.1 >NUL".to_owned(), "cmd.exe".to_owned())
+    (
+        "ping -n 30 127.0.0.1 >NUL".to_owned(),
+        comspec_path().to_string_lossy().into_owned(),
+    )
 }
 
 #[test]
@@ -152,21 +162,21 @@ async fn r71_managed_command_route_seals_and_executes_one_shot() {
     );
     #[cfg(windows)]
     let (program, args) = (
-        "cmd.exe".to_owned(),
+        PathBuf::from("pwsh.exe"),
         vec![
-            "/D".to_owned(),
-            "/C".to_owned(),
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
             concat!(
-                "if not exist \"%TMPDIR%\\.\" exit /b 1 & ",
-                "if not exist \"%HOME%\\.\" exit /b 1 & ",
-                "if not exist \"%XDG_STATE_HOME%\\.\" exit /b 1 & ",
-                "if not exist \"%XDG_CACHE_HOME%\\.\" exit /b 1 & ",
-                "if not exist \"%SIGIL_STATE_HOME%\\.\" exit /b 1 & ",
-                "if not exist \"%SIGIL_CACHE_HOME%\\.\" exit /b 1 & ",
-                "if \"%TMPDIR%\"==\"/ambient-override\" exit /b 1 & ",
-                "if \"%HOME%\"==\"/ambient-home\" exit /b 1 & ",
-                "type nul > \"%TMPDIR%\\child-created\" & ",
-                "echo|set /p=managed-route"
+                "$required = @($env:TMPDIR, $env:HOME, $env:XDG_STATE_HOME, ",
+                "$env:XDG_CACHE_HOME, $env:SIGIL_STATE_HOME, $env:SIGIL_CACHE_HOME); ",
+                "foreach ($path in $required) { ",
+                "if (-not (Test-Path -LiteralPath $path -PathType Container)) { exit 1 } ",
+                "}; ",
+                "if ($env:TMPDIR -eq '/ambient-override' -or $env:HOME -eq '/ambient-home') { exit 1 }; ",
+                "New-Item -ItemType File -Path (Join-Path $env:TMPDIR 'child-created') -Force | Out-Null; ",
+                "[Console]::Out.Write('managed-route')"
             )
             .to_owned(),
         ],
