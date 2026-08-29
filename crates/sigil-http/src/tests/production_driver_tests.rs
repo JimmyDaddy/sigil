@@ -182,6 +182,10 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     std::fs::write(path, config).expect("reasoning test config should write");
 }
 
+fn toml_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn isolated_storage_toml(config_path: &std::path::Path) -> String {
     let root = config_path
         .parent()
@@ -189,7 +193,6 @@ fn isolated_storage_toml(config_path: &std::path::Path) -> String {
     // TOML basic strings treat Windows backslashes as escape introducers (for example, `\\U`).
     // Forward slashes are accepted by Windows path APIs and keep the generated fixture valid on
     // every host platform.
-    let toml_path = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
     format!(
         "[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"",
         toml_path(&root.join("state")),
@@ -4326,8 +4329,8 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
     .expect("fixture workspace file should create");
     let sessions = temp.path().join("sessions");
     std::fs::create_dir(&sessions).expect("session directory should create");
-    let state_root = temp.path().join("state").to_string_lossy().into_owned();
-    let cache_root = temp.path().join("cache").to_string_lossy().into_owned();
+    let state_root = toml_path(&temp.path().join("state"));
+    let cache_root = toml_path(&temp.path().join("cache"));
 
     // Local chat-completions fixture exercising the real current-schema review tool sequence.
     // The request always contains the available tool declarations, so selecting a response by
