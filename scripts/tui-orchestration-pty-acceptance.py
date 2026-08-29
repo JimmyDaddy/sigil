@@ -1348,6 +1348,7 @@ def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         "direct:terminal:start": 1,
         "direct:terminal:after_start": 1,
         "direct:terminal:after_cancel": 1,
+        "title": 1,
     }
     if fixture.request_counts != expected_requests:
         raise AcceptanceError(

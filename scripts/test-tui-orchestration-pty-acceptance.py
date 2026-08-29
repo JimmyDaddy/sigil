@@ -520,6 +520,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
                 "direct:terminal:start": 1,
                 "direct:terminal:after_start": 1,
                 "direct:terminal:after_cancel": 1,
+                "title": 1,
             }
         )
 
