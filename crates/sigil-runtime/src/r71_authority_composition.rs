@@ -320,10 +320,7 @@ impl ValidatedAuthorityConfigSnapshotV1 {
             sigil_resource_authority::identity::canonical_identity(&workspace_root)
                 .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
                 .digest;
-        let encoded = serde_json::to_vec(&config)
-            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let config_hash = snapshot_binding_hash(
-            &encoded,
             raw_config,
             &config_path,
             &launch_cwd,
@@ -752,7 +749,6 @@ fn ensure_authority_anchors(paths: &crate::paths::SigilPaths) -> Result<(), Boot
 }
 
 fn snapshot_binding_hash(
-    encoded_config: &[u8],
     raw_config: &[u8],
     config_path: &Path,
     launch_cwd: &Path,
@@ -764,10 +760,11 @@ fn snapshot_binding_hash(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"validated-authority-config-snapshot-v2");
-    hasher.update(b"raw-config\0");
+    // The persisted bytes are the authority configuration identity. Parsed values may include
+    // process-local model-request timeout overrides, which are session routing inputs and must
+    // not advance the durable authority generation or invalidate a published cutover pointer.
+    hasher.update(b"persisted-config\0");
     hasher.update(raw_config);
-    hasher.update(b"effective-config\0");
-    hasher.update(encoded_config);
     for path in [
         config_path,
         launch_cwd,

@@ -235,6 +235,23 @@ fn r71_validated_snapshot_binding_is_stable_across_reload() {
 }
 
 #[test]
+fn r71_session_model_request_override_does_not_advance_authority_binding() {
+    let _environment_guard = crate::test_env::lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("sigil.toml");
+    write_r71_boot_config(&config);
+    let persisted = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+        .expect("persisted snapshot")
+        .expect("config");
+    let _override =
+        crate::test_env::EnvScope::set(sigil_kernel::SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, "17");
+    let session = ValidatedAuthorityConfigSnapshotV1::load(&config, dir.path())
+        .expect("session snapshot")
+        .expect("config");
+    assert_eq!(session.config_hash(), persisted.config_hash());
+}
+
+#[test]
 fn r71_current_boot_advances_manifest_for_a_new_persisted_config_generation() {
     let _environment_guard = crate::test_env::lock();
     let dir = tempfile::tempdir().expect("tempdir");
