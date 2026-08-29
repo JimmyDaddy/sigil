@@ -1009,12 +1009,14 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         }
         let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
             Ok(owner) => owner,
-            Err(_) => {
+            Err(error) => {
                 let _ = child.kill();
                 if child.wait().is_ok() {
                     let _ = inventory.settle_spawn(claim);
                 }
-                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+                return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
+                    error.to_string(),
+                ));
             }
         };
         let mut claim = Some(claim);
@@ -1213,10 +1215,13 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         }
         let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
             Ok(owner) => owner,
-            Err(_) => {
+            Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+                let _ = inventory.settle_spawn(claim);
+                return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
+                    error.to_string(),
+                ));
             }
         };
         let cap = request.limits.max_output_bytes;
@@ -1311,13 +1316,15 @@ impl SandboxManagedExecutionServiceV1 {
         }
         let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(process_id)) {
             Ok(owner) => owner,
-            Err(_) => {
+            Err(error) => {
                 let mut child = launch.child;
                 let _ = child.kill();
                 if child.wait().is_ok() {
                     let _ = process_inventory.settle_spawn(process_claim);
                 }
-                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+                return Err(ManagedExecutionErrorV1::ProcessOwnershipUnavailable(
+                    error.to_string(),
+                ));
             }
         };
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
