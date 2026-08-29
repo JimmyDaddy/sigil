@@ -38,6 +38,28 @@ fn comspec_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"))
 }
 
+#[cfg(windows)]
+fn powershell_path() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            candidates.push(directory.join("pwsh.exe"));
+            candidates.push(directory.join("powershell.exe"));
+        }
+    }
+    for variable in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(directory) = std::env::var_os(variable) {
+            let directory = PathBuf::from(directory);
+            candidates.push(directory.join(r"PowerShell\7\pwsh.exe"));
+            candidates.push(directory.join(r"WindowsPowerShell\v1.0\powershell.exe"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"))
+}
+
 #[cfg(unix)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
@@ -52,12 +74,13 @@ fn pty_line_command() -> (String, Vec<String>) {
 #[cfg(windows)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
-        comspec_path().to_string_lossy().into_owned(),
+        powershell_path().to_string_lossy().into_owned(),
         vec![
-            "/V:ON".to_owned(),
-            "/D".to_owned(),
-            "/C".to_owned(),
-            "echo runtime-pty-ready& set /P line=& echo(!line!".to_owned(),
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            "[Console]::WriteLine('runtime-pty-ready'); [Console]::Out.Flush(); $line = [Console]::ReadLine(); [Console]::WriteLine($line)".to_owned(),
         ],
     )
 }
@@ -374,8 +397,8 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     #[cfg(unix)]
     let input = b"runtime-pty\n".to_vec();
     #[cfg(windows)]
-    // ConPTY presents a real Windows console line discipline to cmd.exe; CRLF is required to
-    // submit the line to `set /P`, whereas the Unix shell test consumes LF directly.
+    // ConPTY presents a real Windows console line discipline to PowerShell; CRLF is required to
+    // submit the line to `Console.ReadLine`, whereas the Unix shell test consumes LF directly.
     let input = b"runtime-pty\r\n".to_vec();
     tokio::time::timeout(
         Duration::from_secs(30),

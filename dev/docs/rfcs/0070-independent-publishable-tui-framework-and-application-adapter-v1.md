@@ -3504,3 +3504,14 @@ from the still-running prior attempt.
 
 The same test now bounds `start_persistent` and `resize_pty` with the same 30-second diagnostic deadline. This closes
 the remaining unbounded portion of the PTY fixture lifecycle; it does not convert a failed stage into success.
+
+### R70.8 Windows hosted PTY readiness diagnosis and fixture correction（2026-08-30）
+
+The exact-SHA replacement run `33278615214` validated the shard boundary itself: the Windows runtime matrix reached
+independent test execution, and the dedicated `managed-resource-adapters` job ran six of seven tests successfully.
+Its PTY test failed after the bounded 30-second readiness deadline because the `cmd.exe` `set /P` fixture produced no
+observable readiness frame under the hosted ConPTY implementation. This is now a diagnostic fixture failure rather
+than a 45-minute remainder cancellation. The fixture therefore resolves an absolute PowerShell executable from the
+Windows environment and uses explicit `Console.WriteLine`/`Console.ReadLine` calls, while retaining the CRLF input,
+readiness handshake, lifecycle deadlines, PTY resize and managed receipt assertions. The source correction requires a
+new exact-SHA hosted run; `33278615214` is not qualification evidence.
