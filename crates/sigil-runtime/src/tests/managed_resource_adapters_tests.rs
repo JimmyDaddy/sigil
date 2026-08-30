@@ -443,9 +443,10 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
         .expect("pty output timed out")
         .expect("output frame")
     {
-        if !frame.end_of_stream {
-            output.extend(frame.payload);
+        if frame.end_of_stream {
+            break;
         }
+        output.extend(frame.payload);
     }
     let receipt = tokio::time::timeout(Duration::from_secs(30), handle.wait_and_finalize())
         .await

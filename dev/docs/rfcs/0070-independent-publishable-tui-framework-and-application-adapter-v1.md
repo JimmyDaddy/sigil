@@ -3558,3 +3558,17 @@ to `portable-pty 0.8.1` on Windows, while Unix keeps `0.9.0` for its signal-stat
 target-resolved versions. This is a compatibility containment change, not a coverage reduction or fallback to direct
 process spawning. Local Unix `sigil-runtime` managed-resource adapter tests pass `7/7`; a new exact-SHA Windows run is
 required before R70.8 can be considered qualified.
+
+### R70.8 Windows hosted ConPTY EOF synchronization（2026-08-30）
+
+The exact-SHA run `33282594274` confirmed the Windows dependency pin and all other completed shards, but the dedicated
+`managed-resource-adapters` shard still failed in
+`r71_managed_terminal_route_supports_pty_control_and_receipt`: the child exited after the input exchange, while
+ConPTY retained the host-owned master and never released the managed output reader, so the test timed out waiting for
+the stream to finish. The sandbox now starts a Windows-only exit watcher for persistent PTY children; once the child
+has exited (or its status becomes uncertain), the watcher releases the host-owned master and allows the existing
+per-channel EOF frame to be observed. Unix does not use this watcher because polling `try_wait` there could reap the
+child before `wait_and_finalize` publishes its receipt. The runtime test also stops at the explicit EOF frame instead
+of requiring receiver closure. Local Linux targeted validation and the Windows target compile pass; run
+`33282594274` is not qualification evidence because its source predates this correction, and a fresh exact-SHA
+hosted run remains required.

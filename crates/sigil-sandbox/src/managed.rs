@@ -1378,8 +1378,56 @@ impl SandboxManagedExecutionServiceV1 {
             process_inventory,
             process_claim: Some(process_claim),
         };
+        #[cfg(windows)]
+        spawn_windows_pty_exit_watcher(&handle.child, &handle.master);
         Ok(Box::new(handle))
     }
+}
+
+/// ConPTY does not necessarily close the reader when the child exits while the master handle is
+/// still alive.  The managed stream contract exposes a per-channel EOF frame, so observe process
+/// exit independently and release the host-owned master before consumers wait for that frame.
+///
+/// This is Windows-only: on Unix, polling `try_wait` would reap the child before
+/// `wait_and_finalize` can publish its receipt.
+#[cfg(windows)]
+fn spawn_windows_pty_exit_watcher(
+    child: &Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    master: &Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+) {
+    let child = Arc::downgrade(child);
+    let master = Arc::downgrade(master);
+    std::thread::spawn(move || {
+        loop {
+            let Some(child_ref) = child.upgrade() else {
+                return;
+            };
+            let exited = {
+                let mut child = match child_ref.lock() {
+                    Ok(child) => child,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => true,
+                    Ok(None) => false,
+                }
+            };
+            if exited {
+                if let Some(master_ref) = master.upgrade() {
+                    match master_ref.lock() {
+                        Ok(mut master) => {
+                            master.take();
+                        }
+                        Err(poisoned) => {
+                            poisoned.into_inner().take();
+                        }
+                    }
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
 }
 
 /// Local persistent process handle (non-clone, non-serialize).
