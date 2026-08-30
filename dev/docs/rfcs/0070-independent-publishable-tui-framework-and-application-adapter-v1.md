@@ -3572,3 +3572,12 @@ child before `wait_and_finalize` publishes its receipt. The runtime test also st
 of requiring receiver closure. Local Linux targeted validation and the Windows target compile pass; run
 `33282594274` is not qualification evidence because its source predates this correction, and a fresh exact-SHA
 hosted run remains required.
+
+### R70.8 Windows hosted PTY exit-status fixture correction（2026-08-30）
+
+The follow-up exact-SHA run `33283541198` reached the PTY EOF path after the host-owned master was
+released, but the PowerShell fixture returned a non-zero process status after the input/close sequence. The test
+already proved the readiness marker and echoed payload; the fixture now terminates explicitly with `exit 0` after
+emitting that payload, and the assertion includes the complete managed receipt and captured output when the status is
+unexpected. This keeps the receipt's zero-exit requirement while making the platform fixture's intended terminal
+status explicit. A fresh exact-SHA hosted run is required; `33283541198` remains non-qualification evidence.

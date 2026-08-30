@@ -106,7 +106,7 @@ fn pty_line_command() -> (String, Vec<String>) {
             "-NoProfile".to_owned(),
             "-NonInteractive".to_owned(),
             "-Command".to_owned(),
-            "[Console]::WriteLine('runtime-pty-ready'); [Console]::Out.Flush(); $line = [Console]::ReadLine(); [Console]::WriteLine($line)".to_owned(),
+            "[Console]::WriteLine('runtime-pty-ready'); [Console]::Out.Flush(); $line = [Console]::ReadLine(); [Console]::WriteLine($line); exit 0".to_owned(),
         ],
     )
 }
@@ -457,10 +457,13 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
             .windows(b"runtime-pty".len())
             .any(|window| window == b"runtime-pty")
     );
-    assert!(matches!(
-        receipt.process.termination,
-        sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code: 0 }
-    ));
+    assert!(
+        matches!(
+            receipt.process.termination,
+            sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code: 0 }
+        ),
+        "unexpected PTY termination: {receipt:?}; output={output:?}"
+    );
     assert_eq!(
         receipt.resources.cleanup_status,
         sigil_kernel::resource::ResourceCleanupStatusV1::Released
