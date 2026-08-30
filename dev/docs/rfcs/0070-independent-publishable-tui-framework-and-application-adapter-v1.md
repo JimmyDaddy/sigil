@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：R70.4 Complete / R70.5 Complete / R70.6 Complete / R70.7 Complete / R70.8 In Progress（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 framework/package boundary、R70.6 host ownership、R70.7 preview package qualification 已闭合，R70.8 compatibility retirement 仍待 release-cycle validation）
+状态：R70.4 Complete / R70.5 Complete / R70.6 Complete / R70.7 Complete / R70.8 Engineering Complete / Release-cycle Deferred（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 framework/package boundary、R70.6 host ownership、R70.7 preview package qualification、R70.8 compatibility retirement 与 hosted engineering qualification 已闭合；真实 crates.io publish、release cycle 与 user validation 仍按 release operator 条件 deferred）
 
 创建日期：2026-08-23
 
@@ -3627,3 +3627,18 @@ closing the already-exited writer and finalizing the managed receipt. This prese
 settlement assertions without depending on live ConPTY input-close behavior. The run failed only at that fixture
 assertion and is not qualification evidence; a new exact-SHA CI and package run is required. crates.io publication and
 release-cycle validation remain intentionally deferred.
+
+### R70.8 exact-SHA hosted engineering qualification（2026-08-30）
+
+Source candidate `ff9ae90956166d4a8d1f2469e2e8d4ddd7ef5fa6` passed the split hosted qualification set:
+
+- CI run `33287711724`: `30/30` jobs successful, including all Windows runtime shards, Windows/macOS reliability,
+  keyring, coverage, clippy, orchestration and TUI PTY acceptance.
+- Desktop Package run `33287711712`: Windows NSIS, macOS app and Linux deb `3/3` successful.
+- Dependency Supply Chain run `33287711679`: all `5/5` jobs successful.
+- Local follow-up: `sigil-sandbox` `70/70`, managed runtime adapters `7/7`, strict clippy, fmt and diff checks passed.
+
+This closes the R70.8 code and hosted engineering qualification boundary. The qualification records are exact-SHA
+evidence for `ff9ae909`; the documentation commit that records them requires one final exact-SHA revalidation before
+it is treated as the release candidate. crates.io publication, at least one release cycle and user validation remain
+intentionally deferred and are not represented as completed evidence.
