@@ -3604,3 +3604,15 @@ EOF/input-read hang while retaining real stdin write/close, readiness synchroniz
 zero-exit and managed resource-receipt assertions. Local Unix managed-resource adapter tests remain `7/7`. The
 failed run is not qualification evidence; a new exact-SHA CI and package run is required. crates.io publication and
 release-cycle validation remain intentionally deferred and are not represented as completed evidence.
+
+### R70.8 Windows hosted PTY cancellable child wait correction（2026-08-30）
+
+The replacement run `33286399595` showed that removing `set /P` eliminated the PowerShell exit-status failure, but the
+managed PTY job could still remain active because `wait_and_finalize` submitted an unbounded synchronous
+`portable-pty::Child::wait()` to `spawn_blocking`; a caller timeout cannot cancel that worker while the child remains
+alive. Native and PTY finalization now poll non-blocking `try_wait()` in short blocking probes with async sleeps between
+probes. This preserves exact status, process-inventory settlement and fail-closed error mapping while allowing the
+managed caller's bounded timeout to cancel between probes. Local sandbox compilation and managed-resource adapter
+tests pass (`7/7`). Runs `33286399595` and `33286399592` were cancelled after the diagnosis and are not qualification
+evidence; a fresh exact-SHA CI and package run is required. crates.io publication and release-cycle validation remain
+intentionally deferred.

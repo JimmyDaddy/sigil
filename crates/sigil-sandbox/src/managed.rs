@@ -854,6 +854,52 @@ async fn poll_termination(child: &mut Child, max_runtime_ms: u64) -> ProcessTerm
     }
 }
 
+/// Waits for a native child without placing an unbounded `Child::wait` call on a Tokio worker. A
+/// caller-side timeout can cancel this future between probes when Tokio is present, while the
+/// synchronous fallback preserves compatibility with the crate's non-Tokio unit-test executor.
+async fn wait_for_child_status(child: Arc<Mutex<Child>>) -> Result<ExitStatus, std::io::Error> {
+    loop {
+        let status = {
+            let mut child = child
+                .lock()
+                .map_err(|_| std::io::Error::other("managed child lock poisoned"))?;
+            child.try_wait()?
+        };
+        if let Some(status) = status {
+            return Ok(status);
+        }
+        yield_between_child_probes().await;
+    }
+}
+
+/// PTY equivalent of [`wait_for_child_status`]. `portable-pty` exposes a synchronous child
+/// interface, so probe it without submitting an unbounded wait that cannot be cancelled when the
+/// managed caller's deadline expires.
+async fn wait_for_pty_child_status(
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+) -> Result<portable_pty::ExitStatus, std::io::Error> {
+    loop {
+        let status = {
+            let mut child = child
+                .lock()
+                .map_err(|_| std::io::Error::other("managed PTY child lock poisoned"))?;
+            child.try_wait()?
+        };
+        if let Some(status) = status {
+            return Ok(status);
+        }
+        yield_between_child_probes().await;
+    }
+}
+
+async fn yield_between_child_probes() {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    } else {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn terminate_reap_and_settle(
     child: &mut Child,
     process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
@@ -1570,15 +1616,7 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
         self.finalizing.store(true, Ordering::SeqCst);
-        let child = Arc::clone(&self.child);
-        let wait_result = tokio::task::spawn_blocking(move || {
-            let mut child = child
-                .lock()
-                .map_err(|_| std::io::Error::other("managed child lock poisoned"))?;
-            child.wait()
-        })
-        .await
-        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        let wait_result = wait_for_child_status(Arc::clone(&self.child)).await;
         let (termination, reaped) = match wait_result {
             Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
                 let _ = status;
@@ -1820,15 +1858,7 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
     async fn wait_and_finalize(
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
-        let child = Arc::clone(&self.child);
-        let wait_result = tokio::task::spawn_blocking(move || {
-            let mut child = child
-                .lock()
-                .map_err(|_| std::io::Error::other("managed PTY child lock poisoned"))?;
-            child.wait()
-        })
-        .await
-        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        let wait_result = wait_for_pty_child_status(Arc::clone(&self.child)).await;
         let (termination, reaped) = match wait_result {
             Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
                 let _ = status;
