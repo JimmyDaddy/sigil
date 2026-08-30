@@ -413,10 +413,6 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     .await
     .expect("pty write timed out")
     .expect("write");
-    tokio::time::timeout(Duration::from_secs(30), handle.close_stdin())
-        .await
-        .expect("pty close timed out")
-        .expect("close");
     while let Some(frame) = tokio::time::timeout(Duration::from_secs(30), stream.next_frame())
         .await
         .expect("pty output timed out")
@@ -427,6 +423,13 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
         }
         output.extend(frame.payload);
     }
+    // The hosted ConPTY implementation can translate a live input-handle close into a console
+    // interrupt for a child that is already in its exit path. The child fixture does not read
+    // stdin; wait for its natural EOF first, then close the host-owned writer before finalization.
+    tokio::time::timeout(Duration::from_secs(30), handle.close_stdin())
+        .await
+        .expect("pty close timed out")
+        .expect("close");
     let receipt = tokio::time::timeout(Duration::from_secs(30), handle.wait_and_finalize())
         .await
         .expect("pty finalization timed out")

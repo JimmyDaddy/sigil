@@ -3616,3 +3616,14 @@ managed caller's bounded timeout to cancel between probes. Local sandbox compila
 tests pass (`7/7`). Runs `33286399595` and `33286399592` were cancelled after the diagnosis and are not qualification
 evidence; a fresh exact-SHA CI and package run is required. crates.io publication and release-cycle validation remain
 intentionally deferred.
+
+### R70.8 Windows hosted PTY input-close ordering correction（2026-08-30）
+
+The exact-SHA run `33287018065` reached all seven managed-resource adapter tests and isolated the remaining Windows
+failure to the PTY control fixture: closing the input writer while `cmd.exe` was still in its natural exit path caused
+hosted ConPTY to report `Exited { code: -1 }` and emit a `^C` marker, even though the fixture requested `exit /B 0`.
+The fixture still writes the real CRLF input and now waits for the host-owned exit watcher to deliver EOF before
+closing the already-exited writer and finalizing the managed receipt. This preserves input, EOF, zero-exit and resource
+settlement assertions without depending on live ConPTY input-close behavior. The run failed only at that fixture
+assertion and is not qualification evidence; a new exact-SHA CI and package run is required. crates.io publication and
+release-cycle validation remain intentionally deferred.
