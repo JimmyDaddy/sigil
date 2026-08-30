@@ -1407,10 +1407,7 @@ fn spawn_windows_pty_exit_watcher(
                     Ok(child) => child,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                match child.try_wait() {
-                    Ok(Some(_)) | Err(_) => true,
-                    Ok(None) => false,
-                }
+                matches!(child.try_wait(), Ok(Some(_)))
             };
             if exited {
                 if let Some(master_ref) = master.upgrade() {
@@ -1573,24 +1570,27 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
         self.finalizing.store(true, Ordering::SeqCst);
-        let (termination, reaped) = {
-            let mut guard = self
-                .child
+        let child = Arc::clone(&self.child);
+        let wait_result = tokio::task::spawn_blocking(move || {
+            let mut child = child
                 .lock()
-                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-            match guard.wait() {
-                Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
-                    let _ = status;
-                    (ProcessTerminationV1::Cancelled, true)
-                }
-                Ok(status) => (classify_status(status), true),
-                Err(_) => (
-                    ProcessTerminationV1::OutcomeUncertain {
-                        evidence_digest: zero_hash(),
-                    },
-                    false,
-                ),
+                .map_err(|_| std::io::Error::other("managed child lock poisoned"))?;
+            child.wait()
+        })
+        .await
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        let (termination, reaped) = match wait_result {
+            Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
+                let _ = status;
+                (ProcessTerminationV1::Cancelled, true)
             }
+            Ok(status) => (classify_status(status), true),
+            Err(_) => (
+                ProcessTerminationV1::OutcomeUncertain {
+                    evidence_digest: zero_hash(),
+                },
+                false,
+            ),
         };
         if reaped {
             let claim = self
@@ -1820,24 +1820,27 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
     async fn wait_and_finalize(
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
-        let (termination, reaped) = {
-            let mut child = self
-                .child
+        let child = Arc::clone(&self.child);
+        let wait_result = tokio::task::spawn_blocking(move || {
+            let mut child = child
                 .lock()
-                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-            match child.wait() {
-                Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
-                    let _ = status;
-                    (ProcessTerminationV1::Cancelled, true)
-                }
-                Ok(status) => (classify_pty_status(status), true),
-                Err(_) => (
-                    ProcessTerminationV1::OutcomeUncertain {
-                        evidence_digest: zero_hash(),
-                    },
-                    false,
-                ),
+                .map_err(|_| std::io::Error::other("managed PTY child lock poisoned"))?;
+            child.wait()
+        })
+        .await
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        let (termination, reaped) = match wait_result {
+            Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
+                let _ = status;
+                (ProcessTerminationV1::Cancelled, true)
             }
+            Ok(status) => (classify_pty_status(status), true),
+            Err(_) => (
+                ProcessTerminationV1::OutcomeUncertain {
+                    evidence_digest: zero_hash(),
+                },
+                false,
+            ),
         };
         if reaped {
             let claim = self

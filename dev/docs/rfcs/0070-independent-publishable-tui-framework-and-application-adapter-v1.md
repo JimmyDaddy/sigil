@@ -3581,3 +3581,13 @@ already proved the readiness marker and echoed payload; the fixture now terminat
 emitting that payload, and the assertion includes the complete managed receipt and captured output when the status is
 unexpected. This keeps the receipt's zero-exit requirement while making the platform fixture's intended terminal
 status explicit. A fresh exact-SHA hosted run is required; `33283541198` remains non-qualification evidence.
+
+### R70.8 Windows hosted PTY finalization non-blocking correction（2026-08-30）
+
+The same run `33283541198` showed that releasing the master could produce an EOF frame before the child wait had
+completed; the async `wait_and_finalize` implementation then called the synchronous child wait directly on the Tokio
+executor. This could hang the test beyond its intended deadline and hide whether the Windows fixture had actually
+terminated. Persistent process and PTY finalization now perform the blocking child wait on a blocking worker, and the
+Windows exit watcher only releases the master after a positive `try_wait` result. This preserves fail-closed
+uncertain-status handling and process-inventory settlement while making a still-running child observable as a bounded
+test failure. Local managed-resource adapter tests remain `7/7`, and a new exact-SHA hosted run is required.
