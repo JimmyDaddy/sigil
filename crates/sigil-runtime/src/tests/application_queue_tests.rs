@@ -561,7 +561,10 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn application_assembly_freezes_exact_first_request_without_persisting_it() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let root = tempfile::tempdir()?;
     let fixture = application_owned_queue_fixture(
         root.path(),
@@ -612,7 +615,10 @@ async fn application_assembly_freezes_exact_first_request_without_persisting_it(
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let root = tempfile::tempdir()?;
     let fixture = application_owned_queue_fixture_with_auto_routing(
         root.path(),
@@ -682,8 +688,11 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn application_owned_queued_run_commits_one_promoted_user_event_and_no_exact_prompt()
 -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let root = tempfile::tempdir()?;
     let fixture = application_owned_queue_fixture(
         root.path(),
@@ -807,7 +816,10 @@ async fn application_owned_queued_run_commits_one_promoted_user_event_and_no_exa
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn stale_promotion_returns_no_executable_run_and_persists_no_user_message() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let root = tempfile::tempdir()?;
     let mut fixture = application_owned_queue_fixture(root.path(), "inspect README.md")?;
     let run = fixture.run_request();

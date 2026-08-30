@@ -9,6 +9,7 @@ static WORKER_REACTOR_DEADLINE_TOTAL: std::sync::atomic::AtomicU64 =
 static WORKER_REACTOR_ADVANCEMENT_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkerReactorMetricsSnapshot {
     pub event_wake_total: u64,
@@ -16,6 +17,7 @@ pub struct WorkerReactorMetricsSnapshot {
     pub advancement_total: u64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl WorkerReactorMetricsSnapshot {
     #[must_use]
     pub fn saturating_delta(self, earlier: Self) -> Self {
@@ -31,6 +33,7 @@ impl WorkerReactorMetricsSnapshot {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn worker_reactor_metrics() -> WorkerReactorMetricsSnapshot {
     use std::sync::atomic::Ordering;
@@ -136,6 +139,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
         role_provider_builder,
         context_resolver,
         managed_extension_execution,
+        managed_verification_execution,
+        managed_plan_review_child_resources,
     } = mcp_handlers;
     let WorkerLoopTerminalRuntime {
         lifecycle_router: terminal_lifecycle_router,
@@ -294,6 +299,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         managed_storage_writer,
         managed_artifact_store,
     );
+    state.managed_plan_review_child_resources = managed_plan_review_child_resources;
     // RFC-0062 14.1: one startup TTL sweep over the workspace scratch namespaces. Leases are
     // in-memory only, so a fresh worker cannot hold one; expired namespaces from crashed or
     // deleted sessions are reclaimed here, and the sweep never races a live tool or terminal
@@ -350,6 +356,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         role_provider_builder: &role_provider_builder,
                         context_resolver: &context_resolver,
                         managed_extension_execution: &managed_extension_execution,
+                        managed_verification_execution: &managed_verification_execution,
                         state: &mut state,
                     },
                     command,
@@ -376,6 +383,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 role_provider_builder: &role_provider_builder,
                 context_resolver: &context_resolver,
                 managed_extension_execution: &managed_extension_execution,
+                managed_verification_execution: &managed_verification_execution,
                 state: &mut state,
             });
             continue;
@@ -404,6 +412,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         role_provider_builder: &role_provider_builder,
                         context_resolver: &context_resolver,
                         managed_extension_execution: &managed_extension_execution,
+                        managed_verification_execution: &managed_verification_execution,
                         state: &mut state,
                     },
                     command,
@@ -430,6 +439,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 role_provider_builder: &role_provider_builder,
                 context_resolver: &context_resolver,
                 managed_extension_execution: &managed_extension_execution,
+                managed_verification_execution: &managed_verification_execution,
                 state: &mut state,
             });
             continue;
@@ -450,6 +460,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 role_provider_builder: &role_provider_builder,
                 context_resolver: &context_resolver,
                 managed_extension_execution: &managed_extension_execution,
+                managed_verification_execution: &managed_verification_execution,
                 state: &mut state,
             }),
             WorkerAdvancementControl::SkipCommandPoll

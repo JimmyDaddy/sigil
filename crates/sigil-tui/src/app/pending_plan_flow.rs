@@ -10,6 +10,7 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> Option<Option<AppAction>> {
+        self.clear_completed_plan_attention();
         let workbench_open = self
             .composer
             .pending_plan_approval
@@ -29,6 +30,38 @@ impl AppState {
                 Some(None)
             }
             _ => None,
+        }
+    }
+
+    /// Drops a plan-review surface that was rehydrated one frontier behind its durable Task.
+    ///
+    /// A completed plan is no longer an input owner. This can happen after a crash/resume when
+    /// the application projection restores the last plan before the TaskCreatedFromPlan event is
+    /// reflected in the UI state. Keep the decision in the durable projection as the authority,
+    /// clear only the stale presentation, and return to Build so the next user prompt is a normal
+    /// conversation turn rather than another plan request.
+    fn clear_completed_plan_attention(&mut self) {
+        let Some(plan_id) = self
+            .composer
+            .pending_plan_approval
+            .as_ref()
+            .and_then(|pending| pending.plan_id.clone())
+        else {
+            return;
+        };
+        let Ok(plan_id) = sigil_kernel::PlanId::new(plan_id) else {
+            return;
+        };
+        let plans = sigil_kernel::PlanArtifactProjection::from_entries(
+            &self.session_browser.current_entries,
+        );
+        let completed = plans.latest_decision(&plan_id).is_some_and(|decision| {
+            decision.decision == sigil_kernel::PlanDecision::Accepted
+                && plans.task_created_for_plan(&plan_id)
+        });
+        if completed {
+            self.clear_pending_plan_approval();
+            self.composer.mode = super::ComposerMode::Build;
         }
     }
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION, HttpConversationQueueCommandActionKind,
     HttpConversationQueueCommandReceipt, HttpConversationQueueGeneration,
@@ -61,6 +63,39 @@ fn managed_writer(
         &[Channel::AdapterIdempotencyLedger],
     )
     .expect("managed command composition");
+    composition.storage_writer
+}
+
+fn application_managed_writer(
+    temp: &tempfile::TempDir,
+) -> std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    let state = temp.path().join("application-state");
+    let execution = temp.path().join("application-execution");
+    std::fs::create_dir_all(state.join("cache")).expect("state roots");
+    std::fs::create_dir_all(&execution).expect("execution root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+            .expect("state mode");
+        std::fs::set_permissions(state.join("cache"), std::fs::Permissions::from_mode(0o700))
+            .expect("cache mode");
+        std::fs::set_permissions(&execution, std::fs::Permissions::from_mode(0o700))
+            .expect("execution mode");
+    }
+    let planner: std::sync::Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+        std::sync::Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        ));
+    let composition = sigil_runtime::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution,
+        CanonicalHash::from_bytes([0xa3; 32]),
+        planner,
+        &[Channel::ApplicationControlLog],
+    )
+    .expect("managed application composition");
     composition.storage_writer
 }
 
@@ -312,6 +347,59 @@ fn current_schema_command_store_uses_managed_idempotency_ledger() {
         reopened.reserve(identity("managed-command", 'a')),
         Ok(HttpStoredCommandClaim::Existing(completion))
             if *completion == HttpStoredCommandCompletion::Aborted
+    ));
+}
+
+#[test]
+fn current_schema_command_store_cuts_over_to_application_control_authority() {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
+
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let legacy_path = temp.path().join("legacy-application-commands.json");
+    let writer = application_managed_writer(&temp);
+    let managed_path = writer
+        .managed_named_leaf_path(
+            Channel::ApplicationControlLog,
+            "http-application-reservations",
+        )
+        .expect("managed application leaf")
+        .join("records.jsonl");
+    let stored = identity("application-command", 'b');
+    {
+        let store =
+            HttpDurableCommandStore::open(&legacy_path, 8).expect("legacy store should initialize");
+        assert!(matches!(
+            store.reserve(stored.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        store
+            .complete(
+                &stored,
+                HttpStoredCommandCompletion::Start(receipt("application-command")),
+            )
+            .expect("legacy terminal receipt should persist");
+        store
+            .attach_application_writer(Arc::clone(&writer), "http-application-reservations")
+            .expect("application writer should attach");
+        assert!(
+            !legacy_path.exists(),
+            "legacy source must be retired after import"
+        );
+        assert!(
+            managed_path.exists(),
+            "application control record should exist"
+        );
+    }
+
+    let reopened = HttpDurableCommandStore::open(&legacy_path, 8)
+        .expect("compatibility path should be reopenable after cutover");
+    reopened
+        .attach_application_writer(writer, "http-application-reservations")
+        .expect("application writer should reopen");
+    assert!(matches!(
+        reopened.reserve(stored),
+        Ok(HttpStoredCommandClaim::Existing(completion))
+            if matches!(*completion, HttpStoredCommandCompletion::Start(_))
     ));
 }
 

@@ -27,6 +27,9 @@ pub struct ShadowPlannerConfigV1 {
     pub schema_version: u32,
     pub workspace_id: String,
     pub capture_product_defaults: bool,
+    /// The current managed Local binder can only prove explicit unconfined execution. It must
+    /// not advertise the isolated profile until a real platform binder is injected.
+    pub local_execution_explicit_unconfined: bool,
 }
 
 impl Default for ShadowPlannerConfigV1 {
@@ -35,6 +38,7 @@ impl Default for ShadowPlannerConfigV1 {
             schema_version: 1,
             workspace_id: "shadow-workspace".to_owned(),
             capture_product_defaults: true,
+            local_execution_explicit_unconfined: true,
         }
     }
 }
@@ -52,6 +56,7 @@ fn purpose_class(purpose: ExecutionPurposeV1) -> &'static str {
         ExecutionPurposeV1::OneShot => "one-shot",
         ExecutionPurposeV1::Terminal => "terminal",
         ExecutionPurposeV1::ExtensionProcess => "extension",
+        ExecutionPurposeV1::CodeIntelProcess => "code-intel",
     }
 }
 
@@ -77,12 +82,16 @@ impl ShadowPlannerV1 {
             ExecutionPurposeV1::OneShot | ExecutionPurposeV1::Terminal => {
                 ResourceKindV1::ExecutionTemp
             }
-            ExecutionPurposeV1::ExtensionProcess => ResourceKindV1::RuntimeState,
+            ExecutionPurposeV1::ExtensionProcess | ExecutionPurposeV1::CodeIntelProcess => {
+                ResourceKindV1::RuntimeState
+            }
         };
         let lifetime = match purpose {
             ExecutionPurposeV1::OneShot => ResourceLeaseLifetimeV1::ToolCall,
             ExecutionPurposeV1::Terminal => ResourceLeaseLifetimeV1::TerminalTask,
-            ExecutionPurposeV1::ExtensionProcess => ResourceLeaseLifetimeV1::ExtensionProcess,
+            ExecutionPurposeV1::ExtensionProcess | ExecutionPurposeV1::CodeIntelProcess => {
+                ResourceLeaseLifetimeV1::ExtensionProcess
+            }
         };
         let quota = ResourceQuotaProfileV1 {
             class: ResourceQuotaClassV1::AttemptEphemeral,
@@ -107,7 +116,11 @@ impl ShadowPlannerV1 {
                 quota_profile: quota.clone(),
                 retention_policy: ResourceRetentionPolicyV1::ReleaseOnSettlement,
                 cleanup_policy: ResourceCleanupPolicyV1::ReleaseExactGenerationOnSettlement,
-                environment_class: EnvironmentProfileClassV1::FreshIsolatedHome,
+                environment_class: if self.config.local_execution_explicit_unconfined {
+                    EnvironmentProfileClassV1::ExplicitUnconfined
+                } else {
+                    EnvironmentProfileClassV1::FreshIsolatedHome
+                },
                 toolchain_class: None,
                 subject_binding_hash: None,
                 canonical_hash: canonical_digest(b"shadow-stable-key-1"),
@@ -170,7 +183,12 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
             self.config.schema_version
         ));
         let environment_profile_class = match request.purpose {
-            ExecutionPurposeV1::ExtensionProcess => EnvironmentProfileClassV1::ExtensionProcess,
+            ExecutionPurposeV1::ExtensionProcess | ExecutionPurposeV1::CodeIntelProcess => {
+                EnvironmentProfileClassV1::ExtensionProcess
+            }
+            _ if self.config.local_execution_explicit_unconfined => {
+                EnvironmentProfileClassV1::ExplicitUnconfined
+            }
             _ => EnvironmentProfileClassV1::FreshIsolatedHome,
         };
         let draft = ManagedExecutionPlanDraftV1 {
@@ -207,72 +225,5 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sigil_kernel::managed_execution::ExecutionCapturePolicy;
-
-    fn sample_request() -> ManagedExecutionPlanRequestV1 {
-        ManagedExecutionPlanRequestV1 {
-            argv: vec!["sh".into(), "-c".into(), "true".into()],
-            cwd_subject_ref: sigil_kernel::resource::OpaquePermissionSubjectRef::new(
-                "workspace:cwd".to_owned(),
-            ),
-            purpose: ExecutionPurposeV1::OneShot,
-            structured_command_digest: canonical_digest(b"sh -c true"),
-            owner_scope: ResourceOwnerScopeV1::Application,
-            capture: ExecutionCapturePolicy {
-                stdout_capture: sigil_kernel::managed_execution::CaptureModeV1::BoundedRing {
-                    max_bytes: 64 * 1024,
-                },
-                stderr_capture: sigil_kernel::managed_execution::CaptureModeV1::BoundedRing {
-                    max_bytes: 64 * 1024,
-                },
-                pty: false,
-            },
-            environment: Vec::new(),
-            limits: sigil_kernel::managed_execution::ExecutionResourceLimits {
-                max_output_bytes: 128 * 1024,
-                max_runtime_ms: 30_000,
-                max_children: 4,
-                max_fds: 256,
-                pty_required: false,
-            },
-        }
-    }
-
-    #[test]
-    fn r71_shadow_planner_is_side_effect_free_and_stable() {
-        let planner = ShadowPlannerV1::new(ShadowPlannerConfigV1::default());
-        let first = planner
-            .plan_execution(sample_request())
-            .expect("shadow plan");
-        let second = planner
-            .plan_execution(sample_request())
-            .expect("shadow plan");
-        assert_eq!(
-            first.draft_hash, second.draft_hash,
-            "hash must be deterministic"
-        );
-        assert_eq!(first.argv_digest, second.argv_digest);
-        assert_eq!(first.attempt_journal_scope, second.attempt_journal_scope);
-    }
-
-    #[test]
-    fn r71_shadow_planner_requirement_hash_changes_with_capture_product() {
-        let planner = ShadowPlannerV1::new(ShadowPlannerConfigV1 {
-            capture_product_defaults: true,
-            ..ShadowPlannerConfigV1::default()
-        });
-        let with_defaults = planner.plan_execution(sample_request()).expect("plan");
-        let no_defaults = ShadowPlannerV1::new(ShadowPlannerConfigV1 {
-            capture_product_defaults: false,
-            ..ShadowPlannerConfigV1::default()
-        })
-        .plan_execution(sample_request())
-        .expect("plan");
-        assert_ne!(
-            with_defaults.capture_policy_hash,
-            no_defaults.capture_policy_hash
-        );
-    }
-}
+#[path = "tests/r71_shadow_planner_tests.rs"]
+mod tests;

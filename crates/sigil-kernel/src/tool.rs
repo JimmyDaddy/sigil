@@ -809,6 +809,28 @@ impl ToolContext {
         self.tool_authority.as_deref()
     }
 
+    /// Plans a logical workspace-relative file subject through the attached authority. Shipping
+    /// callers must have an authority; the absence is a typed readiness failure rather than a
+    /// path-based fallback.
+    pub fn plan_managed_file_access(
+        &self,
+        logical_path: impl Into<String>,
+        operation: crate::managed_file_access::ManagedFileOperationV1,
+        operation_scope: impl Into<String>,
+    ) -> Result<
+        crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1,
+        crate::tool_authority::KernelToolAuthorityErrorV1,
+    > {
+        self.tool_authority
+            .as_deref()
+            .ok_or({
+                crate::tool_authority::KernelToolAuthorityErrorV1::Access(
+                    crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+                )
+            })?
+            .plan_file_access(logical_path, operation, operation_scope)
+    }
+
     /// Attaches the tool authority facade (runtime composition provides the single instance).
     #[must_use]
     pub fn with_tool_authority(
@@ -862,6 +884,57 @@ impl ToolContext {
             self.tool_authority(),
             operation,
         )
+    }
+
+    /// Executes one bounded V3 file operation through the authority-owned physical executor.
+    pub fn execute_v3_file_operation(
+        &self,
+        operation: crate::managed_file_access::ManagedFileOperationV1,
+        input: crate::managed_file_access::ManagedFileExecutionInputV1,
+    ) -> Result<
+        crate::managed_file_access::ManagedFileExecutionOutcomeV1,
+        crate::tool_authority::KernelToolAuthorityErrorV1,
+    > {
+        let plan = self.sealed_v3_plan().ok_or({
+            crate::tool_authority::KernelToolAuthorityErrorV1::Access(
+                crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+            )
+        })?;
+        let decision = self.sealed_v3_decision().ok_or({
+            crate::tool_authority::KernelToolAuthorityErrorV1::Access(
+                crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+            )
+        })?;
+        self.tool_authority
+            .as_deref()
+            .ok_or({
+                crate::tool_authority::KernelToolAuthorityErrorV1::Access(
+                    crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+                )
+            })?
+            .execute_v3_file_operation(plan, decision, operation, input)
+    }
+
+    /// Reads bounded preview data through the authority without touching the host filesystem in
+    /// the builtin tool surface. The planner still requires the exact registered workspace.
+    pub fn preview_managed_file_operation(
+        &self,
+        logical_path: impl Into<String>,
+        operation: crate::managed_file_access::ManagedFileOperationV1,
+        max_bytes: usize,
+    ) -> Result<
+        crate::managed_file_access::ManagedFilePreviewOutcomeV1,
+        crate::tool_authority::KernelToolAuthorityErrorV1,
+    > {
+        let plan = self.plan_managed_file_access(logical_path, operation, "file-preview")?;
+        self.tool_authority
+            .as_deref()
+            .ok_or({
+                crate::tool_authority::KernelToolAuthorityErrorV1::Access(
+                    crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+                )
+            })?
+            .preview_file_operation(&plan, operation, max_bytes)
     }
 
     /// Guards one borrowed-subject file operation through the attached authority: None when no

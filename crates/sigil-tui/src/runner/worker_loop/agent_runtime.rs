@@ -606,6 +606,7 @@ pub(in crate::runner) enum PlanReviewExecutionResult {
     Blocked { reason: String, paused: bool },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     run_session: &mut Session,
     action: sigil_kernel::StartPlanReviewAction,
@@ -617,6 +618,9 @@ pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
@@ -639,6 +643,7 @@ where
         handler,
         approval_handler,
         cancellation_handle,
+        managed_plan_review_child_resources,
     )
     .await
 }
@@ -656,6 +661,9 @@ pub(in crate::runner) async fn run_explicit_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
@@ -679,6 +687,7 @@ where
         handler,
         approval_handler,
         cancellation_handle,
+        managed_plan_review_child_resources,
     )
     .await
 }
@@ -695,6 +704,9 @@ pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: sigil_kernel::RunCancellationHandle,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    >,
 ) -> std::result::Result<PlanReviewExecutionResult, String>
 where
     H: sigil_kernel::EventHandler + Send,
@@ -707,18 +719,46 @@ where
     )
     .map_err(|error| format!("failed to start plan review attempt: {error:#}"))?;
     let plan_review_workspace_root = options.workspace_root.clone();
-    let outcome = match sigil_runtime::PlanReviewCoordinator::run_plan_review(
-        run_session,
-        request,
-        agent,
-        options,
-        tool_registry,
-        handler,
-        approval_handler,
-        cancellation_handle,
-    )
-    .await
-    {
+    let child_resource_provisioner = managed_plan_review_child_resources;
+    let outcome_result = match child_resource_provisioner {
+        Some(provisioner) => {
+            sigil_runtime::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+                run_session,
+                request,
+                agent,
+                options,
+                tool_registry,
+                handler,
+                approval_handler,
+                cancellation_handle,
+                provisioner,
+            )
+            .await
+        }
+        None => {
+            #[cfg(test)]
+            {
+                sigil_runtime::PlanReviewCoordinator::run_plan_review(
+                    run_session,
+                    request,
+                    agent,
+                    options,
+                    tool_registry,
+                    handler,
+                    approval_handler,
+                    cancellation_handle,
+                )
+                .await
+            }
+            #[cfg(not(test))]
+            {
+                Err(anyhow::anyhow!(
+                    "TUI plan review requires the composed child resource bundle"
+                ))
+            }
+        }
+    };
+    let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(error) => {
             let close = sigil_runtime::PlanReviewCoordinator::close_plan_review_run_if_open(
@@ -947,6 +987,12 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    managed_verification_execution: Option<
+        Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>,
+    >,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    >,
     session_log_path: &Path,
     next_run_id: &mut u64,
     _terminal_lifecycle_router: &ChannelTerminalLifecycleRouter,
@@ -1133,6 +1179,8 @@ where
                                         base_registry: task_base_registry,
                                         agent_supervisor: task_agent_supervisor,
                                         role_provider_builder: role_provider_builder.as_ref(),
+                                        managed_verification_execution:
+                                            managed_verification_execution.clone(),
                                         handler: &mut handler,
                                         cancellation_handle,
                                         tool_artifact_read_budget,
@@ -1190,6 +1238,8 @@ where
                                         base_registry: task_base_registry,
                                         agent_supervisor: task_agent_supervisor,
                                         role_provider_builder: role_provider_builder.as_ref(),
+                                        managed_verification_execution:
+                                            managed_verification_execution.clone(),
                                         handler: &mut handler,
                                         cancellation_handle,
                                         tool_artifact_read_budget,
@@ -1289,6 +1339,8 @@ where
                                                 agent_supervisor: task_agent_supervisor,
                                                 role_provider_builder:
                                                     role_provider_builder.as_ref(),
+                                                managed_verification_execution:
+                                                    managed_verification_execution.clone(),
                                                 handler: &mut handler,
                                                 cancellation_handle,
                                                 tool_artifact_read_budget,
@@ -1377,17 +1429,18 @@ where
                             agent.as_ref(),
                             &plan_review_root_config,
                             options.clone(),
-                            plan_registry,
+                                    plan_registry,
                             sigil_runtime::plan_handoff_workspace_snapshot_id(
                                 &plan_review_root_config,
                                 &options.workspace_root,
                             )
                             .ok()
                             .flatten(),
-                            &mut handler,
-                            &mut approval_handler,
-                            cancellation_handle.clone(),
-                        )
+                                        &mut handler,
+                                        &mut approval_handler,
+                                        cancellation_handle.clone(),
+                        managed_plan_review_child_resources.clone(),
+                                    )
                         .await;
                         match result {
                             Ok(PlanReviewExecutionResult::Finished(result)) => {

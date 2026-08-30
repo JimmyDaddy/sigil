@@ -17,6 +17,11 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) managed_storage_writer: Option<
         std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
+    pub(in crate::runner) managed_plan_review_child_resources: Option<
+        std::sync::Arc<
+            dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1,
+        >,
+    >,
     pub(in crate::runner) managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
     pub(in crate::runner) run: RunWorkerState,
     pub(in crate::runner) compaction: CompactionWorkerState,
@@ -84,6 +89,7 @@ impl WorkerLoopState {
             terminal_control,
             scratch_control,
             managed_storage_writer,
+            managed_plan_review_child_resources: None,
             managed_artifact_store,
             readiness: WorkerReadiness::new(),
             session: SessionWorkerState {

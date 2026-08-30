@@ -1,5 +1,6 @@
 #![recursion_limit = "1024"]
 
+mod application_bridge;
 mod auth;
 mod command_store;
 mod config;
@@ -17,6 +18,7 @@ mod session_catalog_batch;
 mod sse;
 mod support;
 
+pub use application_bridge::HttpApplicationCommandRequest;
 pub use auth::{HttpAuthError, HttpAuthValidator};
 pub use command_store::{HttpCommandStoreError, HttpDurableCommandStore};
 pub use config::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig, HttpServerConfigError};

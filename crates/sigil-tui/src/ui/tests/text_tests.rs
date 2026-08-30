@@ -61,6 +61,28 @@ fn composer_cursor_width_uses_the_same_graphemes_as_rendering() {
 }
 
 #[test]
+fn bidi_reordering_keeps_logical_and_visual_positions_bijective() {
+    let line = Line::from("prefix אבג suffix");
+    let (visual, map) = bidi_reorder_line_with_map(&line);
+    assert_eq!(
+        map.visual_to_logical.len(),
+        "prefix אבג suffix".chars().count()
+    );
+    assert_eq!(map.logical_to_visual.len(), map.visual_to_logical.len());
+    for (visual_index, logical_index) in map.visual_to_logical.iter().copied().enumerate() {
+        assert_eq!(map.logical_to_visual[logical_index], visual_index);
+    }
+    assert_eq!(
+        visual
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "prefix גבא suffix"
+    );
+}
+
+#[test]
 fn wrap_display_width_preserves_empty_and_multichar_lines() {
     assert_eq!(wrap_display_width("", 10), vec![String::from("")]);
     assert_eq!(

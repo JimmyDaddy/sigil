@@ -3,15 +3,19 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
     time::SystemTime,
 };
+
+#[cfg(not(test))]
+use std::sync::Mutex;
 
 mod agent_flow;
 mod approval_flow;
 mod checkpoint_flow;
 mod command_dispatch;
 mod compaction_flow;
-mod config_flow;
+pub(crate) mod config_flow;
 mod conversation_queue_flow;
 mod diagnostics_flow;
 mod egress_disclosure_flow;
@@ -92,7 +96,7 @@ use crate::workspace_git::{WorkspaceGitStatus, inspect_workspace_git_status};
 pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
 pub(crate) use self::checkpoint_flow::{CheckpointRestoreModalPhase, CheckpointRestoreModalView};
-pub(crate) use self::egress_disclosure_flow::EGRESS_DISCLOSURE_HEIGHT;
+pub(crate) use self::egress_disclosure_flow::{EGRESS_DISCLOSURE_HEIGHT, EgressDisclosureCard};
 use self::formatting::*;
 #[cfg(test)]
 pub(crate) use self::intent_stack_flow::IntentStackRowView;
@@ -559,11 +563,10 @@ pub struct AppState {
         std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
     /// RFC-0071 R71.6: the boot authority composition shared with the worker.
-    authority_composition: Option<
-        std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
-    >,
+    authority_composition:
+        Option<std::sync::Arc<sigil_runtime::application_host::RuntimeAuthorityCompositionV1>>,
     /// Published boot epoch shared with the worker's guarded session opens.
-    boot_cutover: Option<std::sync::Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>>,
+    boot_cutover: Option<std::sync::Arc<sigil_runtime::application_host::RuntimeGlobalCutoverV1>>,
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
     pub session_id: String,
@@ -590,7 +593,11 @@ pub struct AppState {
     info_rail_visible: bool,
     info_rail_detail: bool,
     review: ReviewState,
+    /// Persisted configuration used for authority/config CAS and product configuration UI.
     config_snapshot: Option<RootConfig>,
+    /// Session-effective worker configuration. This may contain a narrow route overlay (for
+    /// example `/model`) but must never be used as an authority composition input.
+    session_runtime_config: Option<RootConfig>,
     recent_model_refs: Vec<sigil_kernel::ModelRef>,
     terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
@@ -611,6 +618,7 @@ pub struct AppState {
     thinking_block_mode: ThinkingBlockMode,
     timeline_state: TimelineState,
     pending_terminal_cancel_confirmation: Option<String>,
+    application_terminal_projection: Option<sigil_application::TerminalSurfaceProjection>,
     terminal_task_control_identities: HashMap<String, TerminalTaskControlIdentity>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
@@ -850,6 +858,10 @@ pub enum AppAction {
         request_id: u64,
         preview: SessionRetentionPreview,
     },
+    PreviewSessionRetention {
+        request_id: u64,
+        policy: sigil_runtime::SessionRetentionPolicy,
+    },
     ActivateLazyMcp {
         server_name: Option<String>,
     },
@@ -869,6 +881,11 @@ pub enum AppAction {
     RuntimeConfigUpdated {
         root_config: Box<RootConfig>,
     },
+    /// Session-scoped provider route update. It changes only the worker's effective route; the
+    /// persisted configuration and authority composition remain unchanged.
+    SessionRuntimeRouteUpdated {
+        route: sigil_kernel::ResolvedModelRoute,
+    },
     /// Runtime permission-mode switch for the active run (and persisted default); does not
     /// restart the worker.
     UpdateActiveRunPermissionMode {
@@ -885,6 +902,40 @@ pub enum AppAction {
     ConfigSaved {
         root_config: Box<RootConfig>,
     },
+    PersistConfiguration {
+        request: Arc<ConfigurationSaveRequest>,
+    },
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub struct ConfigurationSaveRequest {
+    pub(crate) expected: RootConfig,
+    pub(crate) next_base: RootConfig,
+    pub(crate) config_path: PathBuf,
+    pub(crate) follow_up: ConfigurationSaveFollowUp,
+    pub(crate) root_only: bool,
+    #[cfg(not(test))]
+    pub(crate) draft: Mutex<Option<sigil_runtime::provider_connections::ConnectionSaveDraft>>,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigurationSaveFollowUp {
+    RebootRuntime,
+    ApplyActiveRunPermissionMode(sigil_kernel::PermissionMode),
+    ApplyPersistedDefaultModel,
+}
+
+impl std::fmt::Debug for ConfigurationSaveRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfigurationSaveRequest")
+            .field("expected", &self.expected)
+            .field("next_base", &self.next_base)
+            .field("config_path", &self.config_path)
+            .field("draft", &"[redacted]")
+            .finish()
+    }
 }
 
 fn configured_runtime_route(
@@ -943,9 +994,7 @@ impl AppState {
     /// Attaches the boot authority composition (single call at boot).
     pub fn set_authority_composition(
         &mut self,
-        composition: std::sync::Arc<
-            sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1,
-        >,
+        composition: std::sync::Arc<sigil_runtime::application_host::RuntimeAuthorityCompositionV1>,
     ) {
         self.managed_history_writer = Some(std::sync::Arc::clone(&composition.storage_writer));
         self.authority_composition = Some(composition);
@@ -954,14 +1003,85 @@ impl AppState {
         self.session_log_path = self
             .managed_session_log_path()
             .unwrap_or_else(|| self.session_log_path.clone());
+        // `JsonlSessionStore::with_store` binds a managed leaf to the deterministic path identity
+        // because its leaf is `records.jsonl`, not the conventional `session-<id>.jsonl` name.
+        // Keep the application scope equal to that durable writer identity before the worker and
+        // application projection service are constructed.
+        if self.authority_composition.is_some() {
+            self.session_id = sigil_kernel::stable_event_uuid(
+                "sigil-session-path",
+                &self.session_log_path.to_string_lossy(),
+            );
+        }
         self.load_input_history();
+        self.refresh_session_history();
     }
 
     pub fn set_boot_cutover(
         &mut self,
-        cutover: std::sync::Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>,
+        cutover: std::sync::Arc<sigil_runtime::application_host::RuntimeGlobalCutoverV1>,
     ) {
         self.boot_cutover = Some(cutover);
+    }
+
+    /// Applies the bounded runtime application projection to the legacy orchestration state used
+    /// by the current product adapter. The projection is the source of truth for shared run
+    /// status, selected route and attention; it never carries paths or provider payloads.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn apply_application_projection(
+        &mut self,
+        projection: &sigil_application::ApplicationProjection,
+    ) -> bool {
+        let mut changed = false;
+        let is_busy = projection.run.status.as_str() == "running";
+        if self.runtime.is_busy != is_busy {
+            self.runtime.is_busy = is_busy;
+            changed = true;
+        }
+        if let Some(route) = projection.configuration.selected_route.as_ref()
+            && self.runtime.model_name != route.as_str()
+        {
+            self.runtime.model_name = route.as_str().to_owned();
+            changed = true;
+        }
+        if let Some(notice) = projection.attention.last_notice.as_ref()
+            && self.last_notice.as_deref() != Some(notice.as_str())
+        {
+            self.last_notice = Some(notice.as_str().to_owned());
+            changed = true;
+        }
+        if self.application_terminal_projection.as_ref() != Some(&projection.terminal) {
+            self.application_terminal_projection = Some(projection.terminal.clone());
+            changed = true;
+        }
+        changed
+    }
+
+    /// Clears all authority-owned boot attachments before a replacement transaction is
+    /// attempted. A failed config replacement must not leave the stopped worker paired with an
+    /// authority composition built from a previous snapshot.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn clear_boot_authority(&mut self) {
+        self.managed_history_writer = None;
+        self.authority_composition = None;
+        self.boot_cutover = None;
+    }
+
+    /// Applies the runtime boot owner's frozen workspace/path view before any session or writer
+    /// state is initialized. This prevents the TUI shell from resolving authority roots a second
+    /// time from its own process cwd.
+    pub(crate) fn set_frozen_boot_paths(
+        &mut self,
+        workspace_root: PathBuf,
+        sigil_paths: sigil_runtime::paths::SigilPaths,
+    ) {
+        self.workspace_root = workspace_root.clone();
+        self.workspace_git_status = inspect_workspace_git_status(&workspace_root);
+        self.sigil_paths = sigil_paths;
+        self.session_log_dir = self.sigil_paths.session_log_dir.clone();
+        self.session_log_path = self
+            .session_log_dir
+            .join(format!("session-{}.jsonl", self.session_id));
     }
 
     /// Authority-declared managed session-log leaf for the CURRENT session (opaque stem as the
@@ -984,11 +1104,7 @@ impl AppState {
     pub(super) fn tool_artifact_store_for_current_session(
         &self,
     ) -> Option<sigil_kernel::ToolArtifactStore> {
-        let Some(writer) = self.managed_history_writer.as_ref() else {
-            return Some(sigil_kernel::ToolArtifactStore::for_session_path(
-                &self.session_log_path,
-            ));
-        };
+        let writer = self.managed_history_writer.as_ref()?;
         let composition = self.authority_composition.as_ref()?;
         let staging =
             sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;
@@ -996,20 +1112,13 @@ impl AppState {
         if !composition.declared_channels.contains(&staging)
             || !composition.declared_channels.contains(&store)
         {
-            return Some(sigil_kernel::ToolArtifactStore::for_session_path(
-                &self.session_log_path,
-            ));
+            return None;
         }
-        let key = self.session_log_path.file_stem()?.to_str()?;
-        let store_root = writer.managed_named_leaf_path(store, key).ok()?;
-        let staging_root = writer.managed_named_leaf_path(staging, key).ok()?;
-        Some(
-            sigil_kernel::ToolArtifactStore::for_session_path_with_roots(
-                &self.session_log_path,
-                store_root,
-                staging_root,
-            ),
-        )
+        // The app shell does not own the worker's paired artifact lease. Returning a
+        // path-backed kernel store here would reopen the P1-10 bypass; the worker-provided
+        // runtime attachment is the only current-schema reader route.
+        let _ = (writer, composition, staging, store);
+        None
     }
 
     /// The boot authority composition (None before boot attachment). Used by the production
@@ -1018,10 +1127,18 @@ impl AppState {
     #[allow(dead_code)]
     pub(crate) fn authority_composition(
         &self,
-    ) -> Option<
-        &std::sync::Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
-    > {
+    ) -> Option<&std::sync::Arc<sigil_runtime::application_host::RuntimeAuthorityCompositionV1>>
+    {
         self.authority_composition.as_ref()
+    }
+
+    /// The boot owner's published current-schema decision shared with the worker. Production
+    /// worker startup must consume this value instead of reopening a manifest by pathname.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn boot_cutover(
+        &self,
+    ) -> Option<&std::sync::Arc<sigil_runtime::application_host::RuntimeGlobalCutoverV1>> {
+        self.boot_cutover.as_ref()
     }
 
     pub fn from_root_config(config_path: &Path, root_config: &RootConfig) -> Self {
@@ -1141,6 +1258,7 @@ impl AppState {
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: Some(root_config.clone()),
+            session_runtime_config: Some(root_config.clone()),
             recent_model_refs,
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
@@ -1158,6 +1276,7 @@ impl AppState {
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
+            application_terminal_projection: None,
             terminal_task_control_identities: HashMap::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
@@ -1279,6 +1398,7 @@ impl AppState {
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: None,
+            session_runtime_config: None,
             recent_model_refs: Vec::new(),
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: SecretRedactor::default(),
@@ -1296,6 +1416,7 @@ impl AppState {
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
+            application_terminal_projection: None,
             terminal_task_control_identities: HashMap::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,

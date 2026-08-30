@@ -20,15 +20,20 @@ uuid.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-http = { path = "../sigil-http" }
 sigil-runtime = { path = "../sigil-runtime" }
-sigil-tui = { path = "../sigil-tui" }
+sigil-tui-host = { package = "sigil-tui-host", path = "../sigil-tui" }
 sigil-updater = { path = "../sigil-updater" }
 
 [dev-dependencies]
 libc.workspace = true
-portable-pty.workspace = true
 sigil-desktop = { path = "../sigil-desktop" }
 tempfile.workspace = true
 walkdir.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+portable-pty = "=0.9.0"
+
+[target.'cfg(windows)'.dev-dependencies]
+portable-pty = "=0.8.1"
 
 [lints]
 workspace = true

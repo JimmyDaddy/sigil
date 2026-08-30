@@ -347,6 +347,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
         None,
         None,
         None,
+        None,
     )
     .await?
     .registry)
@@ -413,6 +414,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
         scratch_control,
         managed_memory_writer,
         None,
+        None,
     )
     .await
 }
@@ -434,6 +436,9 @@ pub async fn build_tool_surface_with_terminal_lifecycle_and_managed_extension_ex
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
@@ -448,6 +453,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle_and_managed_extension_ex
         scratch_control,
         managed_memory_writer,
         managed_extension_execution,
+        managed_command_execution,
     )
     .await
 }
@@ -521,6 +527,7 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         None,
         None,
         None,
+        None,
     )
     .await?
     .registry)
@@ -544,6 +551,9 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -556,6 +566,7 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
         external_scratch_control,
         managed_memory_writer.clone(),
+        managed_command_execution,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -687,6 +698,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust(
         workspace_trust,
         None,
         None,
+        None,
     )
 }
 
@@ -721,6 +733,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
             terminal_lifecycle_sink,
         )),
         None,
+        None,
     )
 }
 
@@ -738,7 +751,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
     workspace_trust: WorkspaceTrust,
     terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
 ) -> Result<RuntimeToolSurface> {
-    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution(
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
         root_config,
         provider_capabilities,
         workspace_root,
@@ -746,6 +759,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
         runtime_event_handler,
         workspace_trust,
         terminal_lifecycle_factory,
+        None,
         None,
     )
 }
@@ -764,6 +778,41 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) -> Result<RuntimeToolSurface> {
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        workspace_trust,
+        terminal_lifecycle_factory,
+        managed_extension_execution,
+        None,
+    )
+}
+
+/// Builds the lazy-MCP tool surface with both managed Extension and command execution routes.
+///
+/// The command route is required by shipping Terminal, code-intelligence, and verification
+/// tools. Keeping it on the same composition-owned surface prevents those tools from silently
+/// falling back to direct process spawning when the worker is bootstrapped through the lazy-MCP
+/// entrypoint.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    workspace_trust: WorkspaceTrust,
+    terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
+) -> Result<RuntimeToolSurface> {
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_terminal_lifecycle(
         root_config,
         provider_capabilities,
@@ -775,6 +824,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
             terminal_lifecycle_factory,
         )),
         managed_extension_execution,
+        managed_command_execution,
     )
 }
 
@@ -795,6 +845,9 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<RuntimeToolSurface> {
     let _declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -807,6 +860,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         terminal_lifecycle_route,
         None,
         None,
+        managed_command_execution,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -1196,13 +1250,44 @@ fn register_local_tools(
     managed_memory_writer: Option<
         std::sync::Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
 ) -> Result<(
     Option<sigil_code_intel::CodeIntelligenceService>,
     sigil_tools_builtin::TerminalTaskControlHandle,
     sigil_tools_builtin::ScratchNamespaceControl,
 )> {
+    if managed_command_execution.is_none()
+        && root_config.execution.backend() == sigil_kernel::ExecutionBackendKind::Local
+        && root_config.execution.requires_sandbox()
+    {
+        let error = root_config
+            .execution
+            .validate_profile_capabilities(sigil_kernel::ExecutionBackendCapabilities::default())
+            .expect_err("Local execution must not satisfy a required sandbox profile");
+        bail!(error);
+    }
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    let execution_backend = build_configured_execution_backend(root_config)?;
+    let managed_terminal: Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1> =
+        managed_command_execution
+            .as_ref()
+            .map(|route| {
+                Arc::clone(route) as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>
+            })
+            .unwrap_or_else(|| {
+                Arc::new(sigil_tools_builtin::UnavailableManagedCommandExecutionPortV1)
+            });
+    let managed_code_intel: Option<Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>> =
+        managed_command_execution.as_ref().map(|route| {
+            Arc::clone(route) as Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>
+        });
+    let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
+        managed_command_execution
+            .map(|route| route as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>)
+            .unwrap_or_else(|| {
+                Arc::new(sigil_tools_builtin::UnavailableManagedCommandExecutionPortV1)
+            });
     let builtin_paths = sigil_tools_builtin::BuiltinToolPaths {
         changesets_root: paths.changesets_root.clone(),
         changesets_label_root: PathBuf::from("state/artifacts/changesets"),
@@ -1216,13 +1301,18 @@ fn register_local_tools(
         .unwrap_or_else(|| crate::authority_scratch_control(paths.scratch_root.clone()));
     let handles = match terminal_lifecycle_route {
         Some(RuntimeTerminalLifecycleRoute::Factory(factory)) => {
-            sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
                 registry,
                 builtin_paths,
-                execution_backend,
-                &root_config.execution,
-                factory,
+                Arc::clone(&managed_executor),
+                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                    &root_config.execution,
+                ),
+                Some(sigil_tools_builtin::TerminalLifecycleRoute::Factory(
+                    factory,
+                )),
                 Some(scratch_control.clone()),
+                Arc::clone(&managed_terminal),
             )
         }
         route => {
@@ -1231,21 +1321,25 @@ fn register_local_tools(
                 Some(RuntimeTerminalLifecycleRoute::Factory(_)) => unreachable!(),
                 None => None,
             };
-            sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
                 registry,
                 builtin_paths,
-                execution_backend,
-                &root_config.execution,
-                sink,
+                managed_executor,
+                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                    &root_config.execution,
+                ),
+                sink.map(sigil_tools_builtin::TerminalLifecycleRoute::Bound),
                 Some(scratch_control.clone()),
+                managed_terminal,
             )
         }
     };
-    let code_intelligence = sigil_code_intel::register_code_intelligence_tools_with_workspace_trust(
+    let code_intelligence = sigil_code_intel::register_code_intelligence_tools_with_workspace_trust_and_process_launcher(
         registry,
         &root_config.code_intelligence,
         workspace_root.clone(),
         workspace_trust,
+        managed_code_intel,
     );
     let user_config_dir = default_user_config_dir().ok();
     let _ = skills::register_skill_tools(
@@ -1272,6 +1366,7 @@ fn register_local_tools(
 /// # Errors
 ///
 /// Returns an error when the configured backend cannot satisfy the requested isolation policy.
+#[cfg(test)]
 pub fn build_configured_execution_backend(
     root_config: &RootConfig,
 ) -> Result<Arc<dyn ExecutionBackend>> {

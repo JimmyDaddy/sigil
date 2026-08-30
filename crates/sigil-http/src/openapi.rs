@@ -435,6 +435,89 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/application": {
+                "get": {
+                    "summary": "Read the transport-neutral application projection",
+                    "description": "Returns the bounded application projection after applying the durable snapshot/feed reducer. The client identity is supplied by the x-sigil-application-client-id header.",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/ApplicationClientId" }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Bounded application projection",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApplicationProjection" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/application/page": {
+                "get": {
+                    "summary": "Read one bounded application projection page",
+                    "description": "Reads a renderer-safe, frontier-bound transcript page through the same application port used by application clients.",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/ApplicationClientId" },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+                        },
+                        {
+                            "name": "before",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "integer", "format": "uint64", "minimum": 1 }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Bounded renderer-safe application page",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApplicationProjectionPage" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/application/commands": {
+                "post": {
+                    "summary": "Execute one transport-neutral application command",
+                    "description": "Reserves and dispatches a typed application command using the durable client identity supplied by the x-sigil-application-client-id header. Commands without a lossless HTTP host mapping are rejected explicitly during migration.",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/ApplicationClientId" }
+                    ],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ApplicationCommandRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Typed application receipt",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApplicationCommandReceipt" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions/{session_id}/continuity": {
                 "get": {
                     "summary": "Probe durable frontier and current foreground ownership",
@@ -1138,6 +1221,12 @@ pub fn http_openapi_document() -> Value {
                     "required": true,
                     "schema": { "type": "string" }
                 },
+                "ApplicationClientId": {
+                    "name": "x-sigil-application-client-id",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string", "minLength": 1, "maxLength": 256 }
+                },
                 "CallId": {
                     "name": "call_id",
                     "in": "path",
@@ -1587,6 +1676,69 @@ pub fn http_openapi_document() -> Value {
                         "foreground_run_id": { "type": ["string", "null"] },
                         "route_transition": { "oneOf": [{ "$ref": "#/components/schemas/SessionRouteTransitionView" }, { "type": "null" }] },
                         "route_recovery": { "oneOf": [{ "$ref": "#/components/schemas/SessionRouteRecoveryView" }, { "type": "null" }] }
+                    }
+                },
+                "ApplicationCommandRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "command"],
+                    "properties": {
+                        "command_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "command": {
+                            "description": "Versioned grouped application command. The server validates its schema and host binding.",
+                            "type": "object"
+                        }
+                    }
+                },
+                "ApplicationCommandReceipt": {
+                    "description": "Typed settlement, replay, rejection, conflict, in-flight, or uncertain application outcome.",
+                    "oneOf": [
+                        { "type": "object", "required": ["settled"] },
+                        { "type": "object", "required": ["replayed"] },
+                        { "type": "object", "required": ["rejected"] },
+                        { "type": "object", "required": ["payload_conflict"] },
+                        { "type": "object", "required": ["in_flight"] },
+                        { "type": "object", "required": ["uncertain"] }
+                    ]
+                },
+                "ApplicationProjection": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "scope", "writer_generation", "stream_generation", "observer_generation", "frontier", "session", "conversation", "run", "plan_task", "agents", "approval", "user_input", "capabilities", "configuration", "attention"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 1 },
+                        "scope": { "type": "object" },
+                        "writer_generation": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "stream_generation": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "observer_generation": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "frontier": { "type": "object" },
+                        "resource_recovery": { "type": "object" },
+                        "session": { "type": "object" },
+                        "conversation": { "type": "object" },
+                        "run": { "type": "object" },
+                        "plan_task": { "type": "object" },
+                        "agents": { "type": "object" },
+                        "approval": { "type": "object" },
+                        "user_input": { "type": "object" },
+                        "capabilities": { "type": "object" },
+                        "configuration": { "type": "object" },
+                        "attention": { "type": "object" }
+                    }
+                },
+                "ApplicationProjectionPage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["request_id", "scope", "source_generation", "at_frontier", "query", "before", "after", "total", "items"],
+                    "properties": {
+                        "request_id": { "type": "string" },
+                        "scope": { "type": "object" },
+                        "source_generation": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "at_frontier": { "type": "object" },
+                        "query": { "type": "string" },
+                        "before": { "type": ["string", "null"] },
+                        "after": { "type": ["string", "null"] },
+                        "total": { "type": "integer", "format": "uint64" },
+                        "items": { "type": "array", "items": { "type": "object" } }
                     }
                 },
                 "SessionRouteTransitionView": {

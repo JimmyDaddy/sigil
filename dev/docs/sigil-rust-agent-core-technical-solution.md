@@ -3,7 +3,25 @@
 > Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
 > no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
 
-> RFC-0071 implementation snapshot (2026-08-25): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. R71.6-R71.8 remain one unpublished candidate until the fixed cross-platform qualification evidence is complete.
+> RFC-0071 final frozen snapshot (2026-08-28): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. The post-freeze pending-admission, bootstrap recovery, process-inventory, delete-recovery, Windows cleanup and cross-platform portability findings were closed in the final candidate `ec5459d829e086fbb73f090dcb3201f649d99d7b`, which passed exact-SHA local full and fixed five-platform hosted qualification. The earlier qualification-candidate snapshot and all older frozen claims remain historical and are superseded by this exact qualified object.
+
+> RFC-0070 R70.0 baseline (2026-08-28): the post-R71 TUI migration boundary is recorded in
+> `dev/governance/r70-command-event-migration-v1.toml`. This slice does not move authority ownership or
+> split packages; it freezes the production protocol discovery set and measures the existing projection/layout/
+> render/present path before R70.1 introduces `CommittedPresentation`.
+
+> RFC-0070 current package snapshot (2026-08-28): R70.4 application ports, R70.5 public framework packages,
+> R70.6 host ownership and R70.7 preview package qualification are implemented. R70.8 has retired the public
+> compatibility paths and moved the lossless resource-recovery projection from runtime into `sigil-application`.
+> The internal host still owns the product renderer/worker implementation until a published preview has completed
+> one real release cycle and user validation; that evidence is a separate release gate and is not implied by local
+> package tests.
+
+R70.8 compatibility note：上文的 `sigil-tui` package tree 已拆成 public framework 与内部
+`sigil-tui-host`；后者的 runner、AppState、legacy LayoutSnapshot 和 platform effects 不是 public
+framework contract。R70.8 还将 kernel recovery surface 的无状态 lossless facade 迁入
+`sigil-application`，runtime 不再发布 R71 transitional recovery module。真实发布周期与用户验证仍由
+独立 evidence gate 记录，不能由本地 package test 代替。
 
 ## 1. 背景
 
@@ -240,6 +258,14 @@ sigil/
       src/
         lib.rs
         tests/lib_tests.rs
+    sigil-application/
+      src/
+        lib.rs
+        resource_recovery.rs
+    sigil-tui-core/          # publishable application-neutral primitives
+    sigil-tui-ratatui/       # publishable Ratatui adapter
+    sigil-tui-framework/     # publishable `sigil-tui` facade
+    sigil-tui-app/           # non-publishable thin application adapter
     sigil-http/
       src/
         auth.rs
@@ -311,7 +337,12 @@ sigil/
 - `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。历史session reopen只接受catalog提供的relative ref与expected durable id，并由runtime重新验证lifecycle/JSONL truth；SQLite projection不能授权resume。artifact page route 必须 authenticated、typed、session/source-bound、hash-verified 且 endpoint cap 固定，response/error 均不包含物理路径。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`update`、`serve` 和隐藏 provider 调试命令保留为显式自动化/高级入口，不承担最终产品心智；`update check` 只发现更新，`update apply --yes` 只对已准入 standalone archive 执行替换，包管理器安装仅返回 owner command；`serve` 当前通过共享 runtime application service 启动 loopback-only、bearer-authenticated HTTP/SSE listener，支持 durable replay、live event、approval/cancel 与 graceful drain，不提供 remote bind 或 multi-user daemon 语义。`sigil-desktop`已按workspace监管单独的`serve`进程，通过单行版本化JSON/鉴权`server-info`完成bootstrap，并用stdin owner pipe与process-tree fallback拥有child lifecycle；诊断事实由 `sigil-runtime` 提供，避免 CLI、TUI与desktop各写一套判断。R71 current-schema doctor/support 进一步直接投影 kernel-owned `CutoverSurfaceStatusV1`，四个表面共享 epoch/authority/blocker 语义；headless admission 在 kernel 统一区分 `approval_required` 与 `confirmation_required`，session grant 不得替代 confirmation；lossy pipeline 的 final-stage exit code 不会被升级为 verification passed。
 - `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke，并为可独立替换的官方归档写入 `github-release` 分发 marker；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs，npm launcher 再覆盖 install-source marker 以保留包管理器 ownership；`scripts/release-doctor.mjs` 绑定 tag、Cargo/Desktop/Tauri/Cargo.lock/changelog、remote main/tag 与 exact-SHA CI；`scripts/release-candidate.mjs` 冻结 tag commit、候选 asset inventory/size/SHA-256；macOS Desktop 使用 append-only 公证账本把 build+submit、单次 status、offline finalize 与 upload 分离，每个 attempt 绑定 tag/commit/Team/profile label/目标架构/不可变 submission SHA-256，Apple 原始响应原子落盘，缺失 ID 只能唯一 history reconciliation 或显式 orphan 后重提；`scripts/upload-desktop-macos-release.sh` 是签名双架构 Desktop 进入 draft 的唯一 maintainer 入口，并复验 finalized ledger，默认拒绝替换不同字节。`.github/workflows/release.yml` 只在 tag push 时构建一次多平台 TUI archive、生成 provenance、准备 npm tarball 和 draft Release；显式 publish 不再重编，而是按 candidate manifest 复用原 tarball，先验证双架构 macOS Desktop DMG、updater archive、checksum 与 signature，冻结 `latest.json`，再公开 immutable Release、通过 npm Trusted Publisher 按 platform-first/root-last 发布、部署 Pages updater endpoint，并由独立 job 使用仅限 `JimmyDaddy/homebrew-sigil` 的 SSH deploy key同步 tap。主 workflow 在 npm 发布后通过 `repository_dispatch` 启动有界等待的公开 npm/GitHub/Desktop/Pages/Homebrew smoke；`release.published` 另行覆盖非 `GITHUB_TOKEN` 触发的人工发布。crates.io package name 决策仍是 release-management 工作。
-- `sigil-tui`：并列一等产品表面中的终端实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；`app/state.rs` 承载 runtime、composer、approval、session browser 以及 timeline presentation、review/checkpoint、agent panel、egress disclosure 等私有领域 bundle，根 `AppState` 只为兼容保留公开 timeline/event/scroll 字段和顶层编排状态；`runner/worker_loop.rs` 只保留 worker façade，私有 `WorkerLoopState` 统一持有 session/run/compaction/refresh/agent 状态，scheduler 通过统一 `WorkerEvent` inbox 阻塞等待 command、typed completion、durable projection 与 supervisor wake，只在存在 MCP/terminal 等真实 deadline 时使用 nearest-deadline timeout；七个 advancement function 与穷尽 public-command 到 domain-typed-command classifier/handler 分别承担确定性 safe-point 推进和路由。session scheduler 的 queue、TaskGuidance、continuation、terminal 与 usage/readiness 热查询读取 kernel active-session 增量 projection，并以 durable frontier/CAS 保持最终写入权威；switch/new-session/local-session fork/checkpoint fork 复用一个 session transition，替换 projection observer generation，并在 foreground 或 detached background run 存在时 fail-closed，同时按目标 session 重建 agent supervisor 与模型可见 agent-tool surface。终端运行时采用 alternate-screen 全屏模型，Ratatui 是当前应用帧的唯一物理输出所有者；启动不读取 cursor position，也不把 transcript 写入 terminal 原生 scrollback。异步 `EventStream` 是输入的唯一读取者，主 transcript、child transcript、composer、status、modal 与 info rail 全部在同一个应用帧和坐标系内渲染。历史浏览只由 `AppState` 的 bounded timeline render store、虚拟 scroll offset 与 logical content anchor 管理；PageUp/Ctrl-Home/滚轮、新输出、height resize、width reflow 和 info-rail 显隐都必须重投影同一锚点，不能维护第二套物理 frontier/seed/rebase 状态。每次 resize 由 fullscreen autoresize 重建 viewport；退出、普通错误和 panic 必须先清理应用帧并离开 alternate screen，再在恢复后的 primary screen 输出 resume hint 或错误。info rail 是可响应收起的普通布局区域，不拥有独立终端写入路径，也不能成为隐藏其他区域重绘错误的稳定性开关。所有 transcript、status、composer 与 info-rail 宽度统一采用 Ratatui terminal-cell 模型，并先清理控制字符和非 emoji 序列中的 default-ignorable 字符；timeline render store 在缓存和命中区计算前就把每行约束到真实 live-panel 宽度，不把 renderer 的二次 wrap 当作布局事实。interactive TUI 独占 stdout/stderr 所指向的终端字节流，进程级 tracing 不能在运行期写入 stderr 绕过 Ratatui；非交互 CLI 仍保留标准 tracing 输出。TUI `/doctor` 复用 runtime 诊断事实；`/update [check|refresh|apply]` 复用 updater policy，网络和替换在独立后台任务执行，启动自动检查只在 release packaged build 且非 CI/source 时调度，并且永不自动 apply；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
+- `sigil-application`：transport-neutral application port、command reservation、projection/feed、typed receipt 与 kernel-owned recovery surface 的唯一高层 contract。它只做 bounded、lossless contract validation/round-trip，不拥有 runtime worker、physical resource、filesystem、sandbox 或第二份 recovery state。
+- `sigil-tui-core`：公开、application-neutral 的 bounded surface、input、damage、theme、virtual-list、presentation 与 widget primitives；没有 Sigil domain、runtime、filesystem 或 process 依赖。
+- `sigil-tui-ratatui`：公开的 Ratatui rendering adapter，只把 core contract 降为 renderer-owned buffer/terminal facts；不持有 application/session/worker state。
+- `sigil-tui-framework`（package `sigil-tui`）：公开 facade、`App`/`UiRuntimeDriver` 生命周期、prepared render/update 和标准 widget declarations；旧 `AppState`、WorkerProtocol、layout snapshot 与 platform effect 不再属于该 package 的 public API。
+- `sigil-tui-app`：non-publishable、薄的 Sigil product adapter，只依赖 `sigil-application` 与 public `sigil-tui`，将产品 action/projection 映射到 application port。
+- `sigil-tui`（package `sigil-tui-host`）：内部终端 composition host。它仍持有产品 renderer/worker 的实现细节、Ratatui/Crossterm lifecycle 和 host effects；这些代码不得重新成为 public framework compatibility facade，R70.8 release-cycle/user validation 由独立 evidence gate 记录。
 
 主 transcript 与 child-agent transcript 的历史浏览都保存内容锚点；新输出、文件 reload、
 高度变化或宽度 reflow 只能重投影同一锚点。child tail window 滚动时还必须用稳定的 logical
@@ -1984,7 +2015,7 @@ screen 只负责保留用户原来的 shell 内容，应用运行期间的所有
 
 当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛 bootstrap、顶层 key routing 和跨状态编排；运行状态、composer、approval、session browser、timeline presentation、review/checkpoint、agent panel 和 egress disclosure 字段归入 `crates/sigil-tui/src/app/state.rs`，已有公开 timeline/event/scroll 字段继续留在根 façade；输入焦点、slash selector、modal、setup/config、session/resume、timeline/history、tool card interaction/focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、view model 等 TUI 普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；provider config/status/context-window 这类入口共享 helper 的测试维护在 `crates/sigil-runtime/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、event/approval bridge、session/compaction flow 与 runner 状态机测试维护在 `crates/sigil-tui/src/runner/*`，worker loop 由私有 state aggregate、薄 scheduler、七类 advancement、public command 到 domain-typed command 的穷尽 handler、覆盖四种 scope-changing path 的统一 session transition，以及 active run、queue、MCP/provider refresh、agent/task runtime、terminal refresh 共同维护在 `runner/worker_loop/*`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
 
-主题与右侧信息栏启动可见性作为 TUI appearance 能力落在 `AppearanceConfig`，而不是拆成独立 crate。`sigil-kernel` 只承载可序列化的 `AppearanceConfig`、`ThemeId`、`info_rail` 和 `[appearance.colors]` 原始字符串；`sigil-tui` 将主题配置解析为 `ThemePalette`，并把 `info_rail` 作为启动默认值投影到当前运行的可见状态。内置主题包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。颜色 override 只允许稳定语义 token 和 `#RRGGBB`，用于 TUI 外观，不进入 session/control state、approval 审计、tool payload 或 provider-visible context。`/config` 里的 Appearance draft 会优先供 renderer 解析，让用户在保存前即时预览完整 config palette，包括背景、边框、标题 chip、正文、弱化文字、选中行、状态和提示 token；保存后运行时 config snapshot 更新并重建 timeline render cache，避免旧消息缓存保留旧主题色。Info rail 的 `F2` 运行时覆盖只改变进程内布局状态，不写回配置，也不进入会话审计。
+主题与右侧信息栏启动可见性作为 TUI appearance 能力落在 `AppearanceConfig`，而不是拆成独立 crate。`sigil-kernel` 只承载可序列化的 `AppearanceConfig`、`ThemeId`、`info_rail` 和 `[appearance.colors]` 原始字符串；内部 `sigil-tui-host` 将主题配置解析为 `ThemePalette`，并把 `info_rail` 作为启动默认值投影到当前运行的可见状态。公开 framework 只提供 application-neutral 的 `SemanticTheme`/`ThemeRole`/`ThemeColor`，不暴露 Sigil palette。内置主题包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。颜色 override 只允许稳定语义 token 和 `#RRGGBB`，用于 TUI 外观，不进入 session/control state、approval 审计、tool payload 或 provider-visible context。`/config` 里的 Appearance draft 会优先供 renderer 解析，让用户在保存前即时预览完整 config palette，包括背景、边框、标题 chip、正文、弱化文字、选中行、状态和提示 token；保存后运行时 config snapshot 更新并重建 timeline render cache，避免旧消息缓存保留旧主题色。Info rail 的 `F2` 运行时覆盖只改变进程内布局状态，不写回配置，也不进入会话审计。
 
 ### 15.2 Desktop/TUI 双表面下的能力暴露规则
 
@@ -2777,3 +2808,100 @@ pub fn prepare_tools(
 5. 如果要做 JSON mode，优先在 `request.rs` 里作为 DeepSeek request shaping，而不是新建公共 kernel 能力
 
 这个顺序的好处是，先把主链路打通，再加 DeepSeek 专项增强，不会一开始就把 Beta 能力和 repair 分支缠成一团。
+
+## RFC-0071 R71.9 current implementation boundary（2026-08-26）
+
+R71.9 已将真实 current-schema product path 的三个边界落到代码：workspace activation 由 authority composition 唯一注册 borrowed subject；file tool 只消费 pathless managed plan 与 authority-private bounded result/receipt；plan-review research/finalizer 各自通过 current-schema provisioner 获取 SessionLog、ArtifactStaging、ArtifactStore、tool authority、scope 和 authority generation。真实 TUI runner 已覆盖 child `ls/grep/read_file`、durable artifact descriptor、draft-ready 与显式决策前边界。
+
+当前仍是 `Gated / Partial / Not Frozen`。R71.9a–R71.9c 的提交为 `f9a60e53`、`61861bfc`、`4e9a14c0`；R71.9d 已在工作树中完成真实 E2E、FIL/CSR 20 个 required cases、220-case fault campaign 与 structural gates，但最终 clean exact-SHA full/five-platform qualification 尚未完成。RFC-0070 在此之前不得开始。
+
+R71.9d 随后已形成独立 slice commit，并通过 staged full touched gate：真实 TUI runner E2E、FIL 12、CSR 8、220-case manifest/test bijection、journal recovery/quarantine、durable quota replay、整仓测试、doc tests 与 strict clippy 均通过。该记录仍不改变 qualification boundary：最终 clean exact-SHA local release wrapper 与五平台 hosted evidence 尚未取得，故当前仍为 `Gated / Partial / Not Frozen`，RFC-0070 不得开始。
+
+### R71.9f file identity and cross-surface regression update（2026-08-26）
+
+R71.9f 补齐了真实产品路径审计暴露的四项实现缺口：borrowed file plan 现在绑定 expected leaf identity；Unix 使用 descriptor-relative `openat` 与 effect 前 identity revalidation；Windows 使用 `NtCreateFile` 的 parent-handle traversal、reparse 拒绝与 file-ID identity binding；HTTP Revise 测试从 child durable log 验证真实 `ls/grep/read_file` 成功、artifact page 与 access receipt；child bundle 的 partial admission 明确 settlement 已取得的 SessionLog lease。
+
+这些是 implementation/targeted gate 结果，不是 release qualification。Windows 仅完成 cross-compile，新的 tracked candidate 尚未运行 clean exact-SHA local full 或 five-platform hosted qualification；因此 RFC-0071 继续 `Gated / Partial / Not Frozen`，RFC-0070 继续暂停。
+
+### R71.9g delete quarantine, Windows arbitrary-leaf handles, and authority config snapshot
+
+R71.9g closes three implementation findings from the cross-surface review. Unix delete now uses a same-parent no-replace quarantine rename, validates the object after the rename, and restores on identity mismatch or failed deletion without overwriting a replacement path. Windows inspection enumeration uses an `Any` relative handle that omits `FILE_NON_DIRECTORY_FILE`, so directory entries can be inspected before the handle identity determines recursive traversal. Boot authority composition now consumes one validated configuration snapshot containing the parsed config, resolved workspace, execution policy, source path, and config hash; CLI/HTTP no longer independently resolve the authority workspace. Targeted tests, strict clippy, Windows GNU cross-check, and format/diff checks pass. Windows real-host execution and final exact-SHA/five-platform qualification remain pending, so the RFC stays `Gated / Partial / Not Frozen` and RFC-0070 remains paused.
+
+### R71.9h delete recovery arena and snapshot binding
+
+R71.9h 将 Unix delete 的中间态纳入 authority-owned recovery：quarantine 位于 state anchor 下的 owner-only same-filesystem arena，跨目录 no-replace rename 是 source leaf 的线性化点，journal 持久化 `Prepared`、`Renamed`、`IdentityObserved`、`Restored`、`Deleted` 与 `ReconciliationRequired`，workspace activation 负责重启 replay。恢复不确定性使用 kernel typed `ReconciliationRequired` 和 opaque operation/binding，而不是普通 physical error。
+
+R71.9h 同时收紧 validated authority snapshot：外部只能从 config path + launch cwd 取得 snapshot；effective workspace、config-file identity、workspace identity、launch cwd 与 resolved storage roots 与 config serialization 一起形成 binding，composition 会拒绝不一致的 anchor 参数。file-access `28/28`、runtime composition `7/7`、串行 runtime full `1197/4`、strict clippy、negative dependency、Windows GNU cross-check 与 fmt/diff 已通过；exact-SHA local full/five-platform hosted qualification 仍待执行，RFC-0071 保持 `Gated / Partial / Not Frozen`。
+
+R71.9h 的 recovery arena 还执行 authority-owned inventory：启动 replay 前枚举 state-anchor 下的 arena，任何没有对应未完成 journal binding 的 entry 都返回带 opaque binding 的 typed `ReconciliationRequired`，不会被隐式 GC、删除或猜测归属。补充 orphan regression 后 file-access 为 `29/29`；这仍不改变 exact-SHA local/five-platform qualification 未完成的边界。
+
+### R71.9i current-schema-only shipping boundary (2026-08-26)
+
+R71.9i removes the shipping Legacy authority fallback. Legacy records remain readable as inert historical data only; the shared status DTO reports `Unavailable` with `unsupported_legacy_data`, and current-schema session admission rejects Legacy. Production run preparation requires both a current-schema cutover and its complete authority composition/readiness evidence, so missing configuration, composition, activation, or managed routes fail closed. TUI setup/recovery remains available without starting a worker; CLI/HTTP/Desktop return typed startup/configuration failures.
+
+The former `LegacyLauncher` and `LegacyDirectWriter` executable semantics are gone from production. Legacy boot helpers are test-only compatibility fixtures. Targeted kernel/runtime/TUI and structural gates passed, but this does not imply RFC completion: the indivisible boot transaction, strict delete journal reducer, expanded shipping fault campaign, and clean exact-SHA/five-platform qualification remain pending. RFC-0071 therefore remains `Gated / Partial / Not Frozen` and RFC-0070 remains paused.
+
+### R71.9j runtime-owned boot transaction (2026-08-26)
+
+Production boot now has one runtime-owned `RuntimeCurrentBootTransactionV1`: exact no-follow config handle read and identity observation, validation, frozen effective config/path view, authority composition, mandatory readiness, workspace activation, journal reconciliation, and only then cutover publication. Surfaces receive the same effective config, resolved roots, published cutover, composition and workspace registration capsule; they do not independently activate the workspace or reopen an authority-sensitive manifest. TUI configuration replacement stops the old worker and clears its attachment before publishing a complete replacement, and the worker consumes the passed cutover directly.
+
+The transaction path was exercised by the shipping TUI current-schema file-surface test and runtime composition/launcher regressions. Existing journals were not deleted, rewritten or silently migrated; recovery remains append-only. R71.9k/l and clean exact-SHA/five-platform qualification remain pending, so RFC-0071 remains `Gated / Partial / Not Frozen` and RFC-0070 remains paused.
+
+### R71.9k durable delete journal reducer (2026-08-26)
+
+Unix managed delete now binds each operation to the durable journal instance, sequence frontier and plan hash, with an authority-private same-filesystem quarantine arena. The reducer validates `Prepared`, `Renamed`, `IdentityObserved`, `Restored`, `Deleted` and `ReconciliationRequired` phases and rejects duplicate, reversed, terminal, unknown-operation, identity or binding substitutions. Restart replay checks both leaf and arena; a provable rename-before-record crash is fixed forward, while ambiguity, restore collision and orphan entries remain typed blockers.
+
+Eight required delete fault fixtures extend the frozen conformance manifest to 228 rows, with `228/228` manifest/test bijection. Existing journals are not deleted or rewritten; recovery appends only durable facts. R71.9l and exact-SHA/five-platform qualification remain pending, so RFC-0071 remains `Gated / Partial / Not Frozen` and RFC-0070 remains paused.
+
+### R71.9l shipping TUI and fault qualification expansion (2026-08-26)
+
+R71.9l adds a shipping-shaped TUI bootstrap/file-surface gate. It uses the runtime-owned current-schema boot transaction, then exercises authority-managed list, grep and read operations and checks the returned access receipts. The gate also covers launcher setup/configuration replacement and the durable delete fixture family. The full release wrapper includes the gate and a deterministic contract test protects that inclusion.
+
+The conformance manifest now contains 228 required rows, including eight delete reducer/recovery fixtures, and the fault campaign verifies a `228/228` manifest/test bijection. These are implementation and local engineering gates, not release qualification: clean exact-SHA local full execution and five-platform hosted evidence remain required before RFC state can change. RFC-0071 remains `Gated / Partial / Not Frozen`; RFC-0070 remains paused.
+
+### R71.9l exact candidate local qualification follow-up (2026-08-27)
+
+The remaining TUI current-schema fixture mismatches are closed in `922be54512721a690102e40bb5b6fde67a1d8c77`: doctor projections assert unavailable status when no boot authority is attached, and the eager-MCP fixture supplies the same published boot cutover as its authority composition. The clean exact candidate, against base `43b9048602148d9059aa036674d89eb6695ee3ca`, passed the durable macOS Seatbelt full wrapper with `30/30` steps and `228/228` fault manifest/test binding. Evidence is stored at `.repo-local-dev/r71-evidence/922be545-final/qualification.json`; this does not imply hosted five-platform execution. RFC-0071 remains `Gated / Partial / Not Frozen`, RFC-0070 remains paused, and no push/dispatch occurred.
+
+### R71.9m current-instance boot replacement and TUI production seam (2026-08-27)
+
+The current cutover manifest is a content-addressed decision plus a replaceable current-instance pointer. A validated configuration reboot may atomically replace the pointer only when both decisions are current-schema, belong to the same stable host-owned application identity, and the durable authority config generation advances; same-generation drift and Legacy upgrade attempts remain fixed-forward failures. Session-scoped runtime configuration never enters authority composition: `boot_current_schema(config_path, launch_cwd)` loads the persisted configuration once, while TUI carries only a narrow `ResolvedModelRoute` overlay to the worker. Persisted configuration and session-effective route snapshots remain separate, so `/model` survives worker restart without changing the saved default or authority roots.
+
+`RuntimeGlobalCutoverV1::evaluate_current_schema` is the only production evaluator. Epoch-selecting evaluation and Legacy decision rehydration are test-only historical fixtures; Legacy wire values remain available for diagnostic projection but cannot construct production authority. The TUI shipping check is now a normal-dependency integration target covering current boot and replacement, so its evidence does not depend on the `#[cfg(test)]` launcher helper. Slice commit: `8b419aeb`. New exact-SHA local full and hosted five-platform qualification remain required; RFC-0071 stays **Gated / Partial / Not Frozen** and RFC-0070 remains paused.
+
+The inventory/lint follow-up is `91f04d78` (`rfc-0071(R71.9m): sync production inventory gates`). It keeps the generated production ownership baseline aligned with the current source and fixes the normal-dependency TUI shipping test lint; negative dependency, strict clippy and targeted TUI/runtime checks pass. This changes the candidate SHA, so the earlier local qualification evidence is not reusable; a new clean exact-SHA local full and hosted five-platform qualification remain required.
+
+R71.9n closes the authority-input and TUI snapshot split found in the follow-up audit. Production boot accepts only the persisted `config_path` plus captured `launch_cwd`; no public seam accepts a caller-supplied complete `RootConfig` for authority composition. The current pointer uses a stable config-path application identity, while a durable, locked generation record in the authority-owned bootstrap store carries persisted configuration changes, including storage-root changes. The bootstrap store is independent of the config parent and configured workspace/state/cache roots; its owner-only root contains the generation record, current pointer, publication lock and atomic publication temporaries. TUI `/model` emits only a `ResolvedModelRoute` session overlay. Persisted configuration remains the sole input for authority roots and CAS operations, while the worker receives a separate effective session configuration. The normal-dependency shipping test covers persisted roots, unchanged cutover publication, and the subsequent permission-toggle CAS sequence. Implementation gates pass, but a new exact-SHA local release wrapper and hosted five-platform qualification are still required.
+
+### R71.9o authority-owned bootstrap publication
+
+R71.9o hardens the bootstrap metadata boundary exposed by the follow-up audit. The authority config generation record and current cutover pointer no longer live beside an arbitrary explicit config path. Runtime resolves a stable per-config host-owned bootstrap store beneath the private user Sigil directory; its hierarchy and metadata files are owner-only, no-follow, bounded and handle-validated. Missing metadata after an existing store is created, malformed generation/pointer bytes, symlinked metadata and publication hardening failures are typed bootstrap/reconciliation blockers; they never reset generation or fall back to a new writable location. The production store's arbitrary-root constructor is private, so a surface cannot select its own authority metadata directory.
+
+Generation allocation and current-pointer publication now hold one cross-process bootstrap publication lock for the entire transaction. Pointer publication requires an existing valid generation record whose value exactly matches the decision generation, then permits only the same stable current-schema instance to advance monotonically. This closes the interleaving where an older boot could overwrite a newer pointer. The recovery-prefix regression covers generation durable before pointer publication; reboot reconstructs the pointer from the already-bound generation, while corruption and no-follow failures remain fail-closed. These tests complement the explicit-config-parent and concurrent-boot regressions. RFC-0071 remains `Gated / Partial / Not Frozen` until the new exact-SHA local full and hosted five-platform qualification run on the final candidate; RFC-0070 remains paused.
+The host bootstrap resolver canonicalizes the trusted HOME parent before applying the no-follow owner-only checks to the `.sigil/authority-bootstrap-v1` suffix. This preserves the security boundary while accepting normal macOS compatibility ancestors such as `/var`; it does not permit symlinks in the authority-owned suffix or metadata objects. The first exact wrapper attempt after R71.9o exposed this compatibility-path issue in three isolated TUI process tests and was recorded as failed rather than treated as qualification evidence; the follow-up keeps those process tests green.
+
+The R71.9n exact candidate `6e8be0d89630a4cfe5893b4dcf9d3b71591e3edc` passed the clean macOS Seatbelt full release wrapper with `30/30` steps, `dirty=false`, and `228/228` fault manifest/test binding. Evidence is `.repo-local-dev/r71-evidence/6e8be0d8-r719n-final/qualification.json` (SHA-256 `83f1ffd3b4caa1caa54fbeed414a7ad88e2c6aa8e896424f5f8b07b84682594b`). The five hosted platform jobs remain pending; RFC-0071 is not yet `Implemented/Frozen`.
+
+### R71.9p bootstrap recovery and qualification-state isolation
+
+损坏的 bootstrap metadata 现在由独立的 `AuthorityBootstrapRecoveryServiceV1` 处理，而不是由 normal `ResourceAuthority` 或自身 journal 修复。doctor/operator 必须提交 opaque fresh-root selection、exact failed journal evidence、真实 host process observer 产生的 old-epoch quiescence proof，以及带 expiry 的 challenge/confirmation；service 在一次性 authorization 下重新验证 root、process vitality 和 evidence，然后在同一 authority transaction lock 内 durable 写入 fresh-epoch recovery intent/receipt、将旧 root 标记为 inert 并发布 identity-bound active-epoch pointer。recovery metadata 不能通过 normal store API 写入；crash 后只允许按 exact completed receipt reconcile，不能分配第二个 epoch。四表面通过 transport-neutral `SelectFreshAuthorityEpoch` action、`AuthorityBootstrap` domain 和 `AuthorityBootstrapCorrupted` reason 展示该路径，raw path 与 credential 不进入 surface contract。
+
+完整 qualification wrapper 创建带 marker 的临时 HOME，并同步隔离 config/state/cache home；所有 bootstrap namespace 只在该临时 user directory 下产生。evidence 记录隔离策略与 cleanup 前 bootstrap inventory，退出时只清理 marker-owned temporary tree，不批量处理真实用户 `~/.sigil/authority-bootstrap-v1`。当前仅完成 targeted recovery 与 wrapper contract gates；必须在新 clean exact SHA 上重新完成 local full，再运行五平台 hosted qualification，RFC-0071 仍为 `Gated / Partial / Not Frozen`。
+
+### R71.9q durable process inventory and operator recovery composition
+
+bootstrap active epoch 新增 fixed `process-inventory.json` object。其 snapshot 绑定 schema、authority epoch、monotonic sequence、active attempt map 与 canonical snapshot hash；更新通过 bootstrap publication/transaction lock 原子发布。sandbox-facing `AuthorityProcessInventoryPortV1` 只暴露 `prepare_spawn`、`attach_spawn`、`settle_spawn` 和不可序列化 claim。顺序固定为 `durable Prepared → OS spawn → durable Attached(pid) → process-tree ownership → reap → durable settlement`。任一 crash window都留下保守 blocker；不能用 table miss、caller list 或 PID absence 推导无进程。
+
+`AuthorityBootstrapRecoveryServiceV1::probe_old_epoch_quiescence` 不再接受 process refs。它在 transaction lock 下读取并校验 active epoch snapshot：`Prepared` 直接返回 `NoQuiescence`，`Attached` 通过 real host observer 验证 terminal/absent；proof绑定完整 inventory snapshot hash。authorize 与 execute 均重新读取 exact snapshot，execute 在持锁状态完成最终 vitality validation、intent/receipt、old-root inert marker 与 active pointer publication，关闭 check-to-publish race。
+
+normal boot 对 journal composition failure 写入 `boot-failure-evidence.json`，内容绑定 authority epoch、observed bootstrap digest、typed journal scope/class、anchor identity 与 failure digest；successful boot 将同 epoch record 标记 resolved。operator flow只能读取 pending durable record。runtime doctor 的完整动作执行 config-resolved fresh-root validation、authority inventory proof、expiring exact challenge、one-shot authorization、fresh epoch publish和立即 post-recovery current-schema boot。recovery receipt 的 selection hash由新 epoch boot重新计算 canonical state/cache/execution-temp roots并核验，避免 ephemeral selection 与实际 boot roots 脱节。
+
+所有 production managed routes由 current boot composition注入同一 durable inventory；model-eval verification也复用 boot composition route。`InMemoryAuthorityProcessInventoryV1` 位于显式 `test-support` feature，shipping dependency graph中不存在。该设计保持 Resource Authority 负责 durable ownership/inventory，sandbox负责 physical spawn/kill/reap，runtime只负责编排，CLI只负责 exact operator confirmation。
+
+process inventory 的首次引入不是根据“文件不存在”永久猜测。authority config generation schema v2 持久声明 `process_inventory_required`：旧 schema v1 只允许在 bootstrap publication lock 内先发布空 snapshot 和 requirement marker，再升级 generation record；任一步 crash 都可按 v1 继续完成。schema v2 生效后，snapshot 或 marker 任一/全部缺失均作为 durable authority state loss fail closed，不得重建空 inventory。fresh-root selection 同时绑定 canonical paths 与目录 identity，operator authorize/execute 在共享 transaction 内重读 pending failure evidence和 inventory frontier，从而关闭升级、目录替换和 evidence resolution 的 TOCTOU。
+
+### R71.9q final qualification and freeze attestation（2026-08-28）
+
+最终 qualified implementation candidate 为 `ec5459d829e086fbb73f090dcb3201f649d99d7b`，base 为 `44d043517d1893ff1043f5597aa71d31b527f16a`。该 SHA 的 macOS Seatbelt local full 为 `30/30` steps、`228/228` fault binding、`dirty=false`；fixed `r71-release-candidate` 随后完成 five-platform hosted run `33110285888`，toolchain-offline、docker-declared、windows-restricted、macos-seatbelt、linux-bubblewrap 五个 required jobs 全部 success。local evidence SHA-256 为 `659dbc125bc2cb190217dd2470d808f30eb51bc6a62c3dc04bd3ea525afb417b`；五份 hosted evidence 均绑定同一 candidate、`passed`、`228` fault cases、`dirty=false`、`bootstrap_root_isolated=true`。
+
+R71.9q 现正式为 `Implemented / Frozen`。历史失败 candidate/run 继续作为审计事实保留，不继承为资格；真实用户 bootstrap namespace 未被 qualification 删除、GC 或 rewrite。后续若修改 production code，必须以新 exact SHA 重新执行 local full 与五平台 hosted qualification。

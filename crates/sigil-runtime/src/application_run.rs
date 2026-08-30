@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -678,8 +678,7 @@ pub struct ApplicationRunServices {
     /// Production adapters cannot set this crate-private evidence override.
     model_eval_route_qualified: bool,
     /// RFC-0071 R71.6: the one application-global cutover decision. The boot owner selects the
-    /// epoch exactly once; a NewCurrentSchema manifest failing the mandatory readiness gate
-    /// prevents `require_cutover_or_fail` from returning Ok at all.
+    /// epoch exactly once; an unattached decision is unavailable and cannot start a run.
     cutover: Option<Arc<crate::r71_global_cutover::RuntimeGlobalCutoverV1>>,
     /// RFC-0071 R71.6: the boot authority composition (services + writer adapter + broker)
     /// shared by this surface's run paths; None before boot attach.
@@ -875,15 +874,36 @@ impl ApplicationRunServices {
         self.authority_composition.as_deref()
     }
 
+    /// Requires the complete current-schema authority surface before a run can be prepared.
+    /// Keeping this check beside the service container prevents a caller from attaching only a
+    /// cutover manifest while leaving the actual writer/tool authority absent.
+    pub fn require_current_schema_authority(
+        &self,
+    ) -> Result<(), sigil_kernel::cutover_manifest::CutoverErrorV1> {
+        let cutover = self
+            .cutover
+            .as_deref()
+            .ok_or(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable)?;
+        if cutover.manifest().selected_epoch
+            != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+        {
+            return Err(sigil_kernel::cutover_manifest::CutoverErrorV1::LegacySessionUnavailable);
+        }
+        if self.authority_composition.is_none() {
+            return Err(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable);
+        }
+        cutover.gate().map_err(Clone::clone)
+    }
+
     /// Mandatory readiness check: the boot owner calls this after selecting the epoch. A
     /// NewCurrentSchema manifest with any failing adapter probe returns Err and the application
-    /// must not start partially. No attached decision (legacy boot path) is a valid Ok because
-    /// the epoch has not been published yet.
+    /// must not start partially. No attached decision is also an error: there is no legacy
+    /// runtime fallback.
     pub fn require_cutover_or_fail(
         &self,
     ) -> Result<(), sigil_kernel::cutover_manifest::CutoverErrorV1> {
         match self.cutover.as_deref() {
-            None => Ok(()),
+            None => Err(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable),
             Some(decision) => decision.gate().map_err(|error| error.clone()),
         }
     }
@@ -898,7 +918,7 @@ impl ApplicationRunServices {
             .cutover
             .as_ref()
             .map(|decision| decision.manifest().selected_epoch)
-            .unwrap_or(sigil_kernel::cutover_manifest::StartupEpochV1::Legacy);
+            .ok_or(sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable)?;
         sigil_kernel::cutover_manifest::admit_session_open(
             sigil_kernel::cutover_manifest::SessionOpenAttemptV1 {
                 session_epoch,
@@ -1913,14 +1933,11 @@ impl Drop for ManagedApplicationSessionLogLease {
     }
 }
 
-/// Authority-admitted ArtifactStaging + ArtifactStore roots held for one foreground operation.
-/// Capture writes use the staging root; immutable blobs, refs and usage state use the published
-/// artifact-store root. Both namespaces are finalized together on every terminal/drop path.
+/// Authority-admitted ArtifactStaging + ArtifactStore namespaces held for one foreground
+/// operation. The kernel receives only the opaque backend facade; physical roots stay inside the
+/// runtime artifact owner.
 struct ManagedApplicationArtifactStoreLease {
-    writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
-    staging_lease: Option<crate::managed_storage_writer::ManagedStorageWriterLeaseV1>,
-    store_lease: Option<crate::managed_storage_writer::ManagedStorageWriterLeaseV1>,
-    artifact_store: ToolArtifactStore,
+    inner: crate::managed_artifact_store::ManagedArtifactStoreLeaseV1,
 }
 
 impl ManagedApplicationArtifactStoreLease {
@@ -1928,71 +1945,24 @@ impl ManagedApplicationArtifactStoreLease {
         writer: Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
         key: &str,
         session_path: &Path,
+        session_scope_id: &str,
     ) -> Result<Self> {
-        let staging_lease = writer
-            .acquire_named(
-                crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
-                key,
-            )
-            .map_err(|error| {
-                anyhow!("managed artifact-staging namespace admission failed: {error}")
-            })?;
-        let store_lease = match writer.acquire_named(
-            crate::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
-            key,
-        ) {
-            Ok(lease) => lease,
-            Err(error) => {
-                let _ = writer.finalize(staging_lease);
-                return Err(anyhow!(
-                    "managed artifact-store namespace admission failed: {error}"
-                ));
-            }
-        };
-        let artifact_store = ToolArtifactStore::for_session_path_with_roots(
-            session_path,
-            store_lease.path().to_path_buf(),
-            staging_lease.path().to_path_buf(),
-        );
         Ok(Self {
-            writer,
-            staging_lease: Some(staging_lease),
-            store_lease: Some(store_lease),
-            artifact_store,
+            inner: crate::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+                writer,
+                key,
+                session_scope_id,
+                session_path.to_path_buf(),
+            )?,
         })
     }
 
     fn store(&self) -> ToolArtifactStore {
-        self.artifact_store.clone()
+        self.inner.store()
     }
 
-    fn finalize(mut self) -> Result<()> {
-        if let Some(lease) = self.store_lease.take() {
-            self.writer.finalize(lease).map_err(|error| {
-                anyhow!("managed artifact-store namespace finalize failed: {error}")
-            })?;
-        }
-        if let Some(lease) = self.staging_lease.take() {
-            self.writer.finalize(lease).map_err(|error| {
-                anyhow!("managed artifact-staging namespace finalize failed: {error}")
-            })?;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ManagedApplicationArtifactStoreLease {
-    fn drop(&mut self) {
-        if let Some(lease) = self.store_lease.take()
-            && let Err(error) = self.writer.finalize(lease)
-        {
-            tracing::error!(%error, "failed to finalize managed artifact-store namespace during cleanup");
-        }
-        if let Some(lease) = self.staging_lease.take()
-            && let Err(error) = self.writer.finalize(lease)
-        {
-            tracing::error!(%error, "failed to finalize managed artifact-staging namespace during cleanup");
-        }
+    fn finalize(self) -> Result<()> {
+        self.inner.finalize()
     }
 }
 
@@ -2095,6 +2065,8 @@ struct ApplicationTaskExecutionRuntime {
     agent_supervisor: crate::AgentSupervisor,
     role_provider_builder:
         Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
+    verification_execution_port:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
 }
 
 /// Runtime facts used to execute a read-only plan review after an automatic route decision.
@@ -2104,6 +2076,8 @@ struct ApplicationPlanReviewRuntime {
     agent: Box<Agent<Box<dyn sigil_kernel::Provider>>>,
     tool_registry: sigil_kernel::ToolRegistry,
     workspace_snapshot_id: Option<String>,
+    child_resource_provisioner:
+        Option<Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>>,
 }
 
 enum ApplicationRunExecutionKind {
@@ -2782,6 +2756,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
     } = task_execution;
     // New approved Plans already carry first-class direct execution admission. Legacy sessions may
     // still contain a materialized/adopted candidate, so preserve their historical admission
@@ -2834,6 +2809,8 @@ where
             handler,
             cancellation_handle: cancellation_handle.clone(),
             tool_artifact_read_budget: None,
+            verification_execution_port: verification_execution_port
+                .context("current-schema task execution requires the managed verification route")?,
         },
         approval_handler,
     )
@@ -2881,6 +2858,7 @@ where
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
     } = task_execution;
     let result = crate::agent_supervisor::task_execution::bind_task_run_cancellation_scope(
         session,
@@ -2888,9 +2866,9 @@ where
         cancellation_handle,
     );
     let continuation_entry_frontier = session.entries().len();
-    let result = match result {
-        Ok(()) => {
-            crate::agent_supervisor::task_execution::continue_task_execution(
+    let result =
+        match result {
+            Ok(()) => crate::agent_supervisor::task_execution::continue_task_execution(
                 session,
                 crate::agent_supervisor::task_execution::ContinuedTaskExecution {
                     requested_task_id: Some(action.task_id.clone()),
@@ -2910,13 +2888,15 @@ where
                     handler,
                     cancellation_handle: cancellation_handle.clone(),
                     tool_artifact_read_budget: None,
+                    verification_execution_port: verification_execution_port.context(
+                        "current-schema task continuation requires the managed verification route",
+                    )?,
                 },
                 approval_handler,
             )
-            .await
-        }
-        Err(error) => Err(error),
-    };
+            .await,
+            Err(error) => Err(error),
+        };
     let status = crate::agent_supervisor::task_execution::finalize_task_continuation_root(
         session,
         &action.task_id,
@@ -2983,22 +2963,50 @@ where
         root_config,
         agent,
         tool_registry,
+        child_resource_provisioner,
         ..
     } = runtime;
     let plan_review_workspace_root = options.workspace_root.clone();
     emit_current_plan_review_attempt(session, &request, handler)?;
-    let outcome = match crate::PlanReviewCoordinator::run_plan_review(
-        session,
-        &request,
-        agent.as_ref(),
-        options,
-        tool_registry,
-        handler,
-        approval_handler,
-        cancellation_handle.clone(),
-    )
-    .await
-    {
+    let outcome = match child_resource_provisioner {
+        Some(provisioner) => {
+            crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+                session,
+                &request,
+                agent.as_ref(),
+                options,
+                tool_registry,
+                handler,
+                approval_handler,
+                cancellation_handle.clone(),
+                provisioner,
+            )
+            .await
+        }
+        None => {
+            #[cfg(test)]
+            {
+                crate::PlanReviewCoordinator::run_plan_review(
+                    session,
+                    &request,
+                    agent.as_ref(),
+                    options,
+                    tool_registry,
+                    handler,
+                    approval_handler,
+                    cancellation_handle.clone(),
+                )
+                .await
+            }
+            #[cfg(not(test))]
+            {
+                Err(anyhow!(
+                    "current-schema plan review requires the managed child resource bundle"
+                ))
+            }
+        }
+    };
+    let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
@@ -3519,6 +3527,9 @@ async fn assemble_application_tool_surface(
             .authority_composition()
             .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
         managed_extension_execution.clone(),
+        services
+            .authority_composition()
+            .map(|composition| std::sync::Arc::clone(&composition.command_execution)),
     )
     .await?;
     // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run
@@ -3618,6 +3629,12 @@ pub async fn prepare_application_run(
     request: ApplicationRunRequest,
     services: &ApplicationRunServices,
 ) -> std::result::Result<PreparedApplicationRun, ApplicationRunPrepareError> {
+    #[cfg(not(test))]
+    services
+        .require_current_schema_authority()
+        .map_err(|error| ApplicationRunPrepareError::Configuration {
+            source: anyhow!(error),
+        })?;
     let (prepared, frozen_request) =
         prepare_application_run_internal(request, services, None).await?;
     debug_assert!(frozen_request.is_none());
@@ -3633,6 +3650,12 @@ pub(crate) async fn prepare_application_run_with_exact_first_request(
     (PreparedApplicationRun, ApplicationExactFirstRequestAssembly),
     ApplicationRunPrepareError,
 > {
+    #[cfg(not(test))]
+    services
+        .require_current_schema_authority()
+        .map_err(|error| ApplicationRunPrepareError::Configuration {
+            source: anyhow!(error),
+        })?;
     if exact_prompt.expose_secret().trim().is_empty() || durable_user_message_id.trim().is_empty() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "queued exact prompt and durable user message id must not be empty".to_owned(),
@@ -3839,6 +3862,10 @@ async fn prepare_application_run_internal(
                     provider.capabilities(),
                 ),
                 role_provider_builder: Arc::clone(role_provider_builder),
+                verification_execution_port: services.authority_composition().map(|composition| {
+                    Arc::clone(&composition.command_execution)
+                        as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
+                }),
             },
         );
     let conversation_coordinator = crate::ConversationCoordinator::new(
@@ -4014,6 +4041,9 @@ async fn prepare_application_run_internal(
                 ),
                 tool_registry: crate::build_plan_review_tool_registry(&registry, &root_config)
                     .into_registry(),
+                child_resource_provisioner: services
+                    .authority_composition()
+                    .map(|composition| composition.plan_review_child_resource_provisioner()),
             }),
             kind,
             task_execution,
@@ -5073,138 +5103,68 @@ pub fn application_session_transcript_page(
         bail!("transcript before ordinal must be positive");
     }
 
-    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
+    let mut reader = JsonlSessionStore::read_event_record_stream(session_path)?;
     let mut tool_names = BTreeMap::new();
-    let mut projected = Vec::new();
-    for entry in entries {
-        if let SessionLogEntry::Control(control) = &entry {
-            if let Some(trace) = application_transcript_reasoning_trace(control) {
-                let safe_content = safe_persistence_text(trace);
-                let original_content_bytes = safe_content.len();
-                let truncated = original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES;
-                let content = truncate_application_transcript_text(
-                    &safe_content,
-                    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
-                );
-                let ordinal = u64::try_from(projected.len())
-                    .map_err(|_| anyhow!("transcript message count exceeds supported range"))?
-                    .saturating_add(1);
-                projected.push(ApplicationTranscriptMessage {
-                    ordinal,
-                    message_id: safe_application_transcript_message_id(&format!(
-                        "reasoning-trace:{ordinal}"
-                    )),
-                    role: ApplicationTranscriptRole::Assistant,
-                    content: Some(content),
-                    assistant_kind: Some(AssistantMessageKind::ReasoningTrace),
-                    tool_name: None,
-                    image_attachment_count: 0,
-                    truncated,
-                    original_content_bytes: u64::try_from(original_content_bytes)
-                        .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
-                });
-            }
-            continue;
+    let mut tool_name_order = VecDeque::new();
+    const MAX_TOOL_NAMES: usize = 512;
+    let mut messages = VecDeque::<ApplicationTranscriptMessage>::new();
+    let mut message_bytes = 0_usize;
+    let mut total_messages = 0_u64;
+    let mut saw_record = false;
+    for record in &mut reader {
+        let record = record?;
+        saw_record = true;
+        if record.session_id() != expected_session_scope_id {
+            bail!("durable application session scope does not match the bound session");
         }
-        if matches!(entry, SessionLogEntry::RuntimeContextSnapshotV2(_)) {
+        let Some(entry) = sigil_kernel::conversation_transcript_entry_from_record(&record)? else {
             continue;
-        }
-        let (message, role, expected_role) = match entry {
-            SessionLogEntry::User(message) => {
-                (message, ApplicationTranscriptRole::User, MessageRole::User)
-            }
-            SessionLogEntry::Assistant(message) => {
-                for call in &message.tool_calls {
-                    tool_names.insert(
-                        call.id.clone(),
-                        truncate_application_transcript_text(
-                            &safe_persistence_text(&call.name),
-                            128,
-                        ),
-                    );
-                }
-                (
-                    message,
-                    ApplicationTranscriptRole::Assistant,
-                    MessageRole::Assistant,
-                )
-            }
-            SessionLogEntry::ToolResultV3(result) => (
-                result.model_message()?,
-                ApplicationTranscriptRole::Tool,
-                MessageRole::Tool,
-            ),
-            SessionLogEntry::RuntimeContextSnapshotV2(_) => {
-                unreachable!("runtime context snapshots are filtered above")
-            }
-            SessionLogEntry::Control(_) => unreachable!("control entries are handled above"),
         };
-        if message.role != expected_role {
-            bail!("durable transcript entry role does not match its entry class");
+        total_messages = total_messages
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("transcript message count exceeds supported range"))?;
+        let Some(message) = project_application_transcript_entry(
+            entry,
+            total_messages,
+            &mut tool_names,
+            &mut tool_name_order,
+            MAX_TOOL_NAMES,
+        )?
+        else {
+            total_messages = total_messages.saturating_sub(1);
+            continue;
+        };
+        if before.is_none_or(|boundary| message.ordinal < boundary) {
+            let item_bytes = message.content.as_ref().map_or(0, String::len);
+            if messages.len() == limit
+                && let Some(removed) = messages.pop_front()
+            {
+                message_bytes =
+                    message_bytes.saturating_sub(removed.content.as_ref().map_or(0, String::len));
+            }
+            message_bytes = message_bytes.saturating_add(item_bytes);
+            messages.push_back(message);
+            while messages.len() > 1 && message_bytes > MAX_APPLICATION_TRANSCRIPT_PAGE_BYTES {
+                if let Some(removed) = messages.pop_front() {
+                    message_bytes = message_bytes
+                        .saturating_sub(removed.content.as_ref().map_or(0, String::len));
+                }
+            }
         }
-        let ordinal = u64::try_from(projected.len())
-            .map_err(|_| anyhow!("transcript message count exceeds supported range"))?
-            .saturating_add(1);
-        let safe_content = message.content.as_deref().map(safe_persistence_text);
-        let original_content_bytes = safe_content.as_ref().map_or(0, String::len);
-        let truncated = original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES;
-        let content = safe_content.map(|content| {
-            truncate_application_transcript_text(&content, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES)
-        });
-        let tool_name = message
-            .tool_call_id
-            .as_ref()
-            .and_then(|call_id| tool_names.get(call_id))
-            .cloned();
-        projected.push(ApplicationTranscriptMessage {
-            ordinal,
-            message_id: safe_application_transcript_message_id(&message.id),
-            role,
-            content,
-            assistant_kind: if role == ApplicationTranscriptRole::Assistant {
-                message.assistant_kind
-            } else {
-                None
-            },
-            tool_name,
-            image_attachment_count: u64::try_from(message.image_attachments.len())
-                .map_err(|_| anyhow!("transcript attachment count exceeds supported range"))?,
-            truncated,
-            original_content_bytes: u64::try_from(original_content_bytes)
-                .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
-        });
+    }
+    if !saw_record {
+        bail!("durable application session has no session identity");
     }
 
-    let total_messages = u64::try_from(projected.len())
-        .map_err(|_| anyhow!("transcript message count exceeds supported range"))?;
-    let eligible_end = before.map_or(projected.len(), |before| {
-        projected.partition_point(|message| message.ordinal < before)
-    });
-    let mut page_bytes = 0_usize;
-    let mut messages = Vec::with_capacity(limit.min(eligible_end));
-    for message in projected[..eligible_end].iter().rev() {
-        if messages.len() == limit {
-            break;
-        }
-        let message_bytes = message.content.as_ref().map_or(0, String::len);
-        if !messages.is_empty()
-            && page_bytes.saturating_add(message_bytes) > MAX_APPLICATION_TRANSCRIPT_PAGE_BYTES
-        {
-            break;
-        }
-        page_bytes = page_bytes.saturating_add(message_bytes);
-        messages.push(message.clone());
-    }
-    messages.reverse();
     let next_before = messages
-        .first()
+        .front()
         .filter(|message| message.ordinal > 1)
         .map(|message| message.ordinal);
 
     Ok(ApplicationTranscriptPage {
         session_scope_id: expected_session_scope_id.to_owned(),
         total_messages,
-        messages,
+        messages: messages.into_iter().collect(),
         next_before,
     })
 }
@@ -5219,6 +5179,100 @@ fn application_transcript_reasoning_trace(control: &ControlEntry) -> Option<&str
     data.get("text")
         .and_then(serde_json::Value::as_str)
         .filter(|trace| !trace.trim().is_empty())
+}
+
+fn project_application_transcript_entry(
+    entry: SessionLogEntry,
+    ordinal: u64,
+    tool_names: &mut BTreeMap<String, String>,
+    tool_name_order: &mut VecDeque<String>,
+    max_tool_names: usize,
+) -> Result<Option<ApplicationTranscriptMessage>> {
+    let message = match entry {
+        SessionLogEntry::Control(control) => {
+            let Some(trace) = application_transcript_reasoning_trace(&control) else {
+                return Ok(None);
+            };
+            let safe_content = safe_persistence_text(trace);
+            let original_content_bytes = safe_content.len();
+            return Ok(Some(ApplicationTranscriptMessage {
+                ordinal,
+                message_id: safe_application_transcript_message_id(&format!(
+                    "reasoning-trace:{ordinal}"
+                )),
+                role: ApplicationTranscriptRole::Assistant,
+                content: Some(truncate_application_transcript_text(
+                    &safe_content,
+                    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+                )),
+                assistant_kind: Some(AssistantMessageKind::ReasoningTrace),
+                tool_name: None,
+                image_attachment_count: 0,
+                truncated: original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+                original_content_bytes: u64::try_from(original_content_bytes)
+                    .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
+            }));
+        }
+        SessionLogEntry::RuntimeContextSnapshotV2(_) => return Ok(None),
+        SessionLogEntry::User(message) => {
+            (message, ApplicationTranscriptRole::User, MessageRole::User)
+        }
+        SessionLogEntry::Assistant(message) => {
+            for call in &message.tool_calls {
+                if !tool_names.contains_key(&call.id) {
+                    tool_name_order.push_back(call.id.clone());
+                }
+                tool_names.insert(
+                    call.id.clone(),
+                    truncate_application_transcript_text(&safe_persistence_text(&call.name), 128),
+                );
+            }
+            while tool_name_order.len() > max_tool_names {
+                if let Some(call_id) = tool_name_order.pop_front() {
+                    tool_names.remove(&call_id);
+                }
+            }
+            (
+                message,
+                ApplicationTranscriptRole::Assistant,
+                MessageRole::Assistant,
+            )
+        }
+        SessionLogEntry::ToolResultV3(result) => (
+            result.model_message()?,
+            ApplicationTranscriptRole::Tool,
+            MessageRole::Tool,
+        ),
+    };
+    let (message, role, expected_role) = message;
+    if message.role != expected_role {
+        bail!("durable transcript entry role does not match its entry class");
+    }
+    let safe_content = message.content.as_deref().map(safe_persistence_text);
+    let original_content_bytes = safe_content.as_ref().map_or(0, String::len);
+    Ok(Some(ApplicationTranscriptMessage {
+        ordinal,
+        message_id: safe_application_transcript_message_id(&message.id),
+        role,
+        content: safe_content.map(|content| {
+            truncate_application_transcript_text(&content, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES)
+        }),
+        assistant_kind: if role == ApplicationTranscriptRole::Assistant {
+            message.assistant_kind
+        } else {
+            None
+        },
+        tool_name: message
+            .tool_call_id
+            .as_ref()
+            .and_then(|call_id| tool_names.get(call_id))
+            .cloned(),
+        image_attachment_count: u64::try_from(message.image_attachments.len())
+            .map_err(|_| anyhow!("transcript attachment count exceeds supported range"))?,
+        truncated: original_content_bytes > MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+        original_content_bytes: u64::try_from(original_content_bytes)
+            .map_err(|_| anyhow!("transcript content size exceeds supported range"))?,
+    }))
 }
 
 fn truncate_application_transcript_text(value: &str, max_bytes: usize) -> String {
@@ -5299,23 +5353,25 @@ pub async fn rerun_application_verification_with_attachment(
         if session.session_scope_id() != expected_session_scope_id {
             bail!("durable session identity changed before verification rerun");
         }
-        let execution_backend = crate::build_configured_execution_backend(&root_config)?;
-        Ok::<_, anyhow::Error>((
-            session,
-            session_lease,
-            workspace_root,
-            execution_backend,
-            request,
-        ))
+        Ok::<_, anyhow::Error>((session, session_lease, workspace_root, request))
     })
     .await
     .map_err(|_| anyhow!("verification rerun preparation worker failed"))??;
-    let (mut session, _session_lease, workspace_root, execution_backend, request) = preparation;
+    let (mut session, _session_lease, workspace_root, request) = preparation;
+    let verification_execution_port: Arc<
+        dyn sigil_kernel::verification::VerificationExecutionPortV1,
+    > = services
+        .authority_composition()
+        .ok_or_else(|| {
+            anyhow!("current-schema verification rerun requires the managed verification route")
+        })?
+        .command_execution
+        .clone();
     let mut handler = NoopEventHandler;
     rerun_task_verification_check(
         &mut session,
         &mut handler,
-        execution_backend.as_ref(),
+        verification_execution_port.as_ref(),
         &workspace_root,
         &request,
     )
@@ -5682,8 +5738,13 @@ fn prepare_application_run_blocking_with_writer(
         managed_artifact_store_writer,
         managed_session_key.as_deref(),
     ) {
-        let lease = ManagedApplicationArtifactStoreLease::acquire(writer, key, &session_path)
-            .map_err(ApplicationRunPrepareError::execution)?;
+        let lease = ManagedApplicationArtifactStoreLease::acquire(
+            writer,
+            key,
+            &session_path,
+            session.session_scope_id(),
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
         session = session.with_tool_artifact_store_override(lease.store());
         Some(lease)
     } else {
@@ -6416,13 +6477,20 @@ fn application_task_run_status_label(status: TaskRunStatus) -> &'static str {
 /// surface is exposed and the permission mode is read-only; every terminal outcome (draft
 /// committed, no-draft closure, cancelled, failed) is written durably through
 /// [`PlanReviewCoordinator::close_plan_review_run`].
-pub async fn execute_plan_review_revision<H>(
+pub async fn execute_plan_review_revision_with_managed_execution<H>(
     root_config: &RootConfig,
     workspace_root: &Path,
     session_log_path: &Path,
     request: &crate::PlanReviewRunRequest,
     handler: &mut H,
     cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    managed_command_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
+    >,
+    managed_tool_authority: Option<Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
+    child_resource_provisioner: Option<
+        Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    >,
 ) -> Result<crate::PlanReviewRunOutcome>
 where
     H: ApplicationRunEventHandler + Send,
@@ -6462,25 +6530,54 @@ where
             scratch_label: "cache/tmp".to_owned(),
             scratch_quota: sigil_tools_builtin::ScratchQuota::default(),
         };
-        let execution_backend = crate::build_configured_execution_backend(root_config)?;
-        let scratch_control = crate::authority_scratch_control(paths.scratch_root.clone());
-        sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
-            &mut base_registry,
-            builtin_paths,
-            execution_backend,
-            &root_config.execution,
-            None,
-            Some(scratch_control),
-        );
+        let managed_command_execution = match managed_command_execution {
+            Some(route) => Some(route),
+            None => {
+                #[cfg(test)]
+                {
+                    sigil_tools_builtin::register_builtin_tools_with_unavailable_managed_execution(
+                        &mut base_registry,
+                        builtin_paths.clone(),
+                    );
+                    None
+                }
+                #[cfg(not(test))]
+                {
+                    bail!(
+                        "current-schema plan review requires the managed command execution route"
+                    );
+                }
+            }
+        };
+        if let Some(managed_command_execution) = managed_command_execution {
+            let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
+                managed_command_execution.clone();
+            let managed_terminal: Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1> =
+                managed_command_execution;
+            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+                &mut base_registry,
+                builtin_paths,
+                managed_executor,
+                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                    &root_config.execution,
+                ),
+                None,
+                None,
+                managed_terminal,
+            );
+        }
         crate::register_agent_tools(&mut base_registry, root_config)?;
         let tool_registry =
             crate::build_plan_review_tool_registry(&base_registry, root_config).into_registry();
-        let options = crate::build_run_options(
+        let mut options = crate::build_run_options(
             root_config,
             workspace_root.to_path_buf(),
             sigil_kernel::InteractionMode::Headless,
             None,
         );
+        if let Some(tool_authority) = managed_tool_authority {
+            options = options.with_tool_authority(tool_authority);
+        }
         let agent = crate::configured_agent(root_config, provider, base_registry)?;
         let mut bridge = PublicApplicationEventBridge::new(
             ApplicationRunEventSequence::new(
@@ -6489,18 +6586,45 @@ where
             ),
             handler,
         );
-        let outcome = match crate::PlanReviewCoordinator::run_plan_review(
-            &mut session,
-            request,
-            &agent,
-            options,
-            tool_registry,
-            &mut bridge,
-            &mut sigil_kernel::AutoApproveHandler,
-            cancellation_handle,
-        )
-        .await
-        {
+        let outcome = match child_resource_provisioner {
+            Some(provisioner) => {
+                crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+                    &mut session,
+                    request,
+                    &agent,
+                    options,
+                    tool_registry,
+                    &mut bridge,
+                    &mut sigil_kernel::AutoApproveHandler,
+                    cancellation_handle,
+                    provisioner,
+                )
+                .await
+            }
+            None => {
+                #[cfg(test)]
+                {
+                    crate::PlanReviewCoordinator::run_plan_review(
+                        &mut session,
+                        request,
+                        &agent,
+                        options,
+                        tool_registry,
+                        &mut bridge,
+                        &mut sigil_kernel::AutoApproveHandler,
+                        cancellation_handle,
+                    )
+                    .await
+                }
+                #[cfg(not(test))]
+                {
+                    bail!(
+                        "current-schema plan review revision requires the composed child resource bundle"
+                    );
+                }
+            }
+        };
+        let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
@@ -6584,6 +6708,33 @@ where
         }
     })?;
     Ok(outcome)
+}
+
+/// Test-only compatibility wrapper for plan-review fixtures that do not compose authority.
+#[cfg(test)]
+pub async fn execute_plan_review_revision<H>(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    session_log_path: &Path,
+    request: &crate::PlanReviewRunRequest,
+    handler: &mut H,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
+) -> Result<crate::PlanReviewRunOutcome>
+where
+    H: ApplicationRunEventHandler + Send,
+{
+    execute_plan_review_revision_with_managed_execution(
+        root_config,
+        workspace_root,
+        session_log_path,
+        request,
+        handler,
+        cancellation,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 struct PublicApplicationEventBridge<'a, H> {

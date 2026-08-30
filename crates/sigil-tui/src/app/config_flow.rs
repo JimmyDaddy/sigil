@@ -2,9 +2,9 @@ use crate::appearance_diagnostics::appearance_doctor_checks;
 use crate::commands::{UiCommand, command_for_key_event};
 use crate::config_panel::{
     CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
-    CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField, ConfigFieldMove,
-    ConfigFooterAction, ConfigSection, ConfigState, ConnectionPickerChoiceKind,
-    config_field_accepts_char, render_config_readonly_row, render_config_value_row,
+    CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigField, ConfigFieldMove, ConfigFooterAction,
+    ConfigSection, ConfigState, ConnectionPickerChoiceKind, config_field_accepts_char,
+    render_config_readonly_row, render_config_value_row,
 };
 use crate::slash::SLASH_COMMANDS;
 use std::{
@@ -35,11 +35,16 @@ use sigil_runtime::{
     doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks},
     provider_api_key_env_name, provider_capabilities_for_name, provider_capability_view,
     provider_connections::{
-        ConfigPublishOutcome, ConnectionSaveDraft, ConnectionSaveOutcome, RootConfigPublisher,
-        connection_semantic_fingerprint, load_provider_connections, resolve_default_model_route,
-        resolve_model_route, save_connection_config_with_base, validate_persisted_model_route,
+        ConnectionSaveDraft, ConnectionSaveOutcome, RootConfigPublisher,
+        save_connection_config_with_base,
     },
     resolve_context_window_tokens_with_override,
+};
+
+#[cfg(test)]
+use sigil_runtime::provider_connections::{
+    connection_semantic_fingerprint, load_provider_connections, resolve_default_model_route,
+    resolve_model_route, validate_persisted_model_route,
 };
 
 use super::session_lifecycle_flow::SessionRetentionMaintenancePreview;
@@ -53,6 +58,11 @@ use super::{
         TextInputTarget,
     },
 };
+
+#[cfg(test)]
+use crate::config_panel::ConfigDraft;
+#[cfg(test)]
+use sigil_runtime::provider_connections::ConfigPublishOutcome;
 
 mod agent_detail;
 mod agents;
@@ -735,8 +745,7 @@ impl AppState {
                             self.clean_selected_mutation_artifacts()
                         }
                         ConfigFooterAction::CleanSessions => {
-                            self.open_session_retention_modal();
-                            Ok(None)
+                            Ok(self.open_session_retention_modal())
                         }
                         ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
                         ConfigFooterAction::TrustAgent => {
@@ -1250,7 +1259,6 @@ impl AppState {
         self.config_state = Some(config_state);
         self.schedule_connection_inventory_refresh(&persisted_root_config);
         self.refresh_mutation_artifact_retention_preview();
-        self.schedule_session_retention_preview();
         self.last_notice = Some("opened config".to_owned());
         self.push_event("mode", "config");
     }
@@ -1954,51 +1962,68 @@ impl AppState {
             }
         };
         let expected_root_config = config_state.draft.base_root_config.clone();
-        let save_outcome = match persist_connection_config(
-            persisted_root_config(&expected_root_config),
-            next_base_root_config,
-            self.config_path.clone(),
-            connection_save,
-        ) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let message = self
-                    .secret_redactor
-                    .redact_text(&sigil_kernel::safe_persistence_text(&error.to_string()));
-                apply_config_save_error_state(config_state, &message);
-                self.last_notice = Some(format!("save failed: {message}"));
-                self.push_event("config:error", message);
-                return Ok(None);
-            }
-        };
-        let ConnectionSaveOutcome {
-            root_config,
-            publish_outcome,
-            old_credential_cleanup_warning,
-            ..
-        } = save_outcome;
-        config_state.dirty = false;
-        config_state.save_error = None;
-        config_state.close_guard_armed = false;
-        config_state.draft = ConfigDraft::from_root_config(&root_config);
-        config_state.draft_revision = config_state.draft_revision.saturating_add(1);
-        config_state.sync_mcp_selection();
-        let mut compatible_catalog_views =
-            std::mem::take(&mut self.runtime.connection_model_catalog_views);
-        let current_connections = load_provider_connections(&root_config).connections;
-        compatible_catalog_views.retain(|_, view| {
-            current_connections
-                .get(&view.result.connection_id)
-                .is_some_and(|connection| {
-                    connection_semantic_fingerprint(&connection.config)
-                        == view.result.connection_fingerprint
-                })
-        });
-        let active_route = self
-            .apply_saved_provider_route_to_current_session(&expected_root_config, &root_config)?;
-        self.apply_runtime_config_snapshot(&root_config);
-        self.runtime.connection_model_catalog_views = compatible_catalog_views;
-        let saved_notice = match publish_outcome {
+        #[cfg(not(test))]
+        {
+            let request = std::sync::Arc::new(super::ConfigurationSaveRequest {
+                expected: persisted_root_config(&expected_root_config),
+                next_base: next_base_root_config,
+                config_path: self.config_path.clone(),
+                follow_up: super::ConfigurationSaveFollowUp::RebootRuntime,
+                root_only: false,
+                draft: std::sync::Mutex::new(Some(connection_save)),
+            });
+            self.last_notice = Some("saving config through application authority".to_owned());
+            Ok(Some(AppAction::PersistConfiguration { request }))
+        }
+        #[cfg(test)]
+        {
+            let save_outcome = match persist_connection_config(
+                persisted_root_config(&expected_root_config),
+                next_base_root_config,
+                self.config_path.clone(),
+                connection_save,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let message = self
+                        .secret_redactor
+                        .redact_text(&sigil_kernel::safe_persistence_text(&error.to_string()));
+                    apply_config_save_error_state(config_state, &message);
+                    self.last_notice = Some(format!("save failed: {message}"));
+                    self.push_event("config:error", message);
+                    return Ok(None);
+                }
+            };
+            let ConnectionSaveOutcome {
+                root_config,
+                publish_outcome,
+                old_credential_cleanup_warning,
+                ..
+            } = save_outcome;
+            config_state.dirty = false;
+            config_state.save_error = None;
+            config_state.close_guard_armed = false;
+            config_state.draft = ConfigDraft::from_root_config(&root_config);
+            config_state.draft_revision = config_state.draft_revision.saturating_add(1);
+            config_state.sync_mcp_selection();
+            let mut compatible_catalog_views =
+                std::mem::take(&mut self.runtime.connection_model_catalog_views);
+            let current_connections = load_provider_connections(&root_config).connections;
+            compatible_catalog_views.retain(|_, view| {
+                current_connections
+                    .get(&view.result.connection_id)
+                    .is_some_and(|connection| {
+                        connection_semantic_fingerprint(&connection.config)
+                            == view.result.connection_fingerprint
+                    })
+            });
+            let active_route = self.apply_saved_provider_route_to_current_session(
+                &expected_root_config,
+                &root_config,
+            )?;
+            self.apply_persisted_config_snapshot(&root_config);
+            self.runtime.connection_model_catalog_views = compatible_catalog_views;
+            let saved_notice = match publish_outcome {
             ConfigPublishOutcome::Published if old_credential_cleanup_warning => {
                 "saved config; an unreferenced stored credential needs cleanup".to_owned()
             }
@@ -2022,39 +2047,41 @@ impl AppState {
                     },
                 ),
         };
-        self.last_notice = Some(if let Some(model_ref) = active_route.as_ref() {
-            format!(
-                "{saved_notice}; route -> {}/{}; continuing current session",
-                model_ref.connection_id, model_ref.model_id
-            )
-        } else {
-            saved_notice
-        });
-        self.push_event("config", format!("saved {}", self.config_path.display()));
-        let loaded = load_provider_connections(&root_config);
-        let default_model = loaded.default_model.as_ref();
-        self.push_event(
-            "config:model",
-            format!(
-                "default {}/{}; current session {}",
-                default_model
-                    .map(|model| model.connection_id.as_str())
-                    .unwrap_or("not_configured"),
-                default_model
-                    .map(|model| model.model_id.as_str())
-                    .unwrap_or("not_configured"),
-                if active_route.is_some() {
-                    "continued on this route"
-                } else {
-                    "retained"
-                }
-            ),
-        );
-        Ok(Some(AppAction::ConfigSaved {
-            root_config: Box::new(root_config),
-        }))
+            self.last_notice = Some(if let Some(model_ref) = active_route.as_ref() {
+                format!(
+                    "{saved_notice}; route -> {}/{}; continuing current session",
+                    model_ref.connection_id, model_ref.model_id
+                )
+            } else {
+                saved_notice
+            });
+            self.push_event("config", format!("saved {}", self.config_path.display()));
+            let loaded = load_provider_connections(&root_config);
+            let default_model = loaded.default_model.as_ref();
+            self.push_event(
+                "config:model",
+                format!(
+                    "default {}/{}; current session {}",
+                    default_model
+                        .map(|model| model.connection_id.as_str())
+                        .unwrap_or("not_configured"),
+                    default_model
+                        .map(|model| model.model_id.as_str())
+                        .unwrap_or("not_configured"),
+                    if active_route.is_some() {
+                        "continued on this route"
+                    } else {
+                        "retained"
+                    }
+                ),
+            );
+            Ok(Some(AppAction::ConfigSaved {
+                root_config: Box::new(root_config),
+            }))
+        }
     }
 
+    #[cfg(test)]
     fn apply_saved_provider_route_to_current_session(
         &mut self,
         previous_config: &RootConfig,
@@ -2195,7 +2222,7 @@ impl AppState {
         Ok(Some(AppAction::RefreshMcpServer { server_name }))
     }
 
-    pub(crate) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
+    pub(crate) fn apply_persisted_config_snapshot(&mut self, root_config: &RootConfig) {
         let info_rail_default_changed = self.config_snapshot.as_ref().is_none_or(|snapshot| {
             snapshot.appearance.info_rail != root_config.appearance.info_rail
         });
@@ -2211,6 +2238,12 @@ impl AppState {
         self.sigil_paths = sigil_paths;
         self.session_log_dir = self.sigil_paths.session_log_dir.clone();
         self.config_snapshot = Some(root_config.clone());
+        let session_config = self
+            .runtime_config_for_current_session(root_config.clone())
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| root_config.clone());
+        self.apply_session_runtime_config(&session_config);
         self.runtime.connection_model_catalog_views.clear();
         self.schedule_connection_inventory_refresh(root_config);
         if info_rail_default_changed {
@@ -2388,7 +2421,7 @@ fn config_save_error_target(message: &str) -> Option<(ConfigSection, ConfigField
     None
 }
 
-fn persist_connection_config(
+pub(crate) fn persist_connection_config(
     expected: RootConfig,
     next_base: RootConfig,
     config_path: PathBuf,

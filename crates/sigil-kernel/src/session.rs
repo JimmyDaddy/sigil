@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -343,7 +343,7 @@ pub use stats::session_stats_from_entries;
 pub(crate) use store::session_entry_from_domain_event;
 pub use store::{
     JsonlSessionStore, SessionIoBusyError, SessionIoBusyKind, SessionIoLockMetricsSnapshot,
-    session_io_lock_metrics,
+    SessionStreamRecordReader, session_io_lock_metrics,
 };
 pub use tool_artifact::{
     ModelMessagePayloadV1, ProcessStreamCaptureConfigV1, ProviderToolResultMessageV1,
@@ -361,16 +361,18 @@ pub use tool_artifact::{
     ToolArtifactCaptureSink, ToolArtifactCompleteness, ToolArtifactDescriptorV1,
     ToolArtifactEncoding, ToolArtifactGcReportV1, ToolArtifactGcRootsV1, ToolArtifactId,
     ToolArtifactManifestEntryV1, ToolArtifactPageEncoding, ToolArtifactPageV1,
+    ToolArtifactProcessCaptureBackendV1, ToolArtifactProcessCaptureSnapshotV1,
     ToolArtifactReadBudgetV1, ToolArtifactReadOutcome, ToolArtifactReadRecordedV1,
-    ToolArtifactRefV1, ToolArtifactRetentionClass, ToolArtifactRetrievalPolicyV1,
-    ToolArtifactSelectorV1, ToolArtifactSensitivity, ToolArtifactStore,
-    ToolArtifactTombstonePlannedV1, ToolArtifactTrashPruneReportV1, ToolArtifactTruncationV1,
-    ToolArtifactUnavailableV1, ToolDisplayCapability, ToolDisplayViewV1, ToolErrorSummaryV1,
-    ToolExecutionCapturePlanV1, ToolModelViewV1, ToolOutputPersistencePolicy, ToolOutputSegmentV1,
-    ToolOutputStreamLayoutV1, ToolOutputStreamV1, ToolPolicyCompletenessV1, ToolPreviewKind,
-    ToolPreviewTruncationReasonV1, ToolResultCaptureCompletenessV1, ToolResultCapturePathV1,
-    ToolResultCaptureTelemetryV1, ToolResultFactsV1, ToolResultFailureStageV1, ToolResultOutcomeV1,
-    ToolResultRecordedV2, ToolResultRecordedV3, ToolResultTerminalFallbackV1, ToolResultViewsV2,
+    ToolArtifactRefV1, ToolArtifactRetentionClass, ToolArtifactRetireFrontierV1,
+    ToolArtifactRetrievalPolicyV1, ToolArtifactSelectorV1, ToolArtifactSensitivity,
+    ToolArtifactStore, ToolArtifactStoreBackendV1, ToolArtifactTombstonePlannedV1,
+    ToolArtifactTrashPruneReportV1, ToolArtifactTruncationV1, ToolArtifactUnavailableV1,
+    ToolDisplayCapability, ToolDisplayViewV1, ToolErrorSummaryV1, ToolExecutionCapturePlanV1,
+    ToolModelViewV1, ToolOutputPersistencePolicy, ToolOutputSegmentV1, ToolOutputStreamLayoutV1,
+    ToolOutputStreamV1, ToolPolicyCompletenessV1, ToolPreviewKind, ToolPreviewTruncationReasonV1,
+    ToolResultCaptureCompletenessV1, ToolResultCapturePathV1, ToolResultCaptureTelemetryV1,
+    ToolResultFactsV1, ToolResultFailureStageV1, ToolResultOutcomeV1, ToolResultRecordedV2,
+    ToolResultRecordedV3, ToolResultTerminalFallbackV1, ToolResultViewsV2,
     ToolResultWireSemanticsV1, ToolSourceCompletenessV1, ToolStorageCompletenessV1,
 };
 pub use tool_artifact::{

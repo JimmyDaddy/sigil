@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "test-support"))]
 use crate::session::ToolArtifactDescriptorV1;
+#[cfg(any(test, feature = "test-support"))]
+use crate::session::ToolArtifactStore;
 use crate::{
     ControlEntry, ControlledCheckpointProjection, DurableEventType, EventClass,
     ExternalProvenanceEntry, JsonlSessionStore, ResolvedModelRoute, Session, SessionLogEntry,
-    SessionRef, SessionStreamRecord, StoredEvent, ToolArtifactBindingV1, ToolArtifactStore,
-    ToolResultRecordedV3, stable_event_hash, stable_event_uuid,
+    SessionRef, SessionStreamRecord, StoredEvent, ToolArtifactBindingV1, ToolResultRecordedV3,
+    stable_event_hash, stable_event_uuid,
 };
 
 /// Stable, append-only binding for one finalized user turn that can be forked safely.
@@ -284,6 +287,10 @@ fn create_conversation_fork(
             |route| Session::new_with_route(&provider_name, route),
         )
         .with_store(destination_store);
+    #[cfg(any(test, feature = "test-support"))]
+    destination.attach_tool_artifact_store_override(ToolArtifactStore::for_session_path(
+        &destination_path,
+    ));
     destination.append_control(ControlEntry::SessionIdentity {
         provider_name: provider_name.clone(),
         model_name: model_name.clone(),
@@ -352,6 +359,29 @@ fn create_conversation_fork(
     })
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+fn remap_forked_tool_artifacts(
+    _source_store: &JsonlSessionStore,
+    _destination_path: &Path,
+    messages: &mut [SessionLogEntry],
+) -> Result<()> {
+    if messages.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::ToolResultV3(ToolResultRecordedV3 {
+                artifact: ToolArtifactBindingV1::Published { .. },
+                ..
+            })
+        )
+    }) {
+        bail!(
+            "conversation fork with published artifacts requires an authority-managed artifact route"
+        )
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
 fn remap_forked_tool_artifacts(
     source_store: &JsonlSessionStore,
     destination_path: &Path,
@@ -373,6 +403,7 @@ fn remap_forked_tool_artifacts(
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn remap_tool_result_artifact(
     result: &mut ToolResultRecordedV3,
     descriptor: ToolArtifactDescriptorV1,

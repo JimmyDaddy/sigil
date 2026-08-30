@@ -62,8 +62,8 @@ Sigil release admission 后由 replacement engine 使用。升级 `self_update` 
 |---|---|---|---|---|---|
 | `remark-math` / `rehype-katex` / `katex` | `6.0.0` / `7.0.1` / `0.18.1` | `apps/desktop/src/markdown` | 从 Markdown AST 识别 inline/display math，并由 KaTeX 生成本地 HTML/MathML；不开启 `trust`，不允许任意 URL、HTML 或远程字体 | MIT；remarkjs/remark-math、remarkjs/remark-math、KaTeX/KaTeX | 数学渲染独立 lazy chunk；失败局部降级为原始 LaTeX，TUI 不新增数学引擎而显示保真 source |
 | `rehype-sanitize` | `6.0.0` | `apps/desktop/src/markdown` | 在 React 渲染前执行显式 Markdown schema，只允许 Sigil 使用的结构、class 与受限属性；不启用 `rehype-raw` | MIT；rehypejs/rehype-sanitize | 模型、历史 session 和 provider 内容均视为不可信；raw HTML、script、iframe、object 与不受控 URL 不进入 DOM |
-| `mermaid` | `11.16.0` | `apps/desktop/src/markdown` | 只对闭合、限额且通过 admission 的 `mermaid` fence 按需渲染；`securityLevel=strict`、`htmlLabels=false`，不加载 CDN、remote theme、image 或 plugin | MIT；mermaid-js/mermaid | 不进入主 renderer chunk；交互 directive、外链、HTML 标签、control character 与过大输入先拒绝，失败保留源码；TUI 永不执行 Mermaid |
-| `dompurify` | `3.4.12` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
+| `mermaid` | `11.16.1` | `apps/desktop/src/markdown` | 只对闭合、限额且通过 admission 的 `mermaid` fence 按需渲染；`securityLevel=strict`、`htmlLabels=false`，不加载 CDN、remote theme、image 或 plugin | MIT；mermaid-js/mermaid | 不进入主 renderer chunk；交互 directive、外链、HTML 标签、control character 与过大输入先拒绝，失败保留源码；TUI 永不执行 Mermaid |
+| `dompurify` | `3.4.13` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
 
 RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也不启动额外进程、不创建临时文件、
 不访问网络。Desktop CSP 保持 `default-src 'self'`、`img-src 'self' data:`、`object-src 'none'`、
@@ -76,8 +76,12 @@ Vite 拆分。`pnpm audit --audit-level high` 当前无 high-severity 漏洞；`
 `js-yaml` 通过 workspace override 固定为 `4.3.1`；其
 `@redocly/openapi-core -> minimatch` 路径中的 `brace-expansion` 也固定为 `5.0.9`，以覆盖
 `GHSA-mh99-v99m-4gvg` 与后续 expansion-array DoS 修复，直到上游约束自然覆盖对应版本。
-`webdriverio -> cheerio` 与 `jsdom` 的 `undici` 固定为 `7.29.0`，`vite -> postcss` 的
-`nanoid` 固定为 `3.3.17`，避免已知 high-severity advisory。以上 override 均由 contract
+`webdriverio -> cheerio` 与 `jsdom` 的 `undici` 固定为 `7.29.0`，`vite -> postcss` 固定为 `8.5.23`，并将
+`nanoid` 固定为 `3.3.18`，避免已知 high-severity advisory。WDIO 当前仍声明 `@puppeteer/browsers` 的
+2.x 范围，但该范围依赖无修复的 `extract-zip 2.0.1`；`apps/desktop` 将该开发期工具链 override 到
+`@puppeteer/browsers 3.2.1`，其改用 `modern-tar`，并已通过 frozen install、WDIO CLI smoke、完整
+desktop check 和 high-severity audit。该 override 仅影响 dev-only WDIO/Puppeteer browser setup；若上游
+WDIO 收敛到 3.x 或提供兼容修复，必须移除 override 并重跑相同 gate。以上 override 均由 contract
 regeneration、完整 desktop check 和 high-severity audit 验证。升级
 KaTeX、Mermaid、DOMPurify 或 sanitize pipeline 时必须重跑不可信 URL/HTML/SVG 语料、安全审计和
 bundle 差异检查，不得只以视觉 smoke 通过作为升级依据。
@@ -95,8 +99,10 @@ RustSec复扫同时识别出Tauri 2.11.5当前上游图中的以下无安全升�
 - Linux GTK3绑定的unmaintained组`RUSTSEC-2024-0411`至`RUSTSEC-2024-0420`，以及该路径的
   `proc-macro-error` `RUSTSEC-2024-0370`；这些crate只由Tauri/WebKitGTK Linux runtime/build graph引入，Sigil
   不直接调用GTK API。
-- `glib 0.18.5`的`VariantStrIter` unsoundness `RUSTSEC-2024-0429`；Sigil与desktop adapter不构造或遍历
-  `glib::VariantStrIter`。这是当前Tauri Linux传递依赖的受限风险接受，不是漏洞已修复的声明。
+- `glib 0.18.5` 的 `VariantStrIter` unsoundness `RUSTSEC-2024-0429`；`cargo audit` 仍报告该锁定依赖，
+  因此继续保留精确的 `deny.toml`/CI ignore。当前 `cargo deny` 数据库会将该 ID 标为未匹配，但这不构成风险
+  消失的证明；升级 Tauri Linux graph 后仍须同时重跑 `cargo audit` 与 `cargo deny`，不得把例外解释为对任意
+  `glib` API 的安全背书。
 - `tauri-utils -> urlpattern`的unmaintained `rust-unic`组：`RUSTSEC-2025-0075`、`RUSTSEC-2025-0080`、
   `RUSTSEC-2025-0081`、`RUSTSEC-2025-0098`、`RUSTSEC-2025-0100`；该路径用于Tauri构建/URL pattern contract，
   不处理Sigil provider或tool网络数据。
@@ -227,6 +233,14 @@ record schema 和 public trait，避免把 API key、OAuth token 与 continuatio
 
 P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为 HTTP journal 引入另一套 secret scanner 或 event-size 常量。journal 的 exclusive lease 只解决单机同路径 writer ownership；它不替代 append-only session evidence、command identity store 或跨进程服务选主。
 
+## Public TUI Unicode text contract（RFC-0070 R70.3）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `wezterm-bidi` | `0.2.3`；默认 feature | `sigil-tui-core/text` | 对 bounded UTF-8 文本执行 UAX #9 paragraph reorder，并保留 logical/visual character mapping；不读取环境、文件或网络，不承担 grapheme-width、字体 shaping 或剪贴板策略 | `MIT AND Unicode-DFS-2016`；wezterm项目 | 仅由 public renderer-neutral core 直接消费；`Unicode-DFS-2016` 是该依赖数据文件/软件许可，已加入 `deny.toml` 显式 allowlist。升级时必须复跑 bidi、ZWJ/Rule X9、feature powerset、package dry-run 与 `cargo deny` |
+
+该依赖的 Rule X9 控制字符处理由 `sigil-tui-core` 补齐为完整 mapping；public contract 仍以代码点索引为边界，不能将其描述为完整 terminal cell-width 或 grapheme selection 实现。
+
 ## 发布前扫描与显式例外（E21.17）
 
 2026-07-12 使用 `cargo-audit 0.22.2` 与 `cargo-deny 0.20.2` 对启用 all-features 的 workspace 依赖图执行扫描。首次扫描发现 `crossbeam-epoch 0.9.18`、`quinn-proto 0.11.14` 与经 `syntect` 默认 plist feature 引入的 `quick-xml 0.39.4` 存在已公开漏洞。处置如下：
@@ -236,6 +250,13 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 - `deny.toml` 限制依赖来源为 crates.io registry，执行许可白名单检查，并将重复版本保留为 warning 供后续收敛。
 
 复扫结果为 `cargo audit` 零已知漏洞；`cargo deny check` 的 advisories/bans/licenses/sources 四项均通过。当时建立的两项例外为`RUSTSEC-2025-0141`（`syntect`只用`bincode 1.3.3`读取版本固定、编译进二进制的dump）与上文记录的`RUSTSEC-2024-0436`。当前完整例外集合还包括R44.2在本文件开头逐项说明的Tauri传递路径；唯一事实源以`deny.toml`为准，所有例外都必须随上游迁移复核并删除。
+
+R70.8 Windows hosted ConPTY qualification 另将 `portable-pty` 在 Windows target 固定到 `0.8.1`；该版本
+依赖已停止维护的 `serial 0.4.0`（`RUSTSEC-2017-0008`），而 `portable-pty 0.9.0` 在当前 Windows
+hosted ConPTY runner 上无法可靠读出 PTY 帧。该例外只覆盖这一条传递依赖和 Windows PTY 兼容性隔离，
+不表示 `serial` 得到维护或安全背书；Unix target 仍使用 `portable-pty 0.9.0`。升级到包含 Windows
+ConPTY 修复且不引入该传递依赖的上游版本后，必须删除 `deny.toml`、workflow 和本台账中的该例外，
+并重跑 cargo-deny、cargo-audit、Windows PTY 和 full qualification。
 
 上述证据覆盖 E21.17 public WebFetch、stable websearch 与 user-root Streamable HTTP MCP cutover；最终发布结论仍以同一工作区的完整测试、Clippy、格式、文档和站点 gate 全绿为前提。
 
@@ -272,14 +293,14 @@ cargo audit \
   --ignore RUSTSEC-2024-0418 \
   --ignore RUSTSEC-2024-0419 \
   --ignore RUSTSEC-2024-0420 \
-  --ignore RUSTSEC-2024-0429 \
   --ignore RUSTSEC-2024-0436 \
   --ignore RUSTSEC-2025-0075 \
   --ignore RUSTSEC-2025-0080 \
   --ignore RUSTSEC-2025-0081 \
   --ignore RUSTSEC-2025-0098 \
   --ignore RUSTSEC-2025-0100 \
-  --ignore RUSTSEC-2025-0141
+  --ignore RUSTSEC-2025-0141 \
+  --ignore RUSTSEC-2017-0008
 ```
 
 workflow 定时运行只能证明默认分支的最新依赖状态；发布仍需按对应 release RFC 执行完整

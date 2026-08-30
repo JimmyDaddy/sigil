@@ -354,32 +354,156 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile complete workspace and targets
+      - name: Compile macOS workspace and targets
+        if: runner.os == 'macOS'
         run: cargo check --locked --workspace --all-targets
+
+      - name: Compile Windows kernel targets
+        if: runner.os == 'Windows'
+        run: cargo check --locked -p sigil-kernel --all-targets
 
       - name: Test macOS runtime and execution surfaces
         if: runner.os == 'macOS'
-        run: cargo test --locked -p sigil-kernel -p sigil-process -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib
+        run: cargo test --locked -p sigil-kernel -p sigil-process -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib -- --test-threads=1
 
       - name: Test Windows kernel durability
         if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-kernel --lib
 
+  platform-windows-mcp:
+    name: Platform reliability (Windows MCP)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile Windows MCP targets
+        run: cargo check --locked -p sigil-process -p sigil-mcp --all-targets
+
       - name: Test Windows MCP transport
-        if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-process -p sigil-mcp --lib
+        run: cargo test --locked -p sigil-process -p sigil-mcp --lib -- --test-threads=1
+
+  platform-windows-builtin:
+    name: Platform reliability (Windows builtin)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile Windows builtin targets
+        run: cargo check --locked -p sigil-tools-builtin --all-targets
 
       - name: Test Windows builtin tools and terminal semantics
-        if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
 
-      - name: Test Windows runtime integration
-        if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-runtime --lib
+  platform-windows-runtime:
+    name: "Platform reliability (Windows runtime: ${{ matrix.name }})"
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agent-tools
+            timeout: 30
+            test-args: agent_tools
+          - name: agent-supervisor
+            timeout: 30
+            test-args: agent_supervisor
+          - name: session-lifecycle
+            timeout: 30
+            test-args: session_lifecycle
+          - name: application-run
+            timeout: 30
+            test-args: application_run
+          - name: provider-connections
+            timeout: 30
+            test-args: provider_connections
+          - name: doctor
+            timeout: 30
+            test-args: doctor
+          - name: plan-review
+            timeout: 30
+            test-args: plan_review_coordinator_tests
+          - name: managed-resource-adapters
+            timeout: 30
+            test-args: managed_resource_adapters::tests
+          - name: remainder
+            timeout: 45
+            test-args: >-
+              --skip agent_tools
+              --skip agent_supervisor
+              --skip session_lifecycle
+              --skip application_run
+              --skip provider_connections
+              --skip doctor
+              --skip plan_review_coordinator_tests
+              --skip managed_resource_adapters
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile Windows runtime targets
+        run: cargo check --locked -p sigil-runtime --all-targets
+
+      - name: Test Windows runtime integration (${{ matrix.name }})
+        run: cargo test --locked -p sigil-runtime --lib -- --test-threads=1 ${{ matrix.test-args }}
+
+  platform-windows-http:
+    name: Platform reliability (Windows HTTP)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile Windows HTTP targets
+        run: cargo check --locked -p sigil-http --all-targets
 
       - name: Test Windows HTTP durable journal
-        if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-http --all-targets
+        run: cargo test --locked -p sigil-http --all-targets -- --test-threads=1
 
   oauth-keyring-conformance:
     name: Provider and OAuth keyring conformance (${{ matrix.name }})

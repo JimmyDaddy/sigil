@@ -453,6 +453,8 @@ async fn run_git_inspection(
             details: json!({ "operation": operation.as_str() }),
         })?;
     let mut command = Command::new("git");
+    let git_dir = git_argument_path(&repository.git_dir);
+    let workspace_root = git_argument_path(&repository.workspace_root);
     command
         .kill_on_drop(true)
         .stdin(Stdio::null())
@@ -466,9 +468,9 @@ async fn run_git_inspection(
         .args(["-c", "core.preloadIndex=false"])
         .args(["-c", "core.quotePath=true"])
         .arg("--git-dir")
-        .arg(&repository.git_dir)
+        .arg(git_dir)
         .arg("--work-tree")
-        .arg(&repository.workspace_root)
+        .arg(workspace_root)
         .args(operation.command_args())
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -549,6 +551,23 @@ async fn run_git_inspection(
         stdout,
         stderr,
     })
+}
+
+/// Git for Windows does not consistently accept the verbatim path prefix
+/// returned by `std::fs::canonicalize`. Keep canonical paths for all authority
+/// checks, but pass the Win32 spelling at this subprocess boundary.
+fn git_argument_path(path: &std::path::Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.to_string_lossy();
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_owned()
 }
 
 async fn read_capped<R>(mut reader: R, limit: usize) -> std::io::Result<CappedBytes>

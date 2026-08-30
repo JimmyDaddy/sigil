@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -20,7 +21,8 @@ use sigil_kernel::{
     ConversationForked, ConversationTurnForkRequest, DurableEventType, ExternalProvenanceEntry,
     JsonlSessionStore, MessageRole, ModelMessage, RootConfig, Session, SessionLogEntry, SessionRef,
     SessionStreamRecord, ToolArtifactBindingV1, ToolArtifactGcReportV1, ToolArtifactGcRootsV1,
-    ToolArtifactStore, fork_conversation_at_turn, safe_persistence_text,
+    ToolArtifactRetireFrontierV1, ToolArtifactStore, fork_conversation_at_turn,
+    safe_persistence_text,
 };
 use thiserror::Error as ThisError;
 
@@ -420,7 +422,7 @@ impl LocalSessionLifecycleService {
         namespace_key: impl Into<String>,
     ) -> Result<Self> {
         use crate::managed_storage_writer::StorageWriterChannelV1;
-        let namespace_key = namespace_key.into();
+        let namespace_key = managed_lifecycle_namespace_key(&namespace_key.into());
         let namespace = writer
             .managed_named_leaf_path(StorageWriterChannelV1::SessionLifecycleLog, &namespace_key)?;
         self.lifecycle_journal_path = namespace.join("session-lifecycle-v1.jsonl");
@@ -907,7 +909,15 @@ impl LocalSessionLifecycleService {
         let before_hash = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
         let records = JsonlSessionStore::read_event_records(&source.path)?;
         let projection = project_records(&records)?;
-        let artifact_store = self.artifact_store_for_source_path(&source.path);
+        let source_session_id = projection
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow!("source session has no durable identity"))?;
+        let (artifact_store, _artifact_lease) = self.artifact_store_for_source_path(
+            &source.path,
+            &source_session_id,
+            self.session_source_is_managed(&source.session_ref),
+        )?;
         let tool_artifacts = export_tool_artifacts(
             &artifact_store,
             &projection.tool_artifacts,
@@ -919,10 +929,6 @@ impl LocalSessionLifecycleService {
         if before_hash != after_hash {
             bail!("source session changed while export was being prepared");
         }
-        let source_session_id = projection
-            .session_id
-            .clone()
-            .ok_or_else(|| anyhow!("source session has no durable identity"))?;
         let messages = export_messages(&projection.messages, self.limits.max_export_messages)?;
         validate_export_provenance(&messages, &projection.external_provenance)?;
         let payload = SessionExportPayloadV1 {
@@ -1014,7 +1020,8 @@ impl LocalSessionLifecycleService {
         now_unix_ms: u64,
     ) -> Result<ToolArtifactGcReportV1> {
         let _maintenance = self.acquire_maintenance_lease()?;
-        let store = self.resolve_artifact_store_without_jsonl(session_ref, expected_session_id)?;
+        let (store, _artifact_lease) =
+            self.resolve_artifact_store_without_jsonl(session_ref, expected_session_id)?;
         let session_log_path = store.session_log_path().to_path_buf();
         if self.is_session_pinned(session_ref, expected_session_id)? {
             roots.explicit_holds.extend(
@@ -1109,10 +1116,30 @@ impl LocalSessionLifecycleService {
                 now_unix_ms,
             )?;
         }
-        let report = store.garbage_collect(
+        let inventory = store.manifest_inventory()?;
+        let selected_bytes = disabled.iter().fold(0_u64, |total, artifact_ref| {
+            total.saturating_add(
+                inventory
+                    .iter()
+                    .find(|entry| entry.descriptor.artifact_ref == *artifact_ref)
+                    .map_or(0, |entry| entry.descriptor.persisted_bytes),
+            )
+        });
+        let retire_frontier = ToolArtifactRetireFrontierV1 {
+            selected_refs_hash: artifact_retire_refs_hash(&disabled),
+            selected_count: disabled.len() as u64,
+            selected_bytes,
+            eligibility_frontier: session.durable_frontier_sequence().max(1),
+            policy_hash: artifact_retire_policy_hash(
+                &roots,
+                sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+            ),
+        };
+        let report = store.garbage_collect_with_retire_frontier(
             &roots,
             now_unix_ms,
             sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+            retire_frontier,
         )?;
         // RFC-0062 16.2: reconcile every durable tombstone plan whose manifest is already gone
         // (crash between the physical move and the Expired append) together with the manifests
@@ -1622,7 +1649,10 @@ impl LocalSessionLifecycleService {
         &self,
         session_ref: &SessionRef,
         expected_session_id: &str,
-    ) -> Result<ToolArtifactStore> {
+    ) -> Result<(
+        ToolArtifactStore,
+        Option<crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
+    )> {
         let relative = session_ref.as_path();
         if relative.components().count() != 1
             || relative.extension().and_then(|value| value.to_str()) != Some("jsonl")
@@ -1666,43 +1696,44 @@ impl LocalSessionLifecycleService {
                 bail!("managed artifact GC source must be one session key below the root");
             }
         }
-        let store = self.artifact_store_for_source_path(&path);
+        let (store, lease) =
+            self.artifact_store_for_source_path(&path, expected_session_id, managed_source)?;
         if store.session_scope_id() != expected_session_id {
             bail!("artifact GC session identity changed");
         }
-        Ok(store)
+        Ok((store, lease))
     }
 
-    fn artifact_store_for_source_path(&self, source_path: &Path) -> ToolArtifactStore {
-        let Some(session_root) = self.managed_session_log_root.as_deref() else {
-            return ToolArtifactStore::for_session_path(source_path);
-        };
-        let Some(store_root) = self.managed_artifact_store_root.as_deref() else {
-            return ToolArtifactStore::for_session_path(source_path);
-        };
-        let Some(staging_root) = self.managed_artifact_staging_root.as_deref() else {
-            return ToolArtifactStore::for_session_path(source_path);
-        };
-        let Ok(session_root) = session_root.canonicalize() else {
-            return ToolArtifactStore::for_session_path(source_path);
-        };
-        let Ok(source_path) = source_path.canonicalize() else {
-            return ToolArtifactStore::for_session_path(source_path);
-        };
-        let Some(key) = source_path
-            .parent()
-            .and_then(|parent| parent.strip_prefix(&session_root).ok())
-            .filter(|relative| relative.components().count() == 1)
-            .and_then(Path::file_name)
+    fn artifact_store_for_source_path(
+        &self,
+        source_path: &Path,
+        session_scope_id: &str,
+        managed_source: bool,
+    ) -> Result<(
+        ToolArtifactStore,
+        Option<crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
+    )> {
+        if let Some(writer) = &self.managed_writer {
+            let key = if managed_source {
+                source_path.parent().and_then(Path::file_name)
+            } else {
+                source_path.file_stem()
+            }
             .and_then(|value| value.to_str())
-        else {
-            return ToolArtifactStore::for_session_path(&source_path);
-        };
-        ToolArtifactStore::for_session_path_with_roots(
-            &source_path,
-            store_root.join(key),
-            staging_root.join(key),
-        )
+            .context("managed artifact session key is unavailable")?;
+            let lease = crate::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+                Arc::clone(writer),
+                key,
+                session_scope_id,
+                source_path.to_path_buf(),
+            )?;
+            return Ok((lease.store(), Some(lease)));
+        }
+        if !managed_source {
+            #[cfg(test)]
+            return Ok((ToolArtifactStore::for_session_path(source_path), None));
+        }
+        bail!("managed artifact authority lease unavailable")
     }
 
     fn allocate_export_path(
@@ -1981,6 +2012,19 @@ impl LocalSessionLifecycleService {
             Ok(_) | Err(_) => LocalSessionLifecycleRecoveryStatus::Uncertain,
         }
     }
+}
+
+fn managed_lifecycle_namespace_key(workspace_id: &str) -> String {
+    if !workspace_id.is_empty()
+        && workspace_id.len() <= 64
+        && workspace_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return workspace_id.to_owned();
+    }
+    let digest = sigil_kernel::external::sha256_hex(workspace_id.as_bytes());
+    format!("ws-{}", &digest[..60])
 }
 
 fn conversation_fork_path(
@@ -2961,6 +3005,23 @@ fn modified_at_unix_ms(metadata: &fs::Metadata) -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+fn artifact_retire_refs_hash(
+    refs: &[sigil_kernel::ToolArtifactRefV1],
+) -> sigil_kernel::resource::CanonicalHash {
+    let mut refs = refs.to_vec();
+    refs.sort();
+    let bytes = serde_json::to_vec(&refs).unwrap_or_default();
+    sigil_kernel::resource::CanonicalHash::from_bytes(Sha256::digest(bytes).into())
+}
+
+fn artifact_retire_policy_hash(
+    roots: &ToolArtifactGcRootsV1,
+    orphan_grace_ms: u64,
+) -> sigil_kernel::resource::CanonicalHash {
+    let bytes = serde_json::to_vec(&(roots, orphan_grace_ms)).unwrap_or_default();
+    sigil_kernel::resource::CanonicalHash::from_bytes(Sha256::digest(bytes).into())
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {

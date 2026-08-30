@@ -19,12 +19,25 @@ use crate::resource::{
 
 pub const MAX_STORAGE_LOGICAL_KEY_ATOMS: usize = 8;
 
+/// Opaque durable admission identity returned by the authority with a namespace handle.
+///
+/// The runtime may persist these hashes in an owner-only physical marker, but it cannot use
+/// them to mint or reactivate a handle. They bind one physical namespace to one exact journal
+/// admission across process restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedStorageDurableAdmissionBindingV1 {
+    pub grant_hash: CanonicalHash,
+    pub admission_sequence: u64,
+    pub admission_record_hash: CanonicalHash,
+}
+
 /// Opaque storage namespace handle (kernel-broker constructed; non-clone).
 #[derive(Debug)]
 pub struct ManagedStorageNamespaceHandleV1 {
     pub handle_id: OpaqueKernelCapabilityHandleId,
     pub namespace_hash: CanonicalHash,
     pub capability_family: ManagedStorageCapabilityFamilyV1,
+    durable_admission: Option<ManagedStorageDurableAdmissionBindingV1>,
     #[allow(dead_code)]
     authenticator: OpaqueKernelCapabilityAuthenticatorV1,
 }
@@ -40,8 +53,33 @@ impl ManagedStorageNamespaceHandleV1 {
             handle_id,
             namespace_hash,
             capability_family,
+            durable_admission: None,
             authenticator,
         }
+    }
+
+    /// Constructs a handle bound to one exact durable journal admission.
+    pub const fn new_durable(
+        handle_id: OpaqueKernelCapabilityHandleId,
+        namespace_hash: CanonicalHash,
+        capability_family: ManagedStorageCapabilityFamilyV1,
+        durable_admission: ManagedStorageDurableAdmissionBindingV1,
+        authenticator: OpaqueKernelCapabilityAuthenticatorV1,
+    ) -> Self {
+        Self {
+            handle_id,
+            namespace_hash,
+            capability_family,
+            durable_admission: Some(durable_admission),
+            authenticator,
+        }
+    }
+
+    /// Returns the opaque durable marker binding, when this handle came from a journal-backed
+    /// admission. The value is evidence only and cannot authorize a storage operation.
+    #[must_use]
+    pub const fn durable_admission(&self) -> Option<ManagedStorageDurableAdmissionBindingV1> {
+        self.durable_admission
     }
 }
 
@@ -329,6 +367,12 @@ pub struct ManagedStorageStorageReceiptV1 {
     pub committed_sequence_or_version: Option<u64>,
     pub committed_frontier_hash: CanonicalHash,
     pub receipt_hash: CanonicalHash,
+    /// Authority-owned binding to the exact physical bytes used for normal settlement. Probe
+    /// receipts and isolated in-memory authority receipts may leave these absent.
+    #[serde(default)]
+    pub physical_frontier_hash: Option<CanonicalHash>,
+    #[serde(default)]
+    pub physical_observation_record_hash: Option<CanonicalHash>,
 }
 
 /// Consumer facing pathless managed storage service (authority implementation).
@@ -339,9 +383,41 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         capability: ValidatedStorageAdmissionCapabilityV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1>;
 
+    /// Validates that a physical mutation is still covered by an admitted namespace. The
+    /// runtime calls this while holding the namespace lock, so settlement wins the race before a
+    /// post-settlement write can reach the physical object.
+    fn validate_namespace_write(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), ManagedStorageErrorV1>;
+
+    /// Reconciles measured bytes/entries for a live storage namespace without exposing the
+    /// authority's quota book or physical path. Artifact adapters use this only while holding
+    /// their paired staging/store leases; the authority remains the sole quota owner.
+    fn reconcile_namespace_quota(
+        &self,
+        _handle: &ManagedStorageNamespaceHandleV1,
+        _bytes: u64,
+        _entries: u64,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    }
+
     fn finalize_namespace(
         &self,
         handle: ManagedStorageNamespaceHandleV1,
+        reason: String,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1>;
+
+    /// Re-reads and settles one physical writer frontier as one authority-owned operation.
+    /// The authority must hold the physical namespace lock from the re-read through the durable
+    /// observation and settlement, so a writer cannot append after proof and before settlement.
+    fn finalize_namespace_with_physical_frontier(
+        &self,
+        handle: ManagedStorageNamespaceHandleV1,
+        byte_length: u64,
+        record_count: u64,
+        content_hash: CanonicalHash,
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1>;
 }

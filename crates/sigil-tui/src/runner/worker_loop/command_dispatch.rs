@@ -33,6 +33,8 @@ pub(in crate::runner) struct WorkerCommandContext<'a, P> {
     pub(in crate::runner) managed_extension_execution: &'a Option<
         Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    pub(in crate::runner) managed_verification_execution:
+        &'a Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
     pub(in crate::runner) state: &'a mut WorkerLoopState,
 }
 

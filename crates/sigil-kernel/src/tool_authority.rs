@@ -9,8 +9,11 @@ use std::sync::Arc;
 
 use crate::capability_issuer::{CapabilityIssueErrorV1, KernelCapabilityBrokerV1};
 use crate::managed_file_access::{
-    ManagedFileAccessErrorV1, ManagedFileAccessRequestV1, ManagedFileAccessResultV1,
-    ManagedFileAccessServiceV1, ManagedFileAdmissionBindingV1, ManagedFileOperationV1,
+    ManagedFileAccessErrorV1, ManagedFileAccessPlanRequestV1, ManagedFileAccessRequestV1,
+    ManagedFileAccessResultV1, ManagedFileAccessServiceV1, ManagedFileAdmissionBindingV1,
+    ManagedFileExecutionInputV1, ManagedFileExecutionOutcomeV1, ManagedFileExecutionRequestV1,
+    ManagedFileLogicalPathV1, ManagedFileOperationV1, ManagedFilePreviewOutcomeV1,
+    ManagedFilePreviewRequestV1,
 };
 use crate::resource::{CanonicalHash, OpaquePermissionSubjectRef};
 
@@ -51,6 +54,103 @@ impl KernelToolAuthorityV1 {
             file_access,
             broker,
         }
+    }
+
+    /// Plans one logical workspace-relative file access through the authority-owned planner.
+    /// This is deliberately separate from post-decision execution: the returned reference is
+    /// pathless and carries the authority generation/resolver proof needed by V3.
+    pub fn plan_file_access(
+        &self,
+        logical_path: impl Into<String>,
+        operation: ManagedFileOperationV1,
+        operation_scope: impl Into<String>,
+    ) -> Result<
+        crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1,
+        KernelToolAuthorityErrorV1,
+    > {
+        self.file_access
+            .plan(ManagedFileAccessPlanRequestV1 {
+                logical_path: ManagedFileLogicalPathV1::new(logical_path)
+                    .map_err(KernelToolAuthorityErrorV1::Access)?,
+                operation,
+                operation_scope: operation_scope.into(),
+            })
+            .map_err(KernelToolAuthorityErrorV1::Access)
+    }
+
+    /// Seals, issues and executes one V3 file operation. The authority service is the only
+    /// implementation allowed to resolve the registered workspace and touch the filesystem.
+    pub fn execute_v3_file_operation(
+        &self,
+        plan: &crate::permission_plan_v3::ToolPermissionPlanV3,
+        decision: &crate::permission_plan_v3::ToolPermissionDecisionV3,
+        operation: ManagedFileOperationV1,
+        input: ManagedFileExecutionInputV1,
+    ) -> Result<ManagedFileExecutionOutcomeV1, KernelToolAuthorityErrorV1> {
+        let file_ref = plan.managed_file_access_plan.as_ref().ok_or_else(|| {
+            KernelToolAuthorityErrorV1::BindingKind(
+                "tool declares no managed file access plan".to_owned(),
+            )
+        })?;
+        if decision.plan_hash != plan.plan_hash
+            || decision.managed_file_access_plan_hash != Some(file_ref.plan_hash)
+        {
+            return Err(KernelToolAuthorityErrorV1::BindingKind(
+                "decision binds a different file access plan".to_owned(),
+            ));
+        }
+        let binding = v3_file_access_binding(
+            plan.plan_hash,
+            decision.decision_hash,
+            decision.approval_request_hash,
+            decision.approval_request_hash,
+            file_ref,
+        );
+        let subject_binding_hash = file_ref.subject_binding_hash;
+        let operation_digest = file_ref.operation_digest;
+        let proof = self.broker.seal_file_access_proof(
+            binding.clone(),
+            subject_binding_hash,
+            operation_digest,
+        );
+        let token = crate::capability_issuer::KernelCapabilityIssuerV1::issue_file_access(
+            self.broker.as_ref(),
+            proof,
+        )
+        .map_err(KernelToolAuthorityErrorV1::Issuance)?;
+        self.file_access
+            .execute(
+                ManagedFileExecutionRequestV1 {
+                    access: ManagedFileAccessRequestV1 {
+                        subject_ref: file_ref.subject_ref.clone(),
+                        operation,
+                        operation_digest,
+                        admission_binding: binding,
+                        admission_binding_hash: file_ref.plan_hash,
+                    },
+                    input,
+                },
+                token,
+            )
+            .map_err(KernelToolAuthorityErrorV1::Access)
+    }
+
+    /// Performs a bounded pre-approval preview through the authority-owned plan table. This is
+    /// intentionally separate from execution admission: preview never mutates and never issues
+    /// a reusable capability token.
+    pub fn preview_file_operation(
+        &self,
+        plan: &crate::permission_plan_v3::ManagedFileAccessPlanDraftRefV1,
+        operation: ManagedFileOperationV1,
+        max_bytes: usize,
+    ) -> Result<ManagedFilePreviewOutcomeV1, KernelToolAuthorityErrorV1> {
+        self.file_access
+            .preview(ManagedFilePreviewRequestV1 {
+                plan_hash: plan.plan_hash,
+                operation,
+                max_bytes,
+            })
+            .map_err(KernelToolAuthorityErrorV1::Access)
     }
 
     /// Adjudicates one in-process file-tool operation: seal -> issue (one-shot) -> port access.

@@ -229,7 +229,7 @@ pub async fn prepare_git_integration_promotion(
         plan: request.plan.clone(),
         artifacts: request.artifacts.clone(),
         frozen_base: request.frozen_base.clone(),
-        verification_backend: None,
+        verification_execution_port: None,
     };
     validate_integration_request(&lane_request)?;
     validate_physical_base(&lane_request)?;

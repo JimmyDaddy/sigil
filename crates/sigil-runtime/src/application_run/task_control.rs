@@ -250,6 +250,17 @@ pub async fn prepare_application_task_continuation(
         .ok_or_else(|| ApplicationRunPrepareError::Internal {
             source: anyhow!("attached Task executor disappeared during preparation"),
         })?;
+    let verification_execution_port: Arc<
+        dyn sigil_kernel::verification::VerificationExecutionPortV1,
+    > = services
+        .authority_composition()
+        .ok_or_else(|| ApplicationRunPrepareError::Internal {
+            source: anyhow!(
+                "current-schema Task continuation requires the managed verification route"
+            ),
+        })?
+        .command_execution
+        .clone();
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;
@@ -315,6 +326,7 @@ pub async fn prepare_application_task_continuation(
             provider_capabilities,
         ),
         role_provider_builder: Arc::clone(role_provider_builder),
+        verification_execution_port: Some(verification_execution_port),
     };
     let terminal_control = ApplicationTerminalTaskControl::new(
         workspace_root.clone(),
@@ -437,6 +449,7 @@ impl ApplicationTaskContinuationExecution {
             base_registry,
             agent_supervisor,
             role_provider_builder,
+            verification_execution_port,
         } = self.task_execution;
         let continuation_entry_frontier = self.session.entries().len();
         let result = crate::agent_supervisor::task_execution::continue_task_execution(
@@ -451,6 +464,11 @@ impl ApplicationTaskContinuationExecution {
                 base_registry,
                 agent_supervisor,
                 role_provider_builder: role_provider_builder.as_ref(),
+                verification_execution_port: verification_execution_port.ok_or_else(|| {
+                    anyhow!(
+                        "current-schema Task continuation requires the managed verification route"
+                    )
+                })?,
                 handler: &mut bridge,
                 cancellation_handle: self.cancellation_handle.clone(),
                 tool_artifact_read_budget: None,

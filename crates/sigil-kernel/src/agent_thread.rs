@@ -1143,7 +1143,29 @@ pub fn agent_invocation_workspace_snapshot_id(
         0,
     )?;
     snapshot.workspace_snapshot_id.ok_or_else(|| {
-        anyhow::anyhow!("agent invocation grant requires a complete tracked workspace snapshot")
+        let incomplete = snapshot
+            .manifest
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_complete())
+            .take(8)
+            .map(|entry| {
+                format!(
+                    "{}={:?}/{:?}",
+                    entry.normalized_path.display(),
+                    entry.file_type,
+                    entry.state
+                )
+            })
+            .collect::<Vec<_>>();
+        let suffix = if incomplete.is_empty() {
+            "unknown manifest failure".to_owned()
+        } else {
+            incomplete.join(", ")
+        };
+        anyhow::anyhow!(
+            "agent invocation grant requires a complete tracked workspace snapshot: {suffix}"
+        )
     })
 }
 

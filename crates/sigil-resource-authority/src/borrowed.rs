@@ -6,9 +6,11 @@
 //! borrowed generation is one identity observation generation, NOT a right to reclaim.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use sigil_kernel::resource::{
-    OpaquePermissionSubjectRef, ResourceAccessV1, ResourceCleanupStatusV1,
+    AuthorityGeneration, CanonicalHash, OpaquePermissionSubjectRef, ResourceAccessV1,
+    ResourceCleanupStatusV1,
 };
 
 use crate::identity::CanonicalLocalIdentity;
@@ -55,6 +57,27 @@ pub enum BorrowedErrorV1 {
     OwnershipClaimRejected,
     #[error("approval is required for external user paths; subject is unregistered")]
     ExternalSubjectUnregistered,
+    #[error("workspace registration failed: {0}")]
+    RegistrationFailed(String),
+}
+
+/// Current-schema workspace activation capsule. It contains only opaque identity facts; the
+/// physical root is retained by the authority registry and is never exposed to kernel callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BorrowedWorkspaceRegistrationCapsuleV1 {
+    pub application_id: String,
+    pub workspace_id: String,
+    pub subject_ref: OpaquePermissionSubjectRef,
+    pub authority_generation: AuthorityGeneration,
+    pub root_identity_hash: CanonicalHash,
+    pub observation_version: u64,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceBindingV1 {
+    root: PathBuf,
+    root_identity: CanonicalLocalIdentity,
+    capsule: BorrowedWorkspaceRegistrationCapsuleV1,
 }
 
 /// One borrowed identity observation generation.
@@ -80,13 +103,116 @@ pub struct BorrowedAccessLeaseV1 {
 #[derive(Debug, Default)]
 pub struct BorrowedSubjectRegistryV1 {
     observations: BTreeMap<String, (BorrowedSubjectClassV1, u64, Option<CanonicalLocalIdentity>)>,
+    workspace_bindings: BTreeMap<String, WorkspaceBindingV1>,
 }
 
 impl BorrowedSubjectRegistryV1 {
     pub const fn new() -> Self {
         Self {
             observations: BTreeMap::new(),
+            workspace_bindings: BTreeMap::new(),
         }
+    }
+
+    /// Activates one exact workspace identity for the application composition. Repeating the
+    /// same activation is idempotent; changing the root behind an existing subject is a typed
+    /// identity drift and never silently replaces the binding.
+    pub fn activate_workspace(
+        &mut self,
+        application_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        workspace_root: &Path,
+        authority_generation: AuthorityGeneration,
+    ) -> Result<BorrowedWorkspaceRegistrationCapsuleV1, BorrowedErrorV1> {
+        let application_id = application_id.into();
+        let workspace_id = workspace_id.into();
+        let root_metadata = std::fs::symlink_metadata(workspace_root)
+            .map_err(|error| BorrowedErrorV1::RegistrationFailed(error.to_string()))?;
+        if root_metadata.file_type().is_symlink() {
+            return Err(BorrowedErrorV1::SymlinkAtBoundary);
+        }
+        let root = workspace_root
+            .canonicalize()
+            .map_err(|error| BorrowedErrorV1::RegistrationFailed(error.to_string()))?;
+        let root_identity = crate::identity::canonical_identity(&root)
+            .map_err(|error| BorrowedErrorV1::RegistrationFailed(error.to_string()))?;
+        if !root_identity.is_directory || root_identity.is_symlink {
+            return Err(BorrowedErrorV1::SymlinkAtBoundary);
+        }
+        let mut key_material = Vec::new();
+        key_material.extend_from_slice(application_id.as_bytes());
+        key_material.push(0);
+        key_material.extend_from_slice(workspace_id.as_bytes());
+        key_material.push(0);
+        let subject_digest = crate::identity::identity_digest(&key_material);
+        let subject_ref = OpaquePermissionSubjectRef::new(format!(
+            "borrowed-workspace-{}",
+            subject_digest.to_hex()
+        ));
+        let key = subject_ref.as_str().to_owned();
+        if let Some(existing) = self.workspace_bindings.get(&key) {
+            if existing.root_identity != root_identity
+                || existing.authority_generation() != authority_generation
+            {
+                return Err(BorrowedErrorV1::IdentityDrift);
+            }
+            return Ok(existing.capsule.clone());
+        }
+        let observation_version = self
+            .workspace_bindings
+            .values()
+            .map(|binding| binding.capsule.observation_version)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let capsule = BorrowedWorkspaceRegistrationCapsuleV1 {
+            application_id: application_id.clone(),
+            workspace_id: workspace_id.clone(),
+            subject_ref: subject_ref.clone(),
+            authority_generation,
+            root_identity_hash: root_identity.digest,
+            observation_version,
+        };
+        self.observe_with_identity(
+            &subject_ref,
+            BorrowedSubjectClassV1::Workspace,
+            authority_generation.epoch,
+            Some(root_identity),
+        )?;
+        self.workspace_bindings.insert(
+            key,
+            WorkspaceBindingV1 {
+                root,
+                root_identity,
+                capsule: capsule.clone(),
+            },
+        );
+        Ok(capsule)
+    }
+
+    pub fn workspace_root_for(&self, subject_ref: &OpaquePermissionSubjectRef) -> Option<&Path> {
+        self.workspace_bindings
+            .get(subject_ref.as_str())
+            .map(|binding| binding.root.as_path())
+    }
+
+    pub fn workspace_capsule_for(
+        &self,
+        subject_ref: &OpaquePermissionSubjectRef,
+    ) -> Option<&BorrowedWorkspaceRegistrationCapsuleV1> {
+        self.workspace_bindings
+            .get(subject_ref.as_str())
+            .map(|binding| &binding.capsule)
+    }
+
+    /// Returns the single workspace active in one application composition. Multiple workspace
+    /// activations must use a higher-level surface registry and are rejected by this closed V1
+    /// planner rather than guessed.
+    pub fn sole_workspace_subject(&self) -> Option<OpaquePermissionSubjectRef> {
+        (self.workspace_bindings.len() == 1)
+            .then(|| self.workspace_bindings.keys().next().cloned())
+            .flatten()
+            .map(OpaquePermissionSubjectRef::new)
     }
 
     /// Registers an identity observation for a borrowed subject.
@@ -145,6 +271,12 @@ impl BorrowedSubjectRegistryV1 {
     }
 }
 
+impl WorkspaceBindingV1 {
+    fn authority_generation(&self) -> AuthorityGeneration {
+        self.capsule.authority_generation
+    }
+}
+
 /// SystemTemp deny/read-boundary fact (never a writable grant).
 pub fn system_temp_read_boundary_fact() -> String {
     "system-temp: read-boundary only; no write/create/delete grant in V1".to_owned()
@@ -185,73 +317,5 @@ pub fn validate_borrowed_access(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::identity::canonical_identity;
-    use std::collections::BTreeSet;
-
-    #[test]
-    fn r71_borrowed_observation_generation_is_per_subject() {
-        let mut registry = BorrowedSubjectRegistryV1::new();
-        let subject = OpaquePermissionSubjectRef::new("workspace:root".to_owned());
-        registry
-            .observe(&subject, BorrowedSubjectClassV1::Workspace, 1)
-            .expect("observe");
-        registry
-            .observe(&subject, BorrowedSubjectClassV1::Workspace, 2)
-            .expect("re-observe");
-        assert_eq!(registry.generation_for(&subject), Some(2));
-        // Cross-class re-observation fails closed.
-        let error = registry
-            .observe(&subject, BorrowedSubjectClassV1::ExternalUserPath, 3)
-            .expect_err("cross-class");
-        assert!(matches!(error, BorrowedErrorV1::NoAdmission));
-    }
-
-    #[test]
-    fn r71_borrowed_identity_drift_is_rejected() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let file = temp.path().join("existing.txt");
-        std::fs::write(&file, b"one").expect("write");
-        let identity = canonical_identity(&file).expect("identity");
-        let generation = BorrowedIdentityGenerationV1 {
-            subject_class: BorrowedSubjectClassV1::Workspace,
-            subject_ref: OpaquePermissionSubjectRef::new("subject-1".to_owned()),
-            observation_generation: 1,
-            identity,
-            admitted_access: BTreeSet::from([ResourceAccessV1::Read]),
-        };
-        // Mutate the file; the observed identity no longer matches.
-        std::fs::write(&file, b"two-two-totally-different").expect("rewrite");
-        let mutated = canonical_identity(&file).expect("identity 2");
-        let error = validate_borrowed_access(&generation, ResourceAccessV1::Read, &mutated, false)
-            .expect_err("drift must fail");
-        assert!(matches!(error, BorrowedErrorV1::IdentityDrift));
-    }
-
-    #[test]
-    fn r71_system_temp_write_is_denied_unless_approved() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path();
-        let identity = canonical_identity(dir).expect("identity");
-        let generation = BorrowedIdentityGenerationV1 {
-            subject_class: BorrowedSubjectClassV1::SystemTemp,
-            subject_ref: OpaquePermissionSubjectRef::new("system-temp".to_owned()),
-            observation_generation: 1,
-            identity,
-            admitted_access: BTreeSet::from([ResourceAccessV1::Write]),
-        };
-        let identity = canonical_identity(dir).expect("identity 2");
-        let error =
-            validate_borrowed_access(&generation, ResourceAccessV1::Write, &identity, false)
-                .expect_err("default deny write");
-        assert!(matches!(error, BorrowedErrorV1::SystemTempWriteDenied));
-        // Explicit unconfined approval permits the write grant.
-        let lease = validate_borrowed_access(&generation, ResourceAccessV1::Write, &identity, true)
-            .expect("explicit allow");
-        assert_eq!(
-            lease.cleanup_status,
-            ResourceCleanupStatusV1::NotApplicableBorrowed
-        );
-    }
-}
+#[path = "tests/borrowed_tests.rs"]
+mod tests;

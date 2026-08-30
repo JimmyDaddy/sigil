@@ -36,6 +36,7 @@ PHYSICAL_IMPORT_ALLOWLIST = {
         "crates/sigil-runtime/src/r71_authority_composition.rs",
         "crates/sigil-runtime/src/r71_global_cutover.rs",
         "crates/sigil-runtime/src/session_scratch.rs",
+        "crates/sigil-runtime/src/doctor.rs",
     },
     "sigil-http": {
         "crates/sigil-http/src/listener.rs",
@@ -54,9 +55,44 @@ PHYSICAL_IMPORT_ALLOWLIST = {
 LEGACY_PATTERNS = (
     (re.compile(r"\bMcpProcessLaunch::owned\s*\("), "production MCP raw child launch"),
     (re.compile(r"\blaunch_planned_mcp_process\s*\("), "production planned MCP child launch"),
+    (re.compile(r"\bLegacyBackendCommandExecutionPortV1\b"), "production legacy execution backend adapter"),
+    (
+        re.compile(r"\bregister_builtin_tools_with_paths(?:_and_execution_backend|_execution_backend)"),
+        "production builtin registration exposes the legacy execution backend seam",
+    ),
     (re.compile(r"\bFileProjectionStore\b"), "production path-rooted FileProjectionStore"),
     (re.compile(r'PathBuf::from\("\.sigil-(?:state|cache)"\)'), "cwd-relative legacy writable root"),
     (re.compile(r'Path::new\("\.sigil-(?:state|cache)"\)'), "cwd-relative legacy writable root"),
+    (
+        re.compile(r"RuntimePlanReviewChildResourceProvisionerV1::new\s*\("),
+        "plan-review child provisioner may not invent an authority generation",
+    ),
+    (
+        re.compile(r"PlanReviewCoordinator::run_plan_review\s*\("),
+        "production plan review must use the current-schema child resource provisioner",
+    ),
+)
+
+KERNEL_ARTIFACT_LEGACY_PATTERNS = (
+    (re.compile(r"\bToolArtifactStore::for_session_path(?:_with_roots)?\s*\("),
+     "path-rooted kernel artifact store constructor"),
+    (re.compile(r"\b(?:root|staging_root):\s*Option<PathBuf>"),
+     "kernel artifact store retains a physical root"),
+    (re.compile(r"\bfn\s+legacy_(?:staging_)?root\s*\("),
+     "kernel artifact store exposes a legacy physical root"),
+    (re.compile(r"\b(?:OpenOptions::new|File::open|fs::(?:create_dir_all|hard_link|read|read_dir|remove_file|rename|symlink_metadata))\b"),
+     "kernel artifact store performs direct filesystem IO"),
+)
+
+PLUGIN_LEGACY_PATTERNS = (
+    (
+        re.compile(r"\bExecutionBackend\b"),
+        "production plugin hook retains the legacy ExecutionBackend seam",
+    ),
+    (
+        re.compile(r"\bManagedCommandExecutionPortV1\b"),
+        "production plugin hook retains the generic one-shot command seam",
+    ),
 )
 
 
@@ -117,6 +153,20 @@ def check_source(root: Path) -> list[str]:
             ):
                 findings.append(f"{relative}:{line_number}: {description}: {original.strip()}")
 
+        if relative == "crates/sigil-kernel/src/session/tool_artifact.rs":
+            for pattern, description in KERNEL_ARTIFACT_LEGACY_PATTERNS:
+                if pattern.search(code):
+                    findings.append(
+                        f"{relative}:{line_number}: {description}: {original.strip()}"
+                    )
+
+        if relative == "crates/sigil-runtime/src/plugins.rs":
+            for pattern, description in PLUGIN_LEGACY_PATTERNS:
+                if pattern.search(code):
+                    findings.append(
+                        f"{relative}:{line_number}: {description}: {original.strip()}"
+                    )
+
         if "sigil_resource_authority::" in code or "sigil_sandbox::" in code:
             if relative not in PHYSICAL_IMPORT_ALLOWLIST.get(package, set()):
                 findings.append(
@@ -149,6 +199,180 @@ def check_source(root: Path) -> list[str]:
     return findings
 
 
+def check_registration_invariants(root: Path) -> list[str]:
+    """Check shipping registration ownership beyond legacy-symbol matching.
+
+    The terminal manager still contains a test fixture fallback, so this gate verifies the
+    production boundary that prevents shipping registration from constructing that fallback.
+    It also makes the plugin hook's managed-only constructor contract explicit.
+    """
+
+    findings: list[str] = []
+    registry_path = root / "crates/sigil-tools-builtin/src/registry.rs"
+    try:
+        registry_source = registry_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"failed to read terminal registration source: {error}"]
+
+    unavailable_start = registry_source.find(
+        "pub fn register_builtin_tools_with_unavailable_managed_execution"
+    )
+    if unavailable_start < 0:
+        findings.append("shipping terminal registration helper is missing")
+    else:
+        next_function = registry_source.find("\npub fn ", unavailable_start + 1)
+        helper = registry_source[
+            unavailable_start : next_function if next_function >= 0 else len(registry_source)
+        ]
+        expected_terminal_binding = re.compile(
+            r"TerminalExecutionConfig::default\(\),\s*"
+            r"None,\s*None,\s*"
+            r"Arc::new\(\s*crate::managed_execution::"
+            r"UnavailableManagedCommandExecutionPortV1\s*\)",
+            re.DOTALL,
+        )
+        if not expected_terminal_binding.search(helper):
+            findings.append(
+                "shipping unavailable builtin registration does not bind an unavailable managed terminal port"
+            )
+
+    full_signature = re.search(
+        r"pub fn register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal"
+        r"[\s\S]*?managed_terminal:\s*([^,\n]+)",
+        registry_source,
+    )
+    if not full_signature or "Option" in full_signature.group(1):
+        findings.append(
+            "shipping builtin registration still exposes an optional managed terminal port"
+        )
+
+    manager_path = root / "crates/sigil-tools-builtin/src/terminal_process/manager.rs"
+    manager_source = manager_path.read_text(encoding="utf-8")
+    public_constructor = re.search(
+        r"pub fn new_with_artifact_root_and_terminal_execution[\s\S]*?"
+        r"\n\s*/// Binds the production terminal lifecycle",
+        manager_source,
+    )
+    if public_constructor is None:
+        findings.append("public TerminalProcessManager constructor invariant is missing")
+    elif "LegacyDirect" in public_constructor.group(0):
+        findings.append(
+            "public TerminalProcessManager constructor selects legacy direct execution"
+        )
+    manager_context = r71_inventory_scan._Ctx(manager_source)
+    for index, code in enumerate(manager_context.code_lines):
+        if manager_context.cfg_test_or_mod_tests(index):
+            continue
+        if re.search(r"\bmanaged_execution\s*:\s*Option\s*<", code):
+            findings.append(
+                "normal-build TerminalProcessManager still stores an optional managed owner"
+            )
+        if re.search(r"\bCommand::new\s*\(|\bspawn_pty_runtime\s*\(", code):
+            findings.append(
+                f"normal-build TerminalProcessManager retains a direct spawn route at line {index + 1}"
+            )
+
+    plugins_path = root / "crates/sigil-runtime/src/plugins.rs"
+    plugins_source = plugins_path.read_text(encoding="utf-8")
+    if "pub trait ManagedPluginHookExecutionPortV1" not in plugins_source:
+        findings.append("purpose-specific managed plugin hook port is missing")
+    if not re.search(
+        r"pub fn new\(executor:\s*Arc<dyn ManagedPluginHookExecutionPortV1>\)",
+        plugins_source,
+    ):
+        findings.append(
+            "production plugin hook runner is not bound to its purpose-specific managed port"
+        )
+    for required in (
+        "config_grant_ref:",
+        "config_grant_hash:",
+        "durable_scope:",
+        "purpose: sigil_kernel::managed_execution::ExecutionPurposeV1::ExtensionProcess",
+    ):
+        if required not in plugins_source:
+            findings.append(
+                f"managed plugin hook request is missing current-schema admission binding: {required}"
+            )
+
+    composition_source = (
+        root / "crates/sigil-runtime/src/r71_authority_composition.rs"
+    ).read_text(encoding="utf-8")
+    activation = re.search(
+        r"pub fn activate_workspace\([\s\S]*?(?=\n\s*}\n\s*})",
+        composition_source,
+    )
+    if activation and "AuthorityGeneration {" in activation.group(0):
+        findings.append(
+            "workspace activation must reuse the composition authority generation"
+        )
+    if activation and "self.authority_generation" not in activation.group(0):
+        findings.append(
+            "workspace activation does not source its generation from the authority composition"
+        )
+    if "pub plugin_hook_execution:" not in composition_source or "plugin_hook_runner" not in composition_source:
+        findings.append(
+            "production authority composition does not expose the managed plugin hook route"
+        )
+    if "Ch::ApplicationControlLog" not in composition_source:
+        findings.append(
+            "production authority composition does not declare ApplicationControlLog before plugin activation"
+        )
+
+    child_provisioner_path = root / "crates/sigil-runtime/src/plan_review_coordinator.rs"
+    if child_provisioner_path.exists():
+        child_provisioner_source = child_provisioner_path.read_text(encoding="utf-8")
+        legacy_runner = re.search(
+            r"pub async fn run_plan_review<H, A>\s*\(", child_provisioner_source
+        )
+        if legacy_runner:
+            prefix = child_provisioner_source[: legacy_runner.start()]
+            if not re.search(
+                r"#\[cfg\(\s*(?:test|any\(\s*test\s*,\s*feature\s*=\s*\"test-support\"\s*\))\s*\)\]",
+                prefix[-400:],
+            ):
+                findings.append(
+                    "legacy plan-review runner must be test/test-support-only; production must use the current-schema entry point"
+                )
+        if re.search(
+            r"impl RuntimePlanReviewChildResourceProvisionerV1[\s\S]*?pub fn new\s*\(",
+            child_provisioner_source,
+        ):
+            findings.append(
+                "plan-review child provisioner exposes a default constructor without composition generation"
+            )
+
+    adapters_source = (
+        root / "crates/sigil-runtime/src/managed_resource_adapters.rs"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "materialize_plugin_extension_admission",
+        "authorize_extension(&decision, &plan)",
+        "StorageWriterChannelV1::ApplicationControlLog",
+        "seal_extension_execution_proof",
+        "ProcessCancelReasonV1::UserCancelled",
+        '"extension_process_settled"',
+    ):
+        if required not in adapters_source:
+            findings.append(
+                f"managed plugin Extension admission/control invariant is missing: {required}"
+            )
+
+    runtime_manifest = (root / "crates/sigil-runtime/Cargo.toml").read_text(encoding="utf-8")
+    if not re.search(r"^test-support\s*=\s*\[\s*\]$", runtime_manifest, re.MULTILINE):
+        findings.append(
+            "sigil-runtime test-support must not activate legacy dependency features"
+        )
+    if re.search(
+        r'^sigil-tools-builtin\s*=\s*\{[^\n]*features\s*=\s*\[[^\]]*"test-support"',
+        runtime_manifest,
+        re.MULTILINE,
+    ):
+        findings.append(
+            "sigil-runtime dependency activates sigil-tools-builtin/test-support"
+        )
+    return findings
+
+
 def check_inventory(root: Path) -> list[str]:
     findings: list[str] = []
     for checker in (
@@ -175,6 +399,7 @@ def main() -> int:
         _metadata, dependency_findings = run_metadata(ROOT)
         findings.extend(dependency_findings)
         findings.extend(check_source(ROOT))
+        findings.extend(check_registration_invariants(ROOT))
         findings.extend(check_inventory(ROOT))
     except Exception as error:  # parser/metadata failures are fail-closed gate findings
         findings.append(f"negative dependency scanner error: {error}")

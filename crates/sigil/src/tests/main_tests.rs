@@ -28,9 +28,9 @@ use tokio::{
 };
 
 use super::{
-    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
-    RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
-    StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
+    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorCommand, DoctorOutput,
+    HTTP_SERVER_STATE_DIR, RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput,
+    ServeStartupPlan, StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
     cli_application_run_request, drain_provider_stream, interactive_tui_requested,
     load_serve_root_config, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
     render_run_event, render_serve_startup_json, render_serve_startup_plan, render_update_apply,
@@ -722,6 +722,7 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
         cli.command,
         Some(Commands::Doctor {
             output: DoctorOutput::Text,
+            command: None,
         })
     ));
     Ok(())
@@ -735,6 +736,21 @@ fn cli_parses_doctor_json_output() -> Result<()> {
         cli.command,
         Some(Commands::Doctor {
             output: DoctorOutput::Json,
+            command: None,
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_authority_recovery_as_doctor_operator_command() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "doctor", "recover-authority"])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Doctor {
+            command: Some(DoctorCommand::RecoverAuthority),
+            ..
         })
     ));
     Ok(())
@@ -1074,7 +1090,7 @@ fn render_doctor_report_formats_checks_and_summary() {
     let rendered = render_doctor_report(&report);
 
     assert!(rendered.contains("Sigil doctor"));
-    assert!(rendered.contains("cutover: epoch=legacy authority=legacy blockers=0"));
+    assert!(rendered.contains("cutover: epoch=unavailable authority=unavailable blockers=1"));
     assert!(rendered.contains("[ok] config:load - config parsed"));
     assert!(rendered.contains("[warn] terminal - TERM is not set"));
     assert!(rendered.contains("fix: set TERM in the shell before launching the TUI"));
@@ -1500,18 +1516,18 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     let root_config = RootConfig::load(&config_path)?;
     let paths =
         sigil_runtime::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
-    let session_dir = paths.session_log_dir;
+    let session_dir = paths.state_root.join("managed/session-log");
     let entries = fs::read_dir(&session_dir)?
         .collect::<std::io::Result<Vec<_>>>()?
         .into_iter()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter(|entry| entry.path().is_dir())
         .collect::<Vec<_>>();
     assert_eq!(
         entries.len(),
         1,
         "run_command should create one session log"
     );
-    let session_path = entries[0].path();
+    let session_path = entries[0].path().join("records.jsonl");
     assert_eq!(
         session_path.extension().and_then(|ext| ext.to_str()),
         Some("jsonl")
@@ -1652,10 +1668,12 @@ async fn run_json_classifies_missing_config_without_leaking_raw_source() -> Resu
     assert_eq!(exit, MachineExitCode::InvalidInput);
     let record: serde_json::Value = serde_json::from_slice(&stdout)?;
     assert_eq!(record["record_type"], "error");
-    // Missing config on first-run/machine flows is classified by the request layer (the boot
-    // attach degrades to epoch-only for absent configs); the message never leaks raw paths.
-    assert_eq!(record["error"]["code"], "model_route_not_configured");
-    assert_eq!(record["error"]["message"], "model route is not configured");
+    // Missing config is a typed boot failure; the message never leaks raw paths.
+    assert_eq!(record["error"]["code"], "configuration_invalid");
+    assert_eq!(
+        record["error"]["message"],
+        "application boot failed before the run started"
+    );
     assert!(!String::from_utf8(stdout)?.contains("missing.toml"));
     Ok(())
 }

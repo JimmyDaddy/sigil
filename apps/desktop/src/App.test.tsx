@@ -5797,11 +5797,12 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText("plan-review-1")).toBeTruthy();
     expect(screen.getByText(/sha256:ddddd/)).toBeTruthy();
     expect(screen.getByText("Automatic plan review")).toBeTruthy();
-    const runButton = screen.getByRole("button", { name: "Run plan" });
-    expect(runButton.hasAttribute("disabled")).toBe(false);
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "Run plan" }).hasAttribute("disabled"),
+    ).toBe(false));
     await user.click(screen.getByRole("button", { name: "Review complete plan" }));
     expect(await screen.findByTestId("plan-workbench")).toBeTruthy();
-    await user.click(runButton);
+    await user.click(screen.getByRole("button", { name: "Run plan" }));
 
     await waitFor(() => expect(planDecision).toHaveBeenCalledWith(
       workspace.id,

@@ -7,8 +7,10 @@
 //! every batch is an admit -> owner-only no-follow leaf -> append -> finalize(namespace) cycle
 //! with a kernel-shaped storage receipt. The authority remains the only allocator.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+use fs2::FileExt;
 
 use sigil_kernel::managed_storage::{
     ManagedStorageNamespaceHandleV1, ManagedStorageServiceV1, ManagedStorageStorageReceiptV1,
@@ -22,6 +24,7 @@ use sigil_kernel::resource::{
 /// Closed semantic writer channel (row-aligned with the R71.6 mandatory adapter kinds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StorageWriterChannelV1 {
+    ApplicationControlLog,
     SessionLog,
     SessionLifecycleLog,
     InputHistory,
@@ -44,6 +47,11 @@ impl StorageWriterChannelV1 {
         &'static str,
     ) {
         match self {
+            Self::ApplicationControlLog => (
+                ManagedStorageSemanticOwnerV1::ApplicationControlLog,
+                ManagedStorageCapabilityFamilyV1::AppendLog,
+                "application-control-log",
+            ),
             Self::SessionLog => (
                 ManagedStorageSemanticOwnerV1::SessionLog,
                 ManagedStorageCapabilityFamilyV1::AppendLog,
@@ -112,6 +120,8 @@ pub enum ManagedStorageWriterErrorV1 {
     AdmissionFailed(String),
     #[error("managed storage finalize failed: {0}")]
     FinalizeFailed(String),
+    #[error("managed storage lease rejected: {0}")]
+    LeaseRejected(String),
     #[error("writer leaf resolves outside the state anchor")]
     LeafEscapesAnchor,
     #[error("writer leaf is a symlink (no-follow)")]
@@ -120,6 +130,10 @@ pub enum ManagedStorageWriterErrorV1 {
     LeafNotOwnerOnly,
     #[error("writer io failed: {0}")]
     Io(String),
+    #[error("artifact retire authority is unavailable")]
+    RetireAuthorityUnavailable,
+    #[error("artifact retire authorization failed: {0}")]
+    RetireAuthorizationFailed(String),
 }
 
 /// One admitted namespace lease: the authority-declared physical directory plus the handle.
@@ -136,8 +150,9 @@ impl ManagedStorageWriterLeaseV1 {
         self.handle.namespace_hash
     }
 
-    /// Authority-declared physical directory (owner-only, no-follow). The consumer never derives
-    /// this from env/cwd; it is the authority bootstrap layout.
+    /// Authority-declared physical directory (owner-only, no-follow). Production mutations still
+    /// go through this adapter's closed methods, which revalidate the admitted handle under the
+    /// namespace lock before opening a managed object.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -157,6 +172,8 @@ pub struct ManagedStorageWriterAdapterV1 {
     /// namespaces (production grant ns), never the kernel startup-probe marker.
     storage_issuer:
         Option<std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>>,
+    artifact_retire_authority:
+        Option<std::sync::Arc<sigil_resource_authority::maintenance::ArtifactRetireAuthorityV1>>,
 }
 
 impl std::fmt::Debug for ManagedStorageWriterAdapterV1 {
@@ -165,6 +182,10 @@ impl std::fmt::Debug for ManagedStorageWriterAdapterV1 {
             .debug_struct("ManagedStorageWriterAdapterV1")
             .field("state_anchor", &self.state_anchor)
             .field("issuer_attached", &self.storage_issuer.is_some())
+            .field(
+                "artifact_retire_authority_attached",
+                &self.artifact_retire_authority.is_some(),
+            )
             .finish()
     }
 }
@@ -182,6 +203,7 @@ impl ManagedStorageWriterAdapterV1 {
             state_anchor,
             cutover_manifest_hash,
             storage_issuer: None,
+            artifact_retire_authority: None,
         }
     }
 
@@ -199,7 +221,58 @@ impl ManagedStorageWriterAdapterV1 {
             state_anchor,
             cutover_manifest_hash,
             storage_issuer: Some(storage_issuer),
+            artifact_retire_authority: None,
         }
+    }
+
+    /// Attaches the authority-owned paired ArtifactStaging/ArtifactStore retire frontier.
+    #[must_use]
+    pub fn with_artifact_retire_authority(
+        mut self,
+        authority: std::sync::Arc<sigil_resource_authority::maintenance::ArtifactRetireAuthorityV1>,
+    ) -> Self {
+        self.artifact_retire_authority = Some(authority);
+        self
+    }
+
+    /// Exchanges a pathless semantic eligibility frontier for an authority one-shot token.
+    pub fn authorize_artifact_retirement(
+        &self,
+        frontier: sigil_kernel::session::ToolArtifactRetireFrontierV1,
+    ) -> Result<
+        sigil_resource_authority::maintenance::ArtifactRetireTokenV1,
+        ManagedStorageWriterErrorV1,
+    > {
+        let authority = self
+            .artifact_retire_authority
+            .as_ref()
+            .ok_or(ManagedStorageWriterErrorV1::RetireAuthorityUnavailable)?;
+        authority
+            .authorize(
+                sigil_resource_authority::maintenance::ArtifactRetireEligibilityEvidenceV1 {
+                    authority_generation: authority.authority_generation(),
+                    artifact_staging_grant_hash: authority.artifact_staging_grant_hash(),
+                    artifact_store_grant_hash: authority.artifact_store_grant_hash(),
+                    selected_refs_hash: frontier.selected_refs_hash,
+                    selected_count: frontier.selected_count,
+                    selected_bytes: frontier.selected_bytes,
+                    eligibility_frontier: frontier.eligibility_frontier,
+                    policy_hash: frontier.policy_hash,
+                },
+            )
+            .map_err(|error| {
+                ManagedStorageWriterErrorV1::RetireAuthorizationFailed(error.to_string())
+            })
+    }
+
+    /// Consumes the authority-issued artifact retirement proof at the physical writer boundary.
+    pub fn consume_artifact_retirement(
+        &self,
+        token: &mut sigil_resource_authority::maintenance::ArtifactRetireTokenV1,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        token.consume_claim().map_err(|error| {
+            ManagedStorageWriterErrorV1::RetireAuthorizationFailed(error.to_string())
+        })
     }
 
     /// Authority-declared managed NAMED leaf path (validating, non-creating) so consumers can
@@ -293,11 +366,15 @@ impl ManagedStorageWriterAdapterV1 {
         }
         let (_, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?.join(key);
+        if let Some(parent) = path.parent() {
+            reject_existing_reparse_components(parent)?;
+        }
         std::fs::create_dir_all(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        reject_reparse_components(&path, false)?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
+        if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
             return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
         }
         #[cfg(unix)]
@@ -311,6 +388,9 @@ impl ManagedStorageWriterAdapterV1 {
                 return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
             }
         }
+        #[cfg(windows)]
+        sigil_kernel::secure_private_path_permissions(&path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         let capability = match &self.storage_issuer {
             Some(broker) => {
                 // The grant binds the authority-declared channel root. The logical key is
@@ -345,6 +425,7 @@ impl ManagedStorageWriterAdapterV1 {
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        self.write_admission_marker(&path, &handle)?;
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
             path,
@@ -359,11 +440,15 @@ impl ManagedStorageWriterAdapterV1 {
     ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
         let (semantic_owner, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?;
+        if let Some(parent) = path.parent() {
+            reject_existing_reparse_components(parent)?;
+        }
         std::fs::create_dir_all(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        reject_reparse_components(&path, false)?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
+        if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
             return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
         }
         #[cfg(unix)]
@@ -377,6 +462,9 @@ impl ManagedStorageWriterAdapterV1 {
                 return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
             }
         }
+        #[cfg(windows)]
+        sigil_kernel::secure_private_path_permissions(&path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
             semantic_owner,
             capability_family,
@@ -414,6 +502,7 @@ impl ManagedStorageWriterAdapterV1 {
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        self.write_admission_marker(&path, &handle)?;
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
             path,
@@ -428,13 +517,25 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedStorageWriterLeaseV1,
         record: &[u8],
     ) -> Result<(), ManagedStorageWriterErrorV1> {
+        let _namespace_lock = open_namespace_lock(&lease.path)?;
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
         let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
+        let existed = std::fs::symlink_metadata(&record_file).is_ok();
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         }
         let mut file = options
             .open(&record_file)
@@ -443,6 +544,11 @@ impl ManagedStorageWriterAdapterV1 {
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         file.write_all(b"\n")
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if !existed {
+            sync_parent_directory(&record_file)?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -456,6 +562,78 @@ impl ManagedStorageWriterAdapterV1 {
         Ok(())
     }
 
+    fn write_admission_marker(
+        &self,
+        path: &Path,
+        handle: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        let marker = if let Some(admission) = handle.durable_admission() {
+            serde_json::json!({
+                "schema_version": 2,
+                "handle_id": handle.handle_id.as_str(),
+                "namespace_hash": handle.namespace_hash,
+                "grant_hash": admission.grant_hash,
+                "admission_sequence": admission.admission_sequence,
+                "admission_record_hash": admission.admission_record_hash,
+            })
+        } else {
+            serde_json::json!({
+                "schema_version": 1,
+                "handle_id": handle.handle_id.as_str(),
+                "namespace_hash": handle.namespace_hash,
+            })
+        };
+        let bytes = serde_json::to_vec(&marker)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        sigil_kernel::atomic_publish_private_file(&path.join("authority-admission.json"), &bytes)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))
+    }
+
+    fn physical_frontier(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+    ) -> Result<(u64, u64, CanonicalHash), ManagedStorageWriterErrorV1> {
+        let _namespace_lock = open_namespace_lock(&lease.path)?;
+        let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
+        let bytes = match std::fs::symlink_metadata(&record_file) {
+            Ok(metadata) => {
+                if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
+                    return Err(ManagedStorageWriterErrorV1::Io(
+                        "managed record object must be a regular file".to_owned(),
+                    ));
+                }
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NOFOLLOW);
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+                    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+                }
+                let mut file = options
+                    .open(&record_file)
+                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                #[cfg(not(windows))]
+                file.sync_all()
+                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                bytes
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
+        };
+        let record_count = managed_physical_record_count(lease.channel, &bytes)?;
+        Ok((bytes.len() as u64, record_count, content_hash(&bytes)))
+    }
+
     /// Reads the owner-controlled record object for an admitted namespace without following
     /// symlinks or exposing the physical root to the semantic adapter.
     pub fn read_record_bytes(
@@ -464,6 +642,7 @@ impl ManagedStorageWriterAdapterV1 {
         max_bytes: usize,
     ) -> Result<Vec<u8>, ManagedStorageWriterErrorV1> {
         let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
         let metadata = match std::fs::symlink_metadata(&record_file) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -471,7 +650,7 @@ impl ManagedStorageWriterAdapterV1 {
                 return Err(ManagedStorageWriterErrorV1::Io(error.to_string()));
             }
         };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
             return Err(ManagedStorageWriterErrorV1::Io(
                 "managed record object must be a regular file".to_owned(),
             ));
@@ -481,8 +660,7 @@ impl ManagedStorageWriterAdapterV1 {
                 "managed record object exceeds {max_bytes} bytes"
             )));
         }
-        let bytes = std::fs::read(&record_file)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        let bytes = read_no_follow_file(&record_file)?;
         if bytes.len() > max_bytes {
             return Err(ManagedStorageWriterErrorV1::Io(format!(
                 "managed record object exceeds {max_bytes} bytes"
@@ -499,9 +677,14 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedStorageWriterLeaseV1,
         bytes: &[u8],
     ) -> Result<(), ManagedStorageWriterErrorV1> {
+        let _namespace_lock = open_namespace_lock(&lease.path)?;
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
         let record_file = lease.path.join("records.jsonl");
+        reject_reparse_components(&record_file, true)?;
         if let Ok(metadata) = std::fs::symlink_metadata(&record_file)
-            && (metadata.file_type().is_symlink() || !metadata.is_file())
+            && (!is_safe_physical_metadata(&metadata) || !metadata.is_file())
         {
             return Err(ManagedStorageWriterErrorV1::Io(
                 "managed record object must be a regular file".to_owned(),
@@ -516,10 +699,276 @@ impl ManagedStorageWriterAdapterV1 {
         &self,
         lease: ManagedStorageWriterLeaseV1,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
+        let (byte_length, record_count, content_hash) = self.physical_frontier(&lease)?;
         self.service
-            .finalize_namespace(lease.handle, "writer-batch-complete".to_owned())
+            .finalize_namespace_with_physical_frontier(
+                lease.handle,
+                byte_length,
+                record_count,
+                content_hash,
+                "writer-batch-complete".to_owned(),
+            )
             .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
     }
+
+    /// Internal artifact-layer liveness check. Artifact physical operations must keep the
+    /// authority handle as the mutation capability; a copied root is not sufficient after the
+    /// namespace has settled.
+    pub(crate) fn validate_artifact_lease(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+
+    pub(crate) fn reconcile_artifact_quota(
+        &self,
+        staging: &ManagedStorageWriterLeaseV1,
+        staging_bytes: u64,
+        staging_entries: u64,
+        store: &ManagedStorageWriterLeaseV1,
+        store_bytes: u64,
+        store_entries: u64,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        self.service
+            .reconcile_namespace_quota(&staging.handle, staging_bytes, staging_entries)
+            .and_then(|_| {
+                self.service
+                    .reconcile_namespace_quota(&store.handle, store_bytes, store_entries)
+            })
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+}
+
+fn managed_physical_record_count(
+    channel: StorageWriterChannelV1,
+    bytes: &[u8],
+) -> Result<u64, ManagedStorageWriterErrorV1> {
+    if matches!(
+        channel,
+        StorageWriterChannelV1::AdapterDurableState
+            | StorageWriterChannelV1::AdapterEgressDisclosure
+            | StorageWriterChannelV1::AdapterIdempotencyLedger
+    ) {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+            ManagedStorageWriterErrorV1::Io(
+                "managed adapter snapshot is not a complete JSON object".to_owned(),
+            )
+        })?;
+        return value.is_object().then_some(1).ok_or_else(|| {
+            ManagedStorageWriterErrorV1::Io(
+                "managed adapter snapshot must be a JSON object".to_owned(),
+            )
+        });
+    }
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed record object ends with a partial JSONL line".to_owned(),
+        ));
+    }
+    Ok(bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .count() as u64)
+}
+
+fn content_hash(bytes: &[u8]) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorageWriterErrorV1> {
+    let path = directory.join(".authority-storage.lock");
+    reject_reparse_components(&path, true)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, WRITE_DAC, WRITE_OWNER,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        options.access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    #[cfg(windows)]
+    sigil_kernel::secure_private_path_permissions(&path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed namespace lock must be a regular file".to_owned(),
+        ));
+    }
+    file.lock_exclusive()
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    Ok(file)
+}
+
+fn is_safe_physical_metadata(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Rejects symlink/reparse ancestors before a physical managed object is opened. The final
+/// component may be absent when the caller is about to create it; absent ancestors fail closed.
+fn reject_reparse_components(
+    path: &Path,
+    allow_missing_leaf: bool,
+) -> Result<(), ManagedStorageWriterErrorV1> {
+    let components = path.components().collect::<Vec<_>>();
+    let last = components.len().saturating_sub(1);
+    let mut current = PathBuf::new();
+    for (index, component) in components.into_iter().enumerate() {
+        current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            // A drive or verbatim prefix (for example, `C:`) is not a filesystem entry. The
+            // following root component produces the first inspectable path (`C:\`).
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && allow_missing_leaf
+                    && index == last =>
+            {
+                continue;
+            }
+            Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
+        };
+        if !is_safe_physical_metadata(&metadata) {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "physical managed path contains a symlink or reparse point: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Performs the same check for a path that may still have a missing directory suffix. This is
+/// used immediately before `create_dir_all`; after creation the complete path is checked with
+/// `reject_reparse_components` before any managed file is opened.
+fn reject_existing_reparse_components(path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
+    let components = path.components();
+    let mut current = PathBuf::new();
+    for component in components {
+        current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(ManagedStorageWriterErrorV1::Io(error.to_string())),
+        };
+        if !is_safe_physical_metadata(&metadata) {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "physical managed path contains a symlink or reparse point: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn read_no_follow_file(path: &Path) -> Result<Vec<u8>, ManagedStorageWriterErrorV1> {
+    reject_reparse_components(path, false)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed record object must be a regular non-reparse file".to_owned(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    Ok(bytes)
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
+    let parent = path.parent().ok_or_else(|| {
+        ManagedStorageWriterErrorV1::Io("managed record path has no parent".to_owned())
+    })?;
+    #[cfg(unix)]
+    {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        let metadata = std::fs::symlink_metadata(parent)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "managed record parent is not a real Windows directory".to_owned(),
+            ));
+        }
+        // Stable Windows does not support syncing a directory handle with `File::sync_all()`.
+        // The record file was already synced above; its private atomic publication is
+        // write-through on Windows, so the parent directory is only validated here.
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed record parent durability is unsupported on this platform".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Authority-form grant for one declared writer channel (R71.6 production composition:
@@ -613,6 +1062,26 @@ fn grant_for_owner(
     use sigil_kernel::resource::{OpaqueStorageGrantId, ResourceOwnerScopeV1};
     let (_, capability_family, leaf) = channel.mapping();
     let namespace_hash = writer_namespace_hash(leaf);
+    let (quota_class, quota_max_bytes, quota_max_entries, quota_max_holders) = match channel {
+        StorageWriterChannelV1::ArtifactStaging => (
+            sigil_kernel::resource::ResourceQuotaClassV1::ArtifactStaging,
+            sigil_kernel::session::TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
+            100_000,
+            1_024,
+        ),
+        StorageWriterChannelV1::ArtifactStore => (
+            sigil_kernel::resource::ResourceQuotaClassV1::ArtifactStore,
+            sigil_kernel::session::TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
+            100_000,
+            1_024,
+        ),
+        _ => (
+            sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
+            1024 * 1024,
+            1024,
+            1,
+        ),
+    };
     sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
         grant_id: OpaqueStorageGrantId::new(format!("grant-writer-{leaf}")),
         admission_hash: CanonicalHash::from_bytes([0x21 ^ seed; 32]),
@@ -638,10 +1107,10 @@ fn grant_for_owner(
         capability_family,
         retention_policy: sigil_kernel::resource::ResourceRetentionPolicyV1::SessionPolicy,
         quota_profile: sigil_kernel::resource::ResourceQuotaProfileV1 {
-            class: sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
-            max_bytes: 1024 * 1024,
-            max_entries: 1024,
-            max_open_holders: 1,
+            class: quota_class,
+            max_bytes: quota_max_bytes,
+            max_entries: quota_max_entries,
+            max_open_holders: quota_max_holders,
             max_age_ms: None,
             hard_runtime_enforcement_required: true,
             profile_hash: CanonicalHash::from_bytes([0x27; 32]),
@@ -677,342 +1146,5 @@ fn hash_grant_identity(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sigil_kernel::managed_storage::StorageAdmissionGrantV1;
-    use sigil_kernel::resource::{
-        AuthorityGeneration, ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1,
-        OpaqueSessionId, OpaqueStorageGrantId, ResourceJournalScopeV1, ResourceOwnerScopeV1,
-    };
-    use sigil_resource_authority::storage::{
-        AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
-    };
-
-    fn hash(seed: u8) -> CanonicalHash {
-        CanonicalHash::from_bytes([seed; 32])
-    }
-
-    fn session_log_grant() -> StorageAdmissionGrantV1 {
-        StorageAdmissionGrantV1 {
-            grant_id: OpaqueStorageGrantId::new("g-writer-slog".to_owned()),
-            admission_hash: hash(1),
-            semantic_owner: ManagedStorageSemanticOwnerV1::SessionLog,
-            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
-            purpose_hash: hash(2),
-            source_class:
-                sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
-            source_binding_hash: hash(10),
-            namespace_hash: super::writer_namespace_hash("session-log"),
-            journal_scope: ResourceJournalScopeV1::Application,
-            journal_scope_hash: hash(4),
-            resource_ref: sigil_kernel::resource::ResourceRefV1 {
-                resource_id: sigil_kernel::resource::OpaqueResourceId::new(
-                    "res-writer-slog".to_owned(),
-                ),
-                kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
-                owner_scope: ResourceOwnerScopeV1::Application,
-                journal_scope: ResourceJournalScopeV1::Application,
-                generation: 1,
-            },
-            resource_binding_digest: hash(5),
-            physical_binding_hash: hash(6),
-            resource_kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
-            owner_scope: ResourceOwnerScopeV1::Application,
-            capability_family: ManagedStorageCapabilityFamilyV1::AppendLog,
-            retention_policy: sigil_kernel::resource::ResourceRetentionPolicyV1::SessionPolicy,
-            quota_profile: sigil_kernel::resource::ResourceQuotaProfileV1 {
-                class: sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
-                max_bytes: 1024,
-                max_entries: 100,
-                max_open_holders: 1,
-                max_age_ms: None,
-                hard_runtime_enforcement_required: true,
-                profile_hash: hash(7),
-            },
-            semantic_schema: sigil_kernel::resource::OpaqueSemanticSchemaId::new(
-                "schema-writer-slog".to_owned(),
-            ),
-            authority_generation: AuthorityGeneration {
-                epoch: 1,
-                instance_hash: hash(8),
-            },
-            journal_admission_sequence: 1,
-            grant_hash: hash(9),
-        }
-    }
-
-    fn adapter(
-        anchor: &Path,
-        table: AuthorityStorageGrantTableV1,
-    ) -> ManagedStorageWriterAdapterV1 {
-        let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
-            std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
-                table,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: hash(8),
-                },
-            ));
-        ManagedStorageWriterAdapterV1::new(service, anchor.to_path_buf(), hash(10))
-    }
-
-    #[test]
-    fn r71_sw_session_log_batch_round_trip() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut table = AuthorityStorageGrantTableV1::new();
-        table.register(session_log_grant()).expect("register");
-        let writer = adapter(dir.path(), table);
-        let lease = writer
-            .acquire(StorageWriterChannelV1::SessionLog)
-            .expect("acquire");
-        assert_eq!(lease.channel(), StorageWriterChannelV1::SessionLog);
-        assert!(lease.path().ends_with("managed/session-log"));
-        writer
-            .write_record(&lease, b"{\"seq\":1}")
-            .expect("write 1");
-        writer
-            .write_record(&lease, b"{\"seq\":2}")
-            .expect("write 2");
-        let content = std::fs::read_to_string(lease.path().join("records.jsonl")).expect("read");
-        assert_eq!(content, "{\"seq\":1}\n{\"seq\":2}\n");
-        let receipt = writer.finalize(lease).expect("finalize");
-        assert_eq!(
-            receipt.capability_family,
-            ManagedStorageCapabilityFamilyV1::AppendLog
-        );
-    }
-
-    #[test]
-    fn r71_sw_unregistered_family_fails_admission() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let writer = adapter(dir.path(), AuthorityStorageGrantTableV1::new());
-        let error = writer
-            .acquire(StorageWriterChannelV1::SessionLog)
-            .expect_err("no grant");
-        assert!(matches!(
-            error,
-            ManagedStorageWriterErrorV1::AdmissionFailed(_)
-        ));
-    }
-
-    #[test]
-    fn r71_sw_leaf_permissions_owner_only() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let dir = tempfile::tempdir().expect("tempdir");
-            let mut table = AuthorityStorageGrantTableV1::new();
-            table.register(session_log_grant()).expect("register");
-            let writer = adapter(dir.path(), table);
-            let lease = writer
-                .acquire(StorageWriterChannelV1::SessionLog)
-                .expect("acquire");
-            writer.write_record(&lease, b"{\"seq\":1}").expect("write");
-            let dir_meta = std::fs::symlink_metadata(lease.path()).expect("dir meta");
-            assert_eq!(dir_meta.permissions().mode() & 0o077, 0);
-            let file_meta =
-                std::fs::symlink_metadata(lease.path().join("records.jsonl")).expect("file meta");
-            assert_eq!(file_meta.permissions().mode() & 0o077, 0);
-        }
-    }
-
-    #[test]
-    fn r71_sw_finalize_twice_fails_closed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut table = AuthorityStorageGrantTableV1::new();
-        table.register(session_log_grant()).expect("register");
-        let writer = adapter(dir.path(), table);
-        let lease = writer
-            .acquire(StorageWriterChannelV1::SessionLog)
-            .expect("acquire");
-        let path = lease.path().to_path_buf();
-        let channel = lease.channel();
-        let namespace_digest = lease.namespace_digest();
-        writer.finalize(lease).expect("first finalize");
-        // A second finalize of the same namespace is refused by the authority.
-        let error = writer
-            .finalize(ManagedStorageWriterLeaseV1 {
-                handle: ManagedStorageNamespaceHandleV1::new(
-                    sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
-                        "handle-storage-1".to_owned(),
-                    ),
-                    namespace_digest,
-                    ManagedStorageCapabilityFamilyV1::AppendLog,
-                    sigil_kernel::resource::OpaqueKernelCapabilityAuthenticatorV1::new(
-                        "auth-storage-1".to_owned(),
-                    ),
-                ),
-                path,
-                channel,
-            })
-            .expect_err("second finalize");
-        assert!(matches!(
-            error,
-            ManagedStorageWriterErrorV1::FinalizeFailed(_)
-        ));
-    }
-    #[test]
-    fn r71_sw_broker_backed_writer_uses_production_namespace() {
-        use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut table = AuthorityStorageGrantTableV1::new();
-        table.register(session_log_grant()).expect("register");
-        let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
-            std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
-                table,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: hash(8),
-                },
-            ));
-        let broker = std::sync::Arc::new(KernelCapabilityBrokerV1::new());
-        let writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
-            service.clone(),
-            dir.path().to_path_buf(),
-            hash(10),
-            broker.clone(),
-        );
-        // A startup probe runs first: its namespace is dedicated and never the production one.
-        let capability =
-            sigil_kernel::managed_storage::ValidatedStorageAdmissionCapabilityV1::startup_probe();
-        let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
-            semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLog,
-            capability_family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::AppendLog,
-            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
-            source:
-                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
-                    cutover_manifest_hash: hash(10),
-                    application_generation: 1,
-                },
-            owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Session(
-                OpaqueSessionId::new("s-1".to_owned()),
-            ),
-            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
-        };
-        let probe_handle = service
-            .admit_namespace(request, capability)
-            .expect("probe admit");
-        assert_ne!(probe_handle.namespace_hash, hash(3));
-        let probe_ns = probe_handle.namespace_hash;
-        service
-            .finalize_namespace(probe_handle, "probe".to_owned())
-            .expect("probe finalize");
-        // The broker-backed writer batch binds a claim-scoped namespace (distinct from the
-        // probe claim) and works after the probe finalized its own namespace.
-        let lease = writer
-            .acquire(StorageWriterChannelV1::SessionLog)
-            .expect("acquire");
-        assert_ne!(lease.namespace_digest(), probe_ns);
-        assert_ne!(
-            lease.namespace_digest(),
-            CanonicalHash::from_bytes([0u8; 32])
-        );
-        writer.write_record(&lease, b"seq=1").expect("write");
-        writer.finalize(lease).expect("finalize");
-    }
-    #[test]
-    fn r71_sw_named_acquire_per_session_and_unsafe_key_rejected() {
-        use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut table = AuthorityStorageGrantTableV1::new();
-        table.register(session_log_grant()).expect("register");
-        let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
-            std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
-                table,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: hash(8),
-                },
-            ));
-        let broker = std::sync::Arc::new(KernelCapabilityBrokerV1::new());
-        let writer = ManagedStorageWriterAdapterV1::with_storage_issuer(
-            service.clone(),
-            dir.path().to_path_buf(),
-            hash(10),
-            broker,
-        );
-        let lease_a = writer
-            .acquire_named(StorageWriterChannelV1::SessionLog, "session-abc")
-            .expect("named a");
-        assert!(lease_a.path().ends_with("session-log/session-abc"));
-        writer.write_record(&lease_a, b"seq=1").expect("write");
-        writer.finalize(lease_a).expect("finalize a");
-        let lease_b = writer
-            .acquire_named(StorageWriterChannelV1::SessionLog, "session-def")
-            .expect("named b");
-        writer.finalize(lease_b).expect("finalize b");
-        // Unsafe sub-key rejected before any filesystem access.
-        let error = writer
-            .acquire_named(StorageWriterChannelV1::SessionLog, "../escape")
-            .expect_err("unsafe");
-        assert!(matches!(
-            error,
-            ManagedStorageWriterErrorV1::LeafEscapesAnchor
-        ));
-    }
-
-    #[test]
-    fn r71_sw_artifact_staging_and_store_are_separate_authority_roots() {
-        use sigil_kernel::session::ToolArtifactSensitivity;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut table = AuthorityStorageGrantTableV1::new();
-        table
-            .register(grant_for_channel_with_context(
-                StorageWriterChannelV1::ArtifactStaging,
-                0x81,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: hash(0x83),
-                },
-                hash(0x84),
-            ))
-            .expect("staging grant");
-        table
-            .register(grant_for_channel_with_context(
-                StorageWriterChannelV1::ArtifactStore,
-                0x82,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: hash(0x83),
-                },
-                hash(0x84),
-            ))
-            .expect("store grant");
-        let service: std::sync::Arc<dyn ManagedStorageServiceV1> =
-            std::sync::Arc::new(AuthorityManagedStorageServiceV1::new(
-                table,
-                AuthorityGeneration {
-                    epoch: 1,
-                    instance_hash: hash(0x83),
-                },
-            ));
-        let writer =
-            ManagedStorageWriterAdapterV1::new(service, dir.path().to_path_buf(), hash(0x84));
-        let staging = writer
-            .acquire_named(StorageWriterChannelV1::ArtifactStaging, "session-artifact")
-            .expect("staging lease");
-        let store = writer
-            .acquire_named(StorageWriterChannelV1::ArtifactStore, "session-artifact")
-            .expect("store lease");
-        let session_path = dir.path().join("session.jsonl");
-        let artifact_store = sigil_kernel::ToolArtifactStore::for_session_path_with_roots(
-            &session_path,
-            store.path().to_path_buf(),
-            staging.path().to_path_buf(),
-        );
-        let descriptor = artifact_store
-            .capture_text(
-                "call-1",
-                "shell",
-                "managed artifact",
-                ToolArtifactSensitivity::Ordinary,
-            )
-            .expect("artifact should publish");
-        assert!(descriptor.retrieval_available());
-        assert!(artifact_store.root().join("refs").exists());
-        assert!(artifact_store.staging_root().join("staging").exists());
-        assert!(!dir.path().join("session").join("artifacts").exists());
-        writer.finalize(store).expect("store finalize");
-        writer.finalize(staging).expect("staging finalize");
-    }
-}
+#[path = "tests/managed_storage_writer_tests.rs"]
+mod tests;

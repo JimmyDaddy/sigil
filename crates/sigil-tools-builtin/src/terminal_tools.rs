@@ -120,6 +120,14 @@ impl TerminalTaskControlHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn managed_execution_is_bound(&self) -> bool {
+        matches!(
+            self.managers.execution_owner,
+            TerminalManagerExecutionOwnerV1::Managed(_)
+        )
+    }
+
     /// Cancels one task through the exact process manager that admitted it.
     ///
     /// # Errors
@@ -163,13 +171,26 @@ impl TerminalTaskControlHandle {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct TerminalProcessManagers {
     terminal_execution_config: TerminalExecutionConfig,
+    execution_owner: TerminalManagerExecutionOwnerV1,
     lifecycle_route: Option<TerminalLifecycleRoute>,
     scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
     managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
     terminal_read_guards: StdMutex<TerminalReadGuardState>,
+}
+
+pub(crate) enum TerminalManagerExecutionOwnerV1 {
+    Managed(Arc<dyn crate::ManagedTerminalExecutionPortV1>),
+    #[cfg(any(test, feature = "test-support"))]
+    LegacyDirect,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for TerminalProcessManagers {
+    fn default() -> Self {
+        Self::new_legacy(TerminalExecutionConfig::default())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -273,15 +294,43 @@ impl TerminalReadGuardState {
 }
 
 #[derive(Clone)]
-pub(crate) enum TerminalLifecycleRoute {
+pub enum TerminalLifecycleRoute {
     Bound(Arc<dyn sigil_kernel::TerminalLifecycleSink>),
     Factory(Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>),
 }
 
 impl TerminalProcessManagers {
-    pub(crate) fn new(terminal_execution_config: TerminalExecutionConfig) -> Self {
+    pub(crate) fn ensure_execution_available(&self) -> Result<()> {
+        match &self.execution_owner {
+            TerminalManagerExecutionOwnerV1::Managed(port) if !port.is_available() => {
+                Err(anyhow::Error::new(
+                    sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable,
+                )
+                .context("managed terminal launch failed"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn new_managed(
+        terminal_execution_config: TerminalExecutionConfig,
+        managed_execution: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+    ) -> Self {
         Self {
             terminal_execution_config,
+            execution_owner: TerminalManagerExecutionOwnerV1::Managed(managed_execution),
+            lifecycle_route: None,
+            scratch_leases: None,
+            terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
+            managers: StdMutex::new(BTreeMap::new()),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_legacy(terminal_execution_config: TerminalExecutionConfig) -> Self {
+        Self {
+            terminal_execution_config,
+            execution_owner: TerminalManagerExecutionOwnerV1::LegacyDirect,
             lifecycle_route: None,
             scratch_leases: None,
             terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
@@ -367,15 +416,23 @@ impl TerminalProcessManagers {
             return Ok(Arc::clone(manager));
         }
 
-        let manager = Arc::new(
-            TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
-                &workspace_root,
-                artifact_root,
-                artifact_label_root.to_path_buf(),
-                self.terminal_execution_config.clone(),
-            )?
-            .with_scratch_task_leases(self.scratch_leases.clone()),
-        );
+        let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
+            &workspace_root,
+            artifact_root,
+            artifact_label_root.to_path_buf(),
+            self.terminal_execution_config.clone(),
+        )?
+        .with_scratch_task_leases(self.scratch_leases.clone());
+        let manager = match &self.execution_owner {
+            TerminalManagerExecutionOwnerV1::Managed(managed_execution) => {
+                manager.with_managed_execution(Arc::clone(managed_execution))
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            TerminalManagerExecutionOwnerV1::LegacyDirect => {
+                manager.with_legacy_execution_for_test_support()
+            }
+        };
+        let manager = Arc::new(manager);
         managers.insert(key, Arc::clone(&manager));
         Ok(manager)
     }
@@ -583,6 +640,7 @@ impl Tool for TerminalStartTool {
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let args = parse_terminal_start_args(&args)?;
         validate_terminal_start_execution_mode(args.mode, args.pty)?;
+        self.managers.ensure_execution_available()?;
         let shell = self.managers.resolve_shell(args.shell.as_deref())?;
         let execution_analysis = self.analyze_command(&ctx, &args.command, &shell)?;
         reject_known_finite_terminal_start_command(&args.command, &shell, &execution_analysis)?;
@@ -617,6 +675,11 @@ impl Tool for TerminalStartTool {
         let scratch_control = self.scratch.clone();
         let provision_scope = ctx.session_scope_id().map(str::to_owned);
         let provision_quota = self.scratch_quota;
+        let scratch_lease = self
+            .scratch
+            .namespaces
+            .acquire(&session_scratch_key(provision_scope.as_deref()))
+            .map_err(|error| anyhow::anyhow!("session scratch lease unavailable: {error}"))?;
         let provision = tokio::task::spawn_blocking(move || {
             scratch_control.ensure_session_scratch(provision_scope.as_deref(), &provision_quota)
         })
@@ -626,6 +689,7 @@ impl Tool for TerminalStartTool {
         match provision {
             Ok(_provision) => {}
             Err(error) => {
+                drop(scratch_lease);
                 return Ok(scratch_provision_error_result(
                     call_id,
                     self.spec().name,
@@ -735,9 +799,11 @@ impl Tool for TerminalStartTool {
         if !snapshot.entry.status.is_terminal() {
             // RFC-0062 14.1: hold a task-scoped scratch lease while the terminal task is alive
             // so TTL GC never deletes the namespace under a live child process.
-            self.scratch
-                .tasks
-                .register(task_id.as_str(), &session_key, &self.scratch.namespaces);
+            self.scratch.tasks.register(
+                task_id.as_str(),
+                &session_key,
+                &self.scratch.namespaces,
+            )?;
         }
         Ok(terminal_start_result(
             call_id,

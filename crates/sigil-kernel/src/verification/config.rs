@@ -418,6 +418,8 @@ pub fn default_scope_excludes() -> Vec<String> {
         ".sigil/input-history.jsonl",
         ".sigil-state/**",
         ".sigil-recovery/**",
+        "**/*.jsonl.writer-lock",
+        "**/*.jsonl.attachment-lock",
         "target/**",
         "node_modules/**",
         "dist/**",

@@ -6,7 +6,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-use crate::app::{AppState, CheckpointRestoreModalPhase, CheckpointRestoreModalView};
+#[cfg(test)]
+use crate::app::AppState;
+use crate::app::{CheckpointRestoreModalPhase, CheckpointRestoreModalView};
 
 use super::{
     diff::{
@@ -17,13 +19,30 @@ use super::{
     theme::{self, ThemePalette},
 };
 
+#[cfg(test)]
 pub(super) fn render_checkpoint_restore_modal(frame: &mut Frame, app: &AppState) {
     let Some(view) = app.checkpoint_restore_modal_view() else {
         return;
     };
     let current_theme = theme::resolve_for_app(app);
+    render_checkpoint_restore_modal_view(frame, &view, &current_theme);
+}
+
+pub(super) fn render_checkpoint_restore_modal_surface(
+    frame: &mut Frame,
+    view: &CheckpointRestoreModalView,
+    theme: &theme::Theme,
+) {
+    render_checkpoint_restore_modal_view(frame, view, theme);
+}
+
+fn render_checkpoint_restore_modal_view(
+    frame: &mut Frame,
+    view: &CheckpointRestoreModalView,
+    current_theme: &theme::Theme,
+) {
     let palette = &current_theme.palette;
-    let modal_layout = checkpoint_restore_layout(frame.area(), &view);
+    let modal_layout = checkpoint_restore_layout(frame.area(), view);
     let area = modal_layout.area;
     let backdrop = halo_rect(area, frame.area(), 5, 2);
     if backdrop.width > 0 && backdrop.height > 0 {
@@ -64,7 +83,7 @@ pub(super) fn render_checkpoint_restore_modal(frame: &mut Frame, app: &AppState)
     }
 
     frame.render_widget(
-        Paragraph::new(Text::from(checkpoint_summary_lines(&view, palette)))
+        Paragraph::new(Text::from(checkpoint_summary_lines(view, palette)))
             .block(
                 Block::default()
                     .title("Restore target")
@@ -90,9 +109,9 @@ pub(super) fn render_checkpoint_restore_modal(frame: &mut Frame, app: &AppState)
         );
     }
     if modal_layout.body_content.width > 0 && modal_layout.body_content.height > 0 {
-        let lines = checkpoint_body_lines(&view, palette);
+        let lines = checkpoint_body_lines(view, palette);
         let max_scroll =
-            checkpoint_restore_max_scroll(frame.area().width, frame.area().height, &view);
+            checkpoint_restore_max_scroll(frame.area().width, frame.area().height, view);
         let scroll = usize::from(view.scroll).min(max_scroll) as u16;
         frame.render_widget(
             Paragraph::new(Text::from(lines))
@@ -103,7 +122,7 @@ pub(super) fn render_checkpoint_restore_modal(frame: &mut Frame, app: &AppState)
     }
 
     frame.render_widget(
-        Paragraph::new(Text::from(checkpoint_action_lines(&view, palette)))
+        Paragraph::new(Text::from(checkpoint_action_lines(view, palette)))
             .block(
                 Block::default()
                     .title("Actions")

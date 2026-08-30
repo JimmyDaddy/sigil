@@ -1,13 +1,181 @@
-# RFC-0071 R71.5 frozen conformance inventory: all 200 required fault cases.
+# RFC-0071 R71.9l frozen conformance inventory: all 228 required fault cases.
 # Each case id maps exactly one injected frontier with a non-zero expected assertion count.
 # A runner implementing only part of a range, folding multiple frontiers into one case, or
 # filling holes with ignored/skipped cases fails.
 schema_version = 2
-manifest_hash = "r71-conformance-v2-200"
+manifest_hash = "r71-conformance-v4-228"
 
 [[cases]]
 case_id = "R71-F-EXP-001"
 case_name = "fault_EXP_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-001"
+case_name = "fault_DEL_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-002"
+case_name = "fault_DEL_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-003"
+case_name = "fault_DEL_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-004"
+case_name = "fault_DEL_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-005"
+case_name = "fault_DEL_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-006"
+case_name = "fault_DEL_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-007"
+case_name = "fault_DEL_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-DEL-008"
+case_name = "fault_DEL_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-001"
+case_name = "fault_FIL_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-002"
+case_name = "fault_FIL_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-003"
+case_name = "fault_FIL_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-004"
+case_name = "fault_FIL_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-005"
+case_name = "fault_FIL_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-006"
+case_name = "fault_FIL_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-007"
+case_name = "fault_FIL_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-008"
+case_name = "fault_FIL_008"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-009"
+case_name = "fault_FIL_009"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-010"
+case_name = "fault_FIL_010"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-011"
+case_name = "fault_FIL_011"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-012"
+case_name = "fault_FIL_012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-001"
+case_name = "fault_CSR_001"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-002"
+case_name = "fault_CSR_002"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-003"
+case_name = "fault_CSR_003"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-004"
+case_name = "fault_CSR_004"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-005"
+case_name = "fault_CSR_005"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-006"
+case_name = "fault_CSR_006"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-007"
+case_name = "fault_CSR_007"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-CSR-008"
+case_name = "fault_CSR_008"
 fixture_class = "fault-campaign"
 expected_assertion_count = 1
 required = true

@@ -1,0 +1,17 @@
+# RFC-0070 R70.0 deterministic mixed-transcript workload definition.
+schema_version = "r70-transcript-fixture-v1"
+seed = "r70-mixed-transcript-v1"
+generator = "R70.1 deterministic fixture generator"
+payload_bytes = 192
+
+[workloads]
+transcript_10k = 10000
+transcript_100k = 100000
+
+[mix]
+user = 0.18
+assistant = 0.38
+tool_call = 0.16
+tool_result = 0.16
+thinking = 0.08
+system = 0.04

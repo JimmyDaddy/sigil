@@ -256,6 +256,15 @@ pub async fn accept_application_task_integration_review_with_attachment(
     let session_path = session_path.to_owned();
     let expected_session_scope_id = expected_session_scope_id.to_owned();
     let session_leases = Arc::clone(&services.session_leases);
+    let verification_execution_port: Arc<
+        dyn sigil_kernel::verification::VerificationExecutionPortV1,
+    > = services
+        .authority_composition()
+        .ok_or_else(|| {
+            anyhow!("current-schema integration acceptance requires the managed verification route")
+        })?
+        .command_execution
+        .clone();
     let request = request.clone();
     let preparation = tokio::task::spawn_blocking(move || {
         let root_config = RootConfig::load(&config_path)?;
@@ -272,26 +281,23 @@ pub async fn accept_application_task_integration_review_with_attachment(
         if session.session_scope_id() != expected_session_scope_id {
             bail!("durable session identity changed before integration acceptance");
         }
-        let execution_backend = crate::build_configured_execution_backend(&root_config)?;
         let secret_redactor = crate::secret_redactor_for_root_config(&root_config);
         Ok::<_, anyhow::Error>((
             session,
             session_lease,
             workspace_root,
-            execution_backend,
             secret_redactor,
             request,
         ))
     })
     .await
     .map_err(|_| anyhow!("integration acceptance preparation worker failed"))??;
-    let (mut session, _session_lease, workspace_root, execution_backend, secret_redactor, request) =
-        preparation;
+    let (mut session, _session_lease, workspace_root, secret_redactor, request) = preparation;
     let mut handler = NoopEventHandler;
     let output = crate::integration_lanes::accept_task_integration_review(
         &mut session,
         &mut handler,
-        execution_backend,
+        verification_execution_port,
         &secret_redactor,
         &workspace_root,
         &request,

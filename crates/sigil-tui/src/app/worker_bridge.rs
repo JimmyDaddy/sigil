@@ -23,8 +23,8 @@ use tool_card_lifecycle::{
 };
 
 use super::{
-    ActiveTaskRuntimeStatus, AppState, ApprovalPresentationState, PaneFocus, RunPhase,
-    TimelineRole,
+    ActiveTaskRuntimeStatus, AppState, ApprovalPresentationState, ComposerMode, PaneFocus,
+    RunPhase, TimelineRole,
     formatting::{format_terminal_task_block_redacted, summarize_error, summarize_terminal_reason},
 };
 use crate::runner::{WorkerApprovalRouteState, WorkerCommand, WorkerMessage};
@@ -610,6 +610,7 @@ impl AppState {
                 entries,
             } => {
                 self.clear_pending_plan_approval();
+                self.composer.mode = ComposerMode::Build;
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
                 self.last_notice = Some(if entry.stale_reason.is_some() {

@@ -10,6 +10,11 @@ pub(in crate::runner) struct WorkerLoopMcpHandlers {
     pub(in crate::runner) managed_extension_execution: Option<
         Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    pub(in crate::runner) managed_verification_execution:
+        Option<Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>>,
+    pub(in crate::runner) managed_plan_review_child_resources: Option<
+        Arc<dyn sigil_runtime::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    >,
 }
 
 #[allow(clippy::too_many_arguments)]

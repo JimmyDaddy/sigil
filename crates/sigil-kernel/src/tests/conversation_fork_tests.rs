@@ -300,7 +300,10 @@ fn conversation_fork_remaps_v2_artifact_ref_and_preserves_retrieval() -> Result<
     let temp = tempfile::tempdir()?;
     let source_path = temp.path().join("source.jsonl");
     let source_store = JsonlSessionStore::new(&source_path)?;
-    let mut source = Session::new("deepseek", "chat").with_store(source_store.clone());
+    let source_artifact_store = ToolArtifactStore::for_session_store(&source_store);
+    let mut source = Session::new("deepseek", "chat")
+        .with_store(source_store.clone())
+        .with_tool_artifact_store_override(source_artifact_store);
     source.append_user_message(ModelMessage::user("inspect output"))?;
     source.append_assistant_message(ModelMessage::assistant(
         None,

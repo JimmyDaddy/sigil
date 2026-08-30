@@ -756,7 +756,7 @@ fn model_command_switches_runtime_model_in_the_current_session() -> Result<()> {
 
     assert!(matches!(
         action,
-        Some(AppAction::RuntimeConfigUpdated { .. })
+        Some(AppAction::SessionRuntimeRouteUpdated { .. })
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
     assert_eq!(app.session_id, previous_session_id);
@@ -1375,7 +1375,7 @@ fn slash_selector_executes_selected_model_candidate() -> Result<()> {
 
     assert!(matches!(
         action,
-        Some(AppAction::RuntimeConfigUpdated { .. })
+        Some(AppAction::SessionRuntimeRouteUpdated { .. })
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
     assert_eq!(app.session_id, previous_session_id);
@@ -1514,7 +1514,7 @@ fn slash_model_execution_accepts_an_explicit_custom_model_id() -> Result<()> {
     assert_eq!(root_config.agent.model, "ds-custom-2026-08");
     assert!(matches!(
         app.submit_input()?,
-        Some(AppAction::RuntimeConfigUpdated { .. })
+        Some(AppAction::SessionRuntimeRouteUpdated { .. })
     ));
     assert_eq!(app.session_id, previous_session_id);
     assert_eq!(app.runtime.model_name, "ds-custom-2026-08");

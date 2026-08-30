@@ -1,3 +1,4 @@
+use crate::surface::VirtualTextWindow;
 use crate::{
     app::{AppState, task_sidebar::TASK_STRIP_COLLAPSED_ROW_LIMIT},
     timeline::ComposerQueueRow,
@@ -41,10 +42,38 @@ pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &Live
     render_live_panel_with_theme(frame, area, view_model, &theme);
 }
 
+#[cfg(test)]
 pub(crate) fn render_live_panel_with_theme(
     frame: &mut Frame,
     area: Rect,
     view_model: &LivePanelViewModel,
+    theme: &Theme,
+) {
+    render_live_panel_with_lines(
+        frame,
+        area,
+        view_model,
+        view_model.transcript_lines.clone(),
+        theme,
+    );
+}
+
+pub(crate) fn render_live_panel_surface(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &LivePanelViewModel,
+    transcript: &VirtualTextWindow,
+    theme: &Theme,
+) {
+    debug_assert!(transcript.is_bounded_by(transcript.resident_len()));
+    render_live_panel_with_lines(frame, area, view_model, transcript.items().to_vec(), theme);
+}
+
+fn render_live_panel_with_lines(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &LivePanelViewModel,
+    transcript_lines: Vec<Line<'static>>,
     theme: &Theme,
 ) {
     let palette = &theme.palette;
@@ -78,10 +107,7 @@ pub(crate) fn render_live_panel_with_theme(
         content_frame.width,
         content_frame.height.saturating_sub(status_height).max(1),
     );
-    let visual_lines = wrap_live_panel_lines(
-        view_model.transcript_lines.clone(),
-        transcript_frame.width as usize,
-    );
+    let visual_lines = wrap_live_panel_lines(transcript_lines, transcript_frame.width as usize);
     let visual_start = visual_lines
         .len()
         .saturating_sub(transcript_frame.height as usize);

@@ -812,13 +812,15 @@ fn durable_v2_event_is_bounded_while_artifact_keeps_the_complete_body() -> Resul
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&session_path)?;
-    let mut session = Session::new("test", "model").with_store(store);
+    let artifact_store = ToolArtifactStore::for_session_store(&store);
+    let mut session = Session::new("test", "model")
+        .with_store(store)
+        .with_tool_artifact_store_override(artifact_store.clone());
     let body = format!(
         "head:{}:middle-sentinel:{}:tail",
         "0123456789".repeat(100_000),
         "abcdefghij".repeat(100_000)
     );
-    let artifact_store = session.tool_artifact_store().expect("durable store");
     let pre_captured = artifact_store.capture_text(
         "call-large",
         "shell",
@@ -1576,8 +1578,10 @@ fn has_more_compares_against_the_bytes_actually_displayed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&session_path)?;
-    let session = Session::new("test", "model").with_store(store);
-    let artifact_store = session.tool_artifact_store().expect("durable store");
+    let artifact_store = ToolArtifactStore::for_session_store(&store);
+    let _session = Session::new("test", "model")
+        .with_store(store)
+        .with_tool_artifact_store_override(artifact_store.clone());
 
     // Between the model cap (16 KiB) and the display cap (~31 KiB): a complete 20 KiB inline
     // output is fully shown in the live display, so live has_more must be false even though the

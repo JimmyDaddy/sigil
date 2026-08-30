@@ -49,7 +49,12 @@ pub async fn generate_and_persist_session_title(
 ) -> Result<()> {
     let paths =
         crate::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    let session_ref = session_ref_for_title(&paths.session_log_dir, &session_log_path)?;
+    let managed_session_log_root = paths.state_root.join("managed/session-log");
+    let session_ref = session_ref_for_title(
+        &paths.session_log_dir,
+        &managed_session_log_root,
+        &session_log_path,
+    )?;
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .context("failed to build session title provider")?;
@@ -230,6 +235,7 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 
 pub(crate) fn session_ref_for_title(
     session_dir: &Path,
+    managed_session_log_root: &Path,
     session_log_path: &Path,
 ) -> Result<SessionRef> {
     let file_name = session_log_path
@@ -237,15 +243,58 @@ pub(crate) fn session_ref_for_title(
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
         .context("session title source has no UTF-8 file name")?;
-    let session_ref = SessionRef::new_relative(file_name)?;
-    let canonical_session_dir = session_dir
-        .canonicalize()
-        .context("failed to canonicalize the session title directory")?;
     let canonical_session_log_path = session_log_path
         .canonicalize()
         .context("failed to canonicalize the session title source")?;
-    if canonical_session_dir.join(session_ref.as_path()) != canonical_session_log_path {
-        bail!("session title source is outside the configured session directory");
+
+    if let Ok(canonical_session_dir) = session_dir.canonicalize() {
+        let session_ref = SessionRef::new_relative(file_name)?;
+        if canonical_session_dir.join(session_ref.as_path()) == canonical_session_log_path {
+            return Ok(session_ref);
+        }
     }
-    Ok(session_ref)
+
+    let canonical_managed_root = match managed_session_log_root.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("session title source is outside the configured session directory")
+        }
+        Err(error) => {
+            return Err(error)
+                .context("failed to canonicalize the managed session title directory");
+        }
+    };
+    let relative = canonical_session_log_path
+        .strip_prefix(&canonical_managed_root)
+        .map_err(|_| {
+            anyhow::anyhow!("session title source is outside the configured session directories")
+        })?;
+    let mut components = relative.components();
+    let Some(key) = components
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        bail!("session title source is outside the configured session directories");
+    };
+    let Some(leaf) = components
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        bail!("session title source is outside the configured session directories");
+    };
+    if components.next().is_some() || leaf != "records.jsonl" || key.trim().is_empty() {
+        bail!("session title source is outside the configured session directories");
+    }
+    let key_dir = canonical_managed_root.join(key);
+    let key_metadata = std::fs::symlink_metadata(&key_dir)
+        .context("failed to inspect the managed session title namespace")?;
+    if key_metadata.file_type().is_symlink() || !key_metadata.is_dir() {
+        bail!("managed session title namespace is not a real directory");
+    }
+    let record_metadata = std::fs::symlink_metadata(&canonical_session_log_path)
+        .context("failed to inspect the managed session title source")?;
+    if record_metadata.file_type().is_symlink() || !record_metadata.is_file() {
+        bail!("managed session title source is not a regular file");
+    }
+    SessionRef::new_relative(format!("{key}.jsonl"))
 }

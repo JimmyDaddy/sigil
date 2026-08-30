@@ -38,6 +38,7 @@ pub struct PublicEventDeliveryReceiptV1 {
 pub struct PublicEventOutboxProjectionV1 {
     cursor: Option<ProjectionCursor>,
     entries: BTreeMap<String, PublicEventOutboxEntryV1>,
+    ordered_ids: Vec<String>,
     deliveries: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -75,13 +76,15 @@ impl PublicEventOutboxProjectionV1 {
 
     pub fn apply_outbox(&mut self, entry: PublicEventOutboxEntryV1) -> Result<()> {
         validate_outbox_entry(&entry)?;
+        let public_event_id = entry.public_event_id.clone();
         if self
             .entries
-            .insert(entry.public_event_id.clone(), entry)
+            .insert(public_event_id.clone(), entry)
             .is_some()
         {
             bail!("public event outbox entry was recorded more than once");
         }
+        self.ordered_ids.push(public_event_id);
         Ok(())
     }
 
@@ -116,6 +119,17 @@ impl PublicEventOutboxProjectionV1 {
                     .get(&entry.public_event_id)
                     .is_some_and(|adapters| adapters.contains(adapter))
             })
+            .collect()
+    }
+
+    /// Returns the durable public events in stream order for rebuilding a surface projection.
+    /// Delivery receipts intentionally do not affect this view: an adapter receipt records
+    /// transport progress, not whether the event is still part of the session's state history.
+    #[must_use]
+    pub fn events_in_order(&self) -> Vec<&PublicEventOutboxEntryV1> {
+        self.ordered_ids
+            .iter()
+            .filter_map(|event_id| self.entries.get(event_id))
             .collect()
     }
 }
@@ -229,50 +243,5 @@ fn outbox_entries_match(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn event(sequence: u64) -> crate::PublicRunEvent {
-        crate::PublicRunEvent::new(
-            "session-1".to_owned(),
-            "run-1".to_owned(),
-            sequence,
-            crate::PublicRunEventKind::Notice {
-                message: "safe".to_owned(),
-            },
-        )
-    }
-
-    fn entry(sequence: u64) -> PublicEventOutboxEntryV1 {
-        let event = event(sequence);
-        PublicEventOutboxEntryV1 {
-            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-            public_event_id: format!("event-{sequence}"),
-            domain_event_id: format!("domain-{sequence}"),
-            run_id: event.run_id.clone(),
-            sequence,
-            payload_digest: crate::stable_event_hash(
-                serde_json::to_vec(&event).expect("public event encodes"),
-            ),
-            event,
-        }
-    }
-
-    #[test]
-    fn outbox_projection_keeps_failed_delivery_pending_without_changing_domain_event() -> Result<()>
-    {
-        let entry = entry(1);
-        let mut projection = PublicEventOutboxProjectionV1::default();
-        projection.apply_outbox(entry.clone())?;
-        assert_eq!(projection.pending_for_adapter("http").len(), 1);
-        projection.apply_delivery(PublicEventDeliveryReceiptV1 {
-            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-            public_event_id: entry.public_event_id.clone(),
-            adapter: "http".to_owned(),
-            delivered_at_unix_ms: 1,
-        })?;
-        assert!(projection.pending_for_adapter("http").is_empty());
-        assert_eq!(projection.pending_for_adapter("desktop").len(), 1);
-        Ok(())
-    }
-}
+#[path = "tests/public_event_outbox_tests.rs"]
+mod tests;

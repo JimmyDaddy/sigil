@@ -1,0 +1,14 @@
+[package]
+name = "sigil-tui-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sigil application adapter for the public terminal UI framework"
+publish = false
+
+[dependencies]
+sigil-application = { path = "../sigil-application" }
+sigil-tui = { path = "../sigil-tui-framework" }
+
+[lints]
+workspace = true

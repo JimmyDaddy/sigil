@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     AgentRole, AgentRouteStatus, AgentRunOptions, AgentUserInputRouteEntryV1, ControlEntry,
     Provider, RootConfig, SequentialTaskOrchestrator, Session, TaskConfig,
@@ -50,6 +53,7 @@ pub async fn prepare_task_planner_user_input_continuation(
     base_registry: &ToolRegistry,
     agent_supervisor: AgentSupervisor,
     role_provider_builder: &dyn TaskRoleProviderBuilder,
+    verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
     parent_session: &mut Session,
     route: &AgentUserInputRouteEntryV1,
     command: &UserInputDecisionCommandV1,
@@ -70,6 +74,7 @@ pub async fn prepare_task_planner_user_input_continuation(
         base_registry,
         agent_supervisor,
         role_provider_builder,
+        verification_execution_port,
     )
     .await?;
     let mut child = super::build_child_session(parent_session, &route.child_session_ref)?;
@@ -242,6 +247,7 @@ pub async fn build_task_role_runtime(
     base_registry: &ToolRegistry,
     agent_supervisor: AgentSupervisor,
     role_provider_builder: &dyn TaskRoleProviderBuilder,
+    verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
 ) -> Result<TaskRoleRuntime> {
     let planner_provider =
         build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
@@ -267,8 +273,6 @@ pub async fn build_task_role_runtime(
             .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
-    let execution_backend = crate::build_configured_execution_backend(root_config)
-        .context("failed to build task verification execution backend")?;
     let child_runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
         crate::configured_agent(root_config, planner_provider, planner_registry)?,
@@ -288,38 +292,54 @@ pub async fn build_task_role_runtime(
         root_config.task.multi_agent_mode,
         root_config.task.max_planning_research_agents,
     )
-    .with_integration_verification_backend(execution_backend.clone());
+    .with_integration_verification_port(verification_execution_port.clone());
+    // Role-specific options are derived from the persisted role configuration, but the
+    // authority attachments belong to the already-admitted root run.  Dropping this field here
+    // makes a direct Task look correctly bootstrapped until its first managed file tool reaches
+    // the physical execution boundary, where it is (correctly) rejected as authority-less.
+    let tool_authority = options.tool_authority.clone();
+    let mut planner_options = crate::build_role_run_options(
+        root_config,
+        workspace_root.clone(),
+        interaction_mode,
+        AgentRole::Planner,
+    );
+    let mut executor_options = crate::build_role_run_options(
+        root_config,
+        workspace_root.clone(),
+        interaction_mode,
+        AgentRole::Executor,
+    );
+    let mut subagent_read_options = crate::build_role_run_options(
+        root_config,
+        workspace_root.clone(),
+        interaction_mode,
+        AgentRole::SubagentRead,
+    );
+    let mut subagent_write_options = crate::build_role_run_options(
+        root_config,
+        workspace_root,
+        interaction_mode,
+        AgentRole::SubagentWrite,
+    );
+    if let Some(tool_authority) = tool_authority {
+        planner_options = planner_options.with_tool_authority(Arc::clone(&tool_authority));
+        executor_options = executor_options.with_tool_authority(Arc::clone(&tool_authority));
+        subagent_read_options =
+            subagent_read_options.with_tool_authority(Arc::clone(&tool_authority));
+        subagent_write_options = subagent_write_options.with_tool_authority(tool_authority);
+    }
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
             .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
             .with_max_parallel_changeset_steps(configured_max_parallel_changeset_steps(
                 &root_config.task,
             ))
-            .with_execution_backend(execution_backend),
-        planner_options: crate::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::Planner,
-        ),
-        executor_options: crate::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::Executor,
-        ),
-        subagent_read_options: crate::build_role_run_options(
-            root_config,
-            workspace_root.clone(),
-            interaction_mode,
-            AgentRole::SubagentRead,
-        ),
-        subagent_write_options: crate::build_role_run_options(
-            root_config,
-            workspace_root,
-            interaction_mode,
-            AgentRole::SubagentWrite,
-        ),
+            .with_verification_execution_port(verification_execution_port),
+        planner_options,
+        executor_options,
+        subagent_read_options,
+        subagent_write_options,
     })
 }
 

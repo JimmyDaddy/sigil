@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use anyhow::Context;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -24,7 +26,7 @@ use sigil_kernel::{
     PublicRouteRecoveryCode, PublicRunEvent, PublicRunEventKind, RootConfig, SecretString,
     SessionLogEntry, SessionRef, ToolAnalysisStatus, ToolApproval, ToolApprovalContext,
     ToolApprovalUserDecision, ToolArtifactAvailability, ToolArtifactDescriptorV1,
-    ToolArtifactEncoding, ToolArtifactRefV1, ToolArtifactStore, ToolCall, ToolOperation,
+    ToolArtifactEncoding, ToolArtifactRefV1, ToolCall, ToolOperation,
     ToolOutputArchivedArtifactBindingV1, ToolPermissionEffect, ToolPermissionSummary, ToolSpec,
     ToolSubject, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
@@ -320,10 +322,14 @@ impl HttpApplicationRunExecution {
 pub struct HttpProductionRunDriver {
     options: HttpProductionRunDriverOptions,
     services: ApplicationRunServices,
+    authority_ready: bool,
     preparer: Arc<dyn HttpApplicationRunPreparer>,
     event_bus: Arc<HttpLiveEventBus>,
     runtime: Handle,
     registry: OnceLock<Weak<HttpSessionRunRegistry>>,
+    application_reservations: OnceLock<Arc<sigil_runtime::ManagedApplicationReservationStore>>,
+    application_delivery_acks:
+        Mutex<BTreeMap<String, Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
     active_runs_ready: Arc<Condvar>,
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
@@ -540,6 +546,18 @@ impl HttpProductionRunDriver {
         let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
         let cancellation_handle = cancellation_owner.handle();
         let cancellation_timeout = self.options.cancellation_timeout;
+        let managed_command_execution = self
+            .services
+            .authority_composition()
+            .map(|composition| Arc::clone(&composition.command_execution));
+        let managed_tool_authority = self
+            .services
+            .authority_composition()
+            .map(|composition| Arc::new(composition.tool_authority.clone()));
+        let child_resource_provisioner = self
+            .services
+            .authority_composition()
+            .map(|composition| composition.plan_review_child_resource_provisioner());
         let runtime = self.runtime.clone();
         self.runtime.spawn(async move {
             let _held_session_attachment = attachment;
@@ -552,13 +570,16 @@ impl HttpProductionRunDriver {
                     run_id,
                     event_bus,
                 };
-                sigil_runtime::application_run::execute_plan_review_revision(
+                sigil_runtime::application_run::execute_plan_review_revision_with_managed_execution(
                     &root_config,
                     &workspace_root,
                     &session_log_path,
                     &request,
                     &mut handler,
                     Some(cancellation_handle),
+                    managed_command_execution,
+                    managed_tool_authority,
+                    child_resource_provisioner,
                 )
                 .await
             });
@@ -805,13 +826,21 @@ impl HttpProductionRunDriver {
         ))
         .with_scratch_control(options.scratch_control.clone());
         // RFC-0071 R71.6: the server surface runs the one-call boot attach (epoch + authority
-        // composition, shared with CLI/TUI) and fails closed before serving.
-        let services = sigil_runtime::r71_authority_composition::attach_boot_authority_to_services(
-            services,
-            &options.config_path,
-            &options.launch_cwd,
-        )
-        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        // composition, shared with CLI/TUI). A missing/invalid config may still expose the
+        // bounded provider-setup recovery surface, but it never receives a runnable authority
+        // route; every run/session mutation below checks `authority_ready` before proceeding.
+        let (services, authority_ready) =
+            match sigil_runtime::application_host::attach_boot_authority_to_services(
+                services.clone(),
+                &options.config_path,
+                &options.launch_cwd,
+            ) {
+                Ok(services) => (services, true),
+                Err(sigil_runtime::application_host::BootAuthorityErrorV1::Config(_)) => {
+                    (services, false)
+                }
+                Err(error) => return Err(HttpRunDriverError::new(error.to_string())),
+            };
         let mut options = options;
         let current_schema = services.cutover().is_some_and(|cutover| {
             cutover.manifest().selected_epoch
@@ -868,10 +897,13 @@ impl HttpProductionRunDriver {
         Ok(Self {
             options,
             services,
+            authority_ready,
             preparer,
             event_bus,
             runtime,
             registry: OnceLock::new(),
+            application_reservations: OnceLock::new(),
+            application_delivery_acks: Mutex::new(BTreeMap::new()),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
             terminal_owners: Arc::new(Mutex::new(BTreeMap::new())),
@@ -881,6 +913,21 @@ impl HttpProductionRunDriver {
             session_projection_stores: Mutex::new(HttpSessionProjectionStoreCache::default()),
             reconciled_terminal_sessions: Mutex::new(BTreeSet::new()),
         })
+    }
+
+    fn require_current_schema_authority(&self) -> Result<(), HttpRunDriverError> {
+        if self.authority_ready {
+            Ok(())
+        } else {
+            Err(HttpRunDriverError::new(
+                "current-schema authority is unavailable; recovery setup only",
+            ))
+        }
+    }
+
+    fn require_current_schema_admission(&self) -> Result<(), HttpRunAdmissionError> {
+        self.require_current_schema_authority()
+            .map_err(|_| HttpRunAdmissionError::Unavailable)
     }
 
     fn reconcile_terminal_session_once(
@@ -920,9 +967,9 @@ impl HttpProductionRunDriver {
         });
         if current_schema && let Some(composition) = self.services.authority_composition() {
             command_store
-                .attach_managed_writer(
+                .attach_application_writer(
                     Arc::clone(&composition.storage_writer),
-                    "http-idempotency-ledger",
+                    "http-application-reservations",
                 )
                 .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         }
@@ -937,6 +984,100 @@ impl HttpProductionRunDriver {
         Ok(registry)
     }
 
+    fn application_reservation_store(
+        &self,
+    ) -> Result<Arc<sigil_runtime::ManagedApplicationReservationStore>, HttpRunDriverError> {
+        if let Some(store) = self.application_reservations.get() {
+            return Ok(Arc::clone(store));
+        }
+        let composition = self
+            .services
+            .authority_composition()
+            .ok_or_else(|| HttpRunDriverError::new("application authority is unavailable"))?;
+        let store = Arc::new(
+            sigil_runtime::ManagedApplicationReservationStore::open(
+                Arc::clone(&composition.storage_writer),
+                "http-application",
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "application reservation journal is unavailable: {error}"
+                ))
+            })?,
+        );
+        if self
+            .application_reservations
+            .set(Arc::clone(&store))
+            .is_err()
+        {
+            return self
+                .application_reservations
+                .get()
+                .map(Arc::clone)
+                .ok_or_else(|| HttpRunDriverError::new("application reservation owner lost"));
+        }
+        Ok(store)
+    }
+
+    fn application_context(
+        &self,
+        session: &HttpSessionSnapshot,
+    ) -> Result<crate::application_bridge::HttpApplicationContext, HttpRunDriverError> {
+        self.require_current_schema_authority()?;
+        let cutover = self
+            .services
+            .cutover()
+            .ok_or_else(|| HttpRunDriverError::new("application cutover is unavailable"))?;
+        let composition = self
+            .services
+            .authority_composition()
+            .ok_or_else(|| HttpRunDriverError::new("application authority is unavailable"))?;
+        let registry = self.attached_registry()?;
+        let application_instance_id = cutover.manifest().application_instance_id.clone();
+        let scope = crate::application_bridge::application_scope(&application_instance_id, session)
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let mut delivery_acks = self
+            .application_delivery_acks
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("application delivery ACK state unavailable"))?;
+        let delivery_key = session.durable_session_scope_id.clone();
+        let delivery_store = if let Some(store) = delivery_acks.get(&delivery_key) {
+            Arc::clone(store)
+        } else {
+            if delivery_acks.len() >= MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES {
+                return Err(HttpRunDriverError::new(
+                    "application delivery ACK owner reached its bounded session capacity",
+                ));
+            }
+            let store = Arc::new(
+                sigil_runtime::RuntimeApplicationDeliveryAckStore::open(
+                    Arc::clone(&composition.storage_writer),
+                    &format!("http-application-delivery-{delivery_key}"),
+                    scope,
+                    1,
+                )
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "application delivery ACK journal is unavailable: {error}"
+                    ))
+                })?,
+            );
+            delivery_acks.insert(delivery_key, Arc::clone(&store));
+            store
+        };
+        drop(delivery_acks);
+        Ok(crate::application_bridge::HttpApplicationContext {
+            config_path: self.options.config_path.clone(),
+            launch_cwd: self.options.launch_cwd.clone(),
+            application_instance_id,
+            application_generation: cutover.manifest().application_generation,
+            reservations: self.application_reservation_store()?,
+            delivery_acks: delivery_store,
+            registry,
+            runtime: self.runtime.clone(),
+        })
+    }
+
     /// Returns the number of owned run supervisors that have not completed cleanup.
     ///
     /// # Errors
@@ -947,6 +1088,30 @@ impl HttpProductionRunDriver {
             .lock()
             .map(|runs| runs.len())
             .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_managed_plan_review_child_artifact(
+        &self,
+        key: &str,
+        scope_id: &str,
+        session_log_path: &Path,
+        artifact_ref: &ToolArtifactRefV1,
+        selector: sigil_kernel::session::ToolArtifactSelectorV1,
+    ) -> Result<sigil_kernel::session::ToolArtifactPageV1> {
+        let composition = self
+            .services
+            .authority_composition()
+            .context("current-schema authority composition is unavailable")?;
+        let lease = sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+            Arc::clone(&composition.storage_writer),
+            key,
+            scope_id,
+            session_log_path.to_path_buf(),
+        )?;
+        let page = lease.store().read_page(artifact_ref, selector)?;
+        lease.finalize()?;
+        Ok(page)
     }
 
     fn attached_registry(&self) -> Result<Arc<HttpSessionRunRegistry>, HttpRunDriverError> {
@@ -1624,42 +1789,45 @@ fn validate_projected_tool_artifact_descriptor(
 fn authority_artifact_store_for_session(
     services: &ApplicationRunServices,
     session: &crate::HttpSessionSnapshot,
-) -> Option<ToolArtifactStore> {
+) -> Option<AuthorityArtifactStoreLease> {
     let current_schema = services.cutover().is_some_and(|cutover| {
         cutover.manifest().selected_epoch
             == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
     });
-    let Some(composition) = services.authority_composition() else {
-        return Some(ToolArtifactStore::for_session_path(Path::new(
-            &session.session_log_path,
-        )));
-    };
+    let composition = services.authority_composition()?;
     let staging = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging;
     let store = sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore;
     if !current_schema
         || !composition.declared_channels.contains(&staging)
         || !composition.declared_channels.contains(&store)
     {
-        return Some(ToolArtifactStore::for_session_path(Path::new(
-            &session.session_log_path,
-        )));
+        return None;
     }
     let key = Path::new(&session.session_log_path)
         .file_stem()
         .and_then(|value| value.to_str())?;
-    let store_root = composition
-        .storage_writer
-        .managed_named_leaf_path(store, key)
-        .ok()?;
-    let staging_root = composition
-        .storage_writer
-        .managed_named_leaf_path(staging, key)
-        .ok()?;
-    Some(ToolArtifactStore::for_session_path_with_roots(
-        Path::new(&session.session_log_path),
-        store_root,
-        staging_root,
-    ))
+    let lease = sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&composition.storage_writer),
+        key,
+        &session.durable_session_scope_id,
+        Path::new(&session.session_log_path).to_path_buf(),
+    )
+    .ok()?;
+    Some(AuthorityArtifactStoreLease::managed(lease))
+}
+
+struct AuthorityArtifactStoreLease {
+    managed: sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1,
+}
+
+impl AuthorityArtifactStoreLease {
+    fn managed(lease: sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1) -> Self {
+        Self { managed: lease }
+    }
+
+    fn store(&self) -> sigil_kernel::ToolArtifactStore {
+        self.managed.store()
+    }
 }
 
 impl HttpRunDriver for HttpProductionRunDriver {
@@ -1667,11 +1835,21 @@ impl HttpRunDriver for HttpProductionRunDriver {
         true
     }
 
+    fn application_client(
+        &self,
+        session: &HttpSessionSnapshot,
+        client_id: &str,
+    ) -> Result<crate::application_bridge::HttpApplicationClient, HttpRunDriverError> {
+        let context = self.application_context(session)?;
+        crate::application_bridge::build_client(&context, session, client_id)
+    }
+
     fn bind_session(
         &self,
         session_id: &str,
         model_ref: Option<&crate::HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         let connection_id = model_ref
             .map(|model_ref| sigil_kernel::ConnectionId::new(model_ref.connection_id.clone()))
             .transpose()
@@ -1722,6 +1900,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
         expected_session_id: &str,
         recovery_binding: Option<&str>,
     ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
+        self.require_current_schema_authority()
+            .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
         let lifecycle = self
             .options
             .session_lifecycle
@@ -1857,6 +2037,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         session: &crate::HttpSessionSnapshot,
         request: &HttpRunStartRequest,
     ) -> Result<(), HttpRunAdmissionError> {
+        self.require_current_schema_admission()?;
         self.acquire_session_attachment(session)?;
         let context = self
             .run_context_view(session)
@@ -1951,6 +2132,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         self.start_supervised_run(start, None, None)
     }
 
@@ -2057,6 +2239,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn submit_approval(&self, approval: HttpRunDriverApproval) -> Result<(), HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         if approval.call_id != approval.decision.call_id
             || approval.run_id != approval.decision.run_id
         {
@@ -2215,8 +2398,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     sigil_runtime::plan_handoff_workspace_snapshot_id(&config, &workspace_root).ok()
                 })
                 .flatten();
-        let artifact_store = authority_artifact_store_for_session(&self.services, session)
+        let artifact_lease = authority_artifact_store_for_session(&self.services, session)
             .ok_or(HttpConversationDisplayDriverError::Unavailable)?;
+        let artifact_store = artifact_lease.store();
         let page = conversation_display_page_with_artifact_store(
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
@@ -2269,8 +2453,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|_| HttpToolArtifactReadDriverError::InvalidSelector)?;
 
         let binding = self.projected_tool_artifact_binding(session, &artifact_ref)?;
-        let store = authority_artifact_store_for_session(&self.services, session)
+        let artifact_lease = authority_artifact_store_for_session(&self.services, session)
             .ok_or(HttpToolArtifactReadDriverError::Unavailable)?;
+        let store = artifact_lease.store();
         let descriptor = store
             .resolve(&artifact_ref)
             .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
@@ -3135,6 +3320,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn start_queued_run(&self, start: HttpQueuedRunDriverStart) -> Result<(), HttpRunDriverError> {
+        self.require_current_schema_authority()?;
         self.acquire_session_attachment(&start.session)
             .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let (start, queued) = self.queued_supervisor_start(start)?;
@@ -3752,15 +3938,11 @@ fn stable_http_identity_seed(parts: &[&str]) -> String {
 }
 
 fn http_queue_generation(revision: ConversationQueueRevision) -> HttpConversationQueueGeneration {
-    let mut hasher = Sha256::new();
-    for part in [
-        revision.stream_sequence.to_be_bytes().as_slice(),
-        revision.event_id.as_bytes(),
-    ] {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    HttpConversationQueueGeneration(format!("queue-v1:{:x}", hasher.finalize()))
+    HttpConversationQueueGeneration(
+        sigil_application::queue_generation(revision.stream_sequence, &revision.event_id)
+            .as_str()
+            .to_owned(),
+    )
 }
 
 fn http_queue_prompt_preview(prompt: &str) -> (String, bool) {

@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
+use wezterm_bidi::{BidiContext, ParagraphDirectionHint};
 
 pub(crate) fn terminal_grapheme_width(grapheme: &str) -> Option<usize> {
     let sanitized = sanitized_terminal_grapheme(grapheme)?;
@@ -378,6 +379,78 @@ pub(crate) fn visual_position_for_char_cursor(
         }
     }
     (row, column)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BidiLineMap {
+    pub(crate) visual_to_logical: Vec<usize>,
+    pub(crate) logical_to_visual: Vec<usize>,
+}
+
+/// Apply UAX #9 paragraph reordering while retaining the style attached to each logical
+/// character.  The returned map is the contract used by hit testing to translate visual columns
+/// back to logical transcript positions.
+pub(crate) fn bidi_reorder_line_with_map(line: &Line<'static>) -> (Line<'static>, BidiLineMap) {
+    let mut chars = Vec::new();
+    for span in &line.spans {
+        for character in span.content.chars() {
+            chars.push((character, span.style));
+        }
+    }
+    if chars.len() < 2 {
+        let order = (0..chars.len()).collect::<Vec<_>>();
+        return (
+            line.clone(),
+            BidiLineMap {
+                visual_to_logical: order.clone(),
+                logical_to_visual: order,
+            },
+        );
+    }
+    let logical = chars
+        .iter()
+        .map(|(character, _)| *character)
+        .collect::<Vec<_>>();
+    let mut context = BidiContext::new();
+    context.resolve_paragraph(&logical, ParagraphDirectionHint::AutoLeftToRight);
+    let (_, visual_order) = context.reorder_line(0..logical.len());
+    let mut logical_to_visual = vec![0; visual_order.len()];
+    for (visual, logical) in visual_order.iter().copied().enumerate() {
+        logical_to_visual[logical] = visual;
+    }
+    let mut spans = Vec::new();
+    let mut current_style = None;
+    let mut current_text = String::new();
+    for index in visual_order.iter().copied() {
+        let (character, style) = chars[index];
+        if current_style != Some(style)
+            && !current_text.is_empty()
+            && let Some(current_style) = current_style.take()
+        {
+            spans.push(Span::styled(
+                std::mem::take(&mut current_text),
+                current_style,
+            ));
+        }
+        current_style = Some(style);
+        current_text.push(character);
+    }
+    if !current_text.is_empty()
+        && let Some(current_style) = current_style
+    {
+        spans.push(Span::styled(current_text, current_style));
+    }
+    (
+        Line::from(spans).style(line.style),
+        BidiLineMap {
+            visual_to_logical: visual_order,
+            logical_to_visual,
+        },
+    )
+}
+
+pub(crate) fn bidi_reorder_line(line: &Line<'static>) -> Line<'static> {
+    bidi_reorder_line_with_map(line).0
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

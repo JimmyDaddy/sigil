@@ -12,9 +12,13 @@ pub(super) struct ServerPlanState {
 pub(super) struct ProcessLanguageServer {
     pub(super) config: LanguageServerConfig,
     pub(super) capabilities: Value,
-    pub(super) child: Child,
-    pub(super) client: LspClient<ChildStdout, ChildStdin>,
+    pub(super) client:
+        LspClient<Box<dyn AsyncRead + Send + Unpin>, Box<dyn AsyncWrite + Send + Unpin>>,
     pub(super) versions: BTreeMap<PathBuf, i32>,
+    #[cfg(test)]
+    pub(super) child: Option<Child>,
+    #[cfg(not(test))]
+    pub(super) shutdown: Arc<dyn Fn() + Send + Sync>,
 }
 
 pub(super) struct LspRequestOutput {
@@ -28,7 +32,12 @@ pub(super) struct LspRequestOutput {
 
 impl Drop for ProcessLanguageServer {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        #[cfg(test)]
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
+        #[cfg(not(test))]
+        (self.shutdown)();
     }
 }
 
@@ -80,7 +89,10 @@ impl ProcessLanguageServer {
     #[cfg(test)]
     pub(super) async fn shutdown(&mut self, timeout: Duration) {
         let _ = self.client.shutdown(timeout).await;
-        let _ = self.child.kill().await;
+        #[cfg(test)]
+        if let Some(child) = &mut self.child {
+            let _ = child.kill().await;
+        }
     }
 
     pub(super) async fn sync_document(&mut self, path: &Path) -> Result<(i32, String)> {
@@ -108,6 +120,7 @@ pub(super) fn language_server_mut<'a>(
         .ok_or_else(|| anyhow!("language server unavailable while handling {capability}"))
 }
 
+#[cfg(test)]
 pub(super) fn drain_stderr(server: String, mut stderr: ChildStderr) {
     tokio::spawn(async move {
         let mut buffer = [0_u8; 1024];

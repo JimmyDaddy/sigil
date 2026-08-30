@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -7,6 +8,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use sigil_application::{
+    ApplicationCommand, ApplicationCommandReceipt, ApplicationPermissionMode,
+    ApplicationQueueAction, ApplicationQueueItemKind, ApplicationRecoveryAction,
+    ConversationCommand, McpCommand, RunStartOptions, SafeText,
+};
 use sigil_kernel::{
     AgentRole, ApprovalMode, AssistantMessageKind, CandidateCheck, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
@@ -127,11 +133,14 @@ struct FailingTaskPreparation {
 }
 
 fn write_production_test_config(path: &std::path::Path, workspace_root: &str) {
+    let storage = isolated_storage_toml(path);
     let config = format!(
         r#"config_version = 2
 
 [workspace]
 root = "{workspace_root}"
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -149,10 +158,14 @@ credential = {{ source = "none" }}
 }
 
 fn write_reasoning_test_config(path: &std::path::Path) {
-    let config = r#"config_version = 2
+    let storage = isolated_storage_toml(path);
+    let config = format!(
+        r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "deepseek-test"
@@ -163,9 +176,28 @@ label = "DeepSeek test"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#;
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+    );
     std::fs::write(path, config).expect("reasoning test config should write");
+}
+
+fn toml_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn isolated_storage_toml(config_path: &std::path::Path) -> String {
+    let root = config_path
+        .parent()
+        .expect("production test config should have a parent");
+    // TOML basic strings treat Windows backslashes as escape introducers (for example, `\\U`).
+    // Forward slashes are accepted by Windows path APIs and keep the generated fixture valid on
+    // every host platform.
+    format!(
+        "[storage]\nstate_root = \"{}\"\ncache_root = \"{}\"",
+        toml_path(&root.join("state")),
+        toml_path(&root.join("cache"))
+    )
 }
 
 fn production_test_model_route(
@@ -220,6 +252,124 @@ async fn production_driver_attaches_the_shared_application_task_executor() {
     let driver = production_queue_driver(&temp, "task-executor");
 
     assert!(driver.services.task_executor_attached());
+}
+
+#[tokio::test]
+async fn production_http_application_client_uses_runtime_projection_page_and_reservation() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "application-port");
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-application.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+    let queue_generation = registry
+        .conversation_queue(&session.id)
+        .expect("queue should be readable")
+        .generation
+        .0;
+    let client = registry
+        .application_client(&session.id, "http-application-test")
+        .expect("application client should bind");
+    let (projection, page, receipt, start_receipt, queue_receipt, recovery_receipt) =
+        tokio::task::spawn_blocking(move || {
+            let projection = client
+                .refresh()
+                .expect("application projection should refresh");
+            let page = client
+                .page(None, 1)
+                .expect("application page should use the same frontier");
+            let receipt = client
+                .execute(
+                    "application-unsupported-command",
+                    ApplicationCommand::Mcp(McpCommand::Refresh {
+                        binding: "test-server".to_owned(),
+                    }),
+                )
+                .expect("unsupported command should receive a typed rejection");
+            let start_receipt = client
+                .execute(
+                    "application-start-test",
+                    ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                        prompt: Some(
+                            SafeText::new("start through application port").expect("prompt"),
+                        ),
+                        options: Some(Box::new(RunStartOptions {
+                            permission_mode: ApplicationPermissionMode::Manual,
+                            model: None,
+                            route_recovery_binding: None,
+                            reasoning_effort: None,
+                            reasoning_effort_binding: None,
+                            skill: None,
+                            agent: None,
+                            task_continuation: None,
+                        })),
+                    }),
+                )
+                .expect("run start should receive a durable uncertain receipt");
+            let queue_receipt = client
+                .execute(
+                    "application-queue-test",
+                    ApplicationCommand::Conversation(ConversationCommand::Queue {
+                        expected_generation: SafeText::new(queue_generation).expect("generation"),
+                        action: ApplicationQueueAction::Enqueue {
+                            target: sigil_application::ApplicationQueueTarget::MainThread,
+                            prompt: SafeText::new("queue through application port")
+                                .expect("queue prompt"),
+                            kind: ApplicationQueueItemKind::Chat,
+                            reasoning_effort: None,
+                        },
+                    }),
+                )
+                .expect("queue mutation should receive a durable uncertain receipt");
+            let recovery_receipt = client
+                .execute(
+                    "application-recovery-test",
+                    ApplicationCommand::Conversation(ConversationCommand::Recovery {
+                        action: ApplicationRecoveryAction::PrepareCompaction {
+                            preview_id: SafeText::new("preview").expect("preview"),
+                        },
+                    }),
+                )
+                .expect("stale recovery binding should receive a typed rejection");
+            (
+                projection,
+                page,
+                receipt,
+                start_receipt,
+                queue_receipt,
+                recovery_receipt,
+            )
+        })
+        .await
+        .expect("blocking application client task should complete");
+
+    assert_eq!(
+        projection.scope.session.as_ref().map(ToString::to_string),
+        Some(session.durable_session_scope_id)
+    );
+    assert_eq!(page.scope, projection.scope);
+    assert!(matches!(receipt, ApplicationCommandReceipt::Rejected(_)));
+    let ApplicationCommandReceipt::Uncertain(start_receipt) = start_receipt else {
+        panic!("run start should be represented as an uncertain application receipt");
+    };
+    assert!(
+        start_receipt
+            .recovery_binding
+            .starts_with("http-run-start:")
+    );
+    let ApplicationCommandReceipt::Uncertain(queue_receipt) = queue_receipt else {
+        panic!("queue mutation should be represented as an uncertain application receipt");
+    };
+    assert!(queue_receipt.recovery_binding.starts_with("http-queue:"));
+    let ApplicationCommandReceipt::Rejected(recovery_rejection) = recovery_receipt else {
+        panic!("invalid recovery binding should be represented as a typed rejection");
+    };
+    assert!(!recovery_rejection.reason.contains("preview boundary"));
 }
 
 #[tokio::test]
@@ -371,12 +521,17 @@ async fn production_selection_recovery_requires_exact_route_and_catalog_bindings
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
         .expect("original route should bind");
+    let replacement_config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&replacement_config_path);
     std::fs::write(
-        temp.path().join("sigil.toml"),
-        r#"config_version = 2
+        &replacement_config_path,
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "replacement"
@@ -387,8 +542,9 @@ label = "Replacement"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:2"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )
     .expect("replacement config should write");
     let context = driver
@@ -475,12 +631,16 @@ credential = { source = "none" }
 async fn production_supervisor_routes_typed_task_continuation_to_shared_preparer() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -491,11 +651,12 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:1"
-credential = { source = "none" }
+credential = {{ source = "none" }}
 
 [task]
 enabled = true
-"#,
+"#
+        ),
     )
     .expect("Task continuation config should write");
     let protocol_journal = Arc::new(
@@ -603,18 +764,20 @@ fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpS
 }
 
 fn append_durable_tool_artifact(
+    driver: &HttpProductionRunDriver,
     session: &HttpSessionSnapshot,
     result: ToolResult,
 ) -> ToolArtifactDescriptorV1 {
     let session_store = JsonlSessionStore::new(std::path::Path::new(&session.session_log_path))
         .expect("session store should reopen");
-    let artifact_store = ToolArtifactStore::for_session_store(&session_store);
-    let (recorded, _display) = ToolResultRecordedV3::capture(
-        &result,
-        Some(&artifact_store),
-        ToolArtifactSensitivity::Ordinary,
-    )
-    .expect("tool result should capture");
+    let (recorded, _display) = with_authority_artifact_store(driver, session, |artifact_store| {
+        ToolResultRecordedV3::capture(
+            &result,
+            Some(artifact_store),
+            ToolArtifactSensitivity::Ordinary,
+        )
+        .expect("tool result should capture")
+    });
     let descriptor = recorded
         .artifact
         .descriptor()
@@ -626,14 +789,26 @@ fn append_durable_tool_artifact(
     descriptor
 }
 
+fn with_authority_artifact_store<T>(
+    driver: &HttpProductionRunDriver,
+    session: &HttpSessionSnapshot,
+    operation: impl FnOnce(&ToolArtifactStore) -> T,
+) -> T {
+    let lease = authority_artifact_store_for_session(&driver.services, session)
+        .expect("current-schema artifact authority should admit the test session");
+    let store = lease.store();
+    let output = operation(&store);
+    drop(lease);
+    output
+}
+
 #[tokio::test]
 async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "artifact-read");
     let session = production_queue_session_named(&temp, "artifact-owner");
-    let store =
-        ToolArtifactStore::for_session_path(std::path::Path::new(&session.session_log_path));
     let descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-artifact",
@@ -643,7 +818,9 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         ),
     );
     assert!(
-        store.source_event_id(&descriptor.artifact_ref).is_err(),
+        with_authority_artifact_store(&driver, &session, |store| store
+            .source_event_id(&descriptor.artifact_ref))
+        .is_err(),
         "retrieval authority must not require a post-append sidecar"
     );
     let request = crate::HttpToolArtifactReadRequest {
@@ -693,19 +870,22 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         Err(crate::HttpToolArtifactReadDriverError::Unavailable)
     );
 
-    let binary_descriptor = store
-        .capture_policy_safe_bytes(
-            "call-binary",
-            "read_binary",
-            &[0xff, 0x00],
-            2,
-            "application/octet-stream",
-            ToolArtifactEncoding::Binary,
-            ToolArtifactSensitivity::Ordinary,
-            0,
-        )
-        .expect("binary artifact should publish");
+    let binary_descriptor = with_authority_artifact_store(&driver, &session, |store| {
+        store
+            .capture_policy_safe_bytes(
+                "call-binary",
+                "read_binary",
+                &[0xff, 0x00],
+                2,
+                "application/octet-stream",
+                ToolArtifactEncoding::Binary,
+                ToolArtifactSensitivity::Ordinary,
+                0,
+            )
+            .expect("binary artifact should publish")
+    });
     let binary_descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-binary",
@@ -731,6 +911,7 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
 
     let long_line = "x".repeat(sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES as usize + 128);
     let long_line_descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-long-line",
@@ -761,9 +942,9 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         .content_sha256
         .strip_prefix("sha256:")
         .expect("descriptor hash prefix");
-    let blob_path = store
-        .root()
-        .join("blobs")
+    let blob_path = temp
+        .path()
+        .join("state/managed/artifact-store/artifact-owner/blobs")
         .join(&digest[..2])
         .join(format!("{digest}.blob"));
     std::fs::write(&blob_path, b"tampered")
@@ -791,20 +972,21 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "artifact-binding");
     let session = production_queue_session_named(&temp, "artifact-binding-owner");
-    let store =
-        ToolArtifactStore::for_session_path(std::path::Path::new(&session.session_log_path));
 
-    let orphan = store
-        .capture_text(
-            "call-orphan",
-            "shell",
-            "not durably bound",
-            ToolArtifactSensitivity::Ordinary,
-        )
-        .expect("orphan artifact should publish");
-    store
-        .bind_source_event(&orphan.artifact_ref, "forged-source-event")
-        .expect("orphan sidecar should be forgeable for the regression fixture");
+    let orphan = with_authority_artifact_store(&driver, &session, |store| {
+        let orphan = store
+            .capture_text(
+                "call-orphan",
+                "shell",
+                "not durably bound",
+                ToolArtifactSensitivity::Ordinary,
+            )
+            .expect("orphan artifact should publish");
+        store
+            .bind_source_event(&orphan.artifact_ref, "forged-source-event")
+            .expect("orphan sidecar should be forgeable for the regression fixture");
+        orphan
+    });
     assert_eq!(
         driver.tool_artifact_page(
             &session,
@@ -821,6 +1003,7 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
     );
 
     let descriptor = append_durable_tool_artifact(
+        &driver,
         &session,
         ToolResult::ok(
             "call-bound",
@@ -829,17 +1012,26 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
             ToolResultMeta::default(),
         ),
     );
-    let manifest_path = store
-        .root()
-        .join("refs")
-        .join(format!("{}.json", descriptor.artifact_ref.artifact_id));
     let mut forged_descriptor = descriptor.clone();
     forged_descriptor.tool_name = "forged-tool".to_owned();
+    let manifest_path = temp
+        .path()
+        .join("state/managed/artifact-store/artifact-binding-owner/refs")
+        .join(format!("{}.json", descriptor.artifact_ref.artifact_id));
     std::fs::write(
         manifest_path,
         serde_json::to_vec(&forged_descriptor).expect("forged descriptor should encode"),
     )
     .expect("test should replace the descriptor manifest");
+    with_authority_artifact_store(&driver, &session, |store| {
+        assert_eq!(
+            store
+                .resolve(&descriptor.artifact_ref)
+                .expect("forged but well-formed physical descriptor should resolve")
+                .tool_name,
+            "forged-tool"
+        );
+    });
     let projected_binding = driver
         .retained_session_projection_store(&session)
         .expect("projection store should remain available")
@@ -849,13 +1041,6 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
         .artifact_source_binding(&descriptor.artifact_ref)
         .expect("durable binding should remain authoritative");
     assert_eq!(projected_binding.tool_name, "shell");
-    assert_eq!(
-        store
-            .resolve(&descriptor.artifact_ref)
-            .expect("forged but well-formed physical descriptor should resolve")
-            .tool_name,
-        "forged-tool"
-    );
     assert_eq!(
         driver.tool_artifact_page(
             &session,
@@ -3463,7 +3648,11 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
         )
         .expect("owned production supervisor should accept the run");
 
-    let terminal = tokio::time::timeout(Duration::from_secs(10), async {
+    // Windows hosted runners can spend several seconds in the first managed authority/provider
+    // preparation while the production failure remains fully bounded. Keep this as a finite
+    // regression budget, but do not mistake the local 10-second scheduling budget for the
+    // production cancellation deadline.
+    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let event = subscriber
                 .recv()
@@ -3818,12 +4007,16 @@ async fn production_revision_duplicate_registration_never_blocks_the_session() {
     std::fs::create_dir(&sessions).expect("session directory should create");
 
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "workspace"
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -3838,8 +4031,9 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:9"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )
     .expect("revision config should write");
 
@@ -4017,12 +4211,16 @@ async fn production_revision_bind_failure_rolls_back_only_the_run_registration()
     std::fs::create_dir(&sessions).expect("session directory should create");
 
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -4037,8 +4235,9 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:9"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )
     .expect("revision config should write");
     let root_config = sigil_kernel::RootConfig::load(&config_path).expect("config should load");
@@ -4127,34 +4326,56 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace should create");
+    std::fs::write(
+        workspace.join("README.md"),
+        "coordinator migration fixture\n",
+    )
+    .expect("fixture workspace file should create");
     let sessions = temp.path().join("sessions");
     std::fs::create_dir(&sessions).expect("session directory should create");
+    let state_root = toml_path(&temp.path().join("state"));
+    let cache_root = toml_path(&temp.path().join("cache"));
 
-    // Local chat-completions fixture answering the revision plan review with a typed draft.
+    // Local chat-completions fixture exercising the real current-schema review tool sequence.
+    // The request always contains the available tool declarations, so selecting a response by
+    // searching for `submit_plan_draft` would make this test false-green.
+    let provider_call = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener should bind");
     let address = listener.local_addr().expect("fixture address");
-    let fixture = tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                break;
-            };
-            let mut buffer = vec![0; 16384];
-            let read = socket.read(&mut buffer).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
-            let body = if request.contains("\"submit_plan_draft\"") {
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised coordinator migration\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
-                    "data: [DONE]\n\n"
-                )
-            } else {
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"revised\"},\"finish_reason\":\"stop\"}]}\n\n",
-                    "data: [DONE]\n\n"
-                )
-            };
-            let _ = socket
+    let fixture = tokio::spawn({
+        let provider_call = Arc::clone(&provider_call);
+        async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0; 16384];
+                let _read = socket.read(&mut buffer).await.unwrap_or(0);
+                let call_index = provider_call.fetch_add(1, Ordering::SeqCst);
+                let body = if call_index >= 3 {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised coordinator migration\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else if call_index == 2 {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-read-call\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else if call_index == 1 {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-grep-call\",\"type\":\"function\",\"function\":{\"name\":\"grep\",\"arguments\":\"{\\\"pattern\\\":\\\"coordinator\\\",\\\"path\\\":\\\".\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-list-call\",\"type\":\"function\",\"function\":{\"name\":\"ls\",\"arguments\":\"{\\\"path\\\":\\\".\\\",\\\"limit\\\":20}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                };
+                let _ = socket
                 .write_all(
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -4163,6 +4384,7 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
                     .as_bytes(),
                 )
                 .await;
+            }
         }
     });
 
@@ -4172,6 +4394,10 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
         &config_path,
         format!(
             r#"config_version = 2
+
+[storage]
+state_root = "{state_root}"
+cache_root = "{cache_root}"
 
 [workspace]
 root = "workspace"
@@ -4258,10 +4484,11 @@ credential = {{ source = "none" }}
     let answer_registry = Arc::clone(&registry);
     let answer_session_id = session.id.clone();
     let answer_request_id = guidance.identity.request_id.as_str().to_owned();
+    let answer_request_id_for_command = answer_request_id.clone();
     let answer_receipt = tokio::task::spawn_blocking(move || {
         answer_registry.user_input_decision_command(
             &answer_session_id,
-            &answer_request_id,
+            &answer_request_id_for_command,
             HttpCommandEnvelope::new(
                 "revision-guidance-answer-1",
                 "client-1",
@@ -4356,6 +4583,88 @@ credential = {{ source = "none" }}
             .plans
             .values()
             .any(|draft| draft.summary == "Revised coordinator migration")
+    );
+    let revision_request_id = sigil_kernel::UserInputRequestId::new(answer_request_id.clone())
+        .expect("revision guidance request id should remain valid");
+    let attempt_id = sigil_kernel::plan_review_attempt_id_for_revision_ordinal(
+        &review_id,
+        &revision_request_id,
+        1,
+    );
+    let child_key = format!("pr-{}-research-0", attempt_id.as_str());
+    let child_scope_id = format!("{}-research", revision_run_id);
+    let child_session_log_path = temp
+        .path()
+        .join("state/managed/session-log")
+        .join(&child_key)
+        .join("records.jsonl");
+    let child_entries = JsonlSessionStore::read_entries(&child_session_log_path)
+        .expect("the production child durable log should remain readable after settlement");
+    assert!(
+        !child_entries.is_empty(),
+        "the production child durable log must contain the supervised tool results"
+    );
+    let mut durable_tool_names = BTreeSet::new();
+    let mut readable_tool_names = BTreeSet::new();
+    for entry in &child_entries {
+        let SessionLogEntry::ToolResultV3(result) = entry else {
+            continue;
+        };
+        let descriptor = result
+            .artifact
+            .descriptor()
+            .expect("every current-schema Revise tool result must publish a durable artifact");
+        descriptor
+            .validate()
+            .expect("Revise artifact descriptor must validate");
+        durable_tool_names.insert(result.tool_name.clone());
+        let page = driver
+            .read_managed_plan_review_child_artifact(
+                &child_key,
+                &child_scope_id,
+                &child_session_log_path,
+                &descriptor.artifact_ref,
+                sigil_kernel::session::ToolArtifactSelectorV1::ByteSlice {
+                    offset: 0,
+                    limit: descriptor.persisted_bytes.clamp(1, 1024) as u32,
+                },
+            )
+            .expect("Revise artifact descriptor must be readable through HTTP authority");
+        assert_eq!(page.artifact_ref, descriptor.artifact_ref);
+        assert_eq!(
+            result.facts.status, "ok",
+            "child durable result must prove the tool completed successfully: tool={} error={:?} details={:?}",
+            result.tool_name, result.facts.error, result.facts.tool_specific
+        );
+        if matches!(result.tool_name.as_str(), "ls" | "grep" | "read_file") {
+            let receipt = result
+                .facts
+                .tool_specific
+                .get("managed_access_receipt")
+                .and_then(serde_json::Value::as_object)
+                .expect("managed file result must persist its authority access receipt");
+            assert!(
+                receipt
+                    .get("receipt_hash")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|hash| !hash.is_empty()),
+                "managed access receipt must have a durable receipt hash"
+            );
+            readable_tool_names.insert(result.tool_name.clone());
+        }
+    }
+    assert_eq!(
+        readable_tool_names,
+        BTreeSet::from(["grep".to_owned(), "ls".to_owned(), "read_file".to_owned(),]),
+        "the three current-schema inspection tools must all succeed and publish artifacts; durable={durable_tool_names:?}"
+    );
+    assert!(
+        durable_tool_names.contains("submit_plan_draft"),
+        "submit_plan_draft must also leave a durable artifact-backed tool result"
+    );
+    assert!(
+        provider_call.load(Ordering::SeqCst) >= 4,
+        "revision must execute ls, grep, read_file, and submit_plan_draft"
     );
 
     // Ownership is released: the run leaves active_runs and the foreground slot is free.

@@ -14,7 +14,7 @@ import r71_qualification_common as common
 class QualificationContractTests(unittest.TestCase):
     def test_frozen_manifests_have_exact_required_sets(self) -> None:
         conformance = common.load_conformance_manifest()
-        self.assertEqual(len(conformance["cases"]), 200)
+        self.assertEqual(len(conformance["cases"]), 228)
         platform = common.load_platform_manifest()
         self.assertEqual(
             {job["job_id"] for job in platform["jobs"]}, common.REQUIRED_PLATFORM_JOBS
@@ -66,6 +66,54 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("--ref r71-release-candidate", dispatch)
         self.assertIn("-f require_conformance=true", dispatch)
         self.assertIn('run.get("headSha") != candidate', dispatch)
+
+    def test_shipping_tui_gate_is_included_in_full_release_wrapper(self) -> None:
+        wrapper = (common.ROOT / "scripts/run-r71-release-qualification.sh").read_text(
+            encoding="utf-8"
+        )
+        gate = common.ROOT / "scripts/run-r71-tui-shipping-e2e.sh"
+        self.assertTrue(gate.is_file())
+        self.assertIn(
+            "run_step tui-shipping-e2e bash scripts/run-r71-tui-shipping-e2e.sh",
+            wrapper,
+        )
+
+    def test_bootstrap_namespace_isolated_and_marker_bound_cleanup_is_required(self) -> None:
+        wrapper = (common.ROOT / "scripts/run-r71-release-qualification.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('export HOME="$qualification_home"', wrapper)
+        self.assertIn('export SIGIL_R71_BOOTSTRAP_ISOLATED=1', wrapper)
+        self.assertIn('qualification_corepack_home="${COREPACK_HOME:-$qualification_original_home/.cache/node/corepack}"', wrapper)
+        self.assertIn('export COREPACK_HOME="$qualification_corepack_home"', wrapper)
+        self.assertIn('export VSCMD_SKIP_SENDTELEMETRY=1', wrapper)
+        self.assertIn('qualification_windows_vctip_baseline=""', wrapper)
+        self.assertIn('qualification_home_windows=""', wrapper)
+        self.assertIn('command -v cygpath', wrapper)
+        self.assertIn('export SIGIL_R71_QUALIFICATION_HOME_WINDOWS=', wrapper)
+        self.assertIn('export SIGIL_R71_QUALIFICATION_VCTIP_BASELINE=', wrapper)
+        self.assertIn('settle_qualification_windows_helpers()', wrapper)
+        self.assertIn('cleanup_windows_qualification_home()', wrapper)
+        self.assertIn('$identity = "{0}:{1}" -f $_.Id, $_.StartTime.ToUniversalTime().Ticks', wrapper)
+        self.assertIn('$baseline -notcontains $identity', wrapper)
+        self.assertIn('$ErrorActionPreference = "Stop"', wrapper)
+        self.assertIn('export HOME="$qualification_original_home"', wrapper)
+        self.assertIn('export USERPROFILE="$qualification_original_userprofile"', wrapper)
+        self.assertIn('export RUST_TEST_THREADS=1', wrapper)
+        self.assertIn('qualification_home_marker="$qualification_home/.sigil-r71-qualification-home"', wrapper)
+        self.assertIn('refusing qualification HOME cleanup without ownership marker', wrapper)
+        self.assertIn('-L "$qualification_home_marker"', wrapper)
+        self.assertIn('return 1', wrapper)
+        self.assertIn('for _qualification_cleanup_pass in 1 2 3', wrapper)
+        self.assertIn('-delete 2>/dev/null || true', wrapper)
+        self.assertIn('qualification HOME cleanup left unexpected residue', wrapper)
+        self.assertIn('Get-ChildItem -LiteralPath $root -Force', wrapper)
+        self.assertIn('Where-Object { $_.FullName -ne $marker }', wrapper)
+        self.assertIn('Remove-Item -LiteralPath $_.FullName -Force -Recurse', wrapper)
+        self.assertIn('Assert-QualificationHomeMarker', wrapper)
+        self.assertIn('qualification HOME cleanup left Windows residue', wrapper)
+        self.assertIn('find "$qualification_home" -mindepth 1 -maxdepth 8 -print', wrapper)
+        self.assertIn('"bootstrap_root_residue_count_before_cleanup"', wrapper)
 
 
 if __name__ == "__main__":

@@ -342,19 +342,25 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
             if execution.tool_name == "write_file"
     )));
-    let child_session_path = entries
+    let child_attempt_id = entries
         .iter()
         .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) => Some(
-                attempt.child_session_ref.resolve(
-                    session_log_path
-                        .parent()
-                        .unwrap_or_else(|| std::path::Path::new(".")),
-                ),
-            ),
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) => {
+                Some(attempt.attempt_id.as_str().to_owned())
+            }
             _ => None,
         })
         .expect("plan review must preserve its child-session binding");
+    // Current-schema plan review child logs are authority-managed named SessionLog resources.
+    // The logical child_session_ref remains the durable lifecycle binding, but is intentionally
+    // not a physical path that tests or production callers may open directly.
+    let child_session_path = worker
+        .managed_storage_writer()
+        .managed_named_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+            &format!("pr-{child_attempt_id}-research-0"),
+        )?
+        .join("records.jsonl");
     let child_entries = JsonlSessionStore::read_entries(child_session_path)?;
     assert!(child_entries.iter().any(|entry| matches!(
         entry,

@@ -200,6 +200,21 @@ pub trait HttpRunDriver: Send + Sync {
         false
     }
 
+    /// Builds the transport-neutral application client for one authenticated HTTP session.
+    ///
+    /// The client is host-bound: the caller supplies only its durable client identity, while
+    /// scope, authority, reservation storage, and delivery acknowledgement ownership remain in
+    /// the production composition root.
+    fn application_client(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _client_id: &str,
+    ) -> Result<crate::application_bridge::HttpApplicationClient, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "transport-neutral application client is unavailable",
+        ))
+    }
+
     /// Creates or resolves the durable session binding for one adapter session.
     ///
     /// # Errors

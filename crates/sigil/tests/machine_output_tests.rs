@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
@@ -10,10 +10,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::{
-    ffi::CString,
-    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
-};
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
 fn test_workspace(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("sigil-process-{name}-{}", uuid::Uuid::new_v4()));
@@ -271,9 +268,8 @@ fn json_process_configuration_error_is_structured_and_exits_two() {
     assert_eq!(stdout.lines().count(), 1);
     let record: serde_json::Value = serde_json::from_str(&stdout).expect("stdout should be JSON");
     assert_eq!(record["record_type"], "error");
-    // Missing config on first-run/machine flows is classified by the request layer (boot
-    // attach degrades to epoch-only for absent configs); the message never leaks raw paths.
-    assert_eq!(record["error"]["code"], "model_route_not_configured");
+    // Missing config is a typed current-schema boot failure; the message never leaks raw paths.
+    assert_eq!(record["error"]["code"], "configuration_invalid");
     assert!(!stdout.contains("missing.toml"));
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
@@ -343,7 +339,7 @@ fn jsonl_process_sigint_persists_cancelled_terminal_and_exits_130() {
 
 #[cfg(unix)]
 #[test]
-fn json_process_sigint_during_blocking_preparation_exits_130_by_deadline() {
+fn json_process_rejects_non_regular_config_before_run() {
     let workspace = test_workspace("json-preparation-cancel");
     let config_path = workspace.join("blocked-config.fifo");
     let fifo = CString::new(config_path.as_os_str().as_bytes()).expect("FIFO path has no NUL");
@@ -364,50 +360,10 @@ fn json_process_sigint_during_blocking_preparation_exits_130_by_deadline() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("sigil process should start");
-    let (writer_ready, ready) = mpsc::channel();
-    let (release_writer, release) = mpsc::channel();
-    let writer_path = config_path.clone();
-    let fifo_writer = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let writer = loop {
-            match OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&writer_path)
-            {
-                Ok(writer) => break writer,
-                Err(error)
-                    if error.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => panic!("test FIFO writer could not observe the reader: {error}"),
-            }
-        };
-        writer_ready
-            .send(())
-            .expect("FIFO reader readiness should publish");
-        let _writer = writer;
-        let _ = release.recv_timeout(Duration::from_secs(10));
-    });
-    ready
-        .recv_timeout(Duration::from_secs(5))
-        .expect("sigil should enter blocking config preparation");
-    let pid = i32::try_from(child.id()).expect("child pid should fit pid_t");
-    // SAFETY: `pid` belongs to the live child process spawned immediately above.
-    let result = unsafe { libc::kill(pid, libc::SIGINT) };
-    assert_eq!(result, 0, "SIGINT should be delivered to the child");
-
-    let started_waiting = Instant::now();
     let output = wait_for_child_output(child, Duration::from_secs(5));
-    release_writer
-        .send(())
-        .expect("FIFO writer should be released");
-    fifo_writer.join().expect("FIFO writer should join");
-    assert!(started_waiting.elapsed() < Duration::from_secs(5));
     assert_eq!(
         output.status.code(),
-        Some(130),
+        Some(2),
         "exe={} stdout={} stderr={} status={:?}",
         env!("CARGO_BIN_EXE_sigil"),
         String::from_utf8_lossy(&output.stdout),
@@ -418,10 +374,10 @@ fn json_process_sigint_during_blocking_preparation_exits_130_by_deadline() {
     assert_eq!(stdout.lines().count(), 1);
     let record: serde_json::Value = serde_json::from_str(&stdout).expect("stdout should be JSON");
     assert_eq!(record["record_type"], "error");
-    assert_eq!(record["error"]["code"], "cancelled");
+    assert_eq!(record["error"]["code"], "configuration_invalid");
     assert_eq!(
         record["error"]["message"],
-        "application run was cancelled before startup completed"
+        "application boot failed before the run started"
     );
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }

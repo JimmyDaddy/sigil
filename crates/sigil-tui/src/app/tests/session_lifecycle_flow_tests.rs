@@ -178,10 +178,9 @@ fn retention_footer_uses_worker_preview_and_replays_exact_batch() -> Result<()> 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.open_config_panel();
     let request_id = app
-        .drain_pending_worker_commands()
-        .into_iter()
-        .find_map(|command| match command {
-            WorkerCommand::PreviewSessionRetention { request_id, .. } => Some(request_id),
+        .open_session_retention_modal()
+        .and_then(|action| match action {
+            AppAction::PreviewSessionRetention { request_id, .. } => Some(request_id),
             _ => None,
         })
         .expect("retention preview request");

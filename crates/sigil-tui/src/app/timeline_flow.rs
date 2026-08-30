@@ -987,7 +987,6 @@ impl AppState {
             .plain_line(line_index)
     }
 
-    #[cfg(test)]
     pub(crate) fn timeline_render_line_count(&self) -> usize {
         self.timeline_state.render_store.snapshot().total_lines()
     }

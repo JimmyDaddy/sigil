@@ -295,7 +295,7 @@ fn gc_skips_namespace_with_active_task_lease() -> Result<()> {
     let key = session_scratch_key(Some(session));
     control
         .tasks
-        .register("terminal-1", &key, &control.namespaces);
+        .register("terminal-1", &key, &control.namespaces)?;
     assert!(control.tasks.is_leased("terminal-1"));
 
     let report = gc_scratch_namespaces(
@@ -330,7 +330,7 @@ fn delete_session_namespace_respects_active_lease() -> Result<()> {
     ensure_session_scratch(&scratch_root, Some(session), &ScratchQuota::default())?;
     let key = session_scratch_key(Some(session));
 
-    let lease = control.namespaces.acquire(&key);
+    let lease = control.namespaces.acquire(&key)?;
     assert_eq!(
         delete_session_scratch_namespace(&scratch_root, Some(session), &control)?,
         crate::scratch_namespace::ScratchDeleteOutcome::SkippedLeased
@@ -451,7 +451,7 @@ fn lease_registry_delete_runs_under_the_registry_lock() -> Result<()> {
     let path = temp.path().join("marker");
     fs::write(&path, b"x")?;
 
-    let lease = control.namespaces.acquire(key);
+    let lease = control.namespaces.acquire(key)?;
     let deleted = control
         .namespaces
         .delete_if_unleased(key, || {
@@ -480,7 +480,7 @@ fn scratch_task_lease_registry_is_arc_sharable() -> Result<()> {
     let namespaces = Arc::new(crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new());
     let tasks = Arc::new(ScratchTaskLeaseRegistry::new());
     let key = "arc-share-session-0000-0000-0000-000000000014";
-    tasks.register("terminal-arc", key, &namespaces);
+    tasks.register("terminal-arc", key, &namespaces)?;
     assert!(tasks.is_leased("terminal-arc"));
     assert!(namespaces.is_leased(key));
     tasks.release("terminal-arc");

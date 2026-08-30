@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Verify the frozen 200-case manifest before running any fixture and bind every manifest row to
+# Verify the frozen 228-case manifest before running any fixture and bind every manifest row to
 # exactly one discovered Rust test. The family-level cargo filters below are only accepted after
 # this bijection has been proven; a missing, skipped, duplicated, or extra fault test fails here.
 python3 - "$ROOT/dev/governance/r71-conformance-inventory-v1.toml" <<'MANIFEST_CHECK'
@@ -28,8 +28,8 @@ import re, subprocess, sys, tomllib
 from pathlib import Path
 doc = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 cases = doc.get("cases", [])
-if len(cases) != 200:
-    print(f"FAIL: manifest must contain exactly 200 required fault cases, found {len(cases)}", file=sys.stderr)
+if len(cases) != 228:
+    print(f"FAIL: manifest must contain exactly 228 required fault cases, found {len(cases)}", file=sys.stderr)
     sys.exit(1)
 ids = [c.get("case_id") for c in cases]
 if len(ids) != len(set(ids)):
@@ -48,7 +48,11 @@ expected = {}
 for case in cases:
     _, _, family, number = case["case_id"].split("-")
     prefix = f"r71_f_{family.lower()}_{number}"
-    package = "sigil-sandbox" if family == "SPN" else "sigil-resource-authority"
+    package = (
+        "sigil-sandbox" if family == "SPN"
+        else "sigil-runtime" if family == "CSR"
+        else "sigil-resource-authority"
+    )
     expected.setdefault(package, {})[prefix] = case["case_id"]
 
 discovered = {}
@@ -129,6 +133,7 @@ run_suite() {
 
 run_suite recovery-gate - cargo test -p sigil-kernel --lib resource_recovery -- --format terse
 run_suite fault-jrn 8 cargo test -p sigil-resource-authority --lib r71_f_jrn -- --format terse
+run_suite fault-del 8 cargo test -p sigil-resource-authority --lib r71_f_del -- --format terse
 run_suite fault-boot 10 cargo test -p sigil-resource-authority --lib r71_f_boot -- --format terse
 run_suite fault-rec 10 cargo test -p sigil-resource-authority --lib r71_f_rec -- --format terse
 run_suite fault-abr 8 cargo test -p sigil-resource-authority --lib r71_f_abr -- --format terse
@@ -143,6 +148,8 @@ run_suite fault-cat 10 cargo test -p sigil-resource-authority --lib r71_f_cat --
 run_suite fault-att 14 cargo test -p sigil-resource-authority --lib r71_f_att -- --format terse
 run_suite fault-exp 24 cargo test -p sigil-resource-authority --lib r71_f_exp -- --format terse
 run_suite fault-spn 32 cargo test -p sigil-sandbox --lib r71_f_spn -- --format terse
+run_suite fault-fil 12 cargo test -p sigil-resource-authority --lib r71_f_fil -- --format terse
+run_suite fault-csr 8 cargo test -p sigil-runtime --lib r71_f_csr -- --format terse
 run_suite contract-goldens - bash scripts/check-r71-contract-goldens.sh
 run_suite authority-fixtures - bash scripts/run-r71-authority-conformance.sh
 echo "r71-fault-campaign: all fixtures passed"

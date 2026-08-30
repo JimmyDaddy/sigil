@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import re
 import sys
 import tempfile
 import threading
@@ -28,6 +29,7 @@ sys.modules[SUPPORT_SPEC.name] = SUPPORT
 SUPPORT_SPEC.loader.exec_module(SUPPORT)
 
 SCHEMA_VERSION = 1
+ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MODEL_NAME = "orchestration-fixture-model"
 FINAL_CANARY = "ORCHESTRATION-PTY-FINAL-CANARY-7319"
 APPROVAL_FINAL_CANARY = "ORCHESTRATION-PTY-APPROVAL-FINAL-8427"
@@ -317,6 +319,7 @@ class SessionAudit:
     terminal_max_output_bytes: int
     paused_task_run_count: int
     interrupted_step_count: int
+    interrupted_task_run_count: int
     cancelled_task_run_count: int
     promotion_preview_count: int
     promotion_authority_count: int
@@ -503,13 +506,62 @@ class FixtureHandler(BaseHTTPRequestHandler):
                         f"unexpected synthesis request {request_number}"
                     )
                 self._send_text(final)
+            elif kind == "direct:read":
+                self._send_text(FINAL_CANARY)
+            elif kind == "direct:write:request":
+                self._send_tool_call(
+                    APPROVAL_TOOL_CALL_ID,
+                    "write_file",
+                    APPROVAL_WRITE_ARGS,
+                )
+            elif kind == "direct:write:after_tool":
+                self._send_text(APPROVAL_FINAL_CANARY)
+            elif kind == "direct:continue":
+                if request_number == 1:
+                    if not self.fixture.crash_release.wait(timeout=30):
+                        raise TimeoutError("direct crash fixture was not released")
+                    self._send_text("obsolete pre-crash response")
+                else:
+                    self._send_text(CONTINUE_FINAL_CANARY)
+            elif kind == "direct:cancel":
+                if not self.fixture.cancel_release.wait(timeout=30):
+                    raise TimeoutError("direct cancel fixture was not released")
+                self._send_text("obsolete cancelled response")
+            elif kind == "direct:integration:a":
+                self._send_tool_call(
+                    INTEGRATION_TOOL_CALL_IDS[0],
+                    "write_file",
+                    INTEGRATION_WRITE_ARGS[0],
+                )
+            elif kind == "direct:integration:b":
+                self._send_tool_call(
+                    INTEGRATION_TOOL_CALL_IDS[1],
+                    "write_file",
+                    INTEGRATION_WRITE_ARGS[1],
+                )
+            elif kind == "direct:integration:final":
+                self._send_text(INTEGRATION_FINAL_CANARY)
+            elif kind == "direct:terminal:start":
+                self._send_tool_call(
+                    TERMINAL_START_TOOL_CALL_ID,
+                    "terminal_start",
+                    TERMINAL_START_ARGS,
+                )
+            elif kind == "direct:terminal:after_start":
+                self._send_tool_call(
+                    TERMINAL_CANCEL_TOOL_CALL_ID,
+                    "terminal_cancel",
+                    TERMINAL_CANCEL_ARGS,
+                )
+            elif kind == "direct:terminal:after_cancel":
+                self._send_text(TERMINAL_FINAL_CANARY)
             elif kind == "title":
                 self._send_text("Orchestration acceptance")
             else:
                 raise AcceptanceError(f"unsupported request kind {kind}")
         except Exception as error:  # noqa: BLE001 - retain fixture diagnostics.
             expected_disconnect = (
-                kind in {"continue:step", "cancel:step"}
+                kind in {"continue:step", "cancel:step", "direct:continue", "direct:cancel"}
                 and request_number == 1
                 and isinstance(error, (BrokenPipeError, ConnectionResetError))
             )
@@ -524,7 +576,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         finally:
             if kind:
                 self.fixture.finish_request(kind)
-            if kind == "cancel:step":
+            if kind in {"cancel:step", "direct:cancel"}:
                 self.fixture.cancel_settled.set()
 
     def _read_json(self) -> object:
@@ -663,6 +715,27 @@ def has_tool_result(payload: object, call_id: str) -> bool:
     )
 
 
+TASK_STEP_IDS = (
+    *READ_STEP_IDS,
+    "write_note",
+    "continue_after_crash",
+    "cancel_in_flight",
+    "integrate_a",
+    "integrate_b",
+    "terminal_lifecycle",
+)
+
+
+def latest_task_step_id(text: str) -> str | None:
+    """Return the current step from a prompt that may include the approved plan."""
+    matches = [
+        (text.rfind(f"Step: {step_id}"), step_id)
+        for step_id in TASK_STEP_IDS
+    ]
+    position, step_id = max(matches)
+    return step_id if position >= 0 else None
+
+
 def classify_request(payload: object) -> str:
     names = tool_names(payload)
     text = request_text(payload)
@@ -681,29 +754,98 @@ def classify_request(payload: object) -> str:
         return "planner"
     if "Produce the single user-visible final answer" in text:
         return "synthesis"
-    if "Role: subagent_read" in text:
-        matching = [step_id for step_id in READ_STEP_IDS if f"Step: {step_id}" in text]
-        if len(matching) == 1:
-            return f"read:{matching[0]}"
-    if "Step: write_note" in text and "Role: executor" in text:
+    direct_scenario = next(
+        (
+            scenario
+            for scenario in range(1, 7)
+            if f"Review scenario {scenario} before execution" in text
+        ),
+        None,
+    )
+    if direct_scenario == 1:
+        return "direct:read"
+    if direct_scenario == 2:
+        return (
+            "direct:write:after_tool"
+            if has_tool_result(payload, APPROVAL_TOOL_CALL_ID)
+            else "direct:write:request"
+        )
+    if direct_scenario == 3:
+        return "direct:continue"
+    if direct_scenario == 4:
+        return "direct:cancel"
+    if direct_scenario == 5:
+        if has_tool_result(payload, INTEGRATION_TOOL_CALL_IDS[1]):
+            return "direct:integration:final"
+        if has_tool_result(payload, INTEGRATION_TOOL_CALL_IDS[0]):
+            return "direct:integration:b"
+        return "direct:integration:a"
+    if direct_scenario == 6:
+        if has_tool_result(payload, TERMINAL_CANCEL_TOOL_CALL_ID):
+            return "direct:terminal:after_cancel"
+        if has_tool_result(payload, TERMINAL_START_TOOL_CALL_ID):
+            return "direct:terminal:after_start"
+        return "direct:terminal:start"
+    step_id = latest_task_step_id(text)
+    if step_id in READ_STEP_IDS and "Role: subagent_read" in text:
+        return f"read:{step_id}"
+    if step_id == "write_note" and "Role: executor" in text:
         if has_tool_result(payload, APPROVAL_TOOL_CALL_ID):
             return "write:after_tool"
         return "write:request"
-    if "Step: continue_after_crash" in text and "Role: executor" in text:
+    if step_id == "continue_after_crash" and "Role: executor" in text:
         return "continue:step"
-    if "Step: cancel_in_flight" in text and "Role: executor" in text:
+    if step_id == "cancel_in_flight" and "Role: executor" in text:
         return "cancel:step"
-    if "Step: integrate_a" in text and "Role: subagent_write" in text:
+    if step_id == "integrate_a" and "Role: subagent_write" in text:
         return "integration:step:a"
-    if "Step: integrate_b" in text and "Role: subagent_write" in text:
+    if step_id == "integrate_b" and "Role: subagent_write" in text:
         return "integration:step:b"
-    if "Step: terminal_lifecycle" in text and "Role: executor" in text:
+    if step_id == "terminal_lifecycle" and "Role: executor" in text:
         if has_tool_result(payload, TERMINAL_CANCEL_TOOL_CALL_ID):
             return "terminal:after_cancel"
         if has_tool_result(payload, TERMINAL_START_TOOL_CALL_ID):
             return "terminal:after_start"
         return "terminal:start"
     raise AcceptanceError("provider request does not match a production orchestration role")
+
+
+def managed_parent_session_files(root: Path) -> list[Path]:
+    """Find parent sessions in the managed store, excluding plan-review children."""
+    candidates = sorted(
+        root.glob("session-*/records.jsonl"),
+        key=lambda path: path.stat().st_mtime_ns,
+    )
+    # A resume boot may create a short-lived session identity stream before it attaches to
+    # the requested durable parent.  It contains only trust/route metadata, not a user run;
+    # treating it as a second parent makes the acceptance harness report a false fork.
+    parent_event_types = {
+        "user_message_recorded",
+        "assistant_message_recorded",
+        "plan_draft_created",
+        "plan_decision_recorded",
+        "task_created_from_plan",
+        "run_status_changed",
+        "run_finalized",
+        "tool_execution_started",
+        "tool_execution_finished",
+        "tool_result_recorded_v3",
+    }
+    managed = []
+    for path in candidates:
+        try:
+            has_parent_activity = any(
+                json.loads(line).get("event_type") in parent_event_types
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        except (OSError, json.JSONDecodeError):
+            continue
+        if has_parent_activity:
+            managed.append(path)
+    if managed:
+        return managed
+    return SUPPORT.session_files(root)
 
 
 def write_config(
@@ -796,6 +938,7 @@ def read_session_audit(path: Path) -> SessionAudit:
     terminal_max_output_bytes = 0
     paused_task_run_count = 0
     interrupted_step_count = 0
+    interrupted_task_run_count = 0
     cancelled_task_run_count = 0
     promotion_preview_count = 0
     promotion_authority_count = 0
@@ -804,6 +947,60 @@ def read_session_audit(path: Path) -> SessionAudit:
     approval_child_refs: set[str] = set()
     failed_run_count = 0
     cancelled_run_count = 0
+
+    def observe_tool_control(control: dict[str, object]) -> None:
+        nonlocal approved_tool_call_count
+        nonlocal approved_terminal_start_count
+        nonlocal terminal_start_completed_count
+        nonlocal terminal_cancel_completed_count
+        approval = control.get("tool_approval")
+        if isinstance(approval, dict):
+            if (
+                approval.get("action") == "resolved"
+                and approval.get("user_decision") == "approved"
+            ):
+                call_id = approval.get("call_id")
+                if call_id == APPROVAL_TOOL_CALL_ID:
+                    approved_tool_call_count += 1
+                elif call_id == TERMINAL_START_TOOL_CALL_ID:
+                    approved_terminal_start_count += 1
+        execution = control.get("tool_execution")
+        if isinstance(execution, dict) and execution.get("status") == "completed":
+            call_id = execution.get("call_id")
+            tool_name = execution.get("tool_name")
+            if call_id == TERMINAL_START_TOOL_CALL_ID and tool_name == "terminal_start":
+                terminal_start_completed_count += 1
+            elif call_id == TERMINAL_CANCEL_TOOL_CALL_ID and tool_name == "terminal_cancel":
+                terminal_cancel_completed_count += 1
+
+    def observe_terminal_control(control: dict[str, object]) -> None:
+        nonlocal terminal_max_output_bytes
+        terminal_task = control.get("terminal_task")
+        if not isinstance(terminal_task, dict):
+            return
+        handle = terminal_task.get("handle")
+        if not (
+            isinstance(handle, dict)
+            and handle.get("task_id") == TERMINAL_TASK_ID
+        ):
+            return
+        status = terminal_task.get("status")
+        status_state = status.get("state") if isinstance(status, dict) else None
+        if isinstance(status_state, str):
+            terminal_task_statuses.add(status_state)
+        readiness = terminal_task.get("readiness")
+        readiness_state = (
+            readiness.get("state") if isinstance(readiness, dict) else None
+        )
+        if isinstance(readiness_state, str):
+            terminal_readiness_states.add(readiness_state)
+        output_total_bytes = terminal_task.get("output_total_bytes")
+        if isinstance(output_total_bytes, int):
+            terminal_max_output_bytes = max(
+                terminal_max_output_bytes,
+                output_total_bytes,
+            )
+
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         record = json.loads(raw_line)
         event_type = record.get("event_type")
@@ -816,7 +1013,12 @@ def read_session_audit(path: Path) -> SessionAudit:
             outcome = payload.get("outcome")
             if outcome == "cancelled" and payload.get("cleanup_complete") is True:
                 cancelled_run_count += 1
-            else:
+            elif payload.get("run_status") not in {
+                "completed",
+                "cancelled",
+                "paused",
+                "interrupted",
+            } and outcome not in {"completed", "success"}:
                 failed_run_count += 1
         entry = payload.get("session_log_entry")
         if not isinstance(entry, dict):
@@ -839,6 +1041,8 @@ def read_session_audit(path: Path) -> SessionAudit:
         control = entry.get("control")
         if not isinstance(control, dict):
             continue
+        observe_tool_control(control)
+        observe_terminal_control(control)
         step = control.get("task_step")
         if (
             isinstance(step, dict)
@@ -850,9 +1054,18 @@ def read_session_audit(path: Path) -> SessionAudit:
             interrupted_step_count += 1
         if isinstance(control.get("task_final_answer_committed"), dict):
             task_final_count += 1
+        direct_attempt = control.get("task_direct_execution_attempt_v1")
+        if (
+            isinstance(direct_attempt, dict)
+            and direct_attempt.get("status") == "completed"
+            and isinstance(direct_attempt.get("final_message_id"), str)
+        ):
+            task_final_count += 1
         task_run = control.get("task_run")
         if isinstance(task_run, dict) and task_run.get("status") == "paused":
             paused_task_run_count += 1
+        if isinstance(task_run, dict) and task_run.get("status") == "interrupted":
+            interrupted_task_run_count += 1
         if isinstance(task_run, dict) and task_run.get("status") == "cancelled":
             cancelled_task_run_count += 1
         if isinstance(control.get("task_promotion_preview_recorded"), dict):
@@ -884,54 +1097,9 @@ def read_session_audit(path: Path) -> SessionAudit:
             payload = record.get("payload")
             entry = payload.get("session_log_entry") if isinstance(payload, dict) else None
             control = entry.get("control") if isinstance(entry, dict) else None
-            approval = control.get("tool_approval") if isinstance(control, dict) else None
-            if (
-                isinstance(approval, dict)
-                and approval.get("action") == "resolved"
-                and approval.get("user_decision") == "approved"
-            ):
-                call_id = approval.get("call_id")
-                if call_id == APPROVAL_TOOL_CALL_ID:
-                    approved_tool_call_count += 1
-                elif call_id == TERMINAL_START_TOOL_CALL_ID:
-                    approved_terminal_start_count += 1
-            execution = control.get("tool_execution") if isinstance(control, dict) else None
-            if isinstance(execution, dict) and execution.get("status") == "completed":
-                call_id = execution.get("call_id")
-                tool_name = execution.get("tool_name")
-                if (
-                    call_id == TERMINAL_START_TOOL_CALL_ID
-                    and tool_name == "terminal_start"
-                ):
-                    terminal_start_completed_count += 1
-                elif (
-                    call_id == TERMINAL_CANCEL_TOOL_CALL_ID
-                    and tool_name == "terminal_cancel"
-                ):
-                    terminal_cancel_completed_count += 1
-            terminal_task = control.get("terminal_task") if isinstance(control, dict) else None
-            handle = terminal_task.get("handle") if isinstance(terminal_task, dict) else None
-            if not (
-                isinstance(handle, dict)
-                and handle.get("task_id") == TERMINAL_TASK_ID
-            ):
-                continue
-            status = terminal_task.get("status")
-            status_state = status.get("state") if isinstance(status, dict) else None
-            if isinstance(status_state, str):
-                terminal_task_statuses.add(status_state)
-            readiness = terminal_task.get("readiness")
-            readiness_state = (
-                readiness.get("state") if isinstance(readiness, dict) else None
-            )
-            if isinstance(readiness_state, str):
-                terminal_readiness_states.add(readiness_state)
-            output_total_bytes = terminal_task.get("output_total_bytes")
-            if isinstance(output_total_bytes, int):
-                terminal_max_output_bytes = max(
-                    terminal_max_output_bytes,
-                    output_total_bytes,
-                )
+            if isinstance(control, dict):
+                observe_tool_control(control)
+                observe_terminal_control(control)
     return SessionAudit(
         event_counts=counts,
         completed_steps=tuple(completed_steps),
@@ -954,6 +1122,7 @@ def read_session_audit(path: Path) -> SessionAudit:
         terminal_max_output_bytes=terminal_max_output_bytes,
         paused_task_run_count=paused_task_run_count,
         interrupted_step_count=interrupted_step_count,
+        interrupted_task_run_count=interrupted_task_run_count,
         cancelled_task_run_count=cancelled_task_run_count,
         promotion_preview_count=promotion_preview_count,
         promotion_authority_count=promotion_authority_count,
@@ -972,20 +1141,36 @@ def wait_for_audit(
 ) -> tuple[Path, SessionAudit]:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
+    last_audit: SessionAudit | None = None
     while time.monotonic() < deadline:
         runner.read_available(0.01)
-        files = SUPPORT.session_files(session_dir)
+        files = managed_parent_session_files(session_dir)
         if len(files) > 1:
             raise AcceptanceError("orchestration run created more than one parent session")
         if files:
             try:
                 audit = read_session_audit(files[0])
+                last_audit = audit
                 if predicate(audit):
                     return files[0], audit
             except (OSError, json.JSONDecodeError) as error:
                 last_error = error
         time.sleep(0.05)
+    try:
+        runner.read_available(0.0)
+        runner.raw_log.write_bytes(bytes(runner.output))
+    except OSError:
+        pass
     suffix = f": {last_error}" if last_error is not None else ""
+    if last_audit is not None:
+        suffix += (
+            f"; observed finals={last_audit.task_final_count}, "
+            f"paused={last_audit.paused_task_run_count}, "
+            f"interrupted_tasks={last_audit.interrupted_task_run_count}, "
+            f"cancelled_tasks={last_audit.cancelled_task_run_count}, "
+            f"cancelled_runs={last_audit.cancelled_run_count}, "
+            f"failed_runs={last_audit.failed_run_count}"
+        )
     raise TimeoutError(f"timed out waiting for durable orchestration completion{suffix}")
 
 
@@ -1113,15 +1298,17 @@ def validate_integration_audit(audit: SessionAudit, fixture: FixtureState) -> No
 def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
     if audit.event_counts.get("plan_draft_created", 0) != 6:
         raise AcceptanceError("terminal phase did not durably record all six plan drafts")
-    if audit.completed_steps.count("terminal_lifecycle") != 1:
-        raise AcceptanceError("terminal lifecycle step did not complete exactly once")
-    if (
-        audit.terminal_approval_route_resolved_count != 1
-        or audit.approved_terminal_start_count != 1
-    ):
-        raise AcceptanceError(
-            "terminal_start approval was not durably resolved once in parent and child"
-        )
+    # Direct Task execution records the plan step through its durable task attempt and terminal
+    # records rather than the legacy child-orchestration task_step projection. The unique terminal
+    # final below is therefore the direct route's completion marker.
+    if audit.terminal_final_answer_count != 1:
+        raise AcceptanceError("terminal lifecycle task did not complete exactly once")
+    # The shipping path is a direct Task: its approval is resolved in the parent session and the
+    # managed terminal records are attached to that same durable stream. The older child-role
+    # route used a separate task_subagent_approval projection, so requiring that projection here
+    # would make the production acceptance test assert an obsolete topology.
+    if audit.approved_terminal_start_count != 1:
+        raise AcceptanceError("terminal_start approval was not durably resolved exactly once")
     if (
         audit.terminal_start_completed_count != 1
         or audit.terminal_cancel_completed_count != 1
@@ -1129,9 +1316,12 @@ def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         raise AcceptanceError(
             "terminal_start and terminal_cancel must each complete exactly once"
         )
-    if not {"running", "cancelled"}.issubset(audit.terminal_task_statuses):
+    if "cancelled" not in audit.terminal_task_statuses or not {
+        "starting",
+        "running",
+    }.intersection(audit.terminal_task_statuses):
         raise AcceptanceError(
-            "terminal lifecycle did not durably progress from running to cancelled"
+            "terminal lifecycle did not durably progress from start to cancelled"
         )
     if "ready" not in audit.terminal_readiness_states:
         raise AcceptanceError("terminal readiness was not durably satisfied")
@@ -1147,18 +1337,17 @@ def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
     expected_requests = {
         "routing:plan_review": 6,
         "plan_review": 6,
-        f"read:{READ_STEP_IDS[0]}": 1,
-        f"read:{READ_STEP_IDS[1]}": 1,
-        "write:request": 1,
-        "write:after_tool": 1,
-        "continue:step": 2,
-        "cancel:step": 1,
-        "integration:step:a": 2,
-        "integration:step:b": 2,
-        "terminal:start": 1,
-        "terminal:after_start": 1,
-        "terminal:after_cancel": 1,
-        "synthesis": 5,
+        "direct:read": 1,
+        "direct:write:request": 1,
+        "direct:write:after_tool": 1,
+        "direct:continue": 2,
+        "direct:cancel": 1,
+        "direct:integration:a": 1,
+        "direct:integration:b": 1,
+        "direct:integration:final": 1,
+        "direct:terminal:start": 1,
+        "direct:terminal:after_start": 1,
+        "direct:terminal:after_cancel": 1,
         "title": 1,
     }
     if fixture.request_counts != expected_requests:
@@ -1192,29 +1381,447 @@ def wait_for_fixture_request(
     raise TimeoutError(f"timed out waiting for fixture request {kind} #{count}")
 
 
+def validate_direct_task_audit(
+    audit: SessionAudit,
+    fixture: FixtureState,
+    *,
+    plan_count: int,
+    task_count: int,
+    final_count: int,
+) -> None:
+    if audit.event_counts.get("plan_draft_created", 0) != plan_count:
+        raise AcceptanceError(
+            f"direct task phase expected {plan_count} durable plan drafts, "
+            f"got {audit.event_counts.get('plan_draft_created', 0)}"
+        )
+    if audit.task_final_count != task_count:
+        raise AcceptanceError(
+            f"direct task phase expected {task_count} task finals, got {audit.task_final_count}"
+        )
+    observed_finals = (
+        audit.final_answer_count
+        + audit.approval_final_answer_count
+        + audit.continue_final_answer_count
+        + audit.integration_final_answer_count
+        + audit.terminal_final_answer_count
+    )
+    if observed_finals != final_count:
+        raise AcceptanceError(
+            f"direct task phase expected {final_count} canary finals, got {observed_finals}"
+        )
+    if audit.failed_run_count != 0:
+        raise AcceptanceError("direct task phase finalized with a hard failure")
+    if fixture.protocol_errors:
+        raise AcceptanceError(
+            f"fixture observed provider protocol errors: {fixture.protocol_errors}"
+        )
+
+
+def run_direct_task_acceptance(
+    runner: object,
+    *,
+    frozen_binary: Path,
+    config_path: Path,
+    workspace: Path,
+    env: dict[str, str],
+    output_dir: Path,
+    fixture: FixtureState,
+    managed_session_dir: Path,
+    deadline: object,
+    runner_holder: list[object | None],
+) -> tuple[
+    object,
+    Path,
+    SessionAudit,
+    SessionAudit,
+    SessionAudit,
+    SessionAudit,
+    SessionAudit,
+    SessionAudit,
+]:
+    """Exercise the current direct-Task plan approval contract through a real TUI PTY."""
+    submit_user_prompt(runner, USER_PROMPT)
+    approve_review_first_plan(runner, deadline.remaining(180.0))
+    session_path, audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.final_answer_count == 1 and value.task_final_count == 1,
+        deadline.remaining(),
+    )
+    settled_screen = wait_for_visible_screen(
+        lambda text: FINAL_CANARY in text
+        and "Thinking..." not in text
+        and "Replying..." not in text,
+        deadline.remaining(),
+        "settled direct task final answer",
+        runner=runner,
+    )
+    if settled_screen.count(FINAL_CANARY) != 1:
+        raise AcceptanceError("TUI rendered the direct task final answer more than once")
+    validate_direct_task_audit(
+        audit,
+        fixture,
+        plan_count=1,
+        task_count=1,
+        final_count=1,
+    )
+
+    submit_user_prompt(runner, APPROVAL_USER_PROMPT)
+    approve_review_first_plan(runner, deadline.remaining(180.0))
+    wait_for_visible_screen(
+        lambda text: ("Approve action?" in text or "Review file changes" in text)
+        and "write_file" in text
+        and APPROVAL_PATH in text,
+        deadline.remaining(),
+        "direct task write approval",
+        runner=runner,
+    )
+    runner.send("y")
+    session_path, approval_audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.approval_final_answer_count == 1
+        and value.task_final_count == 2,
+        deadline.remaining(),
+    )
+    approval_screen = wait_for_visible_screen(
+        lambda text: APPROVAL_FINAL_CANARY in text
+        and "Thinking..." not in text
+        and "Replying..." not in text,
+        deadline.remaining(),
+        "settled approved direct task final answer",
+        runner=runner,
+    )
+    if approval_screen.count(APPROVAL_FINAL_CANARY) != 1:
+        raise AcceptanceError("TUI rendered the approved direct task final more than once")
+    if (workspace / APPROVAL_PATH).read_text(encoding="utf-8") != APPROVAL_CONTENT:
+        raise AcceptanceError("approved direct task write did not reach the workspace")
+    validate_direct_task_audit(
+        approval_audit,
+        fixture,
+        plan_count=2,
+        task_count=2,
+        final_count=2,
+    )
+    checkpoint_workspace(workspace, env, "record approved write fixture")
+
+    submit_user_prompt(runner, CONTINUE_USER_PROMPT)
+    approve_review_first_plan(runner, deadline.remaining(180.0))
+    wait_for_fixture_request(
+        fixture,
+        "direct:continue",
+        1,
+        runner,
+        deadline.remaining(),
+    )
+    runner.stop()
+    fixture.crash_release.set()
+    runner = SUPPORT.PtyRunner(
+        [str(frozen_binary), "--config", str(config_path), "resume", str(session_path)],
+        workspace,
+        env,
+        output_dir / "resume-process.log",
+    )
+    runner_holder[0] = runner
+    runner.start()
+    SUPPORT.wait_for_main_tui(runner, deadline.remaining())
+    session_path, interrupted_audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.paused_task_run_count >= 1 and value.task_final_count == 2,
+        deadline.remaining(),
+    )
+    runner.type_text("/task continue")
+    runner.send("\r")
+    session_path, continue_audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.continue_final_answer_count == 1
+        and value.task_final_count == 3,
+        deadline.remaining(),
+    )
+    continued_screen = wait_for_visible_screen(
+        lambda text: CONTINUE_FINAL_CANARY in text
+        and "Thinking..." not in text
+        and "Replying..." not in text,
+        deadline.remaining(),
+        "settled continued direct task final answer",
+        runner=runner,
+    )
+    if continued_screen.count(CONTINUE_FINAL_CANARY) != 1:
+        raise AcceptanceError("TUI rendered the continued direct task final more than once")
+    if interrupted_audit.task_final_count != 2:
+        raise AcceptanceError("interrupted direct task committed a final before continue")
+    validate_direct_task_audit(
+        continue_audit,
+        fixture,
+        plan_count=3,
+        task_count=3,
+        final_count=3,
+    )
+
+    submit_user_prompt(runner, CANCEL_USER_PROMPT)
+    approve_review_first_plan(runner, deadline.remaining(180.0))
+    wait_for_fixture_request(
+        fixture,
+        "direct:cancel",
+        1,
+        runner,
+        deadline.remaining(),
+    )
+    # Ctrl-C is the production cancellation binding while the TUI is busy. Escape only clears
+    # focus and would leave the provider fixture blocked forever.
+    runner.send(b"\x03")
+    session_path, cancel_audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.interrupted_task_run_count >= 1,
+        deadline.remaining(),
+    )
+    fixture.cancel_release.set()
+    if not fixture.cancel_settled.wait(timeout=deadline.remaining(5.0)):
+        raise AcceptanceError("cancelled direct provider request did not settle")
+    # The task terminal is durable before the root run's cleanup/finalization record. Do not
+    # submit the next plan while the worker still owns the cancelled run; otherwise the TUI may
+    # queue the prompt behind a run that is already visibly cancelled and the fixture will never
+    # receive the next provider request.
+    session_path, cancel_audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.interrupted_task_run_count >= 1
+        and value.cancelled_run_count == 1,
+        deadline.remaining(),
+    )
+    if cancel_audit.interrupted_task_run_count < 1:
+        raise AcceptanceError("cancelled direct task did not persist an interrupted task terminal")
+    if cancel_audit.task_final_count != 3:
+        raise AcceptanceError("cancelled direct task incorrectly committed a parent final")
+    if fixture.protocol_errors:
+        raise AcceptanceError(
+            f"fixture observed provider protocol errors: {fixture.protocol_errors}"
+        )
+    wait_for_visible_screen(
+        lambda text: "Thinking..." not in text
+        and "Replying..." not in text
+        and not active_review_overlay_present(text),
+        deadline.remaining(10.0),
+        "idle TUI after cancelling direct task",
+        runner=runner,
+    )
+    # The durable child task/run terminal above is the source of truth for the stopped state.
+    # The activity pane may legitimately retain the prior provider card until the next prompt;
+    # the terminal phase below separately asserts the user-visible cancelled terminal card.
+
+    submit_user_prompt(runner, INTEGRATION_USER_PROMPT)
+    approve_review_first_plan(runner, deadline.remaining(180.0))
+    session_path, integration_audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.integration_final_answer_count == 1
+        and value.task_final_count == 4,
+        deadline.remaining(),
+    )
+    integration_screen = wait_for_visible_screen(
+        lambda text: INTEGRATION_FINAL_CANARY in text
+        and "Thinking..." not in text
+        and "Replying..." not in text,
+        deadline.remaining(),
+        "settled direct integration task final answer",
+        runner=runner,
+    )
+    if integration_screen.count(INTEGRATION_FINAL_CANARY) != 1:
+        raise AcceptanceError("TUI rendered the direct integration final more than once")
+    validate_direct_task_audit(
+        integration_audit,
+        fixture,
+        plan_count=5,
+        task_count=4,
+        final_count=4,
+    )
+    for path, expected in zip(
+        INTEGRATION_PATHS,
+        ("integrated a\n", "integrated b\n"),
+        strict=True,
+    ):
+        if (workspace / path).read_text(encoding="utf-8") != expected:
+            raise AcceptanceError(f"direct integration task did not write {path}")
+
+    submit_user_prompt(runner, TERMINAL_USER_PROMPT)
+    approve_review_first_plan(runner, deadline.remaining(180.0))
+    wait_for_visible_screen(
+        lambda text: ("Approve action?" in text or "Review file changes" in text)
+        and "terminal_start" in text
+        and TERMINAL_READY_CANARY in text,
+        deadline.remaining(),
+        "direct structured terminal_start approval",
+        runner=runner,
+    )
+    runner.send("y")
+    session_path, terminal_audit = wait_for_audit(
+        managed_session_dir,
+        runner,
+        lambda value: value.terminal_final_answer_count == 1
+        and value.task_final_count == 5,
+        deadline.remaining(),
+    )
+    terminal_screen = wait_for_visible_screen(
+        lambda text: TERMINAL_FINAL_CANARY in text
+        and TERMINAL_TASK_ID in text
+        and "status: cancelled" in text
+        and "Thinking..." not in text
+        and "Replying..." not in text,
+        deadline.remaining(),
+        "settled direct terminal lifecycle final answer and terminal state",
+        runner=runner,
+    )
+    if terminal_screen.count(TERMINAL_FINAL_CANARY) != 1:
+        raise AcceptanceError("TUI rendered the direct terminal final more than once")
+    validate_direct_task_audit(
+        terminal_audit,
+        fixture,
+        plan_count=6,
+        task_count=5,
+        final_count=5,
+    )
+    validate_terminal_audit(terminal_audit, fixture)
+    if fixture.protocol_errors:
+        raise AcceptanceError(
+            f"fixture observed provider protocol errors: {fixture.protocol_errors}"
+        )
+    return (
+        runner,
+        session_path,
+        audit,
+        approval_audit,
+        continue_audit,
+        cancel_audit,
+        integration_audit,
+        terminal_audit,
+    )
+
+
 def submit_user_prompt(runner: object, prompt: str) -> None:
     # Completed tool activity retains focus so ordinary characters do not
     # accidentally edit the composer. Esc returns an idle TUI to the composer.
     runner.send(b"\x1b")
+    runner.read_available(0.05)
+    # Resume can restore a plan/approval overlay one redraw behind the durable task terminal
+    # state. Close that stale presentation before typing; otherwise the opaque prompt bytes are
+    # consumed by the overlay and no new user record is admitted.
+    screen = runner.screen()
+    if active_review_overlay_present(screen):
+        wait_for_visible_screen(
+            lambda text: not active_review_overlay_present(text),
+            10.0,
+            "idle TUI after dismissing stale review overlay",
+            runner=runner,
+        )
+    # A slash is the production activity-to-composer focus binding. Use it as a sentinel instead
+    # of relying on how many Escape presses a just-completed tool card needs, then let Escape clear
+    # the sentinel and any slash selector before submitting the actual prompt.
+    runner.send("/")
+    runner.read_available(0.05)
+    runner.send(b"\x7f")
+    runner.read_available(0.05)
+    runner.send(b"\x1b")
+    runner.read_available(0.05)
     runner.type_text(prompt)
     runner.send("\r")
 
 
+def active_review_overlay_present(screen: str) -> bool:
+    """Detect modal titles, excluding historical timeline notices with the same words."""
+    return (
+        "Review file changes" in screen
+        or "Approve action?" in screen
+        or "Approve command?" in screen
+        or any(line.lstrip().startswith("Plan Review ·") for line in screen.splitlines()[:4])
+    )
+
+
+def wait_for_visible_screen(
+    predicate: Callable[[str], bool],
+    timeout: float,
+    description: str,
+    *,
+    runner: object,
+) -> str:
+    """Wait for a current rendered screen without replaying the VT transcript every poll."""
+    deadline = time.monotonic() + timeout
+    next_screen_check = 0.0
+    while time.monotonic() < deadline:
+        runner.read_available(0.05)
+        now = time.monotonic()
+        if now >= next_screen_check:
+            screen = runner.screen()
+            if predicate(screen):
+                return screen
+            next_screen_check = now + 0.5
+        if runner.process is not None and runner.process.poll() is not None:
+            raise AcceptanceError(f"TUI exited while waiting for {description}")
+    raise TimeoutError(f"timed out waiting for {description}")
+
+
 def approve_review_first_plan(runner: object, timeout: float) -> None:
-    runner.wait_until(
-        lambda text: "Plan ready" in text,
-        timeout,
-        "review-first plan card",
-        final_screen=True,
-    )
+    # Replaying the complete VT transcript on every poll is unnecessarily expensive for this
+    # long-running campaign. The durable host notice is emitted immediately before the current
+    # plan surface; inspect only that raw suffix and strip CSI styling, then use the final-screen
+    # parser only for assertions that actually depend on layout.
+    first_surface = wait_for_plan_surface(runner, timeout)
+    if "Plan ready" in first_surface and not plan_review_workbench_visible(first_surface):
+        runner.send("\r")
+        wait_for_plan_surface(runner, timeout, require_workbench=True)
     runner.send("\r")
-    runner.wait_until(
-        lambda text: "Plan Review" in text and "Run" in text and "Reject" in text,
-        timeout,
-        "complete plan review workbench",
-        final_screen=True,
+
+
+def wait_for_plan_surface(
+    runner: object,
+    timeout: float,
+    *,
+    require_workbench: bool = False,
+) -> str:
+    deadline = time.monotonic() + timeout
+    next_screen_check = 0.0
+    while time.monotonic() < deadline:
+        runner.read_available(0.05)
+        surface = latest_plan_surface(bytes(runner.output))
+        if surface and (
+            plan_review_workbench_visible(surface)
+            if require_workbench
+            else "Plan ready" in surface or plan_review_workbench_visible(surface)
+        ):
+            return surface
+        # A TUI redraw can be split across PTY reads: the durable notice and the workbench are
+        # emitted by different owner-loop iterations.  Keep the fast raw-suffix path, but sample
+        # the rendered screen periodically so a final workbench already visible on screen cannot
+        # be lost at the read boundary.
+        now = time.monotonic()
+        if now >= next_screen_check:
+            screen = runner.screen()
+            if plan_review_workbench_visible(screen) and (
+                require_workbench or "Plan ready" in screen or "Plan Review" in screen
+            ):
+                return screen
+            next_screen_check = now + 0.5
+        if runner.process is not None and runner.process.poll() is not None:
+            raise AcceptanceError("TUI exited while waiting for review-first plan surface")
+    raise TimeoutError(
+        "timed out waiting for complete plan review workbench"
+        if require_workbench
+        else "timed out waiting for review-first plan card"
     )
-    runner.send("\r")
+
+
+def latest_plan_surface(raw: bytes) -> str:
+    marker = b"validated plan draft recorded"
+    offset = raw.rfind(marker)
+    if offset < 0:
+        return ""
+    return ANSI_CSI_PATTERN.sub("", raw[offset:].decode("utf-8", errors="replace"))
+
+
+def plan_review_workbench_visible(text: str) -> bool:
+    return "Plan Review" in text and "Run" in text and "Reject" in text
 
 
 def click_screen_text(runner: object, screen: str, needle: str) -> None:
@@ -1302,7 +1909,9 @@ def main() -> int:
         else root / args.output_dir
     ).expanduser().resolve()
     fixture_root: Path | None = None
+    managed_session_dir: Path | None = None
     runner: object | None = None
+    runner_holder: list[object | None] = [None]
     server: FixtureServer | None = None
     server_thread: threading.Thread | None = None
     started_at = utc_now()
@@ -1320,8 +1929,9 @@ def main() -> int:
         workspace = fixture_root / "workspace"
         state_root = fixture_root / "state"
         cache_root = fixture_root / "cache"
-        session_dir = fixture_root / "sessions"
-        for directory in (workspace, state_root, cache_root, session_dir):
+        configured_session_dir = fixture_root / "sessions"
+        managed_session_dir = state_root / "managed" / "session-log"
+        for directory in (workspace, state_root, cache_root, configured_session_dir):
             directory.mkdir()
         (workspace / "README.md").write_text("orchestration fixture\n", encoding="utf-8")
         SUPPORT.generate_fixture_tls_identity(fixture_root)
@@ -1338,7 +1948,7 @@ def main() -> int:
             workspace=workspace,
             state_root=state_root,
             cache_root=cache_root,
-            session_dir=session_dir,
+            session_dir=configured_session_dir,
             port=int(server.server_address[1]),
         )
         runner = SUPPORT.PtyRunner(
@@ -1347,14 +1957,103 @@ def main() -> int:
             env,
             output_dir / "tui-process.log",
         )
+        runner_holder[0] = runner
         runner.start()
         SUPPORT.wait_for_main_tui(runner, deadline.remaining())
+        (
+            runner,
+            session_path,
+            audit,
+            approval_audit,
+            continue_audit,
+            cancel_audit,
+            integration_audit,
+            terminal_audit,
+        ) = run_direct_task_acceptance(
+            runner,
+            frozen_binary=frozen_binary,
+            config_path=config_path,
+            workspace=workspace,
+            env=env,
+            output_dir=output_dir,
+            fixture=fixture,
+            managed_session_dir=managed_session_dir,
+            deadline=deadline,
+            runner_holder=runner_holder,
+        )
+        runner.quit(timeout=deadline.remaining(10.0))
+        runner.stop()
+        runner = None
+        runner_holder[0] = None
+
+        evidence_dir = output_dir / "sessions"
+        evidence_dir.mkdir(mode=0o700, exist_ok=True)
+        evidence_path = evidence_dir / "parent.jsonl"
+        shutil.copyfile(session_path, evidence_path)
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "campaign": "sigil-direct-task-tui-v1",
+            "status": "passed",
+            "started_at": started_at,
+            "finished_at": utc_now(),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "binary": identity.as_dict(),
+            "checks": {
+                "review_first_direct_task": True,
+                "approved_write_count": approval_audit.approved_tool_call_count,
+                "continued_task_count": continue_audit.continue_final_answer_count,
+                "cancelled_task_count": cancel_audit.interrupted_task_run_count,
+                "direct_integration_final_count": (
+                    integration_audit.integration_final_answer_count
+                ),
+                "approved_terminal_start_count": (
+                    terminal_audit.approved_terminal_start_count
+                ),
+                "terminal_start_completed_count": (
+                    terminal_audit.terminal_start_completed_count
+                ),
+                "terminal_cancel_completed_count": (
+                    terminal_audit.terminal_cancel_completed_count
+                ),
+                "terminal_readiness_ready": (
+                    "ready" in terminal_audit.terminal_readiness_states
+                ),
+                "terminal_output_progress_bytes": (
+                    terminal_audit.terminal_max_output_bytes
+                ),
+                "terminal_terminal_state": "cancelled",
+                "completed_task_count": terminal_audit.task_final_count,
+            },
+            "evidence": {
+                "pty_log": "tui-process.log",
+                "resume_pty_log": "resume-process.log",
+                "session": "sessions/parent.jsonl",
+            },
+            "privacy": {
+                "raw_artifacts_local_only": True,
+                "automatic_upload": False,
+            },
+        }
+        manifest_path = output_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (output_dir / "manifest.sha256").write_text(
+            f"{SUPPORT.sha256_file(manifest_path)}  manifest.json\n",
+            encoding="utf-8",
+        )
+        print(f"direct task PTY acceptance passed: {manifest_path}")
+        return 0
+
+        # The legacy child-orchestration fixture below is retained for its unit-level contract
+        # helpers; production plan approval now intentionally uses the direct Task route.
         submit_user_prompt(runner, USER_PROMPT)
         # RFC-0063 ReviewFirst baseline: open the complete workbench first, then explicitly
         # confirm its selected Run action. A single Enter must never skip plan review.
         approve_review_first_plan(runner, deadline.remaining())
         session_path, audit = wait_for_audit(
-            session_dir,
+            managed_session_dir,
             runner,
             lambda value: value.final_answer_count == 1
             and value.task_final_count == 1,
@@ -1388,7 +2087,7 @@ def main() -> int:
         )
         runner.send("y")
         session_path, approval_audit = wait_for_audit(
-            session_dir,
+            managed_session_dir,
             runner,
             lambda value: value.approval_final_answer_count == 1
             and value.task_final_count == 2,
@@ -1438,7 +2137,7 @@ def main() -> int:
         runner.start()
         SUPPORT.wait_for_main_tui(runner, deadline.remaining())
         session_path, interrupted_audit = wait_for_audit(
-            session_dir,
+            managed_session_dir,
             runner,
             lambda value: value.paused_task_run_count == 1
             and value.interrupted_step_count == 1,
@@ -1449,7 +2148,7 @@ def main() -> int:
         runner.type_text("/task continue")
         runner.send("\r")
         session_path, continue_audit = wait_for_audit(
-            session_dir,
+            managed_session_dir,
             runner,
             lambda value: value.continue_final_answer_count == 1
             and value.task_final_count == 3,
@@ -1479,7 +2178,7 @@ def main() -> int:
         )
         runner.send(b"\x1b")
         session_path, cancel_audit = wait_for_audit(
-            session_dir,
+            managed_session_dir,
             runner,
             lambda value: value.cancelled_task_run_count == 1,
             deadline.remaining(),
@@ -1503,7 +2202,7 @@ def main() -> int:
         approve_review_first_plan(runner, deadline.remaining())
 
         session_path, review_audit = wait_for_audit(
-            session_dir,
+            managed_session_dir,
             runner,
             lambda value: value.promotion_preview_count == 1,
             deadline.remaining(),
@@ -1534,7 +2233,7 @@ def main() -> int:
         )
         runner.send("\r")
         session_path, integration_audit = wait_for_audit(
-            session_dir,
+            managed_session_dir,
             runner,
             lambda value: value.integration_final_answer_count == 1
             and value.task_final_count == 4,
@@ -1672,21 +2371,34 @@ def main() -> int:
         json.JSONDecodeError,
     ) as error:
         print(f"orchestration PTY acceptance failed: {error}", file=sys.stderr)
-        if runner is not None:
+        active_runner = runner_holder[0] if runner_holder[0] is not None else runner
+        if active_runner is not None:
             try:
-                runner.read_available(0.0)
+                active_runner.read_available(0.0)
                 (output_dir / "failure-screen.txt").write_text(
-                    runner.screen() + "\n",
+                    active_runner.screen() + "\n",
                     encoding="utf-8",
                 )
             except OSError:
+                pass
+        if managed_session_dir is not None and managed_session_dir.exists():
+            try:
+                failure_sessions = output_dir / "failure-sessions"
+                failure_sessions.mkdir(parents=True, exist_ok=True)
+                for source in managed_parent_session_files(managed_session_dir):
+                    shutil.copyfile(
+                        source,
+                        failure_sessions / f"{source.parent.name}-records.jsonl",
+                    )
+            except (OSError, json.JSONDecodeError):
                 pass
         if args.keep_fixture and fixture_root is not None:
             print(f"retained fixture: {fixture_root}", file=sys.stderr)
         return 1
     finally:
-        if runner is not None:
-            runner.stop()
+        active_runner = runner_holder[0] if runner_holder[0] is not None else runner
+        if active_runner is not None:
+            active_runner.stop()
         if server is not None:
             server.shutdown()
             server.server_close()

@@ -331,12 +331,14 @@ where
             None
         } else {
             Some(
-                ManagedTuiArtifactStoreLease::acquire(current.writer(), &session_log_path)
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "failed to admit target session artifact storage: {error:#}"
-                        )
-                    })?,
+                ManagedTuiArtifactStoreLease::acquire(
+                    current.writer(),
+                    &session_log_path,
+                    session.session_scope_id(),
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to admit target session artifact storage: {error:#}")
+                })?,
             )
         }
     } else {

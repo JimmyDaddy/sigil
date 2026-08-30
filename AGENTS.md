@@ -47,9 +47,12 @@ CLI 与 HTTP 只承担自动化、调试和 adapter 职责。
 - `crates/sigil-desktop`：桌面 Rust 后端的 launcher、私有 bearer 与 typed local HTTP client；不承载 UI 或 agent loop
 - `apps/desktop`：Tauri 2 + React 桌面壳；renderer 只通过 allowlist command/event 消费收窄 DTO，不持有 bearer、路径、process 或 generic HTTP/filesystem 能力
 - `crates/sigil-mcp`：stdio MCP client 与工具适配
-- `crates/sigil-runtime`：Desktop/TUI/CLI 共享的 provider、tool registry 与 run options 装配
+- `crates/sigil-application`：transport-neutral application command/projection/recovery contract；不持有 runtime、TUI、filesystem、process 或 physical authority
+- `crates/sigil-runtime`：Desktop/TUI/CLI 共享的 provider、tool registry 与 run options 装配，以及 application port 的 host 实现
 - `crates/sigil`：薄 CLI、调试入口、自动化入口
-- `crates/sigil-tui`：终端产品表面
+- `crates/sigil-tui-core` / `crates/sigil-tui-ratatui` / `crates/sigil-tui-framework`：可发布、application-neutral 的 TUI framework package family；不导入 Sigil domain、runtime、filesystem 或 process
+- `crates/sigil-tui-app`：只依赖 application contract 与 public TUI facade 的薄产品 adapter
+- `crates/sigil-tui`（package `sigil-tui-host`）：内部 TUI composition host；旧 runner、AppState、renderer 与 platform effects 只能留在该 non-publishable host，不得重新暴露为 public framework API
 - `dev/governance`：开发规范
 - `dev/docs`：架构与技术方案
 

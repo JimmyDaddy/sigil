@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
+fs2.workspace = true
+libc.workspace = true
+regex.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 serde.workspace = true
 serde_json.workspace = true
@@ -12,8 +18,10 @@ sha2.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 toml.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
+sigil-process-observer = { path = "../sigil-process-observer" }
 tempfile.workspace = true
 
 [lints]

@@ -2,9 +2,10 @@ use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
+use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     ChangeSetFileResult, ChangeSetFileResultStatus, ChangeSetResult, ChangeSetResultStatus,
-    ControlEntry, EventHandler, EvidenceScope, ExecutionBackend, IntegrationBaseRepresentation,
+    ControlEntry, EventHandler, EvidenceScope, IntegrationBaseRepresentation,
     IntegrationProjection, IntegrationPromotionAttemptId, IntentExecutionOriginV1, RunEvent,
     SecretRedactor, Session, SessionLogEntry, TaskIntegrationReviewRequest, TaskPromotionAuthority,
     TaskPromotionPreview, TrustedCheckSpec, VerificationPolicy, WorkspaceTrust,
@@ -161,7 +162,7 @@ pub async fn prepare_task_integration_review(
 pub async fn accept_task_integration_review<H>(
     session: &mut Session,
     handler: &mut H,
-    execution_backend: Arc<dyn ExecutionBackend>,
+    verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
     secret_redactor: &SecretRedactor,
     workspace_root: &Path,
     request: &TaskIntegrationReviewRequest,
@@ -273,7 +274,7 @@ where
     let parent_verification = run_authoritative_parent_verification(
         session,
         handler,
-        execution_backend,
+        verification_execution_port,
         ParentVerificationRunRequest {
             attempt_id,
             plan_id: preview.plan_id,

@@ -74,7 +74,7 @@ class RunEvalsTests(unittest.TestCase):
             environment = os.environ.copy()
             environment.update(
                 {
-                    "SIGIL_BIN": str(fake_binary),
+                    "SIGIL_MODEL_EVAL_BIN": str(fake_binary),
                     "SIGIL_CAPTURED_ARGS": str(captured_args),
                 }
             )

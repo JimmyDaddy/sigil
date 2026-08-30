@@ -17,11 +17,41 @@ pub struct TerminalProcessManager {
     preview_limit_bytes: usize,
     artifact_limits: TerminalArtifactLimits,
     cancel_grace: Duration,
+    execution_owner: TerminalExecutionOwnerV1,
     /// RFC-0062 14.1: shared task-scoped scratch leases; released when a task terminalizes.
     scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
 }
 
+#[derive(Clone)]
+enum TerminalExecutionOwnerV1 {
+    Managed(Arc<dyn crate::ManagedTerminalExecutionPortV1>),
+    #[cfg(any(test, feature = "test-support"))]
+    LegacyDirect,
+}
+
+#[cfg(test)]
+fn default_terminal_execution_owner() -> TerminalExecutionOwnerV1 {
+    TerminalExecutionOwnerV1::LegacyDirect
+}
+
+#[cfg(not(test))]
+fn default_terminal_execution_owner() -> TerminalExecutionOwnerV1 {
+    TerminalExecutionOwnerV1::Managed(Arc::new(crate::UnavailableManagedCommandExecutionPortV1))
+}
+
 impl TerminalProcessManager {
+    fn ensure_execution_available(&self) -> Result<()> {
+        match &self.execution_owner {
+            TerminalExecutionOwnerV1::Managed(port) if !port.is_available() => {
+                Err(anyhow::Error::new(
+                    sigil_kernel::managed_execution::ManagedExecutionErrorV1::ProviderUnavailable,
+                )
+                .context("managed terminal launch failed"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Creates a non-PTY process manager rooted at `workspace_root`.
     ///
     /// # Errors
@@ -80,8 +110,27 @@ impl TerminalProcessManager {
             preview_limit_bytes: DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES,
             artifact_limits: TerminalArtifactLimits::default(),
             cancel_grace: Duration::from_millis(DEFAULT_CANCEL_GRACE_MS),
+            execution_owner: default_terminal_execution_owner(),
             scratch_leases: None,
         })
+    }
+
+    /// Binds the production terminal lifecycle to the runtime-owned managed execution port.
+    ///
+    /// Normal-build public constructors always hold a managed owner, including when Cargo unifies
+    /// test-support features for a workspace test build.
+    pub fn with_managed_execution(
+        mut self,
+        managed_execution: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+    ) -> Self {
+        self.execution_owner = TerminalExecutionOwnerV1::Managed(managed_execution);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_legacy_execution_for_test_support(mut self) -> Self {
+        self.execution_owner = TerminalExecutionOwnerV1::LegacyDirect;
+        self
     }
 
     /// Binds the shared task-scoped scratch lease registry to every task lifecycle.
@@ -141,9 +190,36 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     ) -> Result<TerminalTaskEntry> {
+        self.ensure_execution_available()?;
         let plan = self
             .prepare_start(request, TerminalStartMode::LocalProcess)
             .await?;
+        match &self.execution_owner {
+            TerminalExecutionOwnerV1::Managed(managed_execution) => {
+                self.start_managed_with_readiness_and_sink(
+                    managed_execution,
+                    plan,
+                    readiness,
+                    lifecycle_sink,
+                    None,
+                )
+                .await
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            TerminalExecutionOwnerV1::LegacyDirect => {
+                self.start_legacy_with_readiness_and_sink(plan, readiness, lifecycle_sink)
+                    .await
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    async fn start_legacy_with_readiness_and_sink(
+        &self,
+        plan: TerminalTaskStartPlan,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<TerminalTaskEntry> {
         // The lifecycle owner and its watch channel exist before the child can emit or exit.
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
@@ -280,7 +356,43 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     ) -> Result<TerminalTaskEntry> {
-        let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
+        self.ensure_execution_available()?;
+        match &self.execution_owner {
+            TerminalExecutionOwnerV1::Managed(managed_execution) => {
+                let plan = self
+                    .prepare_start(request, TerminalStartMode::ManagedPty)
+                    .await?;
+                self.start_managed_with_readiness_and_sink(
+                    managed_execution,
+                    plan,
+                    readiness,
+                    lifecycle_sink,
+                    Some(pty_size.unwrap_or_default()),
+                )
+                .await
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            TerminalExecutionOwnerV1::LegacyDirect => {
+                let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
+                self.start_legacy_pty_with_readiness_and_sink(
+                    plan,
+                    pty_size,
+                    readiness,
+                    lifecycle_sink,
+                )
+                .await
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    async fn start_legacy_pty_with_readiness_and_sink(
+        &self,
+        plan: TerminalTaskStartPlan,
+        pty_size: Option<TerminalPtySize>,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<TerminalTaskEntry> {
         // Construct the observer before the PTY child can emit or exit.
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
@@ -345,6 +457,102 @@ impl TerminalProcessManager {
             lifecycle,
         }));
 
+        Ok(plan.initial_entry)
+    }
+
+    async fn start_managed_with_readiness_and_sink(
+        &self,
+        managed_execution: &Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+        plan: TerminalTaskStartPlan,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+        pty_size: Option<TerminalPtySize>,
+    ) -> Result<TerminalTaskEntry> {
+        let request = crate::ManagedTerminalStartRequestV1 {
+            program: plan.shell.clone(),
+            args: plan.shell_args.clone(),
+            cwd: plan.resolved_cwd.absolute.clone(),
+            environment: plan.env.clone(),
+            pty_size: pty_size.map(|size| sigil_kernel::managed_execution::BoundedPtySizeV1 {
+                rows: size.rows,
+                cols: size.cols,
+            }),
+        };
+        let handle = managed_execution
+            .start_persistent(request)
+            .await
+            .map_err(|error| anyhow::Error::new(error).context("managed terminal launch failed"))?;
+
+        let lifecycle = TerminalLifecycleOwner::new(
+            plan.task_id.clone(),
+            plan.initial_entry.handle.execution_backend,
+            plan.initial_entry.handle.sandbox_profile,
+            &readiness,
+        )?
+        .with_scratch_leases(self.scratch_leases.clone());
+        let lifecycle_route_baseline = lifecycle.snapshot();
+        let lifecycle_route_receiver = lifecycle.subscribe();
+        let output_file = Arc::new(Mutex::new(CombinedOutputWriter::new(
+            open_append_file(&plan.artifacts.absolute_output).await?,
+            self.artifact_limits.combined_bytes,
+        )));
+        let capture_ledger = Arc::new(TerminalCaptureLedger::with_lifecycle(lifecycle.clone()));
+        let (capture_failure_tx, _capture_failure_rx) = mpsc::unbounded_channel();
+        let (stdout_writer, stdout_reader) = tokio::io::duplex(64 * 1024);
+        let (stderr_writer, stderr_reader) = tokio::io::duplex(64 * 1024);
+        let stdout_task = spawn_capture_task(
+            Some(stdout_reader),
+            TerminalOutputStream::Stdout,
+            plan.artifacts.absolute_stdout.clone(),
+            Arc::clone(&output_file),
+            self.artifact_limits,
+            Arc::clone(&capture_ledger),
+            capture_failure_tx.clone(),
+        );
+        let stderr_task = spawn_capture_task(
+            Some(stderr_reader),
+            TerminalOutputStream::Stderr,
+            plan.artifacts.absolute_stderr.clone(),
+            Arc::clone(&output_file),
+            self.artifact_limits,
+            Arc::clone(&capture_ledger),
+            capture_failure_tx,
+        );
+        let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
+        let (command_tx, cancel_rx) = mpsc::channel(1);
+        let managed = ManagedTerminalTask {
+            summary: Arc::clone(&summary),
+            lifecycle: lifecycle.clone(),
+            control: TerminalTaskControl::Managed { command_tx },
+            lifecycle_route_abort: None,
+        };
+        self.tasks
+            .lock()
+            .await
+            .insert(plan.task_id.clone(), managed);
+        self.attach_lifecycle_route(
+            &plan.task_id,
+            Arc::clone(&summary),
+            lifecycle.clone(),
+            lifecycle_route_receiver,
+            lifecycle_route_baseline,
+            lifecycle_sink,
+        )
+        .await?;
+        self.record_permission_context(&plan)?;
+        tokio::spawn(run_managed_terminal_worker(ManagedTerminalWorker {
+            handle,
+            stdout_writer,
+            stderr_writer,
+            cancel_rx,
+            summary,
+            artifacts: plan.artifacts,
+            stdout_task,
+            stderr_task,
+            capture_ledger,
+            preview_limit_bytes: self.preview_limit_bytes,
+            lifecycle,
+        }));
         Ok(plan.initial_entry)
     }
 
@@ -611,10 +819,6 @@ impl TerminalProcessManager {
             bail!("terminal task is not running: {}", task_id.as_str());
         }
 
-        let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
-            bail!("terminal task backend does not support input: process");
-        };
-
         let input = input.into().into_bytes();
         if input.len() > MAX_TERMINAL_INPUT_BYTES {
             bail!(
@@ -623,6 +827,45 @@ impl TerminalProcessManager {
             );
         }
         let input_bytes = input.len() as u64;
+        if matches!(
+            current.handle.execution_backend,
+            Some(TerminalExecutionBackendKind::SandboxedPty)
+        ) && let TerminalTaskControl::Managed { command_tx } = &task.control
+        {
+            let (respond_to, response) = oneshot::channel();
+            command_tx
+                .send(ManagedTerminalCommand::WriteStdin {
+                    input: sigil_kernel::managed_execution::BoundedProcessInputV1 {
+                        payload: input,
+                    },
+                    respond_to,
+                })
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal task is no longer running: {}",
+                        task_id.as_str()
+                    )
+                })?;
+            response
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal input receipt was lost: {}",
+                        task_id.as_str()
+                    )
+                })?
+                .map_err(|error| anyhow!(error))?;
+            return Ok(TerminalInputResult {
+                task_id: task_id.clone(),
+                input_bytes,
+                backend: TerminalBackendKind::Pty,
+            });
+        }
+        let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
+            bail!("terminal task backend does not support input: process");
+        };
+
         let input_tx = io_control
             .input_tx
             .lock()
@@ -662,6 +905,42 @@ impl TerminalProcessManager {
             bail!("terminal task is not running: {}", task_id.as_str());
         }
 
+        if matches!(
+            current.handle.execution_backend,
+            Some(TerminalExecutionBackendKind::SandboxedPty)
+        ) && let TerminalTaskControl::Managed { command_tx } = &task.control
+        {
+            let (respond_to, response) = oneshot::channel();
+            command_tx
+                .send(ManagedTerminalCommand::Resize {
+                    size: sigil_kernel::managed_execution::BoundedPtySizeV1 {
+                        rows: size.rows,
+                        cols: size.cols,
+                    },
+                    respond_to,
+                })
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal task is no longer running: {}",
+                        task_id.as_str()
+                    )
+                })?;
+            response
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "managed terminal resize receipt was lost: {}",
+                        task_id.as_str()
+                    )
+                })?
+                .map_err(|error| anyhow!(error))?;
+            return Ok(TerminalResizeResult {
+                task_id: task_id.clone(),
+                size,
+                backend: TerminalBackendKind::Pty,
+            });
+        }
         let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
             bail!("terminal task backend does not support resize: process");
         };
@@ -751,6 +1030,33 @@ impl TerminalProcessManager {
                 task.lifecycle
                     .mark_terminal(entry.status, entry.output_total_bytes);
                 Ok(self.snapshot(task_id).await?.entry)
+            }
+            TerminalTaskControl::Managed { command_tx } => {
+                let (respond_to, response) = oneshot::channel();
+                command_tx
+                    .send(ManagedTerminalCommand::Cancel { respond_to })
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "managed terminal task is no longer running: {}",
+                            task_id.as_str()
+                        )
+                    })?;
+                match response.await {
+                    Ok(Ok(())) => Ok(self.snapshot(task_id).await?.entry),
+                    Ok(Err(error)) => Err(anyhow!(error)),
+                    Err(_) => {
+                        let entry = self.snapshot(task_id).await?.entry;
+                        if entry.status.is_terminal() {
+                            Ok(entry)
+                        } else {
+                            Err(anyhow!(
+                                "managed terminal cancellation receipt was lost before cleanup could be confirmed: {}",
+                                task_id.as_str()
+                            ))
+                        }
+                    }
+                }
             }
         }
     }
@@ -884,10 +1190,12 @@ impl TerminalProcessManager {
         let env = request.env;
         let execution = match mode {
             TerminalStartMode::LocalProcess => local_process_execution(),
+            #[cfg(any(test, feature = "test-support"))]
             TerminalStartMode::Pty => self
                 .terminal_execution
                 .resolve_pty_execution(&resolved_cwd.absolute, &shell, &command, &env)?
                 .into(),
+            TerminalStartMode::ManagedPty => managed_pty_execution(),
         };
 
         {
@@ -1008,7 +1316,9 @@ pub(super) fn should_publish_lifecycle_event(
 #[derive(Debug, Clone, Copy)]
 enum TerminalStartMode {
     LocalProcess,
+    #[cfg(any(test, feature = "test-support"))]
     Pty,
+    ManagedPty,
 }
 
 struct TerminalStartExecution {
@@ -1024,6 +1334,17 @@ fn local_process_execution() -> TerminalStartExecution {
     TerminalStartExecution {
         execution_backend: TerminalExecutionBackendKind::LocalProcess,
         execution_backend_capabilities: TerminalExecutionBackendCapabilities::local_process(),
+        enforcement_backend: ExecutionBackendKind::Local,
+        enforcement_backend_capabilities: ExecutionBackendCapabilities::default(),
+        sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        pty_command: None,
+    }
+}
+
+fn managed_pty_execution() -> TerminalStartExecution {
+    TerminalStartExecution {
+        execution_backend: TerminalExecutionBackendKind::SandboxedPty,
+        execution_backend_capabilities: TerminalExecutionBackendCapabilities::sandboxed_pty(),
         enforcement_backend: ExecutionBackendKind::Local,
         enforcement_backend_capabilities: ExecutionBackendCapabilities::default(),
         sandbox_profile: ExecutionSandboxProfile::Unconfined,
@@ -1066,6 +1387,23 @@ pub(super) enum TerminalTaskControl {
         cancel_grace: Duration,
         artifacts: Arc<TerminalTaskArtifacts>,
         preview_limit_bytes: usize,
+    },
+    Managed {
+        command_tx: mpsc::Sender<ManagedTerminalCommand>,
+    },
+}
+
+pub(super) enum ManagedTerminalCommand {
+    WriteStdin {
+        input: sigil_kernel::managed_execution::BoundedProcessInputV1,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    Resize {
+        size: sigil_kernel::managed_execution::BoundedPtySizeV1,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    Cancel {
+        respond_to: oneshot::Sender<Result<(), String>>,
     },
 }
 

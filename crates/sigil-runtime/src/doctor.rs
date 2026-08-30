@@ -27,6 +27,133 @@ use crate::{
     resolve_openai_compat_api_key, resolve_openai_responses_api_key, resolve_sigil_paths,
 };
 
+/// Constructs the independent doctor/operator authority bootstrap recovery service. Normal boot
+/// never receives this service and no tool/model path is wired to it; the returned service owns
+/// its ephemeral authorization table and uses the real host process observer factory.
+pub fn authority_bootstrap_recovery_service(
+    config_path: &Path,
+) -> Result<sigil_resource_authority::AuthorityBootstrapRecoveryServiceV1, String> {
+    let canonical_config_path = fs::canonicalize(config_path).map_err(|error| error.to_string())?;
+    let verifier_hash = sigil_process_observer::canonical_digest(
+        format!(
+            "sigil-authority-bootstrap-recovery-process-observer-v1\0{}",
+            canonical_config_path.display()
+        )
+        .as_bytes(),
+    );
+    let process_factory =
+        sigil_process_observer::ProcessObserverFactoryV1::new(verifier_hash).instantiate();
+    sigil_resource_authority::AuthorityBootstrapRecoveryServiceV1::for_canonical_config_path(
+        &canonical_config_path,
+        process_factory,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Safe operator-facing projection of one completed bootstrap recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityBootstrapRecoverySummaryV1 {
+    pub old_authority_epoch: u64,
+    pub new_authority_epoch: u64,
+    pub receipt_hash: String,
+    pub reconciled_after_crash: bool,
+}
+
+/// Runs the complete doctor/operator recovery flow. The callback receives the exact challenge
+/// digest and must return the operator's typed confirmation. Journal evidence comes only from the
+/// durable failed-boot record; process evidence comes only from the authority inventory.
+pub fn recover_authority_bootstrap_with_confirmation<F>(
+    config_path: &Path,
+    launch_cwd: &Path,
+    confirm: F,
+) -> Result<AuthorityBootstrapRecoverySummaryV1, String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    let service = authority_bootstrap_recovery_service(config_path)?;
+    if let Some(receipt) = service
+        .reconcile_pending_fresh_epoch()
+        .map_err(|error| error.to_string())?
+    {
+        crate::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
+            .map_err(|error| format!("reconciled epoch failed current-schema boot: {error}"))?;
+        return Ok(AuthorityBootstrapRecoverySummaryV1 {
+            old_authority_epoch: receipt.old_authority_epoch,
+            new_authority_epoch: receipt.new_authority_epoch,
+            receipt_hash: receipt.receipt_hash.to_hex(),
+            reconciled_after_crash: true,
+        });
+    }
+
+    let root_config = RootConfig::load(config_path).map_err(|error| error.to_string())?;
+    let workspace_root =
+        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    let root_ref = service
+        .prepare_fresh_root_selection(&paths.state_root, &paths.cache_root, &paths.scratch_root)
+        .map_err(|error| error.to_string())?;
+    let selection_hash = service
+        .prepared_root_selection_hash(&root_ref)
+        .map_err(|error| error.to_string())?;
+    let (failed_bootstrap_hash, evidence) = service
+        .observed_failed_journal_evidence()
+        .map_err(|error| error.to_string())?;
+    let evidence_set_hash =
+        sigil_resource_authority::AuthorityBootstrapRecoveryServiceV1::evidence_set_hash(&evidence)
+            .map_err(|error| error.to_string())?;
+    let quiescence = service
+        .probe_old_epoch_quiescence(evidence_set_hash)
+        .map_err(|error| error.to_string())?;
+    let operation =
+        sigil_resource_authority::AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
+            explicit_root_config: root_ref,
+            expected_failed_bootstrap_hash: Some(failed_bootstrap_hash),
+            failed_journal_evidence: evidence,
+            evidence_set_hash,
+            old_epoch_quiescence: Box::new(quiescence.clone()),
+        };
+    let now_ms = operator_epoch_ms();
+    let challenge = service
+        .issue_operator_challenge(&operation, now_ms, 5 * 60 * 1000)
+        .map_err(|error| error.to_string())?;
+    let expected = challenge.challenge_hash.to_hex();
+    let supplied = confirm(&expected)?;
+    if supplied.trim() != expected {
+        return Err("operator confirmation does not match the recovery challenge".to_owned());
+    }
+    let confirmed_at_ms = operator_epoch_ms();
+    let confirmation =
+        sigil_resource_authority::ExactBootstrapOperatorConfirmationV1::for_challenge(
+            &challenge,
+            evidence_set_hash,
+            Some(quiescence.proof_hash),
+            Some(selection_hash),
+            confirmed_at_ms,
+        );
+    let authorization = service
+        .authorize(&operation, confirmation, confirmed_at_ms)
+        .map_err(|error| error.to_string())?;
+    let receipt = service
+        .execute(operation, authorization)
+        .map_err(|error| error.to_string())?;
+    crate::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
+        .map_err(|error| format!("fresh epoch failed current-schema boot: {error}"))?;
+    Ok(AuthorityBootstrapRecoverySummaryV1 {
+        old_authority_epoch: receipt.old_authority_epoch,
+        new_authority_epoch: receipt.new_authority_epoch,
+        receipt_hash: receipt.receipt_hash.to_hex(),
+        reconciled_after_crash: false,
+    })
+}
+
+fn operator_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
+}
+
 const MAX_SESSION_STREAMS_DOCTOR_SCAN: usize = 20;
 const MAX_SESSION_STREAM_DOCTOR_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -218,6 +345,10 @@ pub(crate) fn check_cutover(
                 CutoverBlockerCodeV1::AdapterNotReady => (
                     "mandatory adapter readiness probe failed",
                     "repair the reported adapter before starting current-schema boot",
+                ),
+                CutoverBlockerCodeV1::UnsupportedLegacyData => (
+                    "persisted legacy data is unsupported for current-schema boot",
+                    "migrate or create a current-schema session before starting a run",
                 ),
             };
             report.push_with_remediation(

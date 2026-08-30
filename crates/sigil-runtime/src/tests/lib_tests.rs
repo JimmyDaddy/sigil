@@ -1140,17 +1140,8 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn terminal_start_result_projects_optional_output_hash_into_durable_audit() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let provider_capabilities =
-        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
-    let mut registry = build_tool_registry(
-        &test_root_config("deepseek"),
-        &provider_capabilities,
-        temp.path().to_path_buf(),
-    )
-    .await?;
+#[test]
+fn terminal_start_result_projects_optional_output_hash_into_durable_audit() -> Result<()> {
     let call = ToolCall {
         id: "terminal-runtime-audit".to_owned(),
         name: "terminal_start".to_owned(),
@@ -1162,9 +1153,12 @@ async fn terminal_start_result_projects_optional_output_hash_into_durable_audit(
         })
         .to_string(),
     };
-    let mut result = registry
-        .execute(ToolContext::new(temp.path().to_path_buf(), 5), call.clone())
-        .await?;
+    let mut result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        serde_json::json!({"status": "started"}).to_string(),
+        ToolResultMeta::default(),
+    );
     result.metadata.details["output_hash"] = json!("2".repeat(64));
 
     let execution = durable_tool_execution_entry(
@@ -1181,8 +1175,6 @@ async fn terminal_start_result_projects_optional_output_hash_into_durable_audit(
     );
     let mut session = Session::new("runtime-audit", "runtime-audit");
     session.append_control(ControlEntry::ToolExecution(Box::new(execution)))?;
-    let tools = registry.drain_by_name_prefix("");
-    shutdown_registered_tools(&tools).await?;
     Ok(())
 }
 
@@ -1400,6 +1392,10 @@ for line in sys.stdin:
     sys.stdout.flush()
 "#,
     )?;
+    let mut baseline_entries = std::fs::read_dir(temp.path())?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    baseline_entries.sort();
     let provider_capabilities =
         provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let route = Arc::new(
@@ -1409,7 +1405,8 @@ for line in sys.stdin:
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             temp.path().to_path_buf(),
-        ),
+        )
+        .with_process_inventory(managed_process_inventory_for_test()),
     );
     let launcher = super::ConfiguredMcpProcessLauncher {
         execution: sigil_kernel::ExecutionConfig::default(),
@@ -1441,6 +1438,14 @@ for line in sys.stdin:
     );
     let tools = registry.drain_by_name_prefix("");
     shutdown_registered_tools(&tools).await?;
+    let mut settled_entries = std::fs::read_dir(temp.path())?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    settled_entries.sort();
+    assert_eq!(
+        settled_entries, baseline_entries,
+        "managed MCP settlement must release its exact ExecutionTemp generation"
+    );
     Ok(())
 }
 
@@ -1753,9 +1758,30 @@ async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -
 
 #[tokio::test]
 #[cfg(target_os = "macos")]
-async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_backend() -> Result<()>
-{
+#[allow(clippy::await_holding_lock)] // Serializes process-wide storage-root overrides for the async fixture.
+async fn build_tool_registry_rejects_uncomposed_terminal_pty_route() -> Result<()> {
+    // Path resolution reads process-wide SIGIL_STATE_HOME / SIGIL_CACHE_HOME. Serialize this
+    // test with the environment-mutating fixtures and bind both roots to this test's lifetime;
+    // otherwise parallel runtime tests can legitimately contend with the developer's default
+    // scratch root before this assertion reaches the uncomposed managed-execution seam.
+    let _environment_guard = crate::test_env::lock();
     let temp = tempfile::tempdir()?;
+    let _environment = EnvScope::set_owned(&[
+        (
+            crate::SIGIL_STATE_HOME_ENV,
+            temp.path()
+                .join("state-home")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            crate::SIGIL_CACHE_HOME_ENV,
+            temp.path()
+                .join("cache-home")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ]);
     let provider_capabilities =
         provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
@@ -1768,7 +1794,7 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
     let registry =
         build_tool_registry(&config, &provider_capabilities, temp.path().to_path_buf()).await?;
 
-    let result = registry
+    let error = registry
         .execute(
             ToolContext::new(temp.path().to_path_buf(), 5),
             ToolCall {
@@ -1784,36 +1810,12 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
                 .to_string(),
             },
         )
-        .await?;
-
-    assert!(!result.is_error());
-    assert_eq!(
-        result.metadata.details["execution_backend"],
-        json!("sandboxed_pty")
+        .await
+        .expect_err("uncomposed terminal execution must fail closed");
+    assert!(
+        format!("{error:#}").contains("sandbox provider is unavailable"),
+        "unexpected fail-closed error: {error:#}"
     );
-    assert_eq!(
-        result.metadata.details["enforcement_backend"],
-        json!("macos_seatbelt")
-    );
-    assert_eq!(
-        result.metadata.details["sandbox_profile"],
-        json!("workspace_write")
-    );
-    assert_eq!(
-        result.metadata.details["enforcement_backend_capabilities"]["persistent_pty"],
-        json!(true)
-    );
-    let cancelled = registry
-        .execute(
-            ToolContext::new(temp.path().to_path_buf(), 5),
-            ToolCall {
-                id: "terminal-sandboxed-pty-cancel".to_owned(),
-                name: "terminal_cancel".to_owned(),
-                args_json: json!({ "task_id": "runtime-sandboxed-pty" }).to_string(),
-            },
-        )
-        .await?;
-    assert!(!cancelled.is_error());
     Ok(())
 }
 
@@ -2352,7 +2354,8 @@ fn managed_mcp_registration_options(
             )),
             Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
             workspace_root.to_path_buf(),
-        ),
+        )
+        .with_process_inventory(managed_process_inventory_for_test()),
     );
     Ok(sigil_mcp::McpToolRegistrationOptions::eager()?
         .with_working_dir(workspace_root.to_path_buf())
@@ -2360,6 +2363,11 @@ fn managed_mcp_registration_options(
             execution: sigil_kernel::ExecutionConfig::default(),
             managed_extension_execution: Some(route),
         })))
+}
+
+fn managed_process_inventory_for_test()
+-> Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> {
+    Arc::new(sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default())
 }
 
 #[tokio::test]

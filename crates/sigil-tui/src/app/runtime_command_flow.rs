@@ -119,7 +119,7 @@ impl AppState {
         )?;
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = model_ref.model_id.clone();
-        self.runtime.model_route = Some(route);
+        self.runtime.model_route = Some(route.clone());
         let notice = format!(
             "route -> {}/{}; continuing current session; saved default unchanged",
             model_ref.connection_id, model_ref.model_id
@@ -131,13 +131,8 @@ impl AppState {
             format!("{}/{}", model_ref.connection_id, model_ref.model_id),
         );
 
-        let mut next_config = root_config;
-        next_config.agent.connection = Some(model_ref.connection_id.clone());
-        next_config.agent.model = model_ref.model_id.clone();
         self.schedule_balance_refresh();
 
-        Ok(Some(AppAction::RuntimeConfigUpdated {
-            root_config: Box::new(next_config),
-        }))
+        Ok(Some(AppAction::SessionRuntimeRouteUpdated { route }))
     }
 }

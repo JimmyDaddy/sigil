@@ -1342,6 +1342,17 @@ impl RootConfig {
         Ok(config)
     }
 
+    /// Parses one configuration payload and applies only the documented model-request
+    /// environment overrides. Callers that already hold an authority-opened config handle use
+    /// this entry point so parsing cannot silently reopen a path that may have been replaced.
+    pub fn parse_with_model_request_env(raw: &str) -> Result<Self> {
+        let mut config = parse_root_config_toml(raw)
+            .map_err(|_| anyhow::anyhow!("failed to parse configuration payload"))?;
+        config.validate_config_schema()?;
+        config.apply_model_request_env_overrides_with(|name| env::var(name).ok())?;
+        Ok(config)
+    }
+
     fn load_with_model_request_env(
         path: &Path,
         read_env: impl Fn(&str) -> Option<String>,
@@ -1702,7 +1713,7 @@ pub fn private_path_permissions_are_restricted(path: &Path) -> Result<bool> {
 ///
 /// Unix callers receive owner-only mode (`0600` for files, `0700` for directories). Windows
 /// callers receive a protected DACL that grants full access only to the current process user and
-/// Local System, and the current user becomes the object owner.
+/// Local System, and the current process user becomes the object owner.
 /// Symbolic links and Windows reparse points are rejected.
 ///
 /// # Errors
@@ -1727,16 +1738,26 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+        use std::os::windows::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawHandle,
+        };
 
         use windows_sys::Win32::{
             Foundation::LocalFree,
             Security::{
                 Authorization::{
                     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                    SE_FILE_OBJECT, SetSecurityInfo,
                 },
-                DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-                PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+                DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+                OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+                PSECURITY_DESCRIPTOR,
+            },
+            Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+                FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                WRITE_DAC, WRITE_OWNER,
             },
         };
 
@@ -1767,29 +1788,61 @@ pub fn secure_private_path_permissions(path: &Path) -> Result<()> {
             return Err(std::io::Error::last_os_error())
                 .context("failed to construct private Windows DACL");
         }
-        let wide_path = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        // SAFETY: the path is NUL terminated and descriptor remains valid until LocalFree.
-        let applied = unsafe {
-            SetFileSecurityW(
-                wide_path.as_ptr(),
+        let mut options = fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options
+            .open(path)
+            .with_context(|| format!("failed to open private Windows path {}", path.display()))?;
+        let mut owner = std::ptr::null_mut();
+        let mut owner_defaulted = 0;
+        let owner_read =
+            unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) };
+        anyhow::ensure!(
+            owner_read != 0 && !owner.is_null(),
+            "failed to read private Windows owner descriptor"
+        );
+        let mut dacl = std::ptr::null_mut();
+        let mut dacl_present = 0;
+        let mut dacl_defaulted = 0;
+        let dacl_read = unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor,
+                &mut dacl_present,
+                &mut dacl,
+                &mut dacl_defaulted,
+            )
+        };
+        anyhow::ensure!(
+            dacl_read != 0 && dacl_present != 0 && !dacl.is_null(),
+            "failed to read private Windows DACL descriptor"
+        );
+        // SAFETY: the handle is live, descriptor and its owner/DACL remain valid until after this
+        // call, and all other security components are intentionally left unchanged.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION
                     | DACL_SECURITY_INFORMATION
                     | PROTECTED_DACL_SECURITY_INFORMATION,
-                descriptor,
+                owner,
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
             )
         };
-        let source = (applied == 0).then(std::io::Error::last_os_error);
         // SAFETY: descriptor was allocated by LocalAlloc through the conversion API and is freed
         // exactly once here.
         unsafe {
             let _ = LocalFree(descriptor);
         }
-        if let Some(source) = source {
-            return Err(source)
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status as i32))
                 .with_context(|| format!("failed to secure Windows ACL for {}", path.display()));
         }
     }
@@ -2063,6 +2116,19 @@ where
         let mut file = {
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                    FILE_SHARE_WRITE, WRITE_DAC, WRITE_OWNER,
+                };
+                options
+                    .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER)
+                    // Keep the temporary publication handle share-compatible with the
+                    // handle-based native ACL hardening performed below.
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            }
             options
                 .open(&temp_path)
                 .with_context(|| format!("failed to create {}", temp_path.display()))?

@@ -9095,7 +9095,7 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
     assert!(
         no_backend_error
             .to_string()
-            .contains("requires an execution backend")
+            .contains("requires the managed verification execution port")
     );
     assert!(run_task_step_verification_checks_with_fake_backend(
         &mut session,

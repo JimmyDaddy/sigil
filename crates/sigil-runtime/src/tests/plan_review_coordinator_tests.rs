@@ -30,6 +30,263 @@ use crate::{
     ConversationCoordinator, PlanDecisionCommand, PlanReviewCoordinator, PlanReviewRunRequest,
 };
 
+#[test]
+fn current_schema_child_resource_bundle_is_scoped_and_explicitly_finalized() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let execution_temp = temp.path().join("execution-temp");
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&execution_temp)?;
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        &[
+            Channel::SessionLog,
+            Channel::ArtifactStaging,
+            Channel::ArtifactStore,
+        ],
+    )?;
+    let provisioner = composition.plan_review_child_resource_provisioner();
+    let (_, request) = session_with_route_decision()?;
+
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    assert!(!bundle.scope_id().is_empty());
+    assert_eq!(
+        bundle.authority_generation(),
+        composition.authority_generation()
+    );
+    assert!(!format!("{bundle:?}").contains("state/"));
+    bundle.finish()?;
+
+    // Explicit finish settles both the child SessionLog and paired artifact namespaces. Reusing
+    // the same deterministic child key is the recovery assertion: a leaked pending lease would
+    // poison the next admission instead of closing the child scope.
+    let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    recovered.finish()?;
+    Ok(())
+}
+
+fn child_resource_fixture(
+    channels: &[crate::managed_storage_writer::StorageWriterChannelV1],
+) -> Result<(
+    tempfile::TempDir,
+    Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    PlanReviewRunRequest,
+)> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let execution_temp = temp.path().join("execution-temp");
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&execution_temp)?;
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        channels,
+    )?;
+    let provisioner = composition.plan_review_child_resource_provisioner();
+    let (_, request) = session_with_route_decision()?;
+    Ok((temp, provisioner, request))
+}
+
+#[test]
+fn r71_f_csr_001_research_bundle_has_a_scoped_identity() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (_temp, provisioner, request) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    assert!(
+        bundle
+            .scope_id()
+            .starts_with(&request.child_logical_run_id())
+    );
+    assert!(bundle.scope_id().ends_with("-research"));
+    bundle.finish()?;
+    Ok(())
+}
+
+#[test]
+fn r71_f_csr_002_bundle_carries_current_authority_generation() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (_temp, provisioner, request) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    assert_eq!(bundle.authority_generation().epoch, 1);
+    assert_eq!(
+        bundle.authority_generation().instance_hash,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32])
+    );
+    bundle.finish()?;
+    Ok(())
+}
+
+#[test]
+fn r71_f_csr_003_bundle_debug_never_exposes_physical_paths() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (temp, provisioner, request) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let debug = format!("{bundle:?}");
+    assert!(!debug.contains(temp.path().to_string_lossy().as_ref()));
+    assert!(!debug.contains("records.jsonl"));
+    bundle.finish()?;
+    Ok(())
+}
+
+#[test]
+fn r71_f_csr_004_research_finish_releases_the_exact_admissions() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (_temp, provisioner, request) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    bundle.finish()?;
+    let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    recovered.finish()?;
+    Ok(())
+}
+
+#[test]
+fn r71_f_csr_005_finalizer_finish_releases_the_exact_admissions() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (_temp, provisioner, request) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
+    bundle.finish()?;
+    let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
+    recovered.finish()?;
+    Ok(())
+}
+
+#[test]
+fn r71_f_csr_006_research_and_finalizer_never_share_scope() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (_temp, provisioner, request) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let research = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let finalizer = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
+    assert_ne!(research.scope_id(), finalizer.scope_id());
+    assert!(research.scope_id().ends_with("-research"));
+    assert!(finalizer.scope_id().ends_with("-finalizer"));
+    finalizer.finish()?;
+    research.finish()?;
+    Ok(())
+}
+
+#[test]
+fn r71_f_csr_007_missing_artifact_authority_fails_before_child_bundle() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (_temp, provisioner, request) = child_resource_fixture(&[Channel::SessionLog])?;
+    let error = provisioner
+        .provision(&request, PlanReviewChildResourceKindV1::Research, 0)
+        .expect_err("missing artifact authority");
+    assert!(error.to_string().contains("artifact-staging"));
+    Ok(())
+}
+
+#[test]
+fn managed_child_partial_artifact_admission_settles_session_log() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let execution_temp = temp.path().join("execution-temp");
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&execution_temp)?;
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        &[
+            Channel::SessionLog,
+            Channel::ArtifactStaging,
+            Channel::ArtifactStore,
+        ],
+    )?;
+    let (_, request) = session_with_route_decision()?;
+    let key = format!("pr-{}-research-0", request.attempt_id.as_str(),);
+    let staging_path = composition
+        .storage_writer
+        .managed_named_leaf_path(Channel::ArtifactStaging, &key)?;
+    std::fs::create_dir_all(staging_path.parent().context("staging parent")?)?;
+    // Force the second-stage artifact admission to fail after SessionLog was admitted. A regular
+    // file is portable across Unix/Windows and is rejected before the authority can mutate it.
+    std::fs::write(&staging_path, b"not-a-directory")?;
+
+    let provisioner = composition.plan_review_child_resource_provisioner();
+    let error = provisioner
+        .provision(&request, PlanReviewChildResourceKindV1::Research, 0)
+        .expect_err("artifact admission should fail on the occupied staging leaf");
+    assert!(error.to_string().contains("artifact"));
+
+    // If the partial bundle path relied on Drop, this exact retry would still be blocked by the
+    // first SessionLog admission. Successful re-admission proves the explicit settlement ran.
+    let session_lease = composition
+        .storage_writer
+        .acquire_named(Channel::SessionLog, &key)?;
+    composition.storage_writer.finalize(session_lease)?;
+    Ok(())
+}
+
+#[test]
+fn r71_f_csr_008_child_scope_is_retry_stable_and_kind_bound() -> Result<()> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+    let (_temp, provisioner, request) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let first = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
+    let first_scope = first.scope_id().to_owned();
+    first.finish()?;
+    let retry = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
+    assert_eq!(retry.scope_id(), first_scope);
+    retry.finish()?;
+    let next = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 2)?;
+    assert_eq!(next.scope_id(), first_scope);
+    next.finish()?;
+    Ok(())
+}
+
 fn session_with_route_decision() -> Result<(Session, PlanReviewRunRequest)> {
     let mut session = Session::new("plan-review-test", "planned-model");
     session.append_control(ControlEntry::SessionIdentity {

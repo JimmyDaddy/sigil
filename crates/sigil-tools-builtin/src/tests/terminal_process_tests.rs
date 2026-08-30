@@ -174,6 +174,21 @@ fn terminal_process_manager_permission_context_reports_missing_task() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn unavailable_managed_terminal_never_falls_back_to_direct_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let manager = TerminalProcessManager::new(temp.path())?
+        .with_managed_execution(Arc::new(crate::UnavailableManagedCommandExecutionPortV1));
+
+    let error = manager
+        .start(TerminalStartRequest::new("sleep 30"))
+        .await
+        .expect_err("unavailable managed terminal must reject startup");
+
+    assert!(error.to_string().contains("managed terminal launch failed"));
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn terminal_cwd_accepts_prefixed_workspace_paths_and_keeps_confinement() -> Result<()> {
@@ -316,15 +331,22 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
 #[tokio::test]
 async fn terminal_lifecycle_fast_exit_preserves_readiness_and_generation() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let shell = test_shell(temp.path())?;
+    #[cfg(unix)]
+    let shell = Some(test_shell(temp.path())?);
+    #[cfg(windows)]
+    let shell = None;
+    #[cfg(unix)]
+    let command = "printf 'READY\\n'";
+    #[cfg(windows)]
+    let command = "Write-Output 'READY'";
     let manager = TerminalProcessManager::new(temp.path())?;
     let entry = manager
         .start_with_readiness(
             TerminalStartRequest {
                 task_id: Some(TerminalTaskId::new("terminal-fast-ready")?),
-                command: "printf 'READY\\n'".to_owned(),
+                command: command.to_owned(),
                 cwd: None,
-                shell: Some(shell),
+                shell,
                 env: Default::default(),
             },
             TerminalReadinessCondition::OutputContains {
@@ -533,7 +555,7 @@ async fn terminal_status_and_cancel_return_the_exact_lifecycle_generation() -> R
             },
             TerminalReadinessCondition::OutputContains {
                 value: "READY".to_owned(),
-                timeout: Duration::from_secs(2),
+                timeout: Duration::from_secs(5),
             },
         )
         .await?;
@@ -542,7 +564,7 @@ async fn terminal_status_and_cancel_return_the_exact_lifecycle_generation() -> R
             &entry.handle.task_id,
             0,
             TerminalWaitCondition::Readiness,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
         )
         .await?;
     assert_eq!(

@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(any(test, feature = "test-support")),
+    allow(dead_code, unused_imports)
+)]
+
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -58,11 +63,13 @@ mod manager; // task registry, lifecycle entrypoints, and permissions.
 mod output; // bounded output reads, previews, and hashes.
 mod worker; // process/PTY worker loops, cancellation, and finalization.
 
+#[cfg(any(test, feature = "test-support"))]
+use config::TERMINAL_PTY_INPUT_QUEUE_BOUND;
 use config::{
     DEFAULT_CANCEL_GRACE_MS, DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES, PTY_CANCEL_POLL_INTERVAL_MS,
-    TERMINAL_PTY_INPUT_QUEUE_BOUND, TERMINAL_TASK_META_FILE, TERMINAL_TASK_OUTPUT_FILE,
-    TERMINAL_TASK_STDERR_FILE, TERMINAL_TASK_STDOUT_FILE, TerminalArtifactLimits,
-    TerminalPtyCommandSpec, TerminalPtyExecution,
+    TERMINAL_TASK_META_FILE, TERMINAL_TASK_OUTPUT_FILE, TERMINAL_TASK_STDERR_FILE,
+    TERMINAL_TASK_STDOUT_FILE, TerminalArtifactLimits, TerminalPtyCommandSpec,
+    TerminalPtyExecution,
 };
 use cwd::{ResolvedTerminalCwd, resolve_terminal_cwd};
 use io::{
@@ -71,12 +78,11 @@ use io::{
     spawn_capture_task, spawn_pty_input_thread, spawn_pty_read_thread, write_task_meta,
 };
 use lifecycle::TerminalLifecycleOwner;
-use manager::{CancelCommand, TerminalTaskStartPlan};
+use manager::{CancelCommand, ManagedTerminalCommand, TerminalTaskStartPlan};
 use output::{LogSummary, current_epoch_ms, read_terminal_output_log, summarize_log};
-use worker::{
-    PtyWorker, TerminalWorker, cancel_pty_task, run_pty_worker, run_terminal_worker,
-    spawn_pty_runtime,
-};
+use worker::{ManagedTerminalWorker, cancel_pty_task, run_managed_terminal_worker};
+#[cfg(any(test, feature = "test-support"))]
+use worker::{PtyWorker, TerminalWorker, run_pty_worker, run_terminal_worker, spawn_pty_runtime};
 
 const TERMINAL_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const TERMINAL_CLEANUP_WAIT_TIMEOUT: Duration = Duration::from_secs(1);

@@ -6,12 +6,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ApprovalMode, DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    ExecutionBackend, ExecutionCoverageLabel, ExecutionReceipt, ExecutionRequest,
-    ExecutionSandboxProfile, ExecutionStreamCapture, ExecutionTerminationCause,
-    ExtensionProcessNetworkAdmission, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
+    ExecutionCoverageLabel, ExecutionReceipt, ExecutionSandboxProfile, ExecutionStreamCapture,
+    ExecutionTerminationCause, ExtensionProcessNetworkAdmission, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
     MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig, MutationEventRecorder, NetworkEffect,
     PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginHookExecutionFinishedEntry,
     PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookOutputArtifactRef,
@@ -21,6 +21,8 @@ use sigil_kernel::{
     validate_extension_process_network_admission,
     validate_extension_process_network_receipt_with_policy, validate_plugin_id,
 };
+#[cfg(test)]
+use sigil_kernel::{ExecutionBackend, ExecutionRequest};
 use uuid::Uuid;
 
 use crate::mcp_declaration::{
@@ -64,6 +66,8 @@ pub struct PluginHookRegistration {
     pub manifest_hash: String,
     pub manifest_version: String,
     pub capability_digest: String,
+    /// Durable manifest-review generation used as the Extension config-grant generation.
+    pub trust_reviewed_at_ms: u64,
     pub trust: PluginTrustDecision,
     pub hook: PluginHookRef,
 }
@@ -185,6 +189,7 @@ pub struct PluginHookExecutionRequest {
     pub redactor: SecretRedactor,
     pub artifact_refs: Vec<PluginHookOutputArtifactRef>,
     pub mutation_recorder: Option<MutationEventRecorder>,
+    pub cancellation: Option<sigil_kernel::RunCancellationHandle>,
 }
 
 impl PluginHookExecutionRequest {
@@ -197,12 +202,19 @@ impl PluginHookExecutionRequest {
             redactor: SecretRedactor::empty(),
             artifact_refs: Vec::new(),
             mutation_recorder: None,
+            cancellation: None,
         }
     }
 
     #[must_use]
     pub fn with_mutation_recorder(mut self, recorder: MutationEventRecorder) -> Self {
         self.mutation_recorder = Some(recorder);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: sigil_kernel::RunCancellationHandle) -> Self {
+        self.cancellation = Some(cancellation);
         self
     }
 }
@@ -261,33 +273,130 @@ impl std::fmt::Display for PluginHookExecutionAdmissionError {
 
 impl std::error::Error for PluginHookExecutionAdmissionError {}
 
-/// Runs trusted plugin hook commands through the configured non-interactive execution backend.
-pub struct PluginHookExecutionRunner {
+/// Host-private command material for one trusted plugin hook after trust and approval admission.
+/// The dedicated port prevents hooks from being rebound to the one-shot built-in command purpose.
+#[derive(Debug, Clone)]
+pub struct ManagedPluginHookExecutionRequestV1 {
+    pub plugin_id: String,
+    pub hook_id: String,
+    pub manifest_hash: String,
+    pub capability_digest: String,
+    pub config_generation: u64,
+    pub durable_scope: sigil_kernel::extension_admission::DurableAdmissionScopeV1,
+    pub config_grant_ref: sigil_kernel::resource::OpaqueExtensionGrantRef,
+    pub config_grant_hash: sigil_kernel::resource::CanonicalHash,
+    pub purpose: sigil_kernel::managed_execution::ExecutionPurposeV1,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub environment: BTreeMap<String, String>,
+    pub timeout_ms: u64,
+    pub output_limit_bytes: usize,
+    pub cancellation: Option<sigil_kernel::RunCancellationHandle>,
+}
+
+/// Purpose-specific production port for plugin hook execution.
+///
+/// Implementations must plan and issue `ExtensionProcess` admission; a generic one-shot command
+/// port deliberately cannot satisfy this trait.
+#[async_trait]
+pub trait ManagedPluginHookExecutionPortV1: Send + Sync {
+    fn kind(&self) -> sigil_kernel::ExecutionBackendKind;
+
+    fn capabilities(&self) -> sigil_kernel::ExecutionBackendCapabilities;
+
+    fn sandbox_profile(&self) -> ExecutionSandboxProfile;
+
+    fn planned_network_receipt(&self) -> sigil_kernel::ExecutionNetworkReceipt;
+
+    async fn execute_plugin_hook(
+        &self,
+        request: ManagedPluginHookExecutionRequestV1,
+    ) -> Result<ExecutionReceipt>;
+}
+
+#[cfg(test)]
+struct LegacyPluginHookExecutionPortV1 {
     backend: Arc<dyn ExecutionBackend>,
     sandbox_profile: ExecutionSandboxProfile,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ManagedPluginHookExecutionPortV1 for LegacyPluginHookExecutionPortV1 {
+    fn kind(&self) -> sigil_kernel::ExecutionBackendKind {
+        self.backend.kind()
+    }
+
+    fn capabilities(&self) -> sigil_kernel::ExecutionBackendCapabilities {
+        self.backend.capabilities()
+    }
+
+    fn sandbox_profile(&self) -> ExecutionSandboxProfile {
+        self.sandbox_profile
+    }
+
+    fn planned_network_receipt(&self) -> sigil_kernel::ExecutionNetworkReceipt {
+        self.backend.planned_network_receipt()
+    }
+
+    async fn execute_plugin_hook(
+        &self,
+        request: ManagedPluginHookExecutionRequestV1,
+    ) -> Result<ExecutionReceipt> {
+        Ok(self
+            .backend
+            .execute(ExecutionRequest {
+                program: request.program,
+                args: request.args,
+                cwd: request.cwd,
+                env: request.environment,
+                environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
+                timeout_ms: Some(request.timeout_ms),
+                timeout_secs: 0,
+                cpu_time_ms: None,
+                memory_limit_bytes: None,
+                process_count_limit: None,
+                capture: None,
+            })
+            .await?)
+    }
+}
+
+/// Runs trusted plugin hook commands through the runtime-owned Extension-purpose port.
+pub struct PluginHookExecutionRunner {
+    executor: Arc<dyn ManagedPluginHookExecutionPortV1>,
     network_admission: ExtensionProcessNetworkAdmission,
 }
 
 impl PluginHookExecutionRunner {
     #[must_use]
-    pub fn new(backend: Arc<dyn ExecutionBackend>) -> Self {
+    pub fn new(executor: Arc<dyn ManagedPluginHookExecutionPortV1>) -> Self {
         Self {
-            backend,
-            sandbox_profile: ExecutionSandboxProfile::Unconfined,
+            executor,
             network_admission: ExtensionProcessNetworkAdmission::default(),
         }
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn new_with_sandbox_profile(
+    pub fn new_legacy(backend: Arc<dyn ExecutionBackend>) -> Self {
+        Self::new(Arc::new(LegacyPluginHookExecutionPortV1 {
+            backend,
+            sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        }))
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn new_legacy_with_sandbox_profile(
         backend: Arc<dyn ExecutionBackend>,
         sandbox_profile: ExecutionSandboxProfile,
     ) -> Self {
-        Self {
+        Self::new(Arc::new(LegacyPluginHookExecutionPortV1 {
             backend,
             sandbox_profile,
-            network_admission: ExtensionProcessNetworkAdmission::default(),
-        }
+        }))
     }
 
     /// Applies one run-scoped network authorization to extension process admission.
@@ -308,7 +417,7 @@ impl PluginHookExecutionRunner {
     ///
     /// Returns an error when the registration is not trusted, a mutating/unknown hook has no
     /// mutation recorder, the plugin root cannot be used as a process working directory, or the
-    /// execution backend fails to spawn or collect the process.
+    /// managed execution port fails to spawn or collect the process.
     pub async fn execute(
         &self,
         request: PluginHookExecutionRequest,
@@ -355,12 +464,13 @@ impl PluginHookExecutionRunner {
         let execution_id = format!("plugin_hook_{}", Uuid::new_v4());
         let declared_effect = registration.hook.declared_effect;
         let tool_name = plugin_hook_tool_name(&registration.plugin_id, &hook_id);
-        let backend = self.backend.kind();
-        let backend_capabilities = self.backend.capabilities();
-        let planned_network = self.backend.planned_network_receipt();
+        let backend = self.executor.kind();
+        let backend_capabilities = self.executor.capabilities();
+        let planned_network = self.executor.planned_network_receipt();
         let process_subject = format!("plugin_hook:{tool_name}");
+        let sandbox_profile = self.executor.sandbox_profile();
         validate_extension_process_network_admission(
-            self.sandbox_profile,
+            sandbox_profile,
             Some(NetworkEffect::Unknown),
             self.network_admission,
             backend_capabilities,
@@ -368,7 +478,6 @@ impl PluginHookExecutionRunner {
             process_subject,
         )?;
         let execution_coverage = ExecutionCoverageLabel::LocalBackendEnforced;
-        let sandbox_profile = self.sandbox_profile;
         let egress_logging = registration.hook.egress_logging;
         let allow_secrets = registration.hook.allow_secrets;
         let started = PluginHookExecutionStartedEntry {
@@ -401,11 +510,7 @@ impl PluginHookExecutionRunner {
             .min(MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES);
         let redactor = request.redactor;
         let artifact_refs = request.artifact_refs;
-        let resolved_environment = sigil_kernel::resolve_extension_process_environment(&[])?;
-        let mut env = resolved_environment
-            .variables()
-            .map(|(name, value)| (name.to_owned(), value.expose_secret().to_owned()))
-            .collect::<BTreeMap<_, _>>();
+        let mut env = BTreeMap::new();
         env.insert(
             "SIGIL_WORKSPACE_ROOT".to_owned(),
             request.workspace_root.to_string_lossy().into_owned(),
@@ -413,19 +518,47 @@ impl PluginHookExecutionRunner {
         env.insert("SIGIL_PLUGIN_ID".to_owned(), registration.plugin_id.clone());
         env.insert("SIGIL_PLUGIN_HOOK_ID".to_owned(), hook_id.clone());
         let receipt = match self
-            .backend
-            .execute(ExecutionRequest {
+            .executor
+            .execute_plugin_hook(ManagedPluginHookExecutionRequestV1 {
+                plugin_id: registration.plugin_id.clone(),
+                hook_id: hook_id.clone(),
+                manifest_hash: registration.manifest_hash.clone(),
+                capability_digest: registration.capability_digest.clone(),
+                config_generation: registration.trust_reviewed_at_ms.max(1),
+                durable_scope:
+                    sigil_kernel::extension_admission::DurableAdmissionScopeV1::ApplicationControl {
+                        control_log_id: format!(
+                            "plugin-control:{}",
+                            crate::r71_shadow_planner::canonical_digest(
+                                request.workspace_root.to_string_lossy().as_bytes()
+                            )
+                            .to_hex()
+                        ),
+                        workspace_id: Some(
+                            crate::r71_shadow_planner::canonical_digest(
+                                request.workspace_root.to_string_lossy().as_bytes(),
+                            )
+                            .to_hex(),
+                        ),
+                    },
+                config_grant_ref: sigil_kernel::resource::OpaqueExtensionGrantRef::new(format!(
+                    "plugin-trust:{}:{}",
+                    registration.plugin_id, registration.trust_reviewed_at_ms
+                )),
+                config_grant_hash: plugin_hook_config_grant_hash(
+                    &registration.plugin_id,
+                    registration.trust_reviewed_at_ms,
+                    &registration.manifest_hash,
+                    &registration.capability_digest,
+                ),
+                purpose: sigil_kernel::managed_execution::ExecutionPurposeV1::ExtensionProcess,
                 program: registration.hook.command.clone(),
                 args: registration.hook.args.clone(),
                 cwd: plugin_root,
-                env,
-                environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
-                timeout_ms: Some(registration.hook.timeout_ms),
-                timeout_secs: 0,
-                cpu_time_ms: None,
-                memory_limit_bytes: None,
-                process_count_limit: None,
-                capture: None,
+                environment: env,
+                timeout_ms: registration.hook.timeout_ms,
+                output_limit_bytes,
+                cancellation: request.cancellation,
             })
             .await
         {
@@ -449,7 +582,7 @@ impl PluginHookExecutionRunner {
             }
         };
         if let Err(error) = validate_extension_process_network_receipt_with_policy(
-            self.sandbox_profile,
+            sandbox_profile,
             Some(NetworkEffect::Unknown),
             self.network_admission.policy,
             &receipt.network,
@@ -601,6 +734,20 @@ fn finish_plugin_hook_mutation_scan(
 
 fn plugin_hook_tool_name(plugin_id: &str, hook_id: &str) -> String {
     format!("plugin_hook:{plugin_id}:{hook_id}")
+}
+
+pub(crate) fn plugin_hook_config_grant_hash(
+    plugin_id: &str,
+    reviewed_at_ms: u64,
+    manifest_hash: &str,
+    capability_digest: &str,
+) -> sigil_kernel::resource::CanonicalHash {
+    crate::r71_shadow_planner::canonical_digest(
+        format!(
+            "plugin-config-grant-v1\0{plugin_id}\0{reviewed_at_ms}\0{manifest_hash}\0{capability_digest}"
+        )
+        .as_bytes(),
+    )
 }
 
 fn plugin_hook_output_envelope(
@@ -1085,13 +1232,16 @@ impl PluginDiscovery {
             capabilities: outcome.manifest.capabilities(),
             trust: PluginTrustDecision::NeedsReview,
         };
-        if let Some(trust) = matching_trust_entry(&snapshot, trust_entries) {
+        let matching_trust = matching_trust_entry(&snapshot, trust_entries);
+        if let Some(trust) = matching_trust {
             snapshot.trust = trust.decision;
         }
         if snapshot.trust == PluginTrustDecision::Trusted
+            && let Some(trust) = matching_trust
             && let Err(error) = self.register_trusted_plugin(
                 &outcome.manifest,
                 &snapshot,
+                trust,
                 &outcome.canonical_plugin_root,
                 &outcome.canonical_manifest_path,
             )
@@ -1179,6 +1329,7 @@ impl PluginDiscovery {
         &mut self,
         manifest: &PluginManifest,
         snapshot: &PluginManifestSnapshot,
+        trust: &PluginTrustEntry,
         canonical_plugin_root: &Path,
         canonical_manifest_path: &Path,
     ) -> Result<()> {
@@ -1217,6 +1368,7 @@ impl PluginDiscovery {
                         manifest_hash: snapshot.manifest_hash.clone(),
                         manifest_version: snapshot.version.clone(),
                         capability_digest: capability_digest.clone(),
+                        trust_reviewed_at_ms: trust.reviewed_at_ms,
                         trust: snapshot.trust,
                         hook,
                     }),

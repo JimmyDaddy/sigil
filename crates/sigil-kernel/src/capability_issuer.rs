@@ -28,6 +28,7 @@ pub enum ProofKindV1 {
     ExecutionOneShot,
     ExecutionTerminal,
     ExecutionExtension,
+    ExecutionCodeIntel,
     FileAccessTool,
     FileAccessSessionExport,
     StorageNamespace,
@@ -212,54 +213,8 @@ impl KernelCapabilityIssuerV1 for MockCapabilityIssuerV1 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn r71_capability_table_fails_closed_on_duplicate_and_unknown_consume() {
-        let mut table = KernelCapabilityTableV1::new();
-        table.record_issued("bundle-1".to_owned()).expect("issue");
-        let duplicate = table.record_issued("bundle-1".to_owned()).expect_err("dup");
-        assert!(matches!(
-            duplicate,
-            CapabilityIssueErrorV1::UnknownOrConsumed
-        ));
-        let unknown = table
-            .record_consumed("bundle-2".to_owned())
-            .expect_err("unknown");
-        assert!(matches!(unknown, CapabilityVerifyErrorV1::VerifyFailed(_)));
-        table
-            .record_consumed("bundle-1".to_owned())
-            .expect("consume");
-        let reconsume = table
-            .record_consumed("bundle-1".to_owned())
-            .expect_err("again");
-        assert!(matches!(
-            reconsume,
-            CapabilityVerifyErrorV1::VerifyFailed(_)
-        ));
-    }
-
-    #[test]
-    fn r71_mock_issuer_never_issues_but_keeps_closed_errors() {
-        let issuer = mock_issuer();
-        let _ = issuer;
-    }
-
-    #[test]
-    fn r71_evidence_view_never_reissues_capability() {
-        let view = VerifiedEvidenceViewV1 {
-            verifier_instance_hash: CanonicalHash::from_bytes([1u8; 32]),
-            verified_record_hash: CanonicalHash::from_bytes([2u8; 32]),
-            verified_frontier_hash: CanonicalHash::from_bytes([3u8; 32]),
-        };
-        // Only public hashes; no authenticator is exposed.
-        assert_eq!(
-            view.verified_record_hash,
-            CanonicalHash::from_bytes([2u8; 32])
-        );
-    }
-}
+#[path = "tests/capability_issuer_tests.rs"]
+mod tests;
 
 /// Kernel-side proof binding record.
 type ProofRecordV1 = (ProofKindV1, &'static str, Vec<u8>);
@@ -269,8 +224,11 @@ type ProofRecordV1 = (ProofKindV1, &'static str, Vec<u8>);
 /// Single instance per composition. The proof handle is opaque; the broker keeps the
 /// purpose/attempt/family binding ledger kernel-side so no consumer can fabricate a
 /// capability with chosen content.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct KernelCapabilityBrokerV1 {
+    /// Process-unique broker identity. Sequence-only handles repeat on every composition and
+    /// therefore cannot be used as durable namespace identity across restarts.
+    instance_id: uuid::Uuid,
     table: std::sync::Mutex<KernelCapabilityTableV1>,
     /// proof handle -> (kind, purpose, physical attempt bytes)
     proofs: std::sync::Mutex<std::collections::BTreeMap<String, ProofRecordV1>>,
@@ -299,8 +257,9 @@ pub struct KernelCapabilityBrokerV1 {
 }
 
 impl KernelCapabilityBrokerV1 {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
+            instance_id: uuid::Uuid::new_v4(),
             table: std::sync::Mutex::new(KernelCapabilityTableV1::new()),
             proofs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             storage_families: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -308,6 +267,14 @@ impl KernelCapabilityBrokerV1 {
             views: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             sequence: std::sync::atomic::AtomicU64::new(1),
         }
+    }
+
+    fn proof_handle(&self, sequence: u64) -> String {
+        format!("proof-{}-{sequence}", self.instance_id.simple())
+    }
+
+    fn proof_authenticator(&self, sequence: u64) -> String {
+        format!("auth-{}-{sequence}", self.instance_id.simple())
     }
 
     /// Seals an execution admission proof (kernel-owned; the handle is opaque and the
@@ -321,12 +288,12 @@ impl KernelCapabilityBrokerV1 {
         let seq = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let handle = format!("proof-{seq}");
+        let handle = self.proof_handle(seq);
         let proof = SealedExecutionAdmissionProofV1 {
             handle_id: crate::resource::OpaqueKernelProofHandleId::new(handle.clone()),
-            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(format!(
-                "auth-{seq}"
-            )),
+            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(
+                self.proof_authenticator(seq),
+            ),
             kind,
         };
         self.proofs
@@ -334,6 +301,19 @@ impl KernelCapabilityBrokerV1 {
             .expect("broker proofs")
             .insert(handle, (kind, purpose, physical_attempt_id));
         proof
+    }
+
+    /// Seals an Extension-purpose proof only from a materialized current-schema admission.
+    /// Generic one-shot/terminal/code-intel proofs cannot enter this constructor.
+    pub fn seal_extension_execution_proof(
+        &self,
+        admission: &crate::extension_admission::ExtensionProcessAdmissionV1,
+    ) -> SealedExecutionAdmissionProofV1 {
+        self.seal_execution_proof(
+            ProofKindV1::ExecutionExtension,
+            "extension-process-admission",
+            admission.physical_attempt_id.as_str().as_bytes().to_vec(),
+        )
     }
 
     /// Seals a storage namespace admission proof carrying the authority-declared family the
@@ -346,12 +326,12 @@ impl KernelCapabilityBrokerV1 {
         let seq = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let handle = format!("proof-{seq}");
+        let handle = self.proof_handle(seq);
         let proof = SealedExecutionAdmissionProofV1 {
             handle_id: crate::resource::OpaqueKernelProofHandleId::new(handle.clone()),
-            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(format!(
-                "auth-{seq}"
-            )),
+            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(
+                self.proof_authenticator(seq),
+            ),
             kind: ProofKindV1::StorageNamespace,
         };
         self.storage_families
@@ -383,6 +363,13 @@ impl KernelCapabilityBrokerV1 {
                 resource_capability,
             }
             | IssuedExecutionAdmissionBundleV1::Extension {
+                consumer_token,
+                resource_capability,
+            } => (
+                consumer_token.as_str().to_owned(),
+                resource_capability.as_str().to_owned(),
+            ),
+            IssuedExecutionAdmissionBundleV1::CodeIntel {
                 consumer_token,
                 resource_capability,
             } => (
@@ -421,6 +408,14 @@ impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
                 )),
             },
             ProofKindV1::ExecutionExtension => IssuedExecutionAdmissionBundleV1::Extension {
+                consumer_token: crate::resource::OpaqueResourceId::new(format!(
+                    "token:{purpose}:{seq}"
+                )),
+                resource_capability: crate::resource::OpaqueResourceId::new(format!(
+                    "cap:{purpose}:{seq}"
+                )),
+            },
+            ProofKindV1::ExecutionCodeIntel => IssuedExecutionAdmissionBundleV1::CodeIntel {
                 consumer_token: crate::resource::OpaqueResourceId::new(format!(
                     "token:{purpose}:{seq}"
                 )),
@@ -504,12 +499,12 @@ impl KernelCapabilityBrokerV1 {
         let seq = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let handle = format!("proof-{seq}");
+        let handle = self.proof_handle(seq);
         let proof = SealedExecutionAdmissionProofV1 {
             handle_id: crate::resource::OpaqueKernelProofHandleId::new(handle.clone()),
-            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(format!(
-                "auth-{seq}"
-            )),
+            authenticator: crate::resource::OpaqueKernelProofAuthenticatorV1::new(
+                self.proof_authenticator(seq),
+            ),
             kind: ProofKindV1::FileAccessTool,
         };
         self.file_access_bindings
@@ -541,6 +536,12 @@ impl KernelCapabilityBrokerV1 {
                 namespace_hash,
             ),
         )
+    }
+}
+
+impl Default for KernelCapabilityBrokerV1 {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

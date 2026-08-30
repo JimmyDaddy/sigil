@@ -56,10 +56,12 @@ fn hidden_model_eval_process_runs_scripted_production_tool_path() -> Result<()> 
     }
 
     if !output.status.success() {
+        let campaign_diagnostics = campaign_diagnostics(&output_dir);
         bail!(
-            "model eval process failed\nstdout:\n{}\nstderr:\n{}",
+            "model eval process failed\nstdout:\n{}\nstderr:\n{}\ncampaign artifacts:\n{}",
             String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stderr),
+            campaign_diagnostics,
         );
     }
     for artifact in ["results.jsonl", "manifest.json", "summary.md"] {
@@ -89,6 +91,46 @@ fn hidden_model_eval_process_runs_scripted_production_tool_path() -> Result<()> 
     assert!(!requests[0].contains(r#""name":"bash""#));
     assert!(!requests[0].contains("websearch"));
     Ok(())
+}
+
+fn campaign_diagnostics(output_dir: &Path) -> String {
+    let mut diagnostics = ["results.jsonl", "manifest.json", "summary.md"]
+        .into_iter()
+        .map(|artifact| {
+            let path = output_dir.join(artifact);
+            match fs::read_to_string(&path) {
+                Ok(contents) => format!("--- {artifact} ---\n{contents}"),
+                Err(error) => format!("--- {artifact} unavailable: {error} ---"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let session_path = output_dir.join("small-code-edit-1/sessions/run.jsonl");
+    let session_tail = match fs::read_to_string(&session_path) {
+        Ok(contents) => {
+            let mut lines = contents
+                .lines()
+                .filter(|line| {
+                    [
+                        r#"\"event_type\":\"command_finished\""#,
+                        r#"\"event_type\":\"check_finished\""#,
+                        r#"\"event_type\":\"verification_recorded\""#,
+                    ]
+                    .iter()
+                    .any(|event_type| line.contains(event_type))
+                })
+                .rev()
+                .take(12)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            lines.reverse();
+            lines.join("\n")
+        }
+        Err(error) => format!("session log unavailable: {error}"),
+    };
+    diagnostics.push_str("\n--- session verification events ---\n");
+    diagnostics.push_str(&session_tail);
+    diagnostics
 }
 
 #[test]

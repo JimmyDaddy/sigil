@@ -1,6 +1,16 @@
 {
   "components": {
     "parameters": {
+      "ApplicationClientId": {
+        "in": "header",
+        "name": "x-sigil-application-client-id",
+        "required": true,
+        "schema": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
       "CallId": {
         "in": "path",
         "name": "call_id",
@@ -449,6 +459,66 @@
         ],
         "type": "object"
       },
+      "ApplicationCommandReceipt": {
+        "description": "Typed settlement, replay, rejection, conflict, in-flight, or uncertain application outcome.",
+        "oneOf": [
+          {
+            "required": [
+              "settled"
+            ],
+            "type": "object"
+          },
+          {
+            "required": [
+              "replayed"
+            ],
+            "type": "object"
+          },
+          {
+            "required": [
+              "rejected"
+            ],
+            "type": "object"
+          },
+          {
+            "required": [
+              "payload_conflict"
+            ],
+            "type": "object"
+          },
+          {
+            "required": [
+              "in_flight"
+            ],
+            "type": "object"
+          },
+          {
+            "required": [
+              "uncertain"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApplicationCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "Versioned grouped application command. The server validates its schema and host binding.",
+            "type": "object"
+          },
+          "command_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "command"
+        ],
+        "type": "object"
+      },
       "ApplicationExtensionCatalog": {
         "additionalProperties": false,
         "properties": {
@@ -547,6 +617,144 @@
           "provenance",
           "model_name",
           "available_reasoning_efforts"
+        ],
+        "type": "object"
+      },
+      "ApplicationProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "type": "object"
+          },
+          "approval": {
+            "type": "object"
+          },
+          "attention": {
+            "type": "object"
+          },
+          "capabilities": {
+            "type": "object"
+          },
+          "configuration": {
+            "type": "object"
+          },
+          "conversation": {
+            "type": "object"
+          },
+          "frontier": {
+            "type": "object"
+          },
+          "observer_generation": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "plan_task": {
+            "type": "object"
+          },
+          "resource_recovery": {
+            "type": "object"
+          },
+          "run": {
+            "type": "object"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "scope": {
+            "type": "object"
+          },
+          "session": {
+            "type": "object"
+          },
+          "stream_generation": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "user_input": {
+            "type": "object"
+          },
+          "writer_generation": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "scope",
+          "writer_generation",
+          "stream_generation",
+          "observer_generation",
+          "frontier",
+          "session",
+          "conversation",
+          "run",
+          "plan_task",
+          "agents",
+          "approval",
+          "user_input",
+          "capabilities",
+          "configuration",
+          "attention"
+        ],
+        "type": "object"
+      },
+      "ApplicationProjectionPage": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "at_frontier": {
+            "type": "object"
+          },
+          "before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "query": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "object"
+          },
+          "source_generation": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "total": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_id",
+          "scope",
+          "source_generation",
+          "at_frontier",
+          "query",
+          "before",
+          "after",
+          "total",
+          "items"
         ],
         "type": "object"
       },
@@ -11975,6 +12183,160 @@
           }
         },
         "summary": "Read bounded child-agent lifecycle and result handoff state"
+      }
+    },
+    "/sessions/{session_id}/application": {
+      "get": {
+        "description": "Returns the bounded application projection after applying the durable snapshot/feed reducer. The client identity is supplied by the x-sigil-application-client-id header.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/ApplicationClientId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationProjection"
+                }
+              }
+            },
+            "description": "Bounded application projection"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read the transport-neutral application projection"
+      }
+    },
+    "/sessions/{session_id}/application/commands": {
+      "post": {
+        "description": "Reserves and dispatches a typed application command using the durable client identity supplied by the x-sigil-application-client-id header. Commands without a lossless HTTP host mapping are rejected explicitly during migration.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/ApplicationClientId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplicationCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationCommandReceipt"
+                }
+              }
+            },
+            "description": "Typed application receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Execute one transport-neutral application command"
+      }
+    },
+    "/sessions/{session_id}/application/page": {
+      "get": {
+        "description": "Reads a renderer-safe, frontier-bound transcript page through the same application port used by application clients.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/ApplicationClientId"
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationProjectionPage"
+                }
+              }
+            },
+            "description": "Bounded renderer-safe application page"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read one bounded application projection page"
       }
     },
     "/sessions/{session_id}/continuity": {

@@ -308,6 +308,9 @@ impl AppState {
                 request_id,
                 preview,
             },
+            AppAction::PreviewSessionRetention { request_id, policy } => {
+                WorkerCommand::PreviewSessionRetention { request_id, policy }
+            }
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
             }
@@ -337,6 +340,7 @@ impl AppState {
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }
+            | AppAction::SessionRuntimeRouteUpdated { .. }
             | AppAction::UpdateActiveRunPermissionMode { .. }
             | AppAction::SetDefaultModel { .. }
             | AppAction::CopyToClipboard { .. }
@@ -348,6 +352,9 @@ impl AppState {
             | AppAction::ApplyUpdate { .. } => unreachable!(
                 "setup/config/runtime updates are handled before worker command conversion"
             ),
+            AppAction::PersistConfiguration { .. } => {
+                unreachable!("configuration persistence is handled through the application port")
+            }
         }
     }
 

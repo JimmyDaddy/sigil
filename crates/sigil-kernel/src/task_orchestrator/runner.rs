@@ -1,11 +1,14 @@
 use super::*;
+#[cfg(test)]
+use crate::ExecutionBackend;
+use crate::verification::VerificationExecutionPortV1;
 use crate::{RunCancellationHandle, RunEffectClass, RunEffectKind, TaskGuidanceMaterializedEntry};
 use anyhow::Context;
 
 /// Sequential planner/executor task orchestrator.
 pub struct SequentialTaskOrchestrator<R> {
     child_runner: R,
-    execution_backend: Option<Arc<dyn ExecutionBackend>>,
+    verification_execution_port: Option<Arc<dyn VerificationExecutionPortV1>>,
     cancellation: Option<RunCancellationHandle>,
     tool_artifact_read_budget: Option<crate::ToolArtifactReadBudgetV1>,
     max_parallel_read_steps: usize,
@@ -550,7 +553,7 @@ where
     pub fn new_with_child_runner(child_runner: R) -> Self {
         Self {
             child_runner,
-            execution_backend: None,
+            verification_execution_port: None,
             cancellation: None,
             tool_artifact_read_budget: None,
             max_parallel_read_steps: DEFAULT_TASK_READ_ONLY_CONCURRENCY,
@@ -587,10 +590,25 @@ where
         self
     }
 
-    /// Returns an orchestrator that uses the provided backend for verification check execution.
+    /// Returns an orchestrator that uses the managed port for verification check execution.
     #[must_use]
-    pub fn with_execution_backend(mut self, execution_backend: Arc<dyn ExecutionBackend>) -> Self {
-        self.execution_backend = Some(execution_backend);
+    pub fn with_verification_execution_port(
+        mut self,
+        execution_port: Arc<dyn VerificationExecutionPortV1>,
+    ) -> Self {
+        self.verification_execution_port = Some(execution_port);
+        self
+    }
+
+    /// Compatibility-only test hook for legacy fixtures. Production callers must use the
+    /// managed verification port above.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_execution_backend<B>(mut self, execution_backend: Arc<B>) -> Self
+    where
+        B: ExecutionBackend + 'static,
+    {
+        self.verification_execution_port = Some(execution_backend);
         self
     }
 
@@ -2745,7 +2763,7 @@ where
             && run_task_step_verification_checks(
                 session,
                 handler,
-                self.execution_backend.as_deref(),
+                self.verification_execution_port.as_deref(),
                 request,
                 step,
                 step_options,
@@ -3078,7 +3096,7 @@ where
             && run_task_step_verification_checks(
                 session,
                 handler,
-                self.execution_backend.as_deref(),
+                self.verification_execution_port.as_deref(),
                 &request,
                 &step,
                 &readiness_options,

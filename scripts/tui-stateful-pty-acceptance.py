@@ -1423,7 +1423,11 @@ def looks_like_trust_gate(text: str) -> bool:
 
 def looks_like_main_tui(text: str) -> bool:
     lowered = text.lower()
-    return "agent:" in lowered and ("build" in lowered or "session" in lowered)
+    return (
+        not looks_like_trust_gate(text)
+        and "agent:" in lowered
+        and ("build" in lowered or "session" in lowered)
+    )
 
 
 def looks_like_busy_tui(text: str) -> bool:
@@ -1516,7 +1520,12 @@ def wait_for_main_tui(runner: PtyRunner, timeout: float) -> None:
     )
     if looks_like_trust_gate(initial):
         runner.send("\r")
-        runner.wait_until(looks_like_main_tui, timeout, "trusted main TUI")
+        runner.wait_until(
+            looks_like_main_tui,
+            timeout,
+            "trusted main TUI",
+            final_screen=True,
+        )
     if not runner.entered_alternate_screen():
         raise AcceptanceError(
             "TUI did not enter the alternate screen before rendering its first frame"

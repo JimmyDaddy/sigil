@@ -5,15 +5,17 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 pub use session_scratch::authority_scratch_control;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sigil_kernel::ExecutionBackend;
 pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunOptions, ExecutionBackend, InteractionMode, McpServerConfig,
-    McpServerStartup, MutationEventRecorder, NetworkEffect, NetworkPolicy,
-    PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
-    ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectKind, ToolSubjectScope, WorkspaceTrust, default_user_config_dir,
+    Agent, AgentRole, AgentRunOptions, InteractionMode, McpServerConfig, McpServerStartup,
+    MutationEventRecorder, NetworkEffect, NetworkPolicy, PermissionEvaluationContext, Provider,
+    ProviderCapabilities, ReasoningEffort, RootConfig, ScopedToolRegistry, SecretRedactor,
+    SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope, WorkspaceTrust, default_user_config_dir,
 };
 pub use sigil_mcp::{
     McpDeclarationLaunchMetadata, McpElicitationAction, McpElicitationHandler,
@@ -105,10 +107,15 @@ pub mod agent_supervisor;
 pub mod agent_tools;
 pub mod application_catalog;
 pub mod application_compaction;
+pub mod application_delivery_ack_store;
+pub mod application_host;
 pub mod application_intent_stack;
+pub mod application_projection;
 pub mod application_queue;
 pub mod application_recovery;
+pub mod application_reservation_store;
 pub mod application_run;
+pub mod application_service;
 pub mod command_permission;
 pub mod context;
 pub mod context_window;
@@ -126,6 +133,7 @@ pub mod integration_lanes;
 pub mod interactive_session_attachment;
 pub mod isolated_workspace;
 pub mod machine_protocol;
+pub mod managed_artifact_store;
 pub mod managed_resource_adapters;
 pub mod managed_storage_writer;
 pub mod mcp_declaration;
@@ -146,7 +154,6 @@ pub mod provider_status;
 pub mod r71_authority_composition;
 pub mod r71_global_cutover;
 pub mod r71_shadow_planner;
-pub mod resource_recovery_surface;
 pub mod runtime_records_projection;
 pub mod session_control;
 pub mod session_lifecycle;
@@ -192,11 +199,19 @@ pub use application_catalog::{
     ApplicationExtensionCatalogView, ApplicationSkillBinding, ApplicationSkillCatalogEntry,
     application_extension_catalog_view,
 };
+pub use application_delivery_ack_store::RuntimeApplicationDeliveryAckStore;
 pub use application_intent_stack::{
     APPLICATION_INTENT_DROP_CONFIRMATION_TTL_MS, ApplicationIntentConfirmationSource,
     ApplicationIntentStackCommandOutputV1, ApplicationIntentStackCommandV1,
     ApplicationIntentStackError, ApplicationIntentStackErrorClass,
     execute_application_intent_stack_command, execute_durable_application_intent_stack_command,
+};
+pub use application_projection::RuntimeSessionProjectionBinding;
+pub use application_reservation_store::ManagedApplicationReservationStore;
+pub use application_service::{
+    RuntimeApplicationCommandExecutor, RuntimeApplicationDeliveryAcker, RuntimeApplicationDispatch,
+    RuntimeApplicationProjectionSource, RuntimeApplicationReservationAdmission,
+    RuntimeApplicationReservationStore, RuntimeApplicationService,
 };
 pub use context::{
     ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,
@@ -269,11 +284,12 @@ pub use plan_review_coordinator::{
     plan_handoff_workspace_snapshot_id, plan_run_rejection_message,
 };
 pub use plugins::{
-    PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
-    PluginHookExecutionAdmissionError, PluginHookExecutionAdmissionErrorCode,
-    PluginHookExecutionOutcome, PluginHookExecutionRequest, PluginHookExecutionRunner,
-    PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
-    discover_workspace_plugins, merge_mcp_server_declarations, merge_plugin_skill_descriptors,
+    ManagedPluginHookExecutionPortV1, ManagedPluginHookExecutionRequestV1, PluginDiscoveryReport,
+    PluginDiscoveryWarning, PluginDiscoveryWarningKind, PluginHookExecutionAdmissionError,
+    PluginHookExecutionAdmissionErrorCode, PluginHookExecutionOutcome, PluginHookExecutionRequest,
+    PluginHookExecutionRunner, PluginHookRegistration, PluginMcpServerRegistration,
+    PluginRegistrations, discover_workspace_plugins, merge_mcp_server_declarations,
+    merge_plugin_skill_descriptors,
 };
 pub use portable_compaction::{
     DeepSeekV4FlashPortableTargetPressure, PortableCompactionEconomicsV2Input,
@@ -415,8 +431,7 @@ pub use mcp_registry::{
     activate_mcp_tools_from_product_surface,
     activate_mcp_tools_from_product_surface_with_managed_extension_execution,
     attach_remote_mcp_activation_presenter,
-    attach_remote_mcp_activation_presenter_with_managed_extension_execution,
-    build_configured_execution_backend, build_tool_registry,
+    attach_remote_mcp_activation_presenter_with_managed_extension_execution, build_tool_registry,
     build_tool_registry_with_mcp_elicitation, build_tool_registry_with_mcp_handlers,
     build_tool_registry_with_mutation_recorder,
     build_tool_registry_with_mutation_recorder_and_workspace_trust,
@@ -427,6 +442,7 @@ pub use mcp_registry::{
     build_tool_surface_without_eager_mcp_with_workspace_trust,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory,
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution,
     mcp_process_receipts_summary, mcp_stdio_boundary_summary,
     refresh_mcp_server_tools_from_product_surface,
@@ -437,6 +453,9 @@ pub use mcp_registry::{
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission_and_managed_extension_execution,
     register_mcp_server_declarations,
 };
+
+#[cfg(test)]
+pub use mcp_registry::build_configured_execution_backend;
 pub use provider_factory::{
     ProviderCapabilityRow, ProviderCapabilityStatus, ProviderCapabilityView, SecretResolution,
     SecretSource, build_provider, build_provider_async, build_provider_for_model_ref,

@@ -38,6 +38,7 @@ use sigil_kernel::{
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
+use sigil_tools_builtin::LocalExecutionBackend;
 
 use super::{
     ApplicationCancellationTicket, ApplicationRunControl, ApplicationRunEventHandler,
@@ -183,6 +184,36 @@ credential = { source = "none" }
 "#,
     )?;
     Ok(())
+}
+
+fn with_application_test_managed_authority(
+    root: &Path,
+    services: ApplicationRunServices,
+) -> Result<ApplicationRunServices> {
+    let fixture_id = uuid::Uuid::new_v4().simple().to_string();
+    let state = root.join(format!("authority-state-{fixture_id}"));
+    let execution_temp = root.join(format!("authority-exec-{fixture_id}"));
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir_all(&execution_temp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&execution_temp, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
+        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        ));
+    let composition = crate::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x4a; 32]),
+        planner,
+        &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
+    )?;
+    Ok(services.with_authority_composition(composition))
 }
 
 fn seed_application_user_input_request(
@@ -971,10 +1002,13 @@ async fn verification_view_uses_durable_truth_and_rerun_shares_the_foreground_le
 
     let lease_manager = Arc::new(ApplicationSessionLeaseManager::new());
     let foreground = lease_manager.acquire(&binding.session_log_path)?;
-    let services = ApplicationRunServices::with_session_leases(
-        Arc::new(RejectingDisclosurePresenter),
-        Arc::clone(&lease_manager),
-    );
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::with_session_leases(
+            Arc::new(RejectingDisclosurePresenter),
+            Arc::clone(&lease_manager),
+        ),
+    )?;
     let request = TaskVerificationRerunRequest::new(
         TaskId::new("task_1")?,
         1,
@@ -1033,10 +1067,13 @@ async fn integration_review_projection_is_scope_checked_and_acceptance_shares_th
 
     let lease_manager = Arc::new(ApplicationSessionLeaseManager::new());
     let foreground = lease_manager.acquire(&binding.session_log_path)?;
-    let services = ApplicationRunServices::with_session_leases(
-        Arc::new(RejectingDisclosurePresenter),
-        Arc::clone(&lease_manager),
-    );
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::with_session_leases(
+            Arc::new(RejectingDisclosurePresenter),
+            Arc::clone(&lease_manager),
+        ),
+    )?;
     let request = TaskIntegrationReviewRequest {
         request_id: "review-request".to_owned(),
         task_id: TaskId::new("task-integration")?,
@@ -2595,6 +2632,54 @@ fn transcript_page_truncates_utf8_content_without_breaking_character_boundaries(
 }
 
 #[test]
+#[ignore = "opt-in R70.4 cold-cache qualification workload"]
+fn cold_cache_transcript_page_100k_keeps_the_resident_page_bounded() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_application_test_config(&config_path)?;
+    let session_path = temp.path().join("state/sessions/cold-cache-100k.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    for index in 0..100_000 {
+        store.append(&SessionLogEntry::User(ModelMessage::user(format!(
+            "cold-cache-message-{index}"
+        ))))?;
+    }
+
+    let started = std::time::Instant::now();
+    let page = application_session_transcript_page(
+        &binding.session_log_path,
+        &binding.session_scope_id,
+        None,
+        32,
+    )?;
+    let elapsed_ms = started.elapsed().as_millis();
+    assert_eq!(page.total_messages, 100_000);
+    assert_eq!(page.messages.len(), 32);
+    assert_eq!(
+        page.messages.first().map(|message| message.ordinal),
+        Some(99_969)
+    );
+    assert_eq!(
+        page.messages.last().map(|message| message.ordinal),
+        Some(100_000)
+    );
+    assert_eq!(page.next_before, Some(99_969));
+    assert!(page.messages.iter().all(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.len() < 128)
+    }));
+    eprintln!(
+        "r70 cold-cache transcript 100k: page={} resident_messages={} elapsed_ms={elapsed_ms}",
+        page.total_messages,
+        page.messages.len()
+    );
+    Ok(())
+}
+
+#[test]
 fn preparation_cancellation_is_durable_idempotent_and_secret_safe() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
@@ -3034,7 +3119,10 @@ fn durable_task_handoff_never_projects_as_application_success() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn application_auto_routing_stays_manual_without_attached_task_executor() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
@@ -3229,6 +3317,7 @@ credential = { source = "none" }
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -3373,6 +3462,7 @@ credential = { source = "none" }
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::clone(&provider_builder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -3431,8 +3521,11 @@ credential = { source = "none" }
     );
     drop(session);
 
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(provider_builder);
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(provider_builder);
     let command = sigil_kernel::UserInputDecisionCommandV1 {
         identity: route.request.identity.clone(),
         request_hash: route.request.request_hash.clone(),
@@ -3677,6 +3770,7 @@ credential = { source = "none" }
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -3793,8 +3887,11 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
     );
     let session_scope_id = session.session_scope_id().to_owned();
     drop(session);
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path,
@@ -4143,11 +4240,14 @@ async fn application_continuation_recovers_safe_materialized_guidance_after_relo
     )?;
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+        executor_requests: Arc::clone(&executor_requests),
+        guidance_review_requests: Arc::clone(&guidance_review_requests),
+    }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -4214,11 +4314,14 @@ async fn application_continuation_recovers_exact_required_materialized_guidance_
     let exact_guidance = fixture.exact_guidance.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+        executor_requests: Arc::clone(&executor_requests),
+        guidance_review_requests: Arc::clone(&guidance_review_requests),
+    }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -4285,11 +4388,14 @@ async fn application_continuation_recovers_safe_selection_only_guidance_after_re
     let task_id = fixture.task_id.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+        executor_requests: Arc::clone(&executor_requests),
+        guidance_review_requests: Arc::clone(&guidance_review_requests),
+    }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -4386,8 +4492,26 @@ async fn application_continuation_recovers_safe_selection_only_guidance_after_re
     Ok(())
 }
 
-#[tokio::test]
-async fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload()
+#[test]
+fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload()
+-> Result<()> {
+    std::thread::Builder::new()
+        .name("application-selection-retry-recovery".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| -> Result<()> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(
+                    application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload_async(),
+                )
+        })
+        .expect("application recovery test thread should spawn")
+        .join()
+        .map_err(|_| anyhow::anyhow!("application recovery test thread should not panic"))?
+}
+
+async fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload_async()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let fixture = application_guidance_recovery_fixture(
@@ -4399,11 +4523,14 @@ async fn application_continuation_explicitly_retries_selection_owned_uncertain_p
     let task_id = fixture.task_id.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+        executor_requests: Arc::clone(&executor_requests),
+        guidance_review_requests: Arc::clone(&guidance_review_requests),
+    }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -4504,11 +4631,14 @@ async fn application_continuation_recovers_exact_selection_only_guidance_after_r
     let exact_guidance = fixture.exact_guidance.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+        executor_requests: Arc::clone(&executor_requests),
+        guidance_review_requests: Arc::clone(&guidance_review_requests),
+    }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -4578,14 +4708,16 @@ fn application_exact_reentry_preserves_active_task_then_recovers_started_planner
                     let exact_guidance = fixture.exact_guidance.clone();
                     let executor_requests = Arc::new(Mutex::new(Vec::new()));
                     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-                    let services =
-                        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-                            .with_task_role_provider_builder(Arc::new(
-                                CapturingApplicationTaskRoleProviderBuilder {
-                                    executor_requests: Arc::clone(&executor_requests),
-                                    guidance_review_requests: Arc::clone(&guidance_review_requests),
-                                },
-                            ));
+                    let services = with_application_test_managed_authority(
+                        temp.path(),
+                        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+                    )?
+                    .with_task_role_provider_builder(Arc::new(
+                        CapturingApplicationTaskRoleProviderBuilder {
+                            executor_requests: Arc::clone(&executor_requests),
+                            guidance_review_requests: Arc::clone(&guidance_review_requests),
+                        },
+                    ));
 
                     let prepared = prepare_application_task_continuation(
                         ApplicationTaskContinuationRequest {
@@ -4708,11 +4840,14 @@ async fn application_continuation_reenters_exact_selection_only_guidance_with_or
     let exact_guidance = fixture.exact_guidance.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+        executor_requests: Arc::clone(&executor_requests),
+        guidance_review_requests: Arc::clone(&guidance_review_requests),
+    }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -4799,11 +4934,14 @@ async fn application_continuation_rejects_mismatched_exact_selection_before_prov
     let session_path = fixture.session_path.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+        executor_requests: Arc::clone(&executor_requests),
+        guidance_review_requests: Arc::clone(&guidance_review_requests),
+    }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -4928,6 +5066,7 @@ async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Re
             executor_requests: Arc::clone(&executor_requests),
             guidance_review_requests: Arc::clone(&guidance_review_requests),
         }),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -5859,6 +5998,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         )),
         tool_registry: sigil_kernel::ToolRegistry::new(),
         workspace_snapshot_id: None,
+        child_resource_provisioner: None,
     };
     let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
     let mut handler = RecordingRunEvents::default();
@@ -6010,6 +6150,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -6193,6 +6334,7 @@ max_plan_steps = 64
             application_task_provider_capabilities(),
         ),
         role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
     };
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
@@ -6274,7 +6416,7 @@ async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()>
         planner,
         &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
     )?;
-    let recovery = crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1::new();
+    let recovery = sigil_application::ApplicationResourceRecoveryFacadeV1::new();
     let cutover = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
         "inst-apprun-authority",
         1,

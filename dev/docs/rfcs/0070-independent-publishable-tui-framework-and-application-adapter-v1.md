@@ -1,6 +1,6 @@
 # RFC-0070：Independent Publishable TUI Framework, Presented-Frame Interaction and Application Adapter V1
 
-状态：Proposed（已按 2026-08-23 architecture review 修订并通过独立只读复核；等待正式冻结决策，尚未实施）
+状态：R70.4 Complete / R70.5 Complete / R70.6 Complete / R70.7 Complete / R70.8 Engineering Complete / Release-cycle Deferred（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 framework/package boundary、R70.6 host ownership、R70.7 preview package qualification、R70.8 compatibility retirement 与 hosted engineering qualification 已闭合；真实 crates.io publish、release cycle 与 user validation 仍按 release operator 条件 deferred）
 
 创建日期：2026-08-23
 
@@ -2875,3 +2875,770 @@ R70.x
 - `src/traits/focusable.rs:72-135`：未与manager完整贯通的focus metadata；
 - `src/theme.rs:31-231`：semantic palette与显式widget theme；
 - `src/components/scrollable_content.rs:212-220,390-400`：visible slice但非variable-height virtualization。
+
+## 31. 实施记录
+
+### R70.0：冻结基线、能力清单与 profiler（2026-08-28）
+
+- implementation commit：`c30cd3846b2dfe05e4287fc2fb98045d0e4146f2`（`rfc-0070(R70.0): establish post-R71 TUI baseline`）；基线提交为
+  `c3b3982388e8e97a19ac1adb3576b6f8063d806f`，R71 qualified implementation candidate 为
+  `ec5459d829e086fbb73f090dcb3201f649d99d7b`。
+- moved authority：没有移动 Resource Authority、Sandbox 或 permission/resource/recovery owner；本 slice
+  只冻结其 kernel public contract，并把后续 application migration 的生产 enum 边界登记到
+  `dev/governance/r70-command-event-migration-v1.toml`。
+- deleted legacy path：没有提前删除 runner、`AppState` 或 click-time layout；这些是 R70.1/R70.6 的明确后续
+  删除项。
+- behavior parity evidence：`scripts/tui-mouse-smoke.sh` 现在产生稳定 check ID、自动/半自动模式和可审计 Markdown
+  matrix；`scripts/check-r70-baseline.sh` 对 R71 handoff、冻结 contract digest、fixture 和生产 enum 做 fail-closed
+  exact join。当前 R71 recovery action、Worker/App/Surface protocol 共发现并显式登记 `274/274` variants。
+- benchmark before/after：R70.0 临时 profiler 已接入 production TUI present helper；以
+  `SIGIL_R70_PHASE_TIMINGS=1 scripts/profile-r70-tui-baseline.sh` 生成 raw logs 与 phase report，当前样本覆盖
+  `app_projection`、`layout_snapshot`、`render`、`terminal_present`。该 report 是 R70.1 之前的 baseline，不是
+  性能改进声明。
+- tests/gates run：`cargo fmt --all --check`、R70 baseline checker、R70 migration unit tests、production present
+  timing probe、两个 targeted TUI tests 通过。
+- remaining deviations / expiry：R70.0 仍未完成全部长期 Done 条件；`CommittedPresentation`、public package split、
+  application contract、100k cold-cache benchmark 和 legacy runner removal 保留给 R70.1-R70.8。临时 phase
+  instrumentation 的 expiry 为 R70.1 完成时，届时必须迁移或删除，不能成为永久性能接口。
+
+### R70.1：提交式 presentation 与 terminal fault state（2026-08-28）
+
+- implementation commit：`de9ee32fc5acb2c78067cc8ce3b77acef8afe8f8`（`rfc-0070(R70.1): commit presented-frame interaction state`）；基线为 R70.0 evidence follow-up
+  `df34e740f90eab20f4c2ba892d8e18e829b2f12a`。
+- moved authority：没有移动 Resource Authority、Sandbox、permission 或 worker/resource owner；本 slice 只在
+  `sigil-tui` 内建立 terminal presentation owner。
+- delivered：新增 `PresentationSession`，为每个 frame 分配不可复用的 generation/attempt/terminal epoch；同一
+  `Terminal::draw` callback 生成 `LayoutSnapshot`、渲染 cell buffer，并只在 backend draw/flush 成功且
+  `TrustedPresentReceipt` 匹配后发布 `CommittedPresentation`。`NotStarted` 保留上一个 committed frame，首帧
+  no-op 可重试；`IndeterminateAfterIo` poison session，鼠标在无 committed frame 或 poisoned 状态下 fail-closed。
+- deleted legacy path：生产 launcher 不再在 mouse event 时间调用 `LayoutSnapshot::from_app` 或读取当前
+  `AppState` 重建 geometry；旧 helper 仅保留给既有单元测试，后续 R70.3 renderer/adapter split 时删除。
+- behavior parity：`AppState`、`AppAction`、worker protocol 与现有 modal/focus/mouse handling 未改语义；新的
+  `handle_committed_mouse_event` 只把 immutable committed layout 传给原有 action handler。
+- tests/gates run：`cargo fmt --all --check`、`cargo check -p sigil-tui`、
+  `cargo test -p sigil-tui --lib presentation::tests -- --nocapture`（4 passed）、
+  `cargo test -p sigil-tui --lib timed_frame_path_uses_the_production_present_helper -- --nocapture`（1 passed）。
+- remaining deviations：R70.1 尚未完成 full-resync backend、normalized input、framework package split、
+  application contract、renderer decoupling 与旧 runner removal；这些继续由 R70.2-R70.8 交付，不能将本 slice
+  解释为 RFC-0070 总体完成。
+
+### R70.2：normalized input、Damage 与 host effects（2026-08-28）
+
+- implementation commit：`8ee8560e89c6070fe7114ae8873380080a95e392`（`rfc-0070(R70.2): normalize input and inject host effects`）；基线为 R70.1 evidence follow-up
+  `1dc22eaf50edeea5b1898162c7ba70acc02db2c7`。
+- moved authority：没有移动 Resource Authority、Sandbox、permission、worker 或 durable event owner；本 slice
+  只收窄 terminal adapter 与 launcher 的输入/host capability 边界。
+- delivered：新增不依赖 Crossterm 类型的 `InputEvent`/`InputKeyEvent`/`InputMouseEvent`/`FocusChange`，并在
+  launcher 入口完成一次性 Crossterm normalization；增加 `EventEffect` 将 ignored/local update/opaque action/
+  host request 分开；增加可合并的 `Damage`，input batch 在同一轮中 union damage，最多在 batch 后触发一次 present。
+- host boundary：clipboard text、clipboard image capture、external URL/file opening 通过 launcher 注入的
+  `HostEffects` 执行；生产使用 `SystemHostEffects`，测试通过 `TestHostEffects`，normalized input 与 app/action
+  层不再直接调用 host process/capability。
+- behavior parity：既有 AppAction、AppMouseOutcome、worker command 与反馈文案保持兼容；旧测试 helper 只作为
+  test-only wrapper 保留，生产事件循环走 typed effect path；unsupported/repeat/release/focus-only input 不生成
+  render damage。
+- tests/gates run：`cargo fmt --all --check`、`cargo check -p sigil-tui`、完整
+  `cargo test -p sigil-tui --lib -- --test-threads=2`（1714 passed / 3 ignored）、normalized input 3 项定向
+  测试、clipboard/external host 行为测试、`git diff --check` 通过。
+- remaining deviations：R70.2 尚未交付 renderer-only SurfaceModel、virtualization/UAX #9、`sigil-application`
+  contract、public package split、runner 下沉或 release qualification；这些继续由 R70.3-R70.8 完成。
+
+### R70.3：SurfaceModel renderer boundary、bounded virtualization 与 Unicode text（2026-08-28）
+
+- implementation commit：`7c129a02`（`rfc-0070(R70.3): render from owned surface snapshots`）。
+- 生产 terminal draw 在一次 `Terminal::draw` 中创建 owned `SurfaceModel`，renderer 入口只消费快照与
+  `SurfaceState`；egress disclosure 的 presentation acknowledgement 仍由 launcher 在 draw 成功后执行。
+- `surface_adapter` 集中 `AppState -> surface` projection；renderer-facing config/status 只使用 bounded label，
+  不把 authority `PathBuf` 带入 SurfaceModel；approval scroll、generation-scoped item ID、UAX #9 bidi map 已
+  纳入该边界。
+- framework bridge 增加 bounded `RenderContext`/scratch `Buffer`、variable-height prefix index、
+  `ViewportAnchor` 与 `ProjectionPageRequest` DTO；100k resident-bound、height lookup、clip 与 logical/visual
+  mapping 测试通过。完整 application page source 仍留给 R70.4，未将当前 viewport rows 误报为 cold-cache paging。
+- tests/gates：`cargo fmt --all --check`、`cargo check -p sigil-tui`、strict clippy、完整 TUI lib
+  `1718 passed / 3 ignored`、surface/UAX #9 targeted tests、`git diff --check`。
+- moved authority：没有移动 R71 Resource Authority/Sandbox、permission、worker 或 runtime owner；下一 slice 是
+  独立 `sigil-application` contract 与 fake application，R70.4-R70.8 仍未完成。
+
+### R70.4：transport-neutral application contract 与 runtime port（2026-08-28）
+
+- implementation commits：`d9b57da3`（`rfc-0070(R70.4): establish transport-neutral application contract`）、
+  `efc7851b`（`rfc-0070(R70.4): consume durable application outbox in projection`）、`b5c0a37e`
+  （`rfc-0070(R70.4): route TUI through application port`）与 `8608d6aa`
+  （`rfc-0070(R70.4): cut over HTTP reservations to application authority`），以及 `ffc3df4e`
+  （`rfc-0070(R70.4): stream bounded transcript pages`），以及 `f44d8c10`
+  （`rfc-0070(R70.4): journal application command reservations`），以及本轮新增的 ApplicationClient
+  resumable reducer/ACK、durable delivery ACK journal 与 cross-surface contract tests；当前切片补充
+  cold-cache 100k qualification。`8b344943`（`rfc-0070(R70.4): persist application delivery acknowledgements`）
+  将 TUI production delivery ACK 接入 runtime-owned managed JSONL journal；`d0ab3da7`
+  （`rfc-0070(R70.4): bridge HTTP through application port`）新增 HTTP transport-neutral application
+  endpoint 与 production client bridge；`cf37303e`（`rfc-0070(R70.4): cut over HTTP cancel commands`）将
+  既有 HTTP `/runs/{run_id}/cancel` production route 切换到同一 ApplicationPort durable reservation，
+  legacy envelope reservation 仅保留在 `cfg(test)` 合成 driver 兼容路径；`bdcd44a4`
+  （`rfc-0070(R70.4): cut over HTTP run starts`）再将 production run-start route 切换到同一
+  ApplicationClient 与 durable reservation；`52b7724b`（`rfc-0070(R70.4): cut over HTTP approval decisions`）
+  将 production approval decision route 也切换到同一 application reservation 与 typed guard；`7be30de7`
+  （`rfc-0070(R70.4): cut over HTTP user-input decisions`）再将 production user-input decision route
+  切换到同一 reservation 与 typed kernel decision。
+- `5c3b33be`（`rfc-0070(R70.4): cut over HTTP conversation queue`）再将 production conversation queue
+  route 切换到同一 host-bound `ApplicationClient` 与 durable reservation；queue-generation CAS、typed
+  enqueue/edit/remove/reorder/pause/resume/interrupt action、prompt/material policy 与 foreground-owner guard
+  仍由 HTTP driver 的直接 effect seam 在同一 session mutation lock 下执行，避免递归回到旧 command-store
+  reservation。application service 内的同步 HTTP driver 调用移出 Tokio worker，避免 production
+  `Handle::block_on` re-entrant panic；driver rejection 通过 typed application `Rejected` 返回。
+- `b885f198`（`rfc-0070(R70.4): cut over HTTP conversation recovery`）再将 production conversation recovery
+  route 切换到同一 host-bound `ApplicationClient` 与 durable reservation；application contract 新增窄化 typed
+  recovery action/outcome，完整承载 compaction apply、standalone tool-output shrink、checkpoint restore 与
+  conversation fork 的结果，并由 HTTP registry direct effect 保留唯一 driver 执行 owner。
+  `PrepareCompaction` 当前在 application boundary 返回 typed preview-required rejection，因为现有 contract 尚
+  不能无损携带 process-local preview/review；它没有被降级为 generic uncertain 或伪造 settled。production
+  application-client regression 覆盖该拒绝语义。
+- `rfc-0070(R70.4): route HTTP compaction preparation through application port`（本轮切片）移除 production HTTP
+  bridge 对 `PrepareCompaction` 的 preview-boundary 预拒绝，使该 action 进入既有 typed registry owner；stale
+  recovery binding 仍返回 typed rejection。production application regression 与 HTTP application 测试通过。
+  该切片不宣称完成四表面 conformance、configuration/session lifecycle 或完整 R70.4 exit gate。
+- `rfc-0070(R70.4): route TUI session transitions through application port`（本轮切片）将 `StartNewSession` 与
+  `SwitchSession` 送入同一 application reservation/worker edge；application payload 只使用 host-owned opaque
+  `SessionItemId`，真实 session path 与可选 attachment-recovery binding 由 TUI adapter 私有 resolver 保留。
+  application `6/6`、TUI session `169/169`（`2 ignored`）、package check 与 production-library strict clippy 通过；
+  configuration save/reboot、terminal lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route TUI attachments through application port`（本轮切片）新增无损
+  `SubmitPromptWithAttachments` application command，复用 kernel image-attachment contract；TUI worker edge
+  还原既有 typed attachment command，provider/runtime ownership 不变。application `6/6`、package check、TUI
+  定向测试、strict library clippy 与 diff check 通过；configuration、terminal lifecycle、四表面 conformance
+  与完整 R70.4 exit gate 仍未闭合。
+
+### R70.5：package topology foundation（本轮切片）
+
+- product implementation package 已改名为 `sigil-tui-app`；workspace 新增 `sigil-tui-core`、
+  `sigil-tui-ratatui` 与 public `sigil-tui` facade。`cargo metadata --locked` 已确认 core 无依赖、Ratatui
+  adapter 只依赖 core 与 Ratatui、facade 只依赖 core/adapter；CLI 已切换到 app package。
+- 该切片只建立真实 package identity 与依赖拓扑，现有 Sigil product modules 尚未全部物理移出 app package，
+  因此 R70.5 package-identity/public-source exit gate、R70.4 四表面 conformance 与 R70.6 runner 下沉仍未闭合。
+- `rfc-0070(R70.4): route TUI terminal cancellation through application port`（`c593e5c5`）新增
+  transport-neutral `ApplicationTerminalTaskIdentity` 与 `RunCommand::CancelTerminalTask`。TUI production adapter
+  先通过 application reservation/dispatch，再在 worker 边界还原为私有 `TerminalTaskControlIdentity`；owner
+  scope、run/task identity 与 expected generation 均保持不透明且有界。application `7/7`、TUI package check、
+  application/TUI strict library clippy 与 diff check 通过；terminal PTY 生命周期、configuration save/reboot、
+  四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route TUI session maintenance through application port`（`df28fe0d`）将 session inspect、fork、
+  export、pin、delete preview/apply 与 retention apply 收敛为 typed `SessionCommand::Maintain`。application payload
+  只携带 opaque `SessionItemId`、request id 与明确 operation，真实路径、fork route、delete/retention preview 仅由
+  TUI adapter 私有 resolver 保留。application/TUI package check 与 production-library strict clippy 通过；
+  configuration save/reboot、terminal PTY lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route TUI MCP OAuth through application port`（`fa6b3de4`）新增 typed `McpCommand::OAuth` 与
+  `ApplicationMcpOAuthAction`；TUI adapter 仅提交 opaque OAuth binding 与 action，manual callback secret 留在
+  adapter 私有 map，直到 worker 边界才恢复为 `McpOAuthUserAction`。application/TUI package check、application
+  `7/7`、strict library clippy 与 diff check 通过；configuration save/reboot、terminal PTY lifecycle、四表面
+  conformance 与完整 R70.4 exit gate 仍未闭合。
+- `rfc-0070(R70.4): route session retention preview through application port`（`90f9bf93`）将 retention preview 从
+  AppState 直接 enqueue legacy worker 改为 typed `SessionCommand::Maintain` 的 `PreviewRetention` operation；
+  retention policy 通过 adapter-owned opaque binding 解析到 worker。session lifecycle 定向测试、
+  application/TUI package check、strict library clippy 与 diff check 通过；configuration save/reboot、terminal
+  PTY lifecycle、四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+- contract：新增独立 `sigil-application`（`publish = false`），不依赖 TUI、Ratatui、runtime、provider、filesystem、
+  sandbox 或 transport；直接复用 kernel-owned `ResourceRecoverySurfaceContractV1`，并定义 grouped versioned
+  command envelope、host admission scope/subject/client epoch、derived lane/settlement policy、typed domain
+  receipt、payload conflict、in-flight/uncertain 状态、scoped snapshot/reducer、gap/reset、bounded async page、
+  cancellation、delivery ACK 与 renderer-safe projection。
+- identity/replay：reservation key 为 application instance + authenticated subject + durable client epoch + command
+  id；connection instance 不进入 key；canonical fingerprint 与 expected frontier/settlement class 绑定。Fake
+  application 覆盖 exact replay、跨 payload conflict、scope/frontier 校验；runtime service 将 reserve → dispatch
+  started → executor → terminal settle 编排收敛到注入的 reservation store，executor error fail-closed 为
+  `Uncertain`，不能把 transport error 当成 effect 未发生。
+- persistence/presentation：生产 reservation store 使用 R71 managed storage writer 的 application-control
+  namespace，保存 `Reserved`/`DispatchStarted`/terminal receipt 并在重启时保留未决 identity；trusted presenter
+  capability 由 broker arm、绑定 marker/content/terminal epoch、单次 consume，session/broker Debug 脱敏且不允许
+  ordinary clone/serialization。runtime projection binding 从现有 durable session query 与完整 durable public
+  outbox（按 stream sequence 排序，不受 adapter delivery receipt 影响）生成 bounded、path-free snapshot/page，并
+  使用 opaque before cursor；outbox delivery 只表示传输进度，不会从状态历史中删除事件。
+- reservation journal：`f44d8c10` 将 application-control reservation 从 whole-file replacement 收敛为可重放
+  JSONL journal；每个 reserve、dispatch marker 和 terminal receipt 都在 effect 前按顺序持久化，旧 v1 snapshot
+  只在首次重开时迁移，重复记录可安全重放，孤立 transition、指纹冲突和终态改写 fail-closed。dispatch marker
+  写入失败时会尽力将已存在的 reservation settlement 为显式 `Uncertain`，避免永久卡在无恢复语义的 `Reserved`。
+- delivery ACK：新增 runtime-owned 的独立 application-control named namespace；ACK 在绑定的
+  application scope、observer generation、frontier 与 event identity 校验通过后才追加到 durable JSONL journal。
+  exact duplicate 可重放，event identity 改写、scope/observer 不一致、partial/corrupt record 与容量超限均
+  fail-closed；TUI production bridge 不再使用仅校验内存对象的 ACK adapter。
+- TUI adapter：生产 launcher 为每个 worker 绑定 runtime `ApplicationPort`，用同一 application scope/frontier
+  刷新 projection；共享 ApplicationClient 统一处理 snapshot、reducer、resumable feed、delivery ACK、page/cancel
+  与保留 command id 的 retry；client epoch 由 host-owned application/session scope 稳定派生，reconnect 不会因
+  随机 epoch 变化而制造第二个 reservation namespace。prompt、cancel、approval decision、lazy-MCP activate/refresh 已通过 application
+  reservation service 进入 worker。worker enqueue 尚未有 domain terminal receipt 时明确返回 `Uncertain`，禁止伪造
+  `Settled`；未有无损 V1 payload 的旧动作仍保留在迁移期 adapter，不能把 R70.4 误记为最终闭合。
+- `aa177ba3`（`rfc-0070(R70.4): retain TUI application client epoch`）固定上述 client identity：epoch 从
+  application/session scope 稳定派生，避免 reconnect retry 因随机 epoch 形成第二个 command reservation namespace。
+- HTTP adapter：生产 command store 在 `ApplicationControlLog` 的独占 managed namespace 中完成 legacy
+  identity/terminal/unfinished/aborted tombstone 导入；旧 compatibility file 只有在 managed snapshot 成功替换
+  后才退役，重启会优先 managed state 并重试旧文件退役。HTTP command registry 的 domain execution 仍需后续
+  完整迁移到同一 `ApplicationPort`，不能把本次 reservation cutover 误记为四表面 conformance。
+- HTTP application bridge：`d0ab3da7` 新增 `/sessions/{session_id}/application`、`/application/page` 与
+  `/application/commands`。请求只携带 bounded command id/typed grouped command，client identity 从 host
+  header 注入；production driver 从当前 cutover/managed writer 构造 runtime `ApplicationClient`，使用共享
+  projection reducer、bounded page、managed application reservation journal 与 per-session durable delivery
+  ACK journal。首个无损 command mapping 为 `Run::Cancel`，绑定必须命中该 HTTP session 的 active run；没有
+  无损 host mapping 的 grouped command 返回 typed `Rejected`，不通过 generic string payload 绕过 contract。
+- HTTP cancel cutover：`cf37303e` 让既有 `/runs/{run_id}/cancel` 在 production 只经由 host-bound
+  ApplicationClient 执行；旧 HTTP command-store reservation 不再进入 shipping path。reason 作为 typed
+  `RunCommand::Cancel` 的 bounded optional field 保留，response-lost retry 对 uncertain terminal 返回
+  `ReplayedUncertain`，不会再次调用 driver。
+- HTTP run-start cutover：`bdcd44a4` 让 production `start_run_command` 通过同一 host-bound
+  ApplicationClient、durable reservation journal 和 runtime executor；HTTP DTO 的 permission/model/
+  reasoning/skill/agent/task continuation 字段被映射为 typed `RunStartOptions`，不再把 start 命令交给
+  legacy HTTP command-store reservation。普通 prompt 与 task continuation 同时存在或同时缺失都会被
+  fail-closed 拒绝；真实 production driver application-client regression 覆盖了 start 的 uncertain
+  recovery binding。
+- HTTP approval cutover：`52b7724b` 让 production approval command route 通过同一 host-bound
+  ApplicationClient 与 application reservation；approval request identity、tool/policy hash、expiry、decision、
+  family pattern 和 reason 由 provider-neutral `ApplicationApprovalResolution` 承载，执行前重新绑定到
+  HTTP registry 的 exact approval guard。旧 HTTP command-store approval reservation 仅保留给 `cfg(test)` 合成
+  driver，uncertain delivery 通过 `Uncertain`/`ReplayedUncertain` recovery binding 返回。
+- HTTP user-input cutover：`7be30de7` 让 production user-input decision route 通过同一 host-bound
+  ApplicationClient 与 durable reservation；request id、generation、request hash、kernel-owned typed decision
+  和 permission mode 由 application command 显式承载，执行后仅通过不含答案内容的 opaque recovery binding
+  暴露 continuation identity。旧 command-store user-input reservation 仅保留给 `cfg(test)` 合成 driver。
+- HTTP queue cutover：`5c3b33be` 让 production conversation queue route 通过同一 host-bound
+  ApplicationClient 与 durable reservation；`ConversationCommand::Queue` 明确携带 queue-generation CAS 与
+  typed queue actions，driver 保留 exact prompt/material、foreground-owner 与 session mutation guard。
+  legacy queue command-store reservation、waiter 与 secret-safe fingerprint helper 仅保留给 `cfg(test)` 合成
+  driver；production application executor 的同步 driver 调用移出 Tokio worker，stale/conflict 不会被包装成
+  generic uncertain 后的成功。
+- snapshot-feed：`OpenProjectionRequest` 可携带 resume frontier；runtime 以 durable session stream sequence 为
+  application frontier，在 bounded feed 中逐 record 生成 scope/generation/digest/前后 frontier 一致的
+  `ProjectionReplaced` event。outbox projection 保留 durable record order，不再用跨 run 不唯一的 run-local sequence
+  排序；缺序、过旧或超出 feed bound 返回 reset/gap，不能拼接不连续状态。transcript page 通过 kernel
+  `SessionStreamRecordReader` 逐行验证 V2 envelope/session identity，并只保留有界消息、工具名称和 UTF-8 安全文本；
+  不再把整个 durable session 读入 runtime 内存。
+- cold-cache qualification：新增 opt-in 的 cold_cache_transcript_page_100k_keeps_the_resident_page_bounded
+  fixture/script，实际写入并逐行回放 100,000 条 durable user message，只返回 32 条 bounded page，断言首尾
+  ordinal、stable before cursor、完整计数与 bounded content；本地结果为 resident_messages=32、
+  elapsed_ms=10352，fixture 全部位于测试 TempDir；cold-cache 100k gate 1 passed（100,000 records / 32 resident
+  messages）。
+- validation：`cargo fmt --all --check`、`cargo check -p sigil-application -p sigil-runtime`、
+  `cargo check -p sigil-tui --tests`、application/runtime strict clippy、application tests `3 passed`、runtime
+  projection tests `2 passed`、kernel public-event-outbox tests `2 passed`、normal-dependency `r71_shipping_e2e`
+  `2 passed`、TUI launcher regression `1 passed`，以及 runtime application-filtered regression `106 passed`、
+  `git diff --check`；`transcript_page` scope/boundary/reasoning/UTF-8 regression `3 passed`；本轮
+  `sigil-application` client/reducer/ACK/conformance tests `6 passed`、runtime durable ACK tests `4 passed`，
+  以及 TUI production dependency check `cargo check -p sigil-tui`；本轮 `sigil-http --lib` 回归为
+  `224 passed`，HTTP application client production 定向测试为 `1 passed`，queue targeted regression 为
+  `12 passed`，`cargo check --locked -p sigil-http`
+  user-input 定向回归 `4 passed`；与 `cargo clippy --locked -p sigil-http --lib -- -D warnings` 通过；本轮 HTTP cancel/application/runtime
+  定向回归与四包 strict clippy 通过，新增 uncertain terminal replay 与 HTTP production run-start 测试通过。
+- remaining deviations / exit gate：本记录证明 contract/runtime foundation、TUI 首批 production port bridge、
+  HTTP reservation cutover、HTTP application bridge 与 resumable snapshot-feed 基础已分别落地，但不关闭
+  R70.4。TUI 尚有未迁移旧动作，HTTP `PrepareCompaction` preview boundary 与其余 command routes 尚未完全
+  收敛到同一 application service；HTTP 新 bridge 当前已对 start/cancel/approval/user-input/queue 以及
+  recovery apply/shrink/restore/fork 提供无损 typed mapping，preview-boundary 与其余未映射 command 明确拒绝。
+  feed 的跨 surface ACK/restart
+  conformance、所有 shared command 的四表面 conformance、cold-cache 100k page e2e 与完整 migration manifest
+  gate 仍需继续完成。TUI ACK 已进入 durable managed writer，但 HTTP/Desktop/CLI 还未全部复用该 delivery
+  journal。R70.5 package split 不得在这些条件未满足前开始。
+- TUI queue mutation cutover：`37dbbfd4` 将 application contract 扩展为 queue projection、共享
+  queue-generation token 与 typed move action；runtime projection 从 durable conversation queue records 重建
+  paused/items/status/dispatchable 状态。TUI production main-thread 的 enqueue、edit、cancel、move、pause/resume
+  先通过 generation-bound `ApplicationClient` 与 runtime reservation service，再由 worker executor 发出原有
+  typed worker command；未有 worker terminal domain receipt 时保持 `Uncertain`。HTTP 复用相同 generation encoder。
+  HTTP 无 anchor 的 Move、TUI 非主线程 target、reorder/interrupt 等不能无损映射的路径维持 typed rejection 或
+  明确 legacy adapter 边界。application/runtime/HTTP/TUI 回归与四包 strict clippy 通过（TUI `1720/1720`，3
+  ignored）。该 slice 只关闭主线程 queue mutation 子集；TUI task/agent target、promote/send-now、剩余旧动作、
+  HTTP compaction preview、四表面 conformance 与完整 migration manifest 仍未闭合。
+- queue target follow-up：`f52aecee` 将 application queue contract 扩展为显式的 main-thread、agent-thread、task
+  target；target identity 进入 projection 与 queue mutation action，TUI production 的 task/agent queue enqueue、
+  promote、send-now 以及 main-thread mutation 通过 generation-bound ApplicationClient 与 typed worker edge。
+  TUI enqueue 要求请求 target 与 active target 一致，跨 target request 在 effect 前返回 scope error；HTTP 仍只
+  暴露 main-thread queue，TUI-only promote/send-now/move 不被近似映射而是 typed reject。application `6/6`、runtime
+  projection `2/2`、HTTP `224/224`、TUI 单线程 `1720/1720`（3 ignored）与四包 strict clippy 通过。该 slice 不关闭
+ TUI 其余 command family、HTTP compaction preview、四表面 conformance 或完整 migration manifest。
+- user-input follow-up：`c4125bd1` 将 TUI durable request 的 request id、generation、expected request hash 与
+  kernel-owned decision 映射为 typed `UserInputCommand::Resolve`；worker 提供 retained command id 时复用为
+  application reservation id，否则由 client 生成。worker edge 保留原始 request 字段并以 uncertain delivery
+  等待事件 reconciliation。TUI user-input 回归 `9/9`、application `6/6`、runtime service `4/4` 与四包
+  strict clippy 通过。permission-mode override 和其他 legacy TUI command family 仍开放，该 slice 不关闭 R70.4。
+- plan/task/agent follow-up：`c27fbc47` 将 TUI plan prompt、plan accept/reject/save/revise、task submit/continue/
+  pause、agent profile、inline/child-session skill、agent message/close/cancel/background 映射为 typed
+  `PlanTaskCommand`/`AgentCommand`；payload 使用 SafeText 或既有 kernel typed request，不把 worker protocol 名称
+  或路径带入 application contract。TUI production 经 application reservation service 后再进入现有 worker edge，
+  uncertain delivery 等待 durable worker event settlement；HTTP 对这些 TUI-only 操作不虚构 mapping。application
+  `6/6`、plan-handoff `19/19`、agent `146/146` 与四包 strict clippy 通过。configuration/permission、verification、
+  terminal、recovery preview 与剩余 surface conformance 仍开放。
+- permission-control follow-up：`7b27b996` 删除 launcher 对 active-run permission mode 的 direct worker send，新增
+  typed `RunCommand::UpdatePermissionMode` 并保留 kernel `PermissionMode` 的原有取值边界；TUI 经 application
+  reservation service 后再进入 worker edge，继续用 uncertain delivery 等待 durable worker event。TUI permission
+  回归 `20/20`、application `6/6`、四包 strict clippy 与 diff check 通过。persisted configuration CAS、verification、
+  terminal、recovery preview 与剩余 surface conformance 仍开放。
+- recovery follow-up：`9eddfd6c` 将 TUI compaction start/preview/cancel、checkpoint preview/execute/fork 与 Intent
+  Stack load/preview/execute 加入 transport-neutral `ApplicationRecoveryAction`；TUI production 先经过 host-bound
+  ApplicationPort reservation，再在 worker edge 还原为既有 typed kernel request，HTTP 对 TUI-only variant 显式
+  typed reject。compaction `47/47`、checkpoint `6/6`、Intent Stack `12/12`、application `6/6` 与四包 production
+  library strict clippy 通过；all-target strict clippy 仍被本 slice 之外既有
+  `sigil-http/src/registry.rs:3344` redundant-closure warning 阻断。该 slice 只关闭 TUI recovery dispatch seam；configuration CAS、verification/maintenance、
+  terminal、HTTP compaction preview、四表面 conformance 与完整 migration manifest 仍未闭合。
+- verification follow-up：`802c8d00` 将 TUI changed-files diagnostics、mutation-artifact cleanup/delete、verification
+  approval/sandbox/rerun 与 integration review/accept 加入 typed `VerificationCommand`；TUI production 先经过
+  ApplicationPort reservation，再在 worker edge 还原为既有 typed worker command，application 层不复制 artifact
+  lifecycle authority。application `6/6`、verification flow `5/5`、command dispatch `12/12`、worker bridge `104/104`
+  与 production-library strict clippy 通过；all-target strict clippy 仍受上述 slice 外的 HTTP test-target warning
+  阻断。configuration/session lifecycle、terminal、HTTP compaction preview、四表面 conformance 与完整 migration
+  manifest 仍开放。
+
+- TUI configuration-save follow-up：`65562367` 将 production 配置保存拆为 TUI adapter 私有
+  `ConfigurationSaveRequest` 与 typed `ConfigurationCommand::Save`。TUI 不再直接调用 credential/config publisher；
+  application executor 在 reservation 后消费一次性 draft，完成原有 CAS/config publication，再以 settled receipt
+  触发统一的 runtime reboot。敏感 draft 只保存在私有 binding 中，application contract 只传 opaque binding 与
+  `config-save-v1` patch marker。测试构建保留隔离 fixture，production build 不再绕过 application port。
+  config-flow `118/118`、package check、production-library strict clippy 与 fmt 通过；terminal PTY lifecycle、
+  四表面 conformance 与完整 R70.4 exit gate 仍未闭合。
+
+- TUI authority-admission follow-up：`5474f371` 将 `/model` session route、默认模型保存与 permission-mode
+  persistence 接入同一 ApplicationPort。provider route 只以 adapter-owned opaque binding 进入
+  `ProviderCommand::SelectRoute`，成功 receipt 后由 launcher 重启 worker；配置与权限保存由 typed
+  `ConfigurationCommand::Save` 在 application reservation 后执行，busy run 只在 durable config receipt 后提交
+  urgent permission override。production session/config actions 不再在 application unavailable 时回退到直接
+  worker/path mutation；旧 session fixture 仅保留在测试构建。TUI 全量 lib tests `1720 passed / 3 ignored`，
+  migration manifest `276/276`、package check、strict library clippy 与 diff check 通过；HTTP/CLI/Desktop
+  四表面 conformance 与完整 R70.4 exit gate仍待完成。
+
+- R70.5 framework contract follow-up：`b5304438` 为 public `sigil-tui` facade 增加 application-neutral 的
+  bounded `Surface`/node builder、opaque action hit binding、`App`/`UpdateOutcome` input-update contract 与
+  bounded `Text` 类型；新增不依赖 Sigil domain 的 `todo`、`chat` examples 和 independent consumer contract
+  tests。新增 `check-r70-package-topology.sh` 使用 `cargo metadata --all-features` 检查 core → ratatui → facade
+  的实际 package identity/依赖 allowlist，并扫描 public framework production source 的 domain、filesystem、process
+  与 Tokio 依赖；当前 gate 已通过。该 slice 证明了真实第二消费者与 public surface contract，但现有 Sigil product
+  modules 尚未全部物理迁出 `sigil-tui-app`，故 R70.5 exit gate、R70.4 四表面 conformance 与 R70.6 runner 下沉
+  仍未闭合。
+
+- R70.5 framework module migration follow-up：`26ca4520` 将 `VirtualSequence`、generation-scoped
+  `SurfaceItemId`、`HeightIndex`、`ViewportAnchor` 与 `ProjectionPageRequest` 从 Sigil product-private surface
+  module 迁入 `sigil-tui-core`；Ratatui-only bounded scratch renderer 迁入 `sigil-tui-ratatui` 并由 facade 暴露。
+  product adapter 现在只为其 `Line<'static>` 提供 framework `VirtualSequence` 类型别名，保留 projection ownership
+  在 adapter。core、ratatui、framework 与 `sigil-tui-app` 回归、strict clippy、package topology gate 均通过。
+  仍未完成全部 public widget/theme/input module 迁移、R70.4 四表面 conformance 或 R70.5 exit gate。
+
+- R70.5 public contract hardening follow-up：`fb13d370` 同步 R70.0 migration manifest 单测到当前冻结的 276 个
+  production variants；`SurfaceNode` 与 `VirtualSequence` 不再暴露可绕过构造/校验的可变字段，改为只读访问器，
+  并为 virtual sequence generation/identity invariant 增加 core regression。TUI live panel 已迁移到只读 accessor。
+  manifest `276/276`、core/ratatui/facade tests、app check 与 diff check 通过；该 slice 仍不关闭 R70.4
+  四表面 conformance、R70.5 完整模块迁移或后续 R70.6-R70.8。
+
+- R70.4 surface conformance follow-up：`b6a853f9` 将 application fixture 扩展为 TUI keyboard、TUI mouse、Desktop、
+  HTTP、CLI 五个入口；每个入口都从同一 scoped snapshot/frontier 执行 bounded page/cancel，再用相同 command id
+  验证 settled/replay 的 domain receipt、settlement 与 frontier 完全一致。application `7/7`、定向 conformance、
+  strict clippy 与 diff check 通过。该 fixture 关闭了 contract-level surface parity 缺口；真实 HTTP/Desktop
+  transport smoke、legacy cutover、terminal lifecycle 和完整 R70.4 exit gate 仍需继续收口。
+
+- R70.4 terminal projection follow-up：`4a1b6341` 将 kernel durable `TerminalTaskProjection` 重放为有界、无路径的
+  `TerminalSurfaceProjection`，纳入 application snapshot/feed；每个 task 只暴露 task id、generation、状态、readiness
+  与输出计数/摘要 hash，owner、进程句柄、命令和取消路由仍留在 host/runtime。TUI refresh 保存该 projection，并优先
+  用它校验 terminal cancel 的 active 状态与 generation，缺失 projection 时才保留既有 durable-entry fallback。
+  application `7/7`、runtime projection `3/3`、TUI app check、fmt 与 diff check 通过；本 slice 不宣称关闭 PTY
+  owner lifecycle、四表面真实 transport smoke 或完整 R70.4 exit gate。
+
+- R70.5/R70.6 package-boundary follow-up：当前大而全的产品实现包改为内部 `sigil-tui-host`，并新增独立
+  `sigil-tui-app` adapter package；后者只依赖 `sigil-application` 与 public `sigil-tui` facade，持有 bounded
+  `ApplicationClient` 和 framework `App` surface，不导入 kernel/runtime/filesystem/process/Tokio。CLI 与 R71
+  shipping scripts 改用 host package，避免 facade 与产品 crate 共享同名 Rust library。`check-r70-package-topology.py`
+  现同时验证 app adapter 的 allowlist 与 public source markers；metadata、topology、app/host/sigil check 通过。
+  这完成 package identity 的可执行基线，但 host 内旧 renderer/runner 尚未全部下沉，R70.5/R70.6 exit gate 与
+  R70.4 full gate 仍未关闭。
+
+- R70.5 framework primitives follow-up：`sigil-tui-core` 新增 application-neutral `SemanticTheme`/`ThemeRole`/
+  `ThemeColor` 与 `InputEvent::validate` bounded contract，facade/prelude 重导出 theme primitives，独立
+  `sigil-tui-app` adapter 在处理输入前执行相同 input validation。core、facade、app tests、fmt、package topology
+  与 host check 通过；Sigil-specific Crossterm decoder/Ratatui palette 仍属于 host adapter，R70.5 full module
+  migration 和 R70.6 runner extraction 仍需继续。
+
+- R70.4 application exit gate follow-up：新增 `scripts/run-r70-application-gate.sh`，把 R70.4 的退出条件固化为可
+  重复执行的 gate：closed migration manifest、public package topology、application contract、runtime
+  projection/service、五表面 shared frontier/receipt fixture、production HTTP/TUI adapter tests，以及 100k
+  cold-cache transcript test。该 gate 在当前 clean commit 全部通过；R70.4 的 application contract、production
+  port、surface conformance 与 cold-cache 条件现已闭合。R70.5 public module completion 与 R70.6-R70.8 仍未闭合。
+
+- R70.5 framework contract completion follow-up：`b5d581bc` 为 public facade 发布 host-owned `UiRuntimeDriver` 生命周期
+  契约、renderer-neutral 的 `SurfaceUpdate`/`PreparedRender`/presentation state，以及 bounded standard widget
+  declarations（包括 box、text、stack、scroll、virtual list、input、button、select、modal、popover、status、card
+  与 markdown 类别）。独立 framework consumer test 覆盖 widget lowering 且不依赖 Sigil domain。该 slice 不引入
+  application、filesystem、process 或 Tokio 依赖；R70.5 publication metadata/feature/docs gate 与 R70.6 host
+  ownership audit 仍待完成。
+
+- R70.5/R70.6 ownership follow-up：`75bfc35a` 将 historical R71 composition 引用从 TUI/HTTP/CLI production
+  surfaces 收敛到 runtime `application_host` composition boundary，并将 host runner 从 public module 降为
+  crate-private。新增 `check-r70-host-ownership.py` 与 `run-r70-host-ownership-gate.sh`，验证 app 依赖 allowlist、
+  application 无 physical authority marker、ProductUpdaterState 仍在 runtime owner、manifest 276/276 与 host
+  全量库测试。该 slice 关闭 R70.5 package/module boundary；R70.6 remaining side-effect extraction、R70.7 release
+  qualification 与 R70.8 compatibility deletion 仍未闭合。
+
+- R70.7 preview package follow-up：三个公开 package（`sigil-tui-core`、`sigil-tui-ratatui`、`sigil-tui`）已独立
+  声明 `0.1.0`、MSRV `1.85`、repository/docs.rs/README/changelog metadata；新增完整 feature powerset、Cargo
+  package verification、unpacked package `--all-targets` tests、docs 与 ordered publish dry-run gate。
+  `.github/workflows/sigil-tui-preview.yml` 提供 core → Ratatui adapter → facade 的显式发布顺序，默认只做
+  qualification，真实 publish 需由 release operator 显式触发。R70.7 已完成；R70.8 仍需 release-cycle/user
+  validation 后执行 compatibility deletion。
+
+- R70.7 metadata correction：Cargo 不接受 `package.changelog` 作为稳定 manifest key；三个公开 package 改为
+  使用约定位置的 `CHANGELOG.md`，metadata checker 直接校验文件存在，避免发布 gate 带 warning 或把未生效的
+  字段误当成 Cargo 发布元数据。preview package gate 的 package/unpack/docs/feature/dry-run 语义不变。
+
+### R70.8：public compatibility retirement boundary（2026-08-28）
+
+`daf770ec` 完成 R70.8 的可执行 public-boundary slice：`sigil-tui-host` 的旧 app/launcher/mouse/ui/runner
+modules 均降为 crate-private，host 明确 `publish = false`；public `sigil-tui` facade、`sigil-tui-app` 和其
+依赖方向不再暴露 `AppState`、WorkerProtocol、legacy LayoutSnapshot、Sigil ThemePalette 或 platform effects。
+R71 runtime 的 lossless recovery surface facade 已迁入 `sigil-application`，runtime 不再发布
+`resource_recovery_surface` transitional module；kernel recovery contract、canonical bytes 与 authority owner
+保持不变。`dev/governance/r70-command-event-migration-v1.toml` 登记 5 条 `verified-retire` row，
+`scripts/run-r70-legacy-retirement-gate.sh` 通过。
+
+本 slice 不伪造 RFC 要求的 release-cycle/user validation：真实 `0.1.0` publish、至少一个 release cycle 和
+真实用户验证仍需由 release operator 提供 evidence 后才可删除内部 host implementation 并将 RFC 标为
+Implemented/Frozen。`scripts/check-r70-release-cycle-validation.py --evidence <record.json>` 对该外部证据
+执行 fail-closed 校验；本 RFC 当前仍为 R70.8 In Progress。
+### R70.6 production application-adapter follow-up（2026-08-28）
+
+本 follow-up 修复了 package boundary 已存在但生产接线仍绕过 `sigil-tui-app` 的缺口。`sigil-tui-host`
+现在显式依赖 `sigil-tui-app`；其 production application bridge 通过 `TuiApplicationAdapter::from_port`
+创建并持有 application client，refresh、projection lookup、command execute/execute-with-id 均经由该 adapter
+进入 `sigil-application` port。host 仍只在 composition edge 持有 worker/runtime/physical bindings，未将这些类型
+下沉到 app package。
+
+提交：`rfc-0070(R70.6): route production TUI through the application adapter`。验证包括 host ownership checker、
+host ownership unit、`sigil-tui-app` library tests、`sigil-tui-host` compile、fmt 与 diff check；R70.8 external
+release-cycle/user validation 仍未被本地代码接线冒充。
+
+### R70.2 performance-invariant follow-up（2026-08-28）
+
+本 follow-up 收口了 public interaction hot path 的两个可证明不变量。`CommittedPresentation` 在成功提交时建立
+有界 dense hit grid，dispatch 只按 viewport cell 做 O(1) lookup；超过 400×120 reference capacity 的 viewport
+直接拒绝提交，不再静默退回线性扫描。`HeightIndex::locate_row` 改为 Fenwick binary lifting，避免原先
+“二分 + 每次 prefix scan”形成 O(log²N) 的分页定位路径。
+
+新增 release-profile `r70_qualification` fixture 与 `scripts/run-r70-framework-qualification.sh`，覆盖 100k
+transcript 的 64-item resident window、variable-height lookup、100k same-target mouse flood、resize/theme/
+Unicode input 和 dense hit-grid bound；输出保存在 ignored qualification directory，不进入用户 durable state。
+本 slice 的 framework qualification 为 `3 passed`，并通过 core tests、fmt、diff check。该 slice 证明 framework
+complexity/invariant 条件，不替代 R70.8 的真实发布、release-cycle 与用户验证。
+### R70.3 public Unicode/UAX #9 follow-up（2026-08-28）
+
+public `sigil-tui-core` 新增 application-neutral `BidiText` 与 `BidiLineMap`。它使用 bounded UTF-8 输入执行
+UAX #9 paragraph reorder，并同时提供 visual→logical 与 logical→visual character mapping；超出 surface text
+预算时 fail closed。`sigil-tui` facade 重导出该 contract，host 仍可在 Ratatui styled-line adapter 中保留样式
+拼接，不把 provider/domain 类型带入 core。
+
+core bidi bijection test、public release-profile qualification（3/3）、framework check、fmt 与 diff check 通过。
+该 slice 补齐 public Unicode/bidi contract，但不把仅有 character map 误称为完整 grapheme-width/selection
+资格；这些仍由 host interaction matrix 与最终 release qualification 继续验证。
+
+### R70.3 public frame metrics follow-up（2026-08-28）
+
+public `sigil-tui-core` 新增 renderer-neutral `FrameMetrics`、`DamageSummary`、`CacheHitMetrics`、
+`PhaseDurations` 与 `FrameMetricsObserver`，并由 `sigil-tui` facade 重导出。metrics 仅描述 generation、damage、
+retained/materialized/measured/painted nodes、hit cells、changed cells、cache counters 与各阶段纳秒耗时，不绑定
+任何 telemetry backend；framework consumer 可以直接保存或转发 observation。release-profile qualification 新增
+host-observable observer contract。
+
+同一 follow-up 修复 `BidiText` 对 UAX #9 Rule X9 formatting controls 的处理：底层 bidi reorder 省略的零宽控制字符
+会被补回完整 logical/visual mapping，emoji ZWJ 序列不再触发越界或丢失控制字符。core、release-profile
+qualification、fmt 与 diff check 通过。该 slice 仍不把代码点映射等同于完整 grapheme-width/selection 资格，
+也不替代 R70.8 的真实发布、release-cycle 与用户验证。
+
+R70.3 dependency follow-up（2026-08-28）：公开 Unicode contract 使用的 `wezterm-bidi 0.2.3` 所需
+`Unicode-DFS-2016` 已加入统一 license allowlist，并在依赖台账登记用途与边界；锁定的 `h2 0.4.16` 同时
+升级到 `0.4.16` 以消除 `RUSTSEC-2026-0258`。`cargo deny check`（advisories/bans/licenses/sources）、
+policy consistency、package gate 与现有 framework qualification 通过；`cargo audit` 仍报告锁定的
+`glib 0.18.5` 对应 `RUSTSEC-2024-0429`，因此该精确 exception 继续保留；`cargo deny` 对同一 ID 的
+advisory-not-detected 只记录为工具数据库差异，不作为风险消失证明。该修复不改变 R70.8 release-cycle/
+user-validation 的外部条件。
+
+R70.3 render-transaction metrics follow-up（2026-08-28）：`PreparedRender` 现在携带与 surface/presentation
+generation 一致的 `FrameMetrics`，构造时拒绝跨 generation metrics，consumer 可从同一 immutable render
+transaction 读取 observation；该契约已有独立 consumer 回归。这样不会把 detached counter 误认为当前 frame
+的指标，也不绑定 telemetry backend。
+
+### R70.8 test-build boundary hardening（2026-08-28）
+
+本 follow-up 修复了 host crate 的 test/non-test 导出边界：production launcher 入口只在非 test 构建重导出，
+测试辅助保持模块私有；同时修正 sidebar 配置流与 release qualification 常量断言，使 host、framework 和 app
+在 `-D warnings` 下通过严格 Clippy。该修复不改变 public package surface，也不把测试 helper 重新暴露给
+consumer。验证包括相关 crate strict Clippy、fmt 与 diff check；R70.8 所要求的真实 preview 发布、release
+cycle 和用户验证仍待外部 evidence，因此 RFC 状态继续为 In Progress。
+
+### R70.4/R70.6 production application-session identity fix（2026-08-28）
+
+真实 TUI 进程回归发现 managed session leaf 使用 `records.jsonl` 后，内核按物理路径生成的 durable session
+scope 与 TUI 初始化时保留的随机 session ID 不一致，导致 application projection 返回 `ScopeMismatch`，进而
+session action 与 first-run command 被错误地报告为 application service unavailable。authority composition 接线
+现在会在切换到 managed leaf 后同步采用同一确定性 path identity，确保 worker、application projection 和 UI
+共享同一 session scope。真实 TUI session-action export 与 first-run provider fixture 已通过；R70.8 的真实
+preview 发布、release cycle 和用户验证仍待外部 evidence。
+
+### R70.8 preview release-train hardening（2026-08-28）
+
+Preview workflow 现在在显式 publish 模式下要求 `CARGO_REGISTRY_TOKEN`，并按 core → Ratatui adapter → facade
+顺序发布后等待 crates.io registry API 确认前置版本可见，再继续下游 package。新增的
+`scripts/wait-for-crates-io-version.py` 对 crate/version、请求超时与总等待时间做有界校验，且有无网络的重试
+单测；避免 registry index propagation 延迟把一个可用的发布 train 错误判为依赖缺失。
+
+本轮仍未执行真实发布、release cycle 或用户验证，也未生成外部 evidence；因此 R70.8 继续为 In Progress，
+不得将本地 preview dry-run 当作 RFC 的 published preview。
+
+### R70.8 release qualification harness follow-up（2026-08-29）
+
+PR qualification 暴露 `scripts/test-run-evals.py` 向 fake model-eval binary 注入了错误的环境变量：runner 实际
+读取 `SIGIL_MODEL_EVAL_BIN`，fixture 却设置未被读取的 `SIGIL_BIN`，使 CI 错误地执行真实 model-eval 并失败。
+测试现已改为注入 runner 的正式 override，且本地 contract test `1 passed`。该修复只纠正测试 harness 与生产
+runner 的既有接口不一致，不放宽 acceptance；PR CI 需要在新 commit 上重新验证。
+
+### R70.8 physical test-layout gate closure（2026-08-29）
+
+PR CI 随后发现 physical Rust test-layout gate 在 `origin/main` 已存在 inline test backlog，且 R70/R71 新增模块
+进一步扩大了失败面。为保持该 gate 的原始含义，没有改成 allowlist、changed-file-only 或跳过检查；仓库内 65 个
+`#[cfg(test)] mod tests` 已迁移到各自源模块的 `tests/*_tests.rs` sibling，并由 `#[path] mod tests;` 保持原有
+父模块私有可见性和测试配置边界。`check-test-layout.py`、其 3 个 contract tests、`cargo check --locked
+--workspace --all-targets` 与 `cargo test --locked --workspace --all-targets --no-fail-fast` 均通过。
+
+该 slice 只修复 CI gate 的真实测试布局缺口，不改变生产行为，也不伪造 R70.8 所需的 crates.io preview、release
+cycle 或 user-validation evidence；R70.8 在这些外部条件完成前继续保持 In Progress。
+
+### R70.8 desktop contract regeneration（2026-08-29）
+
+远端 Desktop contract job 发现 Rust HTTP application routes 已进入 OpenAPI，但 Desktop 提交的 snapshot 与
+generated TypeScript DTO 未同步。已按仓库规定的 `pnpm --dir apps/desktop contract:generate` 更新
+`apps/desktop/contracts/sigil-openapi.json` 与 `apps/desktop/src/generated/http-schema.ts`，并通过完整
+`pnpm --dir apps/desktop check`（contract、UI system、typecheck、287 个前端测试和 production build）。该修复
+不改变 transport contract 的定义，也不伪造 R70.8 的 crates.io preview、release-cycle 或 user-validation evidence。
+
+### R70.8 hosted reliability slicing and frozen-contract gate correction（2026-08-30）
+
+Windows platform reliability 已按故障边界拆分为 required kernel、MCP、builtin/terminal、runtime 与 HTTP jobs；
+各 job 拥有独立 timeout 和 cargo cache 生命周期。完整 workspace/all-targets check 由共享 Ubuntu `check` job
+负责，Windows platform jobs 只编译自身 crate 后运行对应测试，避免 isolated runner 重复冷编译完整 workspace
+耗尽 timeout。此调整只改善 evidence isolation，不放宽任何测试条件。
+
+R70.8 gate 同时发现 migration manifest 对 frozen contract 使用整文件 hash，把 physical-test-layout 的测试模块
+迁移和两个 R70.8 诊断错误变体误判为 R71 canonical contract 变化。已恢复 `ManagedExecutionContractV1` 的 frozen
+kernel error taxonomy，并将 frozen hash 定义为去除 `#[cfg(test)]` module 后的 production bytes；新增 checker regression
+覆盖 inline/sibling test placement 等价和 production change 拒绝。migration manifest `276/276`、sandbox/kernel
+定向测试、legacy-retirement gate 与 current exact HEAD package gate 通过。
+
+当前仍未声称 R70.8 完成：真实 crates.io `0.1.0` preview publish、至少一个 release cycle、真实用户验证和对应
+immutable evidence 仍待 release operator；RFC 状态继续为 R70.8 In Progress。
+
+### R70.8 Windows MCP test scheduling follow-up（2026-08-30）
+
+首轮拆分后的 hosted run 显示 Windows MCP slice 中 183 个进程/协议测试以 cargo 默认并发度运行时，四个彼此独立的
+用例同时在 15 秒 startup deadline 内超时；失败均发生在初始化阶段，未出现协议断言或进程清理失败。该 slice 已将
+Windows MCP job 改为 `--test-threads=1`，保留测试内部显式验证的 MCP 并发 barrier，因此只降低 runner 级资源竞争，
+不放宽启动 deadline、协议检查或进程树清理条件。本地串行验证为 `sigil-mcp 193 passed / 0 failed / 1 ignored`、
+`sigil-process 2 passed`；新的 hosted exact-SHA 结果仍待本次提交完成后重新运行。
+
+### R70.8 Windows HTTP managed-store portability follow-up（2026-08-30）
+
+拆分后的 hosted Windows HTTP job 已完成编译并进入测试，但发现 17 个 production-driver 测试在 managed
+command-store 完成 legacy 文件退休时返回 `Access is denied. (os error 5)`。根因是迁移代码在删除兼容文件后
+无条件对父目录调用 `std::fs::File::sync_all()`；该 Unix 目录 fsync 语义不能直接用于 Windows 目录句柄。
+现已限制父目录 fsync 到非 Windows 路径；Windows 继续依赖 `durable_io` 的 write-through 原子替换边界，删除
+兼容文件后不再尝试不受支持的目录同步。该修复只消除平台错误，不放宽 authority、managed writer 或 durability
+断言；本地 `sigil-http --lib -- --test-threads=1` 为 `224 passed / 0 failed`。需在新 exact SHA 上重跑 hosted
+Windows HTTP 与完整 CI，当前仍不宣称 R70.8 完成。
+
+### R70.8 Windows runtime test sharding follow-up（2026-08-30）
+
+Replacement run `33265825116` confirmed that the split MCP, builtin, HTTP and kernel jobs no longer depend on the
+long-running runtime test: those jobs completed successfully and retained their independent evidence. The remaining
+`sigil-runtime --lib -- --test-threads=1` job itself reached its 45-minute budget and was cancelled, so the prior
+runtime slice was still too large even after platform-level isolation. The workflow now shards Windows runtime tests
+into agent-tools, agent-supervisor, session-lifecycle, application-run, provider-connections, doctor, plan-review and
+an explicit remainder shard. The remainder uses `--skip` for the named shards, so the union still covers the complete
+runtime test binary; `cargo test -- --list` enumerated 1,232 tests across the shard selection and remainder checks.
+Each shard has its own timeout and `fail-fast: false`, while the test-level `--test-threads=1` resource-safety boundary
+is retained. A fresh exact-SHA hosted run is required; the timed-out run does not count as a hosted pass.
+
+### R70.8 Windows HTTP hosted timing-budget follow-up（2026-08-30）
+
+The first hosted run after runtime sharding isolated one independent HTTP regression: the production preparation
+failure test timed out its event observation at 10 seconds on Windows (`222 passed / 1 failed`, test binary completed
+in 109.69 seconds). The failure was a test scheduling budget, not a production cancellation hang; the same test passes
+locally in 4.16 seconds and still verifies the terminal event, failed run projection and durable replay. Its observation
+budget is now a finite 30 seconds to account for cold managed-authority/provider preparation on hosted Windows while
+retaining a bounded failure detector. The new exact-SHA hosted run must revalidate the HTTP slice and all runtime shards.
+
+### R70.8 Windows hosted PTY line-ending follow-up（2026-08-30）
+
+The sharded hosted run `33269236970` completed 28 jobs successfully but its Windows runtime `remainder` job was
+cancelled at the 45-minute limit. The retained job log identified the exact last-started test:
+`r71_managed_terminal_route_supports_pty_control_and_receipt`; the Windows `cmd.exe` ConPTY fixture sent an LF-only
+line to `set /P`, which did not submit the console line and left the child waiting indefinitely. The fixture now sends
+platform-native input (`\n` on Unix, `\r\n` on Windows) while retaining the same PTY resize, output, exit-code and
+resource-receipt assertions. Local targeted validation passes (`1/1`), and the same 708-test remainder passes locally
+(`705 passed / 3 ignored`). A fresh exact-SHA hosted run is required; this cancelled run is not qualification evidence.
+
+### R70.8 desktop package cache-boundary follow-up（2026-08-30）
+
+独立桌面打包 run `33271832007` 的 Linux 与 macOS job 已成功，但 Windows NSIS job 在完成构建后长期停留于
+`Post Cache cargo artifacts`，没有继续到 job completion；该缓存 post-step 阻塞了独立 package job，而不是平台
+构建或验证失败。已将 `desktop-package.yml` 的 Rust cache 保存条件收紧为仅默认分支 push：PR 与手动验证仍可
+恢复已有 cache，但不再上传 release target，避免 cache post-save 消耗整段 job timeout。此次变更不放宽包内容、
+sidecar 或签名验证；取消的旧 package run 不作为资格证据，需在新 exact SHA 上重跑 package workflow。
+
+### R70.8 Windows runtime PTY synchronization and adapter shard（2026-08-30）
+
+The replacement CI run `33273509938` again isolated the only cancelled job to Windows runtime `remainder`; the last
+started test was `r71_managed_terminal_route_supports_pty_control_and_receipt`. The platform-native `\r\n` input
+correction was necessary but did not remove the startup race: the test could write before the ConPTY child had entered
+its input-read state. The fixture now emits `runtime-pty-ready`, drains the managed output stream until that marker is
+observed, and only then writes and closes stdin. The Windows runtime matrix also gives the seven
+`managed_resource_adapters` tests their own 30-minute shard and excludes them from `remainder`; the remainder still
+covers every other runtime test. This is a scheduling/fixture reliability correction, not a reduction of coverage or a
+relaxation of the managed process receipt assertions. Fresh exact-SHA CI is required; the cancelled run is not
+qualification evidence.
+
+### R70.8 Windows PTY fixture deadline and console-reader follow-up（2026-08-30）
+
+The new adapter shard showed that the earlier `pwsh.exe` fixture used a relative executable name that the managed
+launcher correctly rejected as `ProviderUnavailable`; the Windows fixture now restores the absolute `ComSpec` path,
+uses `cmd.exe` with an explicit readiness marker, and keeps CRLF input. Readiness, stdin write/close, output drain and
+finalization each have a bounded 30-second test deadline, so a platform regression becomes a diagnostic test failure
+instead of consuming the whole job budget. The existing Unix shell fixture and managed receipt assertions remain
+unchanged. The in-flight
+`33277739733` run must be replaced by a fresh exact-SHA run because the source SHA changes; no hosted pass is claimed
+from the still-running prior attempt.
+
+The same test now bounds `start_persistent` and `resize_pty` with the same 30-second diagnostic deadline. This closes
+the remaining unbounded portion of the PTY fixture lifecycle; it does not convert a failed stage into success.
+
+### R70.8 Windows hosted PTY readiness diagnosis and fixture correction（2026-08-30）
+
+The exact-SHA replacement run `33278615214` validated the shard boundary itself: the Windows runtime matrix reached
+independent test execution, and the dedicated `managed-resource-adapters` job ran six of seven tests successfully.
+Its PTY test failed after the bounded 30-second readiness deadline because the `cmd.exe` `set /P` fixture produced no
+observable readiness frame under the hosted ConPTY implementation. This is now a diagnostic fixture failure rather
+than a 45-minute remainder cancellation. The fixture therefore resolves an absolute PowerShell executable from the
+Windows environment and uses explicit `Console.WriteLine`/`Console.ReadLine` calls, while retaining the CRLF input,
+readiness handshake, lifecycle deadlines, PTY resize and managed receipt assertions. The source correction requires a
+new exact-SHA hosted run; `33278615214` is not qualification evidence.
+
+### R70.8 Windows hosted PTY environment correction（2026-08-30）
+
+The replacement run `33279368713` showed that the absolute PowerShell fixture still reached its bounded readiness
+deadline without an output frame; six of seven adapter tests passed. The managed PTY launcher intentionally clears the
+ambient environment and only materializes authority-reserved variables, while the Windows console runtime also needs
+the same bounded host-toolchain baseline used by the managed one-shot route (`PATH`, `USERPROFILE`, `HOMEDRIVE`,
+`HOMEPATH`, `LOCALAPPDATA`, `APPDATA`, `PROGRAMDATA` and `ProgramFiles` entries). The PTY fixture now supplies only
+that explicit allowlisted baseline; it does not restore ambient secrets or arbitrary environment inheritance. Local
+targeted and complete adapter validation are `1/1` and `7/7`. A new exact-SHA hosted run is required; `33279368713`
+is not qualification evidence.
+
+### R70.8 Desktop dependency audit refresh（2026-08-30）
+
+The Windows PTY target pin exposed a separate desktop dependency audit failure in the PR gate. The desktop lockfile
+now upgrades `dompurify` to `3.4.13`, `mermaid` to `11.16.1`, `postcss` to `8.5.23`, and `nanoid` to `3.3.18`;
+WDIO's `deepmerge-ts` is constrained to `8.0.0`. The WDIO range currently resolves `@puppeteer/browsers 2.x`,
+which brings an unfixable `extract-zip 2.0.1` advisory; the dev-only browser setup is therefore pinned to
+`@puppeteer/browsers 3.2.1`, which uses `modern-tar`. Frozen install, WDIO CLI smoke, full desktop check, and
+`pnpm audit --audit-level high` pass locally. This is a dev-toolchain dependency correction and does not close
+R70.8's exact-SHA hosted qualification, real crates.io preview publication, release cycle, or user validation.
+
+### R70.8 Fuzz workspace lockfile synchronization（2026-08-30）
+
+The final hosted workspace check found that the independently locked `fuzz` workspace had not recorded the target
+resolved `portable-pty 0.8.1` graph introduced for Windows ConPTY compatibility. The generated
+`fuzz/Cargo.lock` is now synchronized and `cargo check --locked --manifest-path fuzz/Cargo.toml
+--bin shell_permission_plan` passes locally. This is a lockfile-only correction; it preserves the fuzz target's
+separate workspace boundary and does not close hosted qualification, crates.io publication, release-cycle, or user
+validation requirements.
+
+### R70.8 Windows hosted ConPTY dependency correction（2026-08-30）
+
+The exact-SHA run `33280134869` isolated the remaining failure to the dedicated
+`managed-resource-adapters` shard: six tests passed, while
+`r71_managed_terminal_route_supports_pty_control_and_receipt` received no readiness frame and failed at its bounded
+30-second deadline. The failure was not a pipeline timeout; the job completed diagnostically. The hosted runner uses
+`portable-pty 0.9.0`, whose Windows ConPTY path has a known regression in this release line, so changing only the
+fixture command or its allowlisted environment cannot make the reader reliable. The dependency is now target-pinned
+to `portable-pty 0.8.1` on Windows, while Unix keeps `0.9.0` for its signal-status API; the lockfile records both
+target-resolved versions. This is a compatibility containment change, not a coverage reduction or fallback to direct
+process spawning. Local Unix `sigil-runtime` managed-resource adapter tests pass `7/7`; a new exact-SHA Windows run is
+required before R70.8 can be considered qualified.
+
+### R70.8 Windows hosted ConPTY EOF synchronization（2026-08-30）
+
+The exact-SHA run `33282594274` confirmed the Windows dependency pin and all other completed shards, but the dedicated
+`managed-resource-adapters` shard still failed in
+`r71_managed_terminal_route_supports_pty_control_and_receipt`: the child exited after the input exchange, while
+ConPTY retained the host-owned master and never released the managed output reader, so the test timed out waiting for
+the stream to finish. The sandbox now starts a Windows-only exit watcher for persistent PTY children; once the child
+has exited (or its status becomes uncertain), the watcher releases the host-owned master and allows the existing
+per-channel EOF frame to be observed. Unix does not use this watcher because polling `try_wait` there could reap the
+child before `wait_and_finalize` publishes its receipt. The runtime test also stops at the explicit EOF frame instead
+of requiring receiver closure. Local Linux targeted validation and the Windows target compile pass; run
+`33282594274` is not qualification evidence because its source predates this correction, and a fresh exact-SHA
+hosted run remains required.
+
+### R70.8 Windows hosted PTY exit-status fixture correction（2026-08-30）
+
+The follow-up exact-SHA run `33283541198` reached the PTY EOF path after the host-owned master was
+released, but the PowerShell fixture returned a non-zero process status after the input/close sequence. The test
+already proved the readiness marker and echoed payload; the fixture now terminates explicitly with `exit 0` after
+emitting that payload, and the assertion includes the complete managed receipt and captured output when the status is
+unexpected. This keeps the receipt's zero-exit requirement while making the platform fixture's intended terminal
+status explicit. A fresh exact-SHA hosted run is required; `33283541198` remains non-qualification evidence.
+
+### R70.8 Windows hosted PTY finalization non-blocking correction（2026-08-30）
+
+The same run `33283541198` showed that releasing the master could produce an EOF frame before the child wait had
+completed; the async `wait_and_finalize` implementation then called the synchronous child wait directly on the Tokio
+executor. This could hang the test beyond its intended deadline and hide whether the Windows fixture had actually
+terminated. Persistent process and PTY finalization now perform the blocking child wait on a blocking worker, and the
+Windows exit watcher only releases the master after a positive `try_wait` result. This preserves fail-closed
+uncertain-status handling and process-inventory settlement while making a still-running child observable as a bounded
+test failure. Local managed-resource adapter tests remain `7/7`, and a new exact-SHA hosted run is required.
+
+### R70.8 Windows hosted PTY fixture shell correction（2026-08-30）
+
+The exact-SHA run `33284933116` confirmed that the non-blocking finalization path and EOF synchronization no longer
+hang, but the Windows PTY control test still received a `portable-pty` exit code of `0xffffffff` (`-1`) from the
+PowerShell ConPTY fixture after the readiness/input/close sequence. The managed receipt retained the complete output,
+EOF and released resource state; only the fixture's zero-exit assertion failed. The test fixture now uses the Windows
+built-in `ComSpec`/`cmd.exe`, keeps the child alive briefly with a bounded `ping`, and exits explicitly with
+`exit /B 0`. This removes both the PowerShell-specific ConPTY exit-status ambiguity and the hosted-ConPTY `set /P`
+EOF/input-read hang while retaining real stdin write/close, readiness synchronization, CRLF input, PTY resize, EOF,
+zero-exit and managed resource-receipt assertions. Local Unix managed-resource adapter tests remain `7/7`. The
+failed run is not qualification evidence; a new exact-SHA CI and package run is required. crates.io publication and
+release-cycle validation remain intentionally deferred and are not represented as completed evidence.
+
+### R70.8 Windows hosted PTY cancellable child wait correction（2026-08-30）
+
+The replacement run `33286399595` showed that removing `set /P` eliminated the PowerShell exit-status failure, but the
+managed PTY job could still remain active because `wait_and_finalize` submitted an unbounded synchronous
+`portable-pty::Child::wait()` to `spawn_blocking`; a caller timeout cannot cancel that worker while the child remains
+alive. Native and PTY finalization now poll non-blocking `try_wait()` in short blocking probes with async sleeps between
+probes. This preserves exact status, process-inventory settlement and fail-closed error mapping while allowing the
+managed caller's bounded timeout to cancel between probes. Local sandbox compilation and managed-resource adapter
+tests pass (`7/7`). Runs `33286399595` and `33286399592` were cancelled after the diagnosis and are not qualification
+evidence; a fresh exact-SHA CI and package run is required. crates.io publication and release-cycle validation remain
+intentionally deferred.
+
+### R70.8 Windows hosted PTY input-close ordering correction（2026-08-30）
+
+The exact-SHA run `33287018065` reached all seven managed-resource adapter tests and isolated the remaining Windows
+failure to the PTY control fixture: closing the input writer while `cmd.exe` was still in its natural exit path caused
+hosted ConPTY to report `Exited { code: -1 }` and emit a `^C` marker, even though the fixture requested `exit /B 0`.
+The fixture still writes the real CRLF input and now waits for the host-owned exit watcher to deliver EOF before
+closing the already-exited writer and finalizing the managed receipt. This preserves input, EOF, zero-exit and resource
+settlement assertions without depending on live ConPTY input-close behavior. The run failed only at that fixture
+assertion and is not qualification evidence; a new exact-SHA CI and package run is required. crates.io publication and
+release-cycle validation remain intentionally deferred.
+
+### R70.8 exact-SHA hosted engineering qualification（2026-08-30）
+
+Source candidate `ff9ae90956166d4a8d1f2469e2e8d4ddd7ef5fa6` passed the split hosted qualification set:
+
+- CI run `33287711724`: `30/30` jobs successful, including all Windows runtime shards, Windows/macOS reliability,
+  keyring, coverage, clippy, orchestration and TUI PTY acceptance.
+- Desktop Package run `33287711712`: Windows NSIS, macOS app and Linux deb `3/3` successful.
+- Dependency Supply Chain run `33287711679`: all `5/5` jobs successful.
+- Local follow-up: `sigil-sandbox` `70/70`, managed runtime adapters `7/7`, strict clippy, fmt and diff checks passed.
+
+This closes the R70.8 code and hosted engineering qualification boundary. The qualification records are exact-SHA
+evidence for `ff9ae909`; the documentation commit that records them requires one final exact-SHA revalidation before
+it is treated as the release candidate. crates.io publication, at least one release cycle and user validation remain
+intentionally deferred and are not represented as completed evidence.

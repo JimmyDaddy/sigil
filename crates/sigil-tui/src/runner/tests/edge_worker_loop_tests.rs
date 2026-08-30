@@ -51,7 +51,10 @@ use super::{
         },
         worker_loop::{append_interrupted_task_state, append_paused_task_state},
     },
-    common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
+    common::{
+        PlannedProvider, StreamPlan, spawn_test_worker, test_authority_composition,
+        test_root_config,
+    },
 };
 
 struct ManualLoopWorker {
@@ -1218,21 +1221,28 @@ fn close_agent_thread_appends_runtime_close_control() -> Result<()> {
 fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Result<()> {
     let temp = tempdir()?;
     let root_config = test_root_config(temp.path(), "planned", "planned-model");
-    let provider = PlannedProvider::new(Vec::new());
-    let (message_tx, _message_rx) = mpsc::channel();
-    let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
-    let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
-    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new_test(mcp_event_tx));
-    let surface = sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust(
-        &root_config,
-        &provider.capabilities(),
-        temp.path().to_path_buf(),
-        elicitation_handler,
-        mcp_event_handler,
-        sigil_kernel::WorkspaceTrust::Unknown,
-    )?;
-    let registry = surface.registry;
-    let terminal_control = surface.terminal_control;
+    let (composition, _authority_root) = test_authority_composition(temp.path())?;
+    let paths =
+        sigil_runtime::resolve_sigil_paths(&root_config.storage, &root_config.session, temp.path());
+    let scratch_control = sigil_runtime::authority_scratch_control(paths.scratch_root);
+    let mut registry = ToolRegistry::new();
+    let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
+        composition.command_execution.clone();
+    let managed_terminal: Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1> =
+        composition.command_execution.clone();
+    let handles =
+        sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+            &mut registry,
+            sigil_tools_builtin::BuiltinToolPaths::workspace_defaults(temp.path()),
+            managed_executor,
+            sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                &root_config.execution,
+            ),
+            None,
+            Some(scratch_control),
+            managed_terminal,
+        );
+    let terminal_control = handles.terminal;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1851,6 +1861,8 @@ fn spawn_loop_with_shared_agent(
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
                     managed_extension_execution: None,
+                    managed_verification_execution: None,
+                    managed_plan_review_child_resources: None,
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,
@@ -2217,5 +2229,20 @@ fn shutdown_without_active_run_does_not_emit_events() -> Result<()> {
         "idle shutdown should close without emitting run messages"
     );
     worker.join()?;
+    Ok(())
+}
+
+#[test]
+fn managed_records_leaf_keeps_its_logical_session_reference() -> Result<()> {
+    let managed = std::path::Path::new("/state/managed/session-log/session-123/records.jsonl");
+    assert_eq!(
+        session_ref_for_log_path(managed).map_err(anyhow::Error::msg)?,
+        SessionRef::new_relative("session-123.jsonl")?
+    );
+    let direct = std::path::Path::new("/state/sessions/records.jsonl");
+    assert_eq!(
+        session_ref_for_log_path(direct).map_err(anyhow::Error::msg)?,
+        SessionRef::new_relative("records.jsonl")?
+    );
     Ok(())
 }

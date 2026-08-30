@@ -60,6 +60,226 @@ pub(super) struct TerminalWorker {
     pub(super) lifecycle: TerminalLifecycleOwner,
 }
 
+pub(super) struct ManagedTerminalWorker {
+    pub(super) handle: Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>,
+    pub(super) stdout_writer: tokio::io::DuplexStream,
+    pub(super) stderr_writer: tokio::io::DuplexStream,
+    pub(super) cancel_rx: mpsc::Receiver<ManagedTerminalCommand>,
+    pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
+    pub(super) artifacts: TerminalTaskArtifacts,
+    pub(super) stdout_task: JoinHandle<Result<io::CaptureOutcome>>,
+    pub(super) stderr_task: JoinHandle<Result<io::CaptureOutcome>>,
+    pub(super) capture_ledger: Arc<TerminalCaptureLedger>,
+    pub(super) preview_limit_bytes: usize,
+    pub(super) lifecycle: TerminalLifecycleOwner,
+}
+
+pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
+    let mut handle = worker.handle;
+    let mut output_stream = match handle.take_output_stream() {
+        Ok(stream) => stream,
+        Err(error) => {
+            let reason = format!("managed terminal output stream unavailable: {error}");
+            let _ = handle
+                .cancel(sigil_kernel::managed_execution::ProcessCancelReasonV1::ParentShutdown)
+                .await;
+            let receipt = handle.wait_and_finalize().await;
+            let finalization_error = receipt.err().map(|error| error.to_string());
+            let entry = finalize_terminal_summary(
+                &worker.summary,
+                &worker.artifacts,
+                TerminalTaskStatus::Failed { reason },
+                finalization_error,
+                worker.preview_limit_bytes,
+                None,
+                TerminalCaptureEvidence::from_ledger(
+                    &worker.capture_ledger,
+                    Some(TerminalOutputTerminationReason::OutputCaptureFailed),
+                ),
+            )
+            .await;
+            worker
+                .lifecycle
+                .mark_terminal(entry.status.clone(), entry.output_total_bytes);
+            return;
+        }
+    };
+    let mut cancel_rx = worker.cancel_rx;
+    let mut cancel_waiters = Vec::new();
+    let mut stream_error = None;
+    let mut stream_open = true;
+    let mut cancel_open = true;
+    let mut cancel_requested = false;
+    let mut stdout_writer = worker.stdout_writer;
+    let mut stderr_writer = worker.stderr_writer;
+
+    while stream_open {
+        tokio::select! {
+            biased;
+            command = cancel_rx.recv(), if cancel_open => {
+                let Some(command) = command else {
+                    cancel_open = false;
+                    continue;
+                };
+                match command {
+                    ManagedTerminalCommand::WriteStdin { input, respond_to } => {
+                        let result = handle
+                            .write_stdin(input)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| error.to_string());
+                        let _ = respond_to.send(result);
+                    }
+                    ManagedTerminalCommand::Resize { size, respond_to } => {
+                        let result = handle
+                            .resize_pty(size)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| error.to_string());
+                        let _ = respond_to.send(result);
+                    }
+                    ManagedTerminalCommand::Cancel { respond_to } => {
+                        if cancel_requested {
+                            cancel_waiters.push(respond_to);
+                            continue;
+                        }
+                        match handle
+                            .cancel(
+                                sigil_kernel::managed_execution::ProcessCancelReasonV1::UserCancelled,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                cancel_requested = true;
+                                cancel_waiters.push(respond_to);
+                                // Cancellation owns the terminal outcome from this point on. A
+                                // PTY output reader (notably ConPTY) may remain open after the
+                                // process tree has been terminated, so waiting for an EOF frame
+                                // here would prevent wait_and_finalize from closing the PTY and
+                                // publishing the persistent cancellation receipt.
+                                stream_open = false;
+                            }
+                            Err(error) => {
+                                let _ = respond_to.send(Err(error.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            frame = output_stream.next_frame() => {
+                match frame {
+                    Ok(Some(frame)) => {
+                        if frame.end_of_stream {
+                            continue;
+                        }
+                        if frame.payload.is_empty() {
+                            continue;
+                        }
+                        let writer = match frame.channel {
+                            sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Stdout
+                            | sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Pty => &mut stdout_writer,
+                            sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Stderr => &mut stderr_writer,
+                        };
+                        if let Err(error) = writer.write_all(&frame.payload).await {
+                            stream_error.get_or_insert_with(|| {
+                                format!("managed terminal output projection failed: {error}")
+                            });
+                        }
+                    }
+                    Ok(None) => stream_open = false,
+                    Err(error) => {
+                        stream_error = Some(format!("managed terminal output stream failed: {error}"));
+                        let _ = handle.cancel(
+                            sigil_kernel::managed_execution::ProcessCancelReasonV1::ParentShutdown,
+                        ).await;
+                        stream_open = false;
+                    }
+                }
+            }
+        }
+    }
+    drop(output_stream);
+    drop(stdout_writer);
+    drop(stderr_writer);
+    let receipt = handle.wait_and_finalize().await;
+    let mut stdout_task = CaptureTaskState::new(TerminalOutputStream::Stdout, worker.stdout_task);
+    let mut stderr_task = CaptureTaskState::new(TerminalOutputStream::Stderr, worker.stderr_task);
+    let capture_error = join_capture_tasks(&mut stdout_task, &mut stderr_task).await;
+    let capture_error = stream_error.or(capture_error);
+    let (status, cleanup) = match receipt {
+        Ok(ref receipt) => (
+            managed_terminal_status(&receipt.process.termination),
+            Some(managed_cleanup_receipt(&receipt.resources.cleanup_status)),
+        ),
+        Err(ref error) => (
+            TerminalTaskStatus::Failed {
+                reason: format!("managed terminal finalization failed: {error}"),
+            },
+            None,
+        ),
+    };
+    let fallback = capture_error
+        .as_ref()
+        .map(|_| TerminalOutputTerminationReason::OutputCaptureFailed);
+    let finalization_response = match &receipt {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    };
+    let entry = finalize_terminal_summary(
+        &worker.summary,
+        &worker.artifacts,
+        status,
+        capture_error,
+        worker.preview_limit_bytes,
+        cleanup,
+        TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback),
+    )
+    .await;
+    worker
+        .lifecycle
+        .mark_terminal(entry.status.clone(), entry.output_total_bytes);
+    for respond_to in cancel_waiters {
+        let _ = respond_to.send(finalization_response.clone());
+    }
+}
+
+fn managed_terminal_status(
+    termination: &sigil_kernel::managed_execution::ProcessTerminationV1,
+) -> TerminalTaskStatus {
+    match termination {
+        sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code } => {
+            TerminalTaskStatus::Exited {
+                exit_code: Some(*code),
+            }
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::Cancelled => {
+            TerminalTaskStatus::Cancelled
+        }
+        sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut => {
+            TerminalTaskStatus::Failed {
+                reason: "managed terminal exceeded its execution limit".to_owned(),
+            }
+        }
+        other => TerminalTaskStatus::Failed {
+            reason: format!("managed terminal ended without a stable exit: {other:?}"),
+        },
+    }
+}
+
+fn managed_cleanup_receipt(
+    status: &sigil_kernel::resource::ResourceCleanupStatusV1,
+) -> ExecutionCleanupReceipt {
+    match status {
+        sigil_kernel::resource::ResourceCleanupStatusV1::Released => {
+            ExecutionCleanupReceipt::completed("managed authority released terminal resources")
+        }
+        _ => ExecutionCleanupReceipt {
+            status: ExecutionCleanupStatus::Unknown,
+            reason: Some(format!("managed authority cleanup status: {status:?}")),
+        },
+    }
+}
+
 pub(super) struct PtyWorker {
     pub(super) _process_owner: ProcessTreeOwnerGuard,
     pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
@@ -139,6 +359,7 @@ impl CaptureTaskState {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn spawn_pty_runtime(
     plan: &TerminalTaskStartPlan,
     size: TerminalPtySize,
@@ -228,6 +449,7 @@ pub(super) fn spawn_pty_runtime(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
     enum WorkerEvent {
         ProcessExited(TerminalTaskStatus),
@@ -427,6 +649,7 @@ async fn join_capture_tasks(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
     enum PtyWorkerEvent {
         CaptureFailed(TerminalCaptureFailure),
@@ -805,12 +1028,15 @@ pub(super) fn status_from_pty_wait_result(
     wait_result: std::io::Result<portable_pty::ExitStatus>,
 ) -> TerminalTaskStatus {
     match wait_result {
-        Ok(status) => TerminalTaskStatus::Exited {
-            exit_code: status
-                .signal()
-                .is_none()
-                .then(|| i32::try_from(status.exit_code()).unwrap_or(i32::MAX)),
-        },
+        Ok(status) => {
+            #[cfg(unix)]
+            let exited = status.signal().is_none();
+            #[cfg(windows)]
+            let exited = status.success();
+            TerminalTaskStatus::Exited {
+                exit_code: exited.then(|| i32::try_from(status.exit_code()).unwrap_or(i32::MAX)),
+            }
+        }
         Err(error) => TerminalTaskStatus::Failed {
             reason: format!("terminal pty wait failed: {error}"),
         },
@@ -1243,19 +1469,29 @@ pub(super) async fn wait_for_terminal_summary(
 
 #[cfg(unix)]
 pub(super) async fn send_terminate_signal(process_id: u32) -> Result<()> {
-    if send_process_group_signal(process_id, "TERM").await.is_ok() {
-        return Ok(());
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let _ = process_id;
+        bail!("legacy direct terminal cleanup is unavailable in normal builds");
     }
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        if send_process_group_signal(process_id, "TERM").await.is_ok() {
+            return Ok(());
+        }
 
-    let mut command = Command::new("kill");
-    command.arg("-TERM").arg(process_id.to_string());
-    let status =
-        run_terminal_cleanup_command(command, format!("kill -TERM terminal process {process_id}"))
-            .await?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("kill returned non-zero status for terminal process {process_id}");
+        let mut command = Command::new("kill");
+        command.arg("-TERM").arg(process_id.to_string());
+        let status = run_terminal_cleanup_command(
+            command,
+            format!("kill -TERM terminal process {process_id}"),
+        )
+        .await?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("kill returned non-zero status for terminal process {process_id}");
+        }
     }
 }
 

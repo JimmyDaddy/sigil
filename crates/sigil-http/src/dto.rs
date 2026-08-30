@@ -2740,6 +2740,7 @@ pub struct HttpConversationQueueCommandReceipt {
 }
 
 impl HttpConversationQueueCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self
@@ -3217,6 +3218,7 @@ pub struct HttpConversationRecoveryCommandReceipt {
 }
 
 impl HttpConversationRecoveryCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self
@@ -3400,6 +3402,7 @@ pub struct HttpApprovalCommandReceipt {
 }
 
 impl HttpApprovalCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self
@@ -3429,6 +3432,7 @@ pub struct HttpRunStartCommandReceipt {
 }
 
 impl HttpRunStartCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self
@@ -3458,6 +3462,7 @@ pub struct HttpRunCancelCommandReceipt {
 }
 
 impl HttpRunCancelCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self
@@ -3900,6 +3905,7 @@ pub struct HttpUserInputDecisionCommandReceipt {
 }
 
 impl HttpUserInputDecisionCommandReceipt {
+    #[cfg(test)]
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

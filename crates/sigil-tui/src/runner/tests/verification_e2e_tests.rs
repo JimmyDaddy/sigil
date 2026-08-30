@@ -14,7 +14,7 @@ use sigil_kernel::{
 use tempfile::tempdir;
 
 use super::{
-    super::{WorkerCommand, WorkerMessage},
+    super::{LocalOperationKind, LocalOperationStatus, WorkerCommand, WorkerMessage},
     common::{PlannedProvider, spawn_test_worker, test_root_config},
 };
 
@@ -168,6 +168,12 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
             }
             WorkerMessage::RunFailed(error) => {
                 return Err(anyhow!("verification worker failed: {error}"));
+            }
+            WorkerMessage::LocalOperationOutcome(outcome)
+                if outcome.kind == LocalOperationKind::TaskVerificationRerun
+                    && outcome.status == LocalOperationStatus::Failed =>
+            {
+                return Err(anyhow!("{}", outcome.safe_summary));
             }
             _ => {}
         }

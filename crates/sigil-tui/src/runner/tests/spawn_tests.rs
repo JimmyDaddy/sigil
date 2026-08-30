@@ -132,23 +132,42 @@ while True:
 }
 
 fn test_authority_composition(
+    root_config: &RootConfig,
     root: &std::path::Path,
-) -> Result<Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>> {
-    let state_root = root.join("authority-state");
-    fs::create_dir_all(state_root.join("cache"))?;
-    let execution_temp_root = root.join("authority-execution-temp");
-    fs::create_dir_all(&execution_temp_root)?;
-    Ok(Arc::new(
-        sigil_runtime::r71_authority_composition::compose_runtime_authority(
-            &state_root,
-            &execution_temp_root,
-            sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
-            Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
-                sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-            )),
-            &[],
-        )?,
-    ))
+) -> Result<(
+    Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+    Arc<sigil_runtime::r71_global_cutover::RuntimeGlobalCutoverV1>,
+)> {
+    let config_path = root.join("sigil.toml");
+    root_config.save(&config_path)?;
+    let paths =
+        sigil_runtime::resolve_sigil_paths(&root_config.storage, &root_config.session, root);
+    for anchor in [
+        &paths.state_root,
+        &paths.cache_root,
+        &paths.scratch_root,
+        &paths.state_root.join("cache"),
+    ] {
+        fs::create_dir_all(anchor)?;
+        sigil_kernel::config::secure_private_path_permissions(anchor)?;
+    }
+    let config_snapshot =
+        sigil_runtime::r71_authority_composition::ValidatedAuthorityConfigSnapshotV1::load(
+            &config_path,
+            root,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("authority config snapshot is unavailable"))?;
+    let (cutover, composition) =
+        sigil_runtime::r71_authority_composition::compose_current_boot_authority(
+            &config_snapshot,
+            &paths.state_root,
+            &paths.cache_root,
+            &paths.scratch_root,
+        )?;
+    composition
+        .activate_workspace(root)
+        .map_err(anyhow::Error::msg)?;
+    Ok((Arc::new(composition), Arc::new(cutover)))
 }
 
 #[test]
@@ -462,6 +481,10 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         .path()
         .join(".sigil/sessions/session-spawn-eager-ready.jsonl");
     let mut root_config = deepseek_root_config(&workspace_root);
+    root_config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("state").display().to_string());
+    root_config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("cache").display().to_string());
     root_config.mcp_servers.push(mcp_server_config! {
         name: "ready-eager".to_owned(),
         command: "python3".to_owned(),
@@ -470,6 +493,8 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         startup_timeout_secs: 5,
         ..McpServerConfig::default()
     });
+    let (authority_composition, boot_cutover) =
+        test_authority_composition(&root_config, temp.path())?;
 
     let spawned = super::super::spawn::spawn_agent_worker_with_route_directive_and_attachment(
         root_config,
@@ -478,7 +503,8 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
         super::super::spawn::WorkerSessionRouteDirective::default(),
-        Some(test_authority_composition(temp.path())?),
+        Some(authority_composition),
+        Some(boot_cutover),
         None,
     )?;
     let command_tx = spawned.command_tx;

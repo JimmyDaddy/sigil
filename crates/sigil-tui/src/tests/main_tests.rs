@@ -27,10 +27,11 @@ use super::{
     apply_mouse_outcome, build_initial_app, drain_worker_messages, enter_terminal_presentation,
     external_launch_plan, finalize_terminal_presentation, flush_pending_worker_commands,
     leave_terminal_presentation, mouse_layout_snapshot, next_mouse_capture_action,
-    next_wake_deadline, process_app_action, process_app_action_with_spawner,
+    next_wake_deadline, process_app_action, process_app_action_with_spawner, render_timed_frame,
     render_tui_exit_resume_hint, restart_worker_after_session_transition,
     restore_initial_session_from_disk,
 };
+use crate::presentation::PresentationSession;
 
 fn test_config() -> RootConfig {
     RootConfig {
@@ -203,6 +204,25 @@ fn terminal_finalization_clears_the_frame_and_parks_the_cursor_at_origin() {
             .all(|cell| cell.symbol() == " "),
         "no stale TUI cells may remain before the resume hint or a fatal error is printed"
     );
+}
+
+#[test]
+fn timed_frame_path_uses_the_production_present_helper() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    let mut presentation = PresentationSession::new();
+
+    render_timed_frame(&mut terminal, &mut app, &mut presentation)?;
+
+    assert_eq!(
+        presentation
+            .current()
+            .expect("successful draw should commit a frame")
+            .frame()
+            .area(),
+        Rect::new(0, 0, 80, 24)
+    );
+    Ok(())
 }
 
 #[test]
@@ -856,10 +876,16 @@ fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
 #[test]
 fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let root_config = test_config_for_workspace(temp.path());
+    let mut root_config = test_config_for_workspace(temp.path());
+    root_config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("state").display().to_string());
+    root_config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("cache").display().to_string());
+    let config_path = temp.path().join("sigil.toml");
+    root_config.save(&config_path)?;
     let (app, worker) = build_initial_app(
         temp.path().to_path_buf(),
-        temp.path().join("sigil.toml"),
+        config_path,
         Ok(root_config),
         |_root_config, _app| Ok(fake_worker_runtime().0),
     )?;
@@ -867,6 +893,142 @@ fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<(
     assert!(!app.is_setup_mode());
     assert!(app.is_workspace_trust_gate_mode());
     assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn r71_shipping_tui_current_schema_bootstrap_runs_real_authority_file_surface() -> Result<()> {
+    use sigil_kernel::managed_file_access::ManagedFileAdmissionBindingV1;
+    use sigil_kernel::managed_file_access::{
+        ManagedFileAccessAdmissionTokenV1, ToolFileAccessAdmissionTokenV1,
+    };
+    use sigil_kernel::managed_file_access::{
+        ManagedFileAccessPlanRequestV1, ManagedFileAccessRequestV1, ManagedFileExecutionInputV1,
+        ManagedFileLogicalPathV1, ManagedFileOperationV1,
+    };
+    use sigil_kernel::resource::CanonicalHash;
+
+    let _environment_guard = crate::test_env::lock();
+    let temp = tempfile::tempdir()?;
+    std::fs::create_dir_all(temp.path().join("nested"))?;
+    std::fs::write(
+        temp.path().join("README.md"),
+        "needle in the boot workspace\n",
+    )?;
+    std::fs::write(temp.path().join("nested/deep.txt"), "nested needle\n")?;
+    let mut root_config = test_config_for_workspace(temp.path());
+    root_config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("state").display().to_string());
+    root_config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("cache").display().to_string());
+    std::fs::create_dir_all(temp.path().join("state/cache"))?;
+    let config_path = temp.path().join("sigil.toml");
+    root_config.save(&config_path)?;
+
+    let transaction =
+        sigil_runtime::r71_authority_composition::boot_current_schema(&config_path, temp.path())?;
+    let (config, workspace_root, paths, _cutover, composition, registration) =
+        transaction.into_published_parts();
+    assert_eq!(config.workspace.root, temp.path().display().to_string());
+    assert_eq!(workspace_root, temp.path().canonicalize()?);
+    assert!(paths.state_root.is_absolute());
+    assert_eq!(registration.authority_generation.epoch, 1);
+    assert_ne!(
+        registration.authority_generation.instance_hash,
+        CanonicalHash::from_bytes([0; 32])
+    );
+    assert_ne!(
+        registration.root_identity_hash,
+        CanonicalHash::from_bytes([0; 32])
+    );
+
+    let execute = |logical_path: &str,
+                   operation: ManagedFileOperationV1,
+                   input: ManagedFileExecutionInputV1|
+     -> Result<sigil_kernel::managed_file_access::ManagedFileExecutionOutcomeV1> {
+        let plan = composition
+            .services
+            .file_access
+            .plan(ManagedFileAccessPlanRequestV1 {
+                logical_path: ManagedFileLogicalPathV1::new(logical_path.to_owned())?,
+                operation,
+                operation_scope: format!("tui-shipping-{operation:?}"),
+            })?;
+        let binding = ManagedFileAdmissionBindingV1::ToolPermissionPlan {
+            permission_plan_hash: CanonicalHash::from_bytes([0x11; 32]),
+            decision_hash: CanonicalHash::from_bytes([0x12; 32]),
+            approval_continuity_hash: CanonicalHash::from_bytes([0x13; 32]),
+            tool_start_event_digest: CanonicalHash::from_bytes([0x14; 32]),
+            file_access_plan_hash: plan.plan_hash,
+            file_subject_binding_hash: plan.subject_binding_hash,
+            file_resolver_proof_digest: plan.resolver_proof_digest,
+            file_authority_generation: plan.authority_generation,
+            workspace_mutation_activation: None,
+        };
+        let token = ManagedFileAccessAdmissionTokenV1::Tool(
+            ToolFileAccessAdmissionTokenV1::qualification_fixture(
+                binding.clone(),
+                plan.subject_binding_hash,
+                plan.operation_digest,
+            ),
+        );
+        Ok(composition.services.file_access.execute(
+            sigil_kernel::managed_file_access::ManagedFileExecutionRequestV1 {
+                access: ManagedFileAccessRequestV1 {
+                    subject_ref: plan.subject_ref,
+                    operation,
+                    operation_digest: plan.operation_digest,
+                    admission_binding: binding,
+                    admission_binding_hash: plan.plan_hash,
+                },
+                input,
+            },
+            token,
+        )?)
+    };
+
+    let list = execute(
+        ".",
+        ManagedFileOperationV1::List,
+        ManagedFileExecutionInputV1::List {
+            recursive: true,
+            limit: 32,
+            max_depth: 4,
+        },
+    )?;
+    assert!(list.payload.contains("nested/deep.txt"));
+    assert_ne!(
+        list.access_receipt.receipt_hash,
+        CanonicalHash::from_bytes([0; 32])
+    );
+    let grep = execute(
+        ".",
+        ManagedFileOperationV1::Grep,
+        ManagedFileExecutionInputV1::Grep {
+            pattern: "needle".to_owned(),
+            limit: 32,
+            max_bytes: 4096,
+        },
+    )?;
+    assert!(grep.payload.contains("README.md"));
+    assert_ne!(
+        grep.access_receipt.receipt_hash,
+        CanonicalHash::from_bytes([0; 32])
+    );
+    let read = execute(
+        "README.md",
+        ManagedFileOperationV1::Read,
+        ManagedFileExecutionInputV1::Read {
+            offset: 0,
+            limit: 64,
+            max_bytes: 4096,
+        },
+    )?;
+    assert!(read.payload.contains("needle in the boot workspace"));
+    assert_ne!(
+        read.access_receipt.receipt_hash,
+        CanonicalHash::from_bytes([0; 32])
+    );
     Ok(())
 }
 
@@ -934,7 +1096,7 @@ fn config_save_restarts_worker_on_active_session_route() -> Result<()> {
     let mut saved_config = v2_test_config("secondary");
     saved_config.agent.model = "secondary-model".to_owned();
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &current_config);
-    app.apply_runtime_config_snapshot(&saved_config);
+    app.apply_persisted_config_snapshot(&saved_config);
     let (old_runtime, old_commands) = fake_worker_runtime();
     let mut worker = Some(old_runtime);
     let mut spawned_config = None;

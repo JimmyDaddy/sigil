@@ -112,9 +112,12 @@ fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -
             },
             "cutover": {
                 "schema_version": 1,
-                "epoch": "legacy",
-                "authority": "legacy",
-                "blockers": []
+                "epoch": "unavailable",
+                "authority": "unavailable",
+                "blockers": [{
+                    "code": "manifest_corrupt",
+                    "adapter": null
+                }]
             },
             "summary": {
                 "overall_status": "warn",

@@ -29,7 +29,7 @@ use sigil_kernel::resource_recovery::ResourceBlockerAdmissionKeyV1;
 use sigil_kernel::resource_recovery_surface::ResourceRecoverySurfaceContractV1;
 
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
-use crate::resource_recovery_surface::RuntimeResourceRecoveryFacadeV1;
+use sigil_application::ApplicationResourceRecoveryFacadeV1;
 
 /// Actual execution seam kind the runtime surface was composed with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +44,8 @@ pub enum RuntimeExecutionSeamV1 {
 /// extension route the composition does not hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeExecutionExtensionSeamV1 {
-    /// Extension processes still launch through the legacy configured backend path; probe
-    /// fails closed until the managed execution route is composed.
-    LegacyLauncher,
+    /// No managed extension launch route is attached; the readiness probe fails closed.
+    Unavailable,
     /// Extension processes launch through the composed managed execution service; probe passes.
     ManagedExecutionBacked,
 }
@@ -56,7 +55,8 @@ pub enum RuntimeExecutionExtensionSeamV1 {
 /// because its contract has been declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeProductStateSeamV1 {
-    LegacyDirectWriter,
+    /// No product or borrowed-host writer is attached; the readiness probe fails closed.
+    Unavailable,
     /// A trusted product-plane owner performs the bounded atomic lifecycle itself.
     ProductOwnerAtomicBacked,
     /// A borrowed-host writer is attached through the authority registration route.
@@ -191,7 +191,7 @@ fn storage_family_probe(
 /// never claim a seam the composition does not hold.
 pub fn probe_mandatory_adapters(
     services: &RuntimeManagedResourceServicesV1,
-    recovery: &RuntimeResourceRecoveryFacadeV1,
+    recovery: &ApplicationResourceRecoveryFacadeV1,
     cutover_manifest_hash: CanonicalHash,
     application_generation: u64,
 ) -> Vec<AdapterReadinessProbeV1> {
@@ -347,37 +347,32 @@ pub struct RuntimeGlobalCutoverV1 {
 }
 
 impl RuntimeGlobalCutoverV1 {
-    /// Builds the cutover decision for a surface. The manifest is content-addressed and the
-    /// gate is evaluated immediately; the decision is immutable. Seam kinds are read from the
-    /// composed surface (a probe can never claim a seam the composition does not hold).
-    pub fn evaluate(
+    /// Builds the current-schema cutover decision for a surface. The manifest is
+    /// content-addressed and the gate is evaluated immediately; the decision is immutable. Seam
+    /// kinds are read from the composed surface (a probe can never claim a seam the composition
+    /// does not hold).
+    pub fn evaluate_current_schema(
         instance_id: impl Into<String>,
         application_generation: u64,
         authority_generation: AuthorityGeneration,
         services: &RuntimeManagedResourceServicesV1,
-        recovery: &RuntimeResourceRecoveryFacadeV1,
-        selected_epoch: StartupEpochV1,
+        recovery: &ApplicationResourceRecoveryFacadeV1,
     ) -> Self {
         let mut manifest = CutoverManifestV1 {
             schema_version: 1,
             application_instance_id: instance_id.into(),
-            selected_epoch,
+            selected_epoch: StartupEpochV1::NewCurrentSchema,
             application_generation,
             authority_generation_digest: authority_generation.instance_hash,
             mandatory_readiness: Vec::new(),
             manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
         };
-        match selected_epoch {
-            StartupEpochV1::Legacy => {}
-            StartupEpochV1::NewCurrentSchema => {
-                manifest.mandatory_readiness = probe_mandatory_adapters(
-                    services,
-                    recovery,
-                    probe_source::probe(application_generation),
-                    application_generation,
-                );
-            }
-        }
+        manifest.mandatory_readiness = probe_mandatory_adapters(
+            services,
+            recovery,
+            probe_source::probe(application_generation),
+            application_generation,
+        );
         manifest.manifest_hash = compute_manifest_hash(&manifest);
         let gate_error = validate_cutover_manifest(&manifest).err();
         Self {
@@ -385,6 +380,61 @@ impl RuntimeGlobalCutoverV1 {
             gate_ok: gate_error.is_none(),
             gate_error,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evaluate_for_test(
+        instance_id: impl Into<String>,
+        application_generation: u64,
+        authority_generation: AuthorityGeneration,
+        services: &RuntimeManagedResourceServicesV1,
+        recovery: &ApplicationResourceRecoveryFacadeV1,
+        selected_epoch: StartupEpochV1,
+    ) -> Self {
+        if selected_epoch == StartupEpochV1::NewCurrentSchema {
+            return Self::evaluate_current_schema(
+                instance_id,
+                application_generation,
+                authority_generation,
+                services,
+                recovery,
+            );
+        }
+        let instance_id = instance_id.into();
+        let mut manifest = CutoverManifestV1 {
+            schema_version: 1,
+            application_instance_id: instance_id,
+            selected_epoch,
+            application_generation,
+            authority_generation_digest: authority_generation.instance_hash,
+            mandatory_readiness: Vec::new(),
+            manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
+        };
+        manifest.manifest_hash = compute_manifest_hash(&manifest);
+        Self {
+            manifest,
+            gate_ok: true,
+            gate_error: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evaluate(
+        instance_id: impl Into<String>,
+        application_generation: u64,
+        authority_generation: AuthorityGeneration,
+        services: &RuntimeManagedResourceServicesV1,
+        recovery: &ApplicationResourceRecoveryFacadeV1,
+        selected_epoch: StartupEpochV1,
+    ) -> Self {
+        Self::evaluate_for_test(
+            instance_id,
+            application_generation,
+            authority_generation,
+            services,
+            recovery,
+            selected_epoch,
+        )
     }
 
     /// The immutable, content-addressed cutover manifest.
@@ -414,10 +464,16 @@ impl RuntimeGlobalCutoverV1 {
         sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1::from_manifest(&self.manifest)
     }
 
-    /// Rehydrates an already validated manifest into the immutable runtime decision used by a
-    /// worker or a later product surface. The manifest is validated again at the boundary so a
-    /// caller cannot manufacture a green current-schema decision from an unchecked DTO.
-    pub fn from_validated_manifest(manifest: CutoverManifestV1) -> Result<Self, CutoverErrorV1> {
+    /// Rehydrates an already validated current-schema manifest into the immutable runtime
+    /// decision used by a worker or a later product surface. Historical legacy manifests remain
+    /// inspectable as DTOs, but cannot be reintroduced as a runtime authority decision.
+    #[cfg(test)]
+    pub(crate) fn from_validated_manifest(
+        manifest: CutoverManifestV1,
+    ) -> Result<Self, CutoverErrorV1> {
+        if manifest.selected_epoch != StartupEpochV1::NewCurrentSchema {
+            return Err(CutoverErrorV1::AuthorityUnavailable);
+        }
         validate_cutover_manifest(&manifest)?;
         let gate_error = validate_cutover_manifest(&manifest).err();
         Ok(Self {
@@ -432,6 +488,7 @@ impl RuntimeGlobalCutoverV1 {
     /// Legacy-epoch decision for boot paths that have not yet cut over: by contract the legacy
     /// epoch requires no readiness probes. The manifest is content-addressed and persisted by
     /// the boot owner; the session-open guard still applies (legacy sessions only).
+    #[cfg(test)]
     pub fn legacy_decision(
         instance_id: impl Into<String>,
         application_generation: u64,
@@ -483,13 +540,12 @@ pub enum CutoverPersistenceErrorV1 {
 
 impl RuntimeGlobalCutoverV1 {
     /// Persists the content-addressed manifest as a private (0600) regular file. The boot owner
-    /// writes it once per generation; the next boot replays it against the registry.
+    /// atomically publishes the current-instance pointer; the decision bytes remain immutable
+    /// once published for that application instance.
     pub fn save_manifest(&self, path: &std::path::Path) -> Result<(), CutoverPersistenceErrorV1> {
         let bytes = serde_json::to_vec(self.manifest())
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
-        std::fs::write(path, bytes)
-            .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
-        sigil_kernel::config::secure_private_path_permissions(path)
+        sigil_kernel::atomic_publish_private_file(path, &bytes)
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
         Ok(())
     }
@@ -506,7 +562,15 @@ impl RuntimeGlobalCutoverV1 {
         }
         let bytes = std::fs::read(path)
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
-        let manifest: CutoverManifestV1 = serde_json::from_slice(&bytes)
+        Self::validate_manifest_bytes(&bytes)
+    }
+
+    /// Validates manifest bytes that were already read through an authority-owned no-follow
+    /// handle. Path permissions are intentionally checked by the caller that owns the handle.
+    pub fn validate_manifest_bytes(
+        bytes: &[u8],
+    ) -> Result<CutoverManifestV1, CutoverPersistenceErrorV1> {
+        let manifest: CutoverManifestV1 = serde_json::from_slice(bytes)
             .map_err(|error| CutoverPersistenceErrorV1::Io(error.to_string()))?;
         validate_cutover_manifest(&manifest).map_err(|error| match error {
             CutoverErrorV1::UnknownSchemaVersion => CutoverPersistenceErrorV1::UnknownVersion,
@@ -538,10 +602,11 @@ pub enum CutoverBootErrorV1 {
     Guard(CutoverErrorV1),
 }
 
-/// Legacy boot decision: selects the legacy epoch exactly once per stable instance id
+/// Historical test-only boot decision: selects the legacy epoch exactly once per stable instance id
 /// derived from the config seed, persists the content-addressed manifest next to it and
 /// replays an existing manifest instead of overwriting (tamper -> fail closed; valid but
 /// drifting generation -> AlreadyPublished). Shared by every boot surface.
+#[cfg(test)]
 pub fn legacy_boot_decision(
     seed: &std::path::Path,
 ) -> Result<RuntimeGlobalCutoverV1, CutoverBootErrorV1> {
@@ -584,6 +649,7 @@ pub fn legacy_boot_decision(
 /// Rehydrates the published current-schema decision for a worker after the launcher has
 /// completed the composition gate. A legacy manifest is never upgraded implicitly: fixed-forward
 /// epoch semantics require an explicit current-schema publication first.
+#[cfg(test)]
 pub fn current_boot_decision(
     seed: &std::path::Path,
 ) -> Result<RuntimeGlobalCutoverV1, CutoverBootErrorV1> {
@@ -599,10 +665,9 @@ pub fn current_boot_decision(
     RuntimeGlobalCutoverV1::from_validated_manifest(manifest).map_err(CutoverBootErrorV1::Guard)
 }
 
-/// Shared boot attachment for ApplicationRunServices surfaces (CLI headless/machine, HTTP
-/// serve, desktop launcher): selects the epoch via [legacy_boot_decision], attaches the
-/// decision and runs the mandatory readiness guard (fail closed) plus the legacy session-open
-/// guard. A failure aborts startup before any run is prepared.
+/// Historical test-only boot attachment retained for compatibility fixtures. Shipping surfaces
+/// use the runtime-owned current-schema boot transaction and cannot attach a legacy decision.
+#[cfg(test)]
 pub fn attach_legacy_boot_cutover(
     services: crate::application_run::ApplicationRunServices,
     seed: &std::path::Path,
@@ -661,721 +726,5 @@ pub fn guarded_session_open(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sigil_kernel::capability_issuer::{KernelCapabilityIssuerV1, mock_issuer};
-    use sigil_resource_authority::storage::{
-        AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
-    };
-    use std::sync::Arc;
-
-    fn authority() -> AuthorityGeneration {
-        AuthorityGeneration {
-            epoch: 2,
-            instance_hash: CanonicalHash::from_bytes([2u8; 32]),
-        }
-    }
-
-    fn shadow_services(
-        issuer: Arc<dyn KernelCapabilityIssuerV1>,
-    ) -> RuntimeManagedResourceServicesV1 {
-        shadow_services_with_table(issuer, AuthorityStorageGrantTableV1::new())
-    }
-
-    fn shadow_services_with_table(
-        issuer: Arc<dyn KernelCapabilityIssuerV1>,
-        table: AuthorityStorageGrantTableV1,
-    ) -> RuntimeManagedResourceServicesV1 {
-        let storage = Arc::new(AuthorityManagedStorageServiceV1::new(table, authority()));
-        let file_access = sigil_resource_authority::file_access_stub::stub_file_access_service();
-        let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
-            authority(),
-            storage,
-            file_access,
-        )
-        .build_bundle();
-        RuntimeManagedResourceServicesV1::compose(
-            bundle,
-            issuer,
-            Arc::new(CutoverStubProjectionServiceV1),
-        )
-    }
-
-    struct CutoverStubProjectionServiceV1;
-
-    #[async_trait::async_trait]
-    impl sigil_kernel::managed_projection::ManagedProjectionServiceV1
-        for CutoverStubProjectionServiceV1
-    {
-        async fn open_rebuildable_projection(
-            &self,
-            _handle: &sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1,
-            _request: sigil_kernel::managed_projection::OpenProjectionConnectionRequestV1,
-        ) -> Result<
-            Box<dyn sigil_kernel::managed_projection::ManagedProjectionConnectionV1>,
-            sigil_kernel::managed_projection::ProjectionErrorV1,
-        > {
-            Err(sigil_kernel::managed_projection::ProjectionErrorV1::ConnectionClosed)
-        }
-    }
-
-    #[test]
-    fn resource_global_cutover_shadow_surface_fails_closed_on_new_epoch() {
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let cutover = RuntimeGlobalCutoverV1::evaluate(
-            "inst-shadow",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::NewCurrentSchema,
-        );
-        let error = cutover.gate().expect_err("must fail closed");
-        assert!(matches!(error, CutoverErrorV1::AdapterNotReady(_)));
-        assert!(!cutover.is_current_schema_ready());
-        assert_eq!(cutover.manifest().mandatory_readiness.len(), 18);
-    }
-
-    #[test]
-    fn resource_global_cutover_extension_probe_reflects_real_seam() {
-        let mut services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let before = RuntimeGlobalCutoverV1::evaluate(
-            "inst-ext-before",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::NewCurrentSchema,
-        );
-        let ext_before = before
-            .manifest()
-            .mandatory_readiness
-            .iter()
-            .find(|probe| probe.adapter == MandatoryAdapterKindV1::ExecutionExtension)
-            .expect("extension probe");
-        assert!(
-            !ext_before.passed,
-            "legacy launcher must not claim the extension route"
-        );
-
-        services.extension_execution_seam = RuntimeExecutionExtensionSeamV1::ManagedExecutionBacked;
-        let after = RuntimeGlobalCutoverV1::evaluate(
-            "inst-ext-after",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::NewCurrentSchema,
-        );
-        let ext_after = after
-            .manifest()
-            .mandatory_readiness
-            .iter()
-            .find(|probe| probe.adapter == MandatoryAdapterKindV1::ExecutionExtension)
-            .expect("extension probe");
-        assert!(ext_after.passed, "the probe must reflect the composed seam");
-    }
-
-    #[test]
-    fn resource_global_cutover_legacy_epoch_requires_no_probes() {
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let cutover = RuntimeGlobalCutoverV1::evaluate(
-            "inst-legacy",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::Legacy,
-        );
-        assert!(cutover.gate().is_ok());
-        assert_eq!(cutover.manifest().mandatory_readiness.len(), 0);
-    }
-
-    #[test]
-    fn resource_global_cutover_storage_roundtrip_probe_is_real() {
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        // Empty grant table: every storage family probe must fail (service says mismatch).
-        let probes = probe_mandatory_adapters(
-            &services,
-            &recovery,
-            CanonicalHash::from_bytes([0xd1; 32]),
-            1,
-        );
-        for probe in probes.iter().filter(|p| {
-            matches!(
-                p.adapter,
-                MandatoryAdapterKindV1::StorageSessionLog
-                    | MandatoryAdapterKindV1::StorageSessionLifecycle
-                    | MandatoryAdapterKindV1::StorageInputHistory
-                    | MandatoryAdapterKindV1::StorageMemory
-                    | MandatoryAdapterKindV1::StorageSessionCatalog
-                    | MandatoryAdapterKindV1::StorageArtifact
-                    | MandatoryAdapterKindV1::StorageAdapterDurableState
-            )
-        }) {
-            assert!(
-                !probe.passed,
-                "{:?} must fail without grants",
-                probe.adapter
-            );
-        }
-    }
-
-    fn storage_grant(
-        grant_id: &str,
-        owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
-        family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1,
-    ) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
-        sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
-            grant_id: sigil_kernel::resource::OpaqueStorageGrantId::new(grant_id.to_owned()),
-            admission_hash: CanonicalHash::from_bytes([0x31; 32]),
-            semantic_owner: owner,
-            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
-            purpose_hash: CanonicalHash::from_bytes([0x32; 32]),
-            source_class:
-                sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
-            source_binding_hash: CanonicalHash::from_bytes([0x39; 32]),
-            namespace_hash: {
-                let mut ns = [0x33u8; 32];
-                for (index, byte) in grant_id.bytes().take(16).enumerate() {
-                    ns[index] = byte;
-                }
-                CanonicalHash::from_bytes(ns)
-            },
-            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
-            journal_scope_hash: CanonicalHash::from_bytes([0x34; 32]),
-            resource_ref: sigil_kernel::resource::ResourceRefV1 {
-                resource_id: sigil_kernel::resource::OpaqueResourceId::new(format!(
-                    "res-{grant_id}"
-                )),
-                kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
-                owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
-                journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
-                generation: 1,
-            },
-            resource_binding_digest: CanonicalHash::from_bytes([0x35; 32]),
-            physical_binding_hash: CanonicalHash::from_bytes([0x36; 32]),
-            resource_kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
-            owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
-            capability_family: family,
-            retention_policy: sigil_kernel::resource::ResourceRetentionPolicyV1::SessionPolicy,
-            quota_profile: sigil_kernel::resource::ResourceQuotaProfileV1 {
-                class: sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
-                max_bytes: 1024,
-                max_entries: 100,
-                max_open_holders: 1,
-                max_age_ms: None,
-                hard_runtime_enforcement_required: true,
-                profile_hash: CanonicalHash::from_bytes([0x37; 32]),
-            },
-            semantic_schema: sigil_kernel::resource::OpaqueSemanticSchemaId::new(format!(
-                "schema-{grant_id}"
-            )),
-            authority_generation: authority(),
-            journal_admission_sequence: 1,
-            grant_hash: CanonicalHash::from_bytes([0x38; 32]),
-        }
-    }
-
-    #[test]
-    fn resource_global_cutover_storage_family_exact_probe() {
-        use sigil_kernel::resource::{
-            ManagedStorageCapabilityFamilyV1 as Family, ManagedStorageSemanticOwnerV1 as Owner,
-        };
-        let mut table = AuthorityStorageGrantTableV1::new();
-        table
-            .register(storage_grant(
-                "g-session-log",
-                Owner::SessionLog,
-                Family::AppendLog,
-            ))
-            .expect("register");
-        table
-            .register(storage_grant(
-                "g-input-history",
-                Owner::InteractiveInputHistory,
-                Family::AppendLog,
-            ))
-            .expect("register");
-        table
-            .register(storage_grant(
-                "g-artifact",
-                Owner::ArtifactStaging,
-                Family::StreamingArtifact,
-            ))
-            .expect("register");
-        let services = shadow_services_with_table(mock_issuer(), table);
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let probes = probe_mandatory_adapters(
-            &services,
-            &recovery,
-            CanonicalHash::from_bytes([0xd2; 32]),
-            1,
-        );
-        let passed: Vec<MandatoryAdapterKindV1> = probes
-            .iter()
-            .filter(|p| p.passed)
-            .map(|p| p.adapter)
-            .collect();
-        // Exactly the three registered writer channels are ready; the other four fail closed.
-        assert!(passed.contains(&MandatoryAdapterKindV1::StorageSessionLog));
-        assert!(passed.contains(&MandatoryAdapterKindV1::StorageInputHistory));
-        assert!(passed.contains(&MandatoryAdapterKindV1::StorageArtifact));
-        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageSessionLifecycle));
-        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageMemory));
-        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageSessionCatalog));
-        assert!(!passed.contains(&MandatoryAdapterKindV1::StorageAdapterDurableState));
-    }
-
-    #[test]
-    fn resource_global_cutover_manifest_is_content_addressed() {
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let a = RuntimeGlobalCutoverV1::evaluate(
-            "inst-ca",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::Legacy,
-        );
-        let b = RuntimeGlobalCutoverV1::evaluate(
-            "inst-ca",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::Legacy,
-        );
-        assert_eq!(a.manifest().manifest_hash, b.manifest().manifest_hash);
-    }
-
-    struct CutoverTestDisclosurePresenter;
-
-    #[async_trait::async_trait]
-    impl sigil_kernel::egress::EgressDisclosurePresenter for CutoverTestDisclosurePresenter {
-        async fn present(
-            &self,
-            _disclosure: sigil_kernel::egress::PreEgressDisclosure,
-        ) -> Result<
-            sigil_kernel::egress::DisclosurePresentationReceipt,
-            sigil_kernel::egress::DisclosurePresentationError,
-        > {
-            Err(sigil_kernel::egress::DisclosurePresentationError::SinkClosed)
-        }
-    }
-
-    #[test]
-    fn resource_global_cutover_boot_seam_fails_closed_then_guards_session_open() {
-        use crate::application_run::ApplicationRunServices;
-
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let cutover = RuntimeGlobalCutoverV1::evaluate(
-            "inst-boot",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::NewCurrentSchema,
-        );
-        let run_services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter))
-            .with_global_cutover(cutover);
-
-        // Mandatory readiness: a failing probe prevents startup, no partial start.
-        let error = run_services
-            .require_cutover_or_fail()
-            .expect_err("fail closed");
-        assert!(matches!(error, CutoverErrorV1::AdapterNotReady(_)));
-
-        // Old-schema session is explicitly unavailable for the new-epoch binary.
-        let error = run_services
-            .admit_session_open(StartupEpochV1::Legacy)
-            .expect_err("old session unavailable");
-        assert!(matches!(error, CutoverErrorV1::LegacySessionUnavailable));
-
-        // Same-epoch open remains allowed (fixed-forward read of current-schema sessions).
-        run_services
-            .admit_session_open(StartupEpochV1::NewCurrentSchema)
-            .expect("new epoch open");
-    }
-
-    #[test]
-    fn resource_global_cutover_sandbox_seam_readiness_is_truthful() {
-        use sigil_sandbox::managed::SandboxManagedExecutionServiceV1;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
-            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-            ));
-        let execution: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionServiceV1> =
-            Arc::new(SandboxManagedExecutionServiceV1::new(
-                planner,
-                dir.path().to_path_buf(),
-            ));
-        let storage = Arc::new(AuthorityManagedStorageServiceV1::new(
-            AuthorityStorageGrantTableV1::new(),
-            authority(),
-        ));
-        let stub_file_access =
-            sigil_resource_authority::file_access_stub::stub_file_access_service();
-        let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
-            authority(),
-            storage,
-            stub_file_access,
-        )
-        .build_bundle();
-        let registry = Arc::new(std::sync::Mutex::new(
-            sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
-        ));
-        let file_access: Arc<dyn sigil_kernel::managed_file_access::ManagedFileAccessServiceV1> =
-            Arc::new(
-                sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new(
-                    registry,
-                ),
-            );
-        let services = RuntimeManagedResourceServicesV1::compose_sandbox_backed(
-            bundle,
-            mock_issuer(),
-            Arc::new(CutoverStubProjectionServiceV1),
-            execution,
-            file_access,
-            RuntimeFileAccessSeamV1::AuthorityBacked,
-        );
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let cutover = RuntimeGlobalCutoverV1::evaluate(
-            "inst-sandbox",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::NewCurrentSchema,
-        );
-        // Execution probes now reflect the composed sandbox-backed seam.
-        let probes = &cutover.manifest().mandatory_readiness;
-        let one_shot = probes
-            .iter()
-            .find(|p| p.adapter == MandatoryAdapterKindV1::ExecutionOneShot)
-            .expect("one-shot probe");
-        let terminal = probes
-            .iter()
-            .find(|p| p.adapter == MandatoryAdapterKindV1::ExecutionTerminal)
-            .expect("terminal probe");
-        assert!(one_shot.passed);
-        assert!(terminal.passed);
-        // File access is now authority-backed: its probe passes too.
-        let file_access_probe = probes
-            .iter()
-            .find(|p| p.adapter == MandatoryAdapterKindV1::FileAccessInProcess)
-            .expect("file access probe");
-        assert!(file_access_probe.passed);
-        // The gate still fails closed (storage grants / desktop seams not yet cut over) and the
-        // failing kind is among the not-yet-wired adapters: no partial cutover claim.
-        let error = cutover.gate().expect_err("still incomplete");
-        if let CutoverErrorV1::AdapterNotReady(kind) = error {
-            assert_ne!(*kind, MandatoryAdapterKindV1::ExecutionOneShot);
-            assert_ne!(*kind, MandatoryAdapterKindV1::ExecutionTerminal);
-            assert_ne!(*kind, MandatoryAdapterKindV1::FileAccessInProcess);
-        } else {
-            panic!("expected AdapterNotReady, got {error:?}");
-        }
-    }
-    #[test]
-    fn resource_global_cutover_manifest_save_and_load_round_trip() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cutover-manifest.json");
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let cutover = RuntimeGlobalCutoverV1::evaluate(
-            "inst-persist",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::Legacy,
-        );
-        cutover.save_manifest(&path).expect("save");
-        let loaded = RuntimeGlobalCutoverV1::load_and_validate_manifest(&path).expect("load");
-        assert_eq!(loaded, *cutover.manifest());
-        // Replay into the registry after restart: idempotent for the same manifest.
-        let mut registry = sigil_kernel::cutover_manifest::CutoverManifestRegistryV1::new();
-        registry.publish(&loaded).expect("replay");
-    }
-
-    #[test]
-    fn resource_global_cutover_manifest_tamper_fails_closed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cutover-manifest.json");
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let cutover = RuntimeGlobalCutoverV1::evaluate(
-            "inst-tamper",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::Legacy,
-        );
-        cutover.save_manifest(&path).expect("save");
-        // Tamper: bump the recorded generation without recomputing the content hash.
-        let text = std::fs::read_to_string(&path).expect("read");
-        let tampered = text.replace(
-            "\"application_generation\":1",
-            "\"application_generation\":9",
-        );
-        assert_ne!(text, tampered);
-        std::fs::write(&path, tampered).expect("write");
-        let error = RuntimeGlobalCutoverV1::load_and_validate_manifest(&path).expect_err("tamper");
-        assert!(matches!(error, CutoverPersistenceErrorV1::CorruptManifest));
-    }
-
-    #[test]
-    fn resource_global_cutover_manifest_fixed_forward_across_boots() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cutover-manifest.json");
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let first = RuntimeGlobalCutoverV1::evaluate(
-            "inst-forward",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::Legacy,
-        );
-        first.save_manifest(&path).expect("save first");
-        let loaded = RuntimeGlobalCutoverV1::load_and_validate_manifest(&path).expect("load");
-        let mut registry = sigil_kernel::cutover_manifest::CutoverManifestRegistryV1::new();
-        registry.publish(&loaded).expect("publish");
-        // A later boot with a different generation for the same instance is rejected: fixed forward.
-        let second = RuntimeGlobalCutoverV1::evaluate(
-            "inst-forward",
-            2,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::Legacy,
-        );
-        let error = registry
-            .publish(second.manifest())
-            .expect_err("fixed forward");
-        assert!(matches!(
-            error,
-            sigil_kernel::cutover_manifest::CutoverErrorV1::AlreadyPublished
-        ));
-    }
-    #[test]
-    fn resource_global_cutover_legacy_decision_is_content_addressed() {
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let _ = (&services, &recovery);
-        let a = RuntimeGlobalCutoverV1::legacy_decision("inst-legacy-dec", 1, authority());
-        let b = RuntimeGlobalCutoverV1::legacy_decision("inst-legacy-dec", 1, authority());
-        assert_eq!(a.manifest().manifest_hash, b.manifest().manifest_hash);
-        assert!(a.gate().is_ok());
-        assert_eq!(a.manifest().mandatory_readiness.len(), 0);
-        assert_eq!(a.manifest().selected_epoch, StartupEpochV1::Legacy);
-    }
-    #[test]
-    fn resource_global_cutover_boot_attach_selects_legacy_once() {
-        use crate::application_run::ApplicationRunServices;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let seed = dir.path().join("config.toml");
-        std::fs::write(&seed, b"[core]\n").expect("seed");
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        let attached = attach_legacy_boot_cutover(services, &seed).expect("attach");
-        let decision = attached.cutover().expect("decision");
-        assert!(decision.gate().is_ok());
-        assert_eq!(decision.manifest().selected_epoch, StartupEpochV1::Legacy);
-        assert_eq!(decision.manifest().mandatory_readiness.len(), 0);
-        let manifest_path = dir.path().join(".sigil-cutover-manifest.json");
-        assert!(manifest_path.exists());
-        // Reboot with the same seed: identical manifest replay is accepted.
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        attach_legacy_boot_cutover(services, &seed).expect("idempotent reboot");
-        // Legacy session open stays allowed; a new-epoch binary would reject it (kernel guard).
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        let attached = attach_legacy_boot_cutover(services, &seed).expect("attach again");
-        attached
-            .admit_session_open(StartupEpochV1::Legacy)
-            .expect("legacy open");
-    }
-
-    #[test]
-    fn resource_global_cutover_boot_attach_tampered_manifest_fails_closed() {
-        use crate::application_run::ApplicationRunServices;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let seed = dir.path().join("config.toml");
-        std::fs::write(&seed, b"[core]\n").expect("seed");
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        attach_legacy_boot_cutover(services, &seed).expect("attach");
-        let manifest_path = dir.path().join(".sigil-cutover-manifest.json");
-        // A valid-but-different manifest (drifting generation) is refused, never overwritten.
-        let mut manifest =
-            RuntimeGlobalCutoverV1::load_and_validate_manifest(&manifest_path).expect("load");
-        assert_eq!(manifest.application_generation, 1);
-        manifest.application_generation = 2;
-        manifest.manifest_hash = sigil_kernel::cutover_manifest::compute_manifest_hash(&manifest);
-        let bytes = serde_json::to_vec(&manifest).expect("encode");
-        std::fs::write(&manifest_path, bytes).expect("write");
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        let error = attach_legacy_boot_cutover(services, &seed).expect_err("drift");
-        assert!(matches!(
-            error,
-            CutoverBootErrorV1::Guard(CutoverErrorV1::AlreadyPublished)
-        ));
-
-        // Then a tampered manifest fails closed at validation, never silently overwritten.
-        let text = std::fs::read_to_string(&manifest_path).expect("read");
-        let tampered = text.replace(
-            "\"application_generation\":2",
-            "\"application_generation\":7",
-        );
-        std::fs::write(&manifest_path, tampered).expect("tamper");
-        let services = ApplicationRunServices::new(Arc::new(CutoverTestDisclosurePresenter));
-        let error = attach_legacy_boot_cutover(services, &seed).expect_err("tampered");
-        assert!(matches!(error, CutoverBootErrorV1::Persistence(_)));
-    }
-    #[test]
-    fn resource_global_cutover_legacy_boot_decision_guards_sessions() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let seed = dir.path().join("config.toml");
-        std::fs::write(&seed, b"[core]\n").expect("seed");
-        let decision = legacy_boot_decision(&seed).expect("decision");
-        assert!(decision.gate().is_ok());
-        assert_eq!(decision.manifest().selected_epoch, StartupEpochV1::Legacy);
-        // The decision itself enforces the session-open boundary (surface independent).
-        decision
-            .admit_session_open(StartupEpochV1::Legacy)
-            .expect("legacy open");
-        let error = decision
-            .admit_session_open(StartupEpochV1::NewCurrentSchema)
-            .expect_err("legacy binary rejects new session");
-        assert!(matches!(error, CutoverErrorV1::LegacyBinaryRejected));
-    }
-    #[test]
-    fn resource_global_cutover_guarded_session_open_end_to_end() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let session_path = dir.path().join("session.jsonl");
-        // Legacy epoch binary: legacy open is admitted.
-        let legacy = RuntimeGlobalCutoverV1::legacy_decision("inst-guarded", 1, authority());
-        let store = guarded_session_open(&session_path, &legacy, StartupEpochV1::Legacy)
-            .expect("legacy open");
-        drop(store);
-        // A new-epoch binary opening the same legacy session is refused before any store open.
-        let services = shadow_services(mock_issuer());
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let new_epoch = RuntimeGlobalCutoverV1::evaluate(
-            "inst-new",
-            1,
-            authority(),
-            &services,
-            &recovery,
-            StartupEpochV1::NewCurrentSchema,
-        );
-        if new_epoch.gate().is_ok() {
-            // Fully cut-over surfaces reject legacy sessions through the same guard.
-            let error = guarded_session_open(&session_path, &new_epoch, StartupEpochV1::Legacy)
-                .expect_err("old session unavailable");
-            assert!(matches!(
-                error,
-                CutoverSessionOpenErrorV1::Guard(CutoverErrorV1::LegacySessionUnavailable)
-            ));
-        } else {
-            // The gate refuses to claim cutover before every adapter is wired; the guard still
-            // exists and would reject the open (decision-level) even without an actual open.
-            let error = new_epoch
-                .admit_session_open(StartupEpochV1::Legacy)
-                .expect_err("decision rejects");
-            assert!(matches!(error, CutoverErrorV1::LegacySessionUnavailable));
-        }
-    }
-    /// R71.6 acceptance instrument: the fully composed new-epoch surface must pass the
-    /// mandatory readiness gate. Red until every adapter (execution, file access, all seven
-    /// storage writers, extension admission, desktop borrowed/product-updater seams) is
-    /// composed - that is exactly the fail-closed guarantee: no partial cutover claim.
-    #[test]
-    #[ignore = "R71.6 acceptance instrument: red until every mandatory adapter is composed; enabled by --epoch current"]
-    fn r71_full_composition_gate() {
-        use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state = dir.path().join("state");
-        let exec = dir.path().join("exec");
-        let config_path = dir.path().join("sigil.toml");
-        let release_root = dir.path().join("release-owner");
-        std::fs::create_dir_all(&state).expect("state dir");
-        std::fs::create_dir_all(state.join("cache")).expect("cache dir");
-        std::fs::create_dir_all(&exec).expect("exec dir");
-        std::fs::create_dir_all(&release_root).expect("release root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("mode");
-            std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700)).expect("mode");
-        }
-        let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
-            Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-                crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-            ));
-        let composition =
-            crate::r71_authority_composition::compose_runtime_authority_with_product_updater(
-                &state,
-                &state.join("cache"),
-                &exec,
-                &config_path,
-                CanonicalHash::from_bytes([0x55; 32]),
-                planner,
-                &[
-                    Ch::SessionLog,
-                    Ch::SessionLifecycleLog,
-                    Ch::InputHistory,
-                    Ch::DurableMemory,
-                    Ch::SessionCatalog,
-                    Ch::ArtifactStaging,
-                    Ch::AdapterDurableState,
-                ],
-            )
-            .expect("compose");
-        let composition = {
-            let mut composition = composition;
-            let release_output = std::sync::Arc::new(
-                sigil_resource_authority::release_output::AuthorityBorrowedReleaseOutputServiceV1::new(
-                    &release_root,
-                ),
-            );
-            composition.services = composition
-                .services
-                .with_optional_borrowed_release_output(Some(release_output));
-            composition
-        };
-        let recovery = RuntimeResourceRecoveryFacadeV1::new();
-        let cutover = RuntimeGlobalCutoverV1::evaluate(
-            "inst-full",
-            1,
-            authority(),
-            &composition.services,
-            &recovery,
-            StartupEpochV1::NewCurrentSchema,
-        );
-        match cutover.gate() {
-            Ok(()) => {}
-            Err(error) => {
-                let red: Vec<_> = cutover
-                    .manifest()
-                    .mandatory_readiness
-                    .iter()
-                    .filter(|probe| !probe.passed)
-                    .map(|probe| format!("{:?}", probe.adapter))
-                    .collect();
-                panic!(
-                    "new-epoch composition must be fully wired before gate Ok; still failing: {error:?}; red adapters: {red:?}"
-                );
-            }
-        }
-    }
-}
+#[path = "tests/r71_global_cutover_tests.rs"]
+mod tests;

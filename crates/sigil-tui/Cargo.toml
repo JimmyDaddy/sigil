@@ -1,8 +1,13 @@
 [package]
-name = "sigil-tui"
+name = "sigil-tui-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
+description = "Internal Sigil TUI composition host"
+
+[lib]
+name = "sigil_tui_host"
 
 [dependencies]
 anyhow.workspace = true
@@ -16,21 +21,30 @@ ratatui.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 syntect.workspace = true
+thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 url.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-application = { path = "../sigil-application" }
+sigil-tui-app = { path = "../sigil-tui-app" }
+sigil-tui = { package = "sigil-tui", path = "../sigil-tui-framework" }
 sigil-runtime = { path = "../sigil-runtime" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 sigil-updater = { path = "../sigil-updater" }
 two-face.workspace = true
 unicode-segmentation.workspace = true
+wezterm-bidi.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 fs2.workspace = true
 sigil-mcp = { path = "../sigil-mcp" }
+sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
+sigil-resource-authority = { path = "../sigil-resource-authority", features = ["test-support"] }
+sigil-runtime = { path = "../sigil-runtime", features = ["test-support"] }
+sigil-tools-builtin = { path = "../sigil-tools-builtin", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

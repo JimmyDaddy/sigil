@@ -173,6 +173,40 @@ fi
 echo
 echo "Record smoke results. Use p=pass, f=fail, s=skip."
 
+check_ids=(
+  "doctor_terminal_rows"
+  "composer_cursor"
+  "slash_candidate"
+  "transcript_wheel"
+  "config_row_click"
+  "session_actions"
+  "session_actions_focus"
+  "approval_controls"
+  "tool_body_focus"
+  "tool_card_toggle"
+  "hover_state"
+  "column_selection"
+  "osc52_copy"
+  "scroll_sensitivity"
+)
+
+check_modes=(
+  "automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+  "semi-automated"
+)
+
 check_labels=(
   "Doctor terminal rows"
   "Composer click positions cursor"
@@ -227,10 +261,10 @@ overall="$(prompt_text "Overall notes: ")"
   echo
   echo "## Checklist"
   echo
-  echo "| Check | Result | Notes |"
-  echo "| --- | --- | --- |"
+  echo "| Check ID | Check | Mode | Result | Notes |"
+  echo "| --- | --- | --- | --- | --- |"
   for i in "${!check_labels[@]}"; do
-    echo "| $(markdown_escape "${check_labels[$i]}") | $(markdown_escape "${check_statuses[$i]}") | $(markdown_escape "${check_notes[$i]}") |"
+    echo "| $(markdown_escape "${check_ids[$i]}") | $(markdown_escape "${check_labels[$i]}") | $(markdown_escape "${check_modes[$i]}") | $(markdown_escape "${check_statuses[$i]}") | $(markdown_escape "${check_notes[$i]}") |"
   done
   echo
   echo "## Overall Notes"

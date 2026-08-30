@@ -27,6 +27,7 @@ pub(super) struct ServiceInner {
     pub(super) workspace_root: PathBuf,
     pub(super) config: CodeIntelligenceConfig,
     pub(super) workspace_trust: WorkspaceTrust,
+    pub(super) process_launcher: Option<Arc<dyn LanguageServerLaunchPortV1>>,
     pub(super) server_plan: RwLock<ServerPlanState>,
     pub(super) clients: Mutex<BTreeMap<String, LanguageServerHandle>>,
     pub(super) status: Mutex<CodeIntelStatus>,
@@ -42,10 +43,25 @@ impl CodeIntelligenceService {
         Self::new_with_workspace_trust(workspace_root, config, WorkspaceTrust::Unknown)
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_workspace_trust(
         workspace_root: PathBuf,
         config: CodeIntelligenceConfig,
         workspace_trust: WorkspaceTrust,
+    ) -> Self {
+        Self::new_with_workspace_trust_and_process_launcher(
+            workspace_root,
+            config,
+            workspace_trust,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_workspace_trust_and_process_launcher(
+        workspace_root: PathBuf,
+        config: CodeIntelligenceConfig,
+        workspace_trust: WorkspaceTrust,
+        process_launcher: Option<Arc<dyn LanguageServerLaunchPortV1>>,
     ) -> Self {
         let server_plan = if config_enabled(&config) {
             initial_server_plan(&config, &workspace_root)
@@ -64,6 +80,7 @@ impl CodeIntelligenceService {
                 workspace_root,
                 config,
                 workspace_trust,
+                process_launcher,
                 server_plan: RwLock::new(server_plan),
                 clients: Mutex::new(BTreeMap::new()),
                 status: Mutex::new(status),
@@ -1081,6 +1098,62 @@ impl CodeIntelligenceService {
         }
         let root = find_server_root(&self.inner.workspace_root, &config)?;
         let command_path = safe_lsp_command(&self.inner.workspace_root, &config.command)?;
+        let environment = sanitize_lsp_env(&config.env)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let Some(launcher) = &self.inner.process_launcher else {
+            #[cfg(test)]
+            {
+                return self
+                    .start_server_direct_for_tests(config, root, command_path, environment)
+                    .await;
+            }
+            #[cfg(not(test))]
+            {
+                bail!("managed language-server process launcher is unavailable");
+            }
+        };
+        let transport = launcher
+            .launch(crate::process::LanguageServerLaunchRequestV1 {
+                server_name: config.name.clone(),
+                program: command_path,
+                args: config.args.clone(),
+                cwd: root.clone(),
+                environment,
+            })
+            .await
+            .with_context(|| format!("failed to start language server {}", config.name))?;
+        let (reader, writer, shutdown) = transport.into_parts();
+        #[cfg(test)]
+        let _ = &shutdown;
+        let mut client = LspClient::new(reader, writer);
+        let capabilities = client
+            .initialize(
+                &root,
+                config.initialization_options.clone(),
+                Duration::from_millis(config.startup_timeout_ms),
+            )
+            .await?;
+        Ok(ProcessLanguageServer {
+            config,
+            capabilities,
+            client,
+            versions: BTreeMap::new(),
+            #[cfg(test)]
+            child: None,
+            #[cfg(not(test))]
+            shutdown,
+        })
+    }
+
+    #[cfg(test)]
+    async fn start_server_direct_for_tests(
+        &self,
+        config: LanguageServerConfig,
+        root: PathBuf,
+        command_path: PathBuf,
+        environment: Vec<(String, String)>,
+    ) -> Result<ProcessLanguageServer> {
         let mut command = Command::new(command_path);
         command
             .args(&config.args)
@@ -1090,7 +1163,7 @@ impl CodeIntelligenceService {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         command.env_clear();
-        for (key, value) in sanitize_lsp_env(&config.env) {
+        for (key, value) in environment {
             command.env(key, value);
         }
         let mut child = command
@@ -1107,7 +1180,10 @@ impl CodeIntelligenceService {
             .stdin
             .take()
             .ok_or_else(|| anyhow!("language server {} stdin unavailable", config.name))?;
-        let mut client = LspClient::new(stdout, stdin);
+        let mut client = LspClient::new(
+            Box::new(stdout) as Box<dyn AsyncRead + Send + Unpin>,
+            Box::new(stdin) as Box<dyn AsyncWrite + Send + Unpin>,
+        );
         let capabilities = client
             .initialize(
                 &root,
@@ -1118,9 +1194,9 @@ impl CodeIntelligenceService {
         Ok(ProcessLanguageServer {
             config,
             capabilities,
-            child,
             client,
             versions: BTreeMap::new(),
+            child: Some(child),
         })
     }
 

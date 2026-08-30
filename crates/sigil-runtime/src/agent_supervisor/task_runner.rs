@@ -8,38 +8,37 @@ use std::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentBatchId, AgentDelegationRunContext,
     AgentInvocationGrant, AgentInvocationGrantSource, AgentInvocationMode, AgentInvocationSource,
     AgentRole, AgentRouteStatus, AgentRunAttemptId, AgentRunInput, AgentRunOptions, AgentThreadId,
     AgentUsageSummary, ApprovalHandler, ChangeSetId, ControlEntry,
-    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope, ExecutionBackend,
-    IntegrationContentClass, IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus,
-    IntegrationObservedEffect, IntegrationProjection, IntegrationProposalFacts, InteractionMode,
-    IsolatedWorkspaceBackend, IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus,
-    IsolatedWorkspaceCreated, IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode,
-    MutationEventRecorder, ProviderCapabilities, ProviderPhysicalAttemptOutcome,
-    ProviderRequestRejection, ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, SessionStats, TaskApprovalRouteBinding,
-    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation, TaskChildSessionEntry,
-    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskDirectExecutionSessionRunOutput,
-    TaskDirectExecutionSessionRunRequest, TaskId, TaskIntegrationRunOutput,
-    TaskIntegrationRunRequest, TaskIsolationMode, TaskOrchestratorPhase, TaskParticipantAttemptId,
-    TaskParticipantRetryError, TaskParticipantRetryProof, TaskParticipantRetryRouteDriftError,
-    TaskPlannerSessionAwaitingUserInput, TaskPlannerSessionResumeRequest,
-    TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput, TaskPlannerSessionRunRequest,
-    TaskPlannerWorktreeAvailability, TaskPromotionPreview, TaskPromotionPreviewInput, TaskRouteId,
-    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunOutput, TaskSynthesisSessionRunRequest, ToolApproval,
-    ToolApprovalContext, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolRegistry,
-    ToolSpec, VerificationPolicy, WriteIsolationMode, build_task_promotion_preview,
-    changeset_only_child_tool_registry, commit_task_planner_output,
-    decode_changeset_only_child_output, stable_event_uuid, stable_workspace_id,
-    task_participant_child_task_id, task_participant_input_hash, task_participant_logical_run_id,
-    task_step_owner_agent_id,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope, IntegrationContentClass,
+    IntegrationEffect, IntegrationLaneChanged, IntegrationLaneStatus, IntegrationObservedEffect,
+    IntegrationProjection, IntegrationProposalFacts, InteractionMode, IsolatedWorkspaceBackend,
+    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
+    IsolatedWorkspacePrepared, JsonlSessionStore, MultiAgentMode, MutationEventRecorder,
+    ProviderCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
+    ProviderRouteCooldownError, RunEvent, SequentialTaskRequest, Session, SessionLogEntry,
+    SessionRef, SessionStats, TaskApprovalRouteBinding, TaskChildSessionBatchCommitEnvelope,
+    TaskChildSessionBatchPreparation, TaskChildSessionEntry, TaskChildSessionRunOutput,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus,
+    TaskDirectExecutionSessionRunOutput, TaskDirectExecutionSessionRunRequest, TaskId,
+    TaskIntegrationRunOutput, TaskIntegrationRunRequest, TaskIsolationMode, TaskOrchestratorPhase,
+    TaskParticipantAttemptId, TaskParticipantRetryError, TaskParticipantRetryProof,
+    TaskParticipantRetryRouteDriftError, TaskPlannerSessionAwaitingUserInput,
+    TaskPlannerSessionResumeRequest, TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput,
+    TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability, TaskPromotionPreview,
+    TaskPromotionPreviewInput, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
+    TaskSynthesisSessionRunRequest, ToolApproval, ToolApprovalContext, ToolCall, ToolErrorKind,
+    ToolExecutionStatus, ToolOperation, ToolRegistry, ToolSpec, VerificationPolicy,
+    WriteIsolationMode, build_task_promotion_preview, changeset_only_child_tool_registry,
+    commit_task_planner_output, decode_changeset_only_child_output, stable_event_uuid,
+    stable_workspace_id, task_participant_child_task_id, task_participant_input_hash,
+    task_participant_logical_run_id, task_step_owner_agent_id,
 };
-use sigil_tools_builtin::LocalExecutionBackend;
 
 use crate::{
     agent_completion::{AgentCompletionHub, AgentCompletionRegistration},
@@ -85,7 +84,7 @@ pub struct AgentSupervisorTaskChildRunner {
     subagent_read: Arc<BoxedAgent>,
     subagent_write: Arc<BoxedAgent>,
     synthesis: Option<Arc<BoxedAgent>>,
-    integration_verification_backend: Arc<dyn ExecutionBackend>,
+    integration_verification_port: Option<Arc<dyn VerificationExecutionPortV1>>,
     planner_discovery_max_probes: usize,
     provider_pressure: TaskProviderPressure,
 }
@@ -112,7 +111,7 @@ impl AgentSupervisorTaskChildRunner {
                 TaskProviderRouteConsumer::SubagentWrite,
             )),
             synthesis: None,
-            integration_verification_backend: Arc::new(LocalExecutionBackend),
+            integration_verification_port: None,
             planner_discovery_max_probes: 0,
             provider_pressure,
         }
@@ -154,7 +153,7 @@ impl AgentSupervisorTaskChildRunner {
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::Synthesis,
             ))),
-            integration_verification_backend: Arc::new(LocalExecutionBackend),
+            integration_verification_port: None,
             planner_discovery_max_probes: 0,
             provider_pressure,
         }
@@ -183,13 +182,13 @@ impl AgentSupervisorTaskChildRunner {
         self
     }
 
-    /// Uses the same configured RFC-0003 backend for integration-lane structural checks.
+    /// Uses the same managed verification port for integration-lane structural checks.
     #[must_use]
-    pub fn with_integration_verification_backend(
+    pub fn with_integration_verification_port(
         mut self,
-        backend: Arc<dyn ExecutionBackend>,
+        port: Arc<dyn VerificationExecutionPortV1>,
     ) -> Self {
-        self.integration_verification_backend = backend;
+        self.integration_verification_port = Some(port);
         self
     }
 
@@ -2348,7 +2347,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 plan: request.plan.clone(),
                 artifacts: artifacts.clone(),
                 frozen_base: frozen_base.clone(),
-                verification_backend: Some(self.integration_verification_backend.clone()),
+                verification_execution_port: self.integration_verification_port.clone(),
             },
             Some(event_sender),
         ));

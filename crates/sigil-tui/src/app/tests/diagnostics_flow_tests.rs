@@ -35,7 +35,7 @@ fn doctor_slash_command_renders_appearance_warnings() -> anyhow::Result<()> {
         .clone();
     assert!(rendered.contains("appearance:contrast:text-base"));
     assert!(rendered.contains("text_primary on surface_base"));
-    assert!(rendered.contains("cutover: epoch=legacy authority=legacy blockers=0"));
+    assert!(rendered.contains("cutover: epoch=unavailable authority=unavailable blockers=1"));
     Ok(())
 }
 
@@ -62,7 +62,7 @@ fn render_doctor_report_includes_summary_and_check_lines() {
     let rendered = render_doctor_report(&report);
 
     assert!(rendered.starts_with(
-        "doctor: warn\ncutover: epoch=legacy authority=legacy blockers=0\nsummary: 0 error · 1 warn · 1 ok"
+        "doctor: warn\ncutover: epoch=unavailable authority=unavailable blockers=1\nsummary: 0 error · 1 warn · 1 ok"
     ));
     assert!(rendered.contains("needs attention:\n- [warn] terminal\n  TERM is not set"));
     assert!(rendered.contains("  fix: set TERM in the shell before launching the TUI"));
@@ -112,7 +112,7 @@ fn render_doctor_report_marks_all_ok_reports_ready() {
     let rendered = render_doctor_report(&report);
 
     assert!(rendered.starts_with(
-        "doctor: ok\ncutover: epoch=legacy authority=legacy blockers=0\nsummary: 0 error · 0 warn · 1 ok"
+        "doctor: ok\ncutover: epoch=unavailable authority=unavailable blockers=1\nsummary: 0 error · 0 warn · 1 ok"
     ));
     assert!(rendered.contains("ready: all checks passed"));
     assert!(!rendered.contains("needs attention:"));

@@ -6,7 +6,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::{AppState, IntentStackModalPhase, IntentStackModalView};
+#[cfg(test)]
+use crate::app::AppState;
+use crate::app::{IntentStackModalPhase, IntentStackModalView};
 
 use super::{
     geometry::{centered_rect, halo_rect, shadow_rect},
@@ -24,6 +26,7 @@ pub(super) struct IntentStackModalLayout {
     pub(super) primary_action: Rect,
 }
 
+#[cfg(test)]
 pub(super) fn render_intent_stack_modal(frame: &mut Frame, app: &AppState) {
     let Some(view) = app.intent_stack_modal_view() else {
         return;
@@ -31,6 +34,14 @@ pub(super) fn render_intent_stack_modal(frame: &mut Frame, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
     let palette = &current_theme.palette;
     render_intent_stack_modal_view(frame, &view, palette);
+}
+
+pub(super) fn render_intent_stack_modal_surface(
+    frame: &mut Frame,
+    view: &IntentStackModalView,
+    theme: &theme::Theme,
+) {
+    render_intent_stack_modal_view(frame, view, &theme.palette);
 }
 
 fn render_intent_stack_modal_view(

@@ -47,6 +47,7 @@ fn tui_tool_artifact_reads_share_budget_and_fail_closed_on_descriptor_drift() ->
         .artifact_ref
         .clone();
     let mut session = sigil_kernel::Session::load_from_store("deepseek", "model", durable_store)?;
+    session.attach_tool_artifact_store_override(artifact_store.clone());
     session.append(SessionLogEntry::ToolResultV3(recorded))?;
 
     let shared_budget = sigil_kernel::ToolArtifactReadBudgetV1::default();

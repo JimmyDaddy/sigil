@@ -38,6 +38,7 @@ use super::{
     TerminalStartRequest, TerminalStartTool, WriteFileTool, register_builtin_tools,
     register_builtin_tools_with_paths,
     register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle,
+    register_builtin_tools_with_unavailable_managed_execution,
 };
 
 use serial_test::serial;
@@ -54,7 +55,11 @@ fn bash_tool(test_root: &Path) -> BashTool {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
 }
@@ -69,7 +74,11 @@ fn posix_bash_tool(test_root: &Path) -> Result<BashTool> {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?,
     })
 }
@@ -222,7 +231,8 @@ fn tool_context_with_mutation_recorder(workspace: &Path, timeout_secs: u64) -> R
 }
 
 #[test]
-fn r71_every_in_process_file_tool_declares_a_managed_file_access_ref() -> Result<()> {
+fn managed_file_access_every_in_process_file_tool_declares_a_managed_file_access_ref() -> Result<()>
+{
     use sigil_kernel::resource::CanonicalHash;
     let temp = tempfile::tempdir()?;
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
@@ -3790,7 +3800,11 @@ fn temporary_file_guidance_is_model_visible() {
             scratch_namespaces: Arc::new(
                 crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
             ),
-            backend: Arc::new(LocalExecutionBackend),
+            executor: Arc::new(
+                crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                    backend: Arc::new(LocalExecutionBackend),
+                },
+            ),
             shell: crate::shell_runtime::ResolvedShell::detect_default(),
         }
         .spec(),
@@ -4316,6 +4330,19 @@ fn register_builtin_tools_registers_multiple_tools() {
             .access,
         ToolAccess::Execute
     );
+}
+
+#[test]
+fn unavailable_registration_binds_fail_closed_terminal_port() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let mut registry = ToolRegistry::new();
+    let handles = register_builtin_tools_with_unavailable_managed_execution(
+        &mut registry,
+        BuiltinToolPaths::workspace_defaults(workspace.path()),
+    );
+
+    assert!(handles.terminal.managed_execution_is_bound());
+    Ok(())
 }
 
 #[serial]
@@ -5224,7 +5251,7 @@ fn registration_shares_external_scratch_control_across_surfaces() -> Result<()> 
         &external.tasks,
         &handles.scratch.tasks
     ));
-    let lease = handles.scratch.namespaces.acquire("shared-session");
+    let lease = handles.scratch.namespaces.acquire("shared-session")?;
     assert!(external.namespaces.is_leased("shared-session"));
     drop(lease);
     assert!(!external.namespaces.is_leased("shared-session"));
@@ -5243,7 +5270,11 @@ fn scratch_tool_descriptions_match_session_scoped_lifecycle() {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
     .spec();
@@ -5883,7 +5914,11 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     };
     let ctx = ToolContext::new(workspace, 5);
@@ -5928,7 +5963,11 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
         scratch_namespaces: Arc::new(
             crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
         ),
-        backend: Arc::new(LocalExecutionBackend),
+        executor: Arc::new(
+            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+                backend: Arc::new(LocalExecutionBackend),
+            },
+        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
     .execute(ctx.clone(), "bash".to_owned(), json!({ "command": "true" }))

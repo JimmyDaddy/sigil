@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     panic,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,7 +9,6 @@ use std::{
 use std::{
     env, io,
     panic::AssertUnwindSafe,
-    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,9 +23,8 @@ use crossterm::{
     cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
-        KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, EventStream,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
@@ -35,30 +32,42 @@ use crossterm::{
 use futures::StreamExt;
 #[cfg(not(test))]
 use ratatui::backend::CrosstermBackend;
-use ratatui::{
-    Terminal,
-    backend::Backend,
-    layout::{Position, Rect},
-};
+#[cfg(test)]
+use ratatui::layout::Rect;
+use ratatui::{Terminal, backend::Backend, layout::Position};
+#[cfg(test)]
+use sigil_kernel::JsonlSessionStore;
+use sigil_kernel::RootConfig;
 #[cfg(not(test))]
 use sigil_kernel::TerminalKeyboardEnhancement;
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
-use sigil_kernel::{JsonlSessionStore, RootConfig};
 #[cfg(not(test))]
 use sigil_runtime::support::SupportBuildInfo;
 #[cfg(not(test))]
 use sigil_updater::BuildMetadata;
 
 #[cfg(not(test))]
+use crate::application_bridge;
+#[cfg(not(test))]
+use crate::host_effects::SystemHostEffects;
+#[cfg(test)]
+use crate::host_effects::{ExternalLaunchPlatform, TestHostEffects, external_launch_plan};
+#[cfg(not(test))]
+use crate::input_event::{FocusChange, InputEvent, InputKeyCode, InputKeyEventKind, Modifiers};
 use crate::ui;
+#[cfg(test)]
+use crate::ui::LayoutSnapshot;
 use crate::{
     app::{AppAction, AppState},
     attention::AttentionController,
-    clipboard::{self, ClipboardCopyOutcome},
+    damage::Damage,
+    host_effects::{ExternalLaunchTarget, HostEffects},
+    input_event::{EventEffect, HostRequest},
     mouse::AppMouseOutcome,
+    presentation::PresentationSession,
     runner::{self, WorkerCommand, WorkerMessage},
-    ui::LayoutSnapshot,
+    surface_adapter::build_surface_model,
 };
 
 const BACKGROUND_TASK_WAKE_INTERVAL: Duration = Duration::from_millis(250);
@@ -70,11 +79,13 @@ const SPINNER_FRAME_MILLIS: u128 = 120;
 type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     run_tui_with_build_info(config, SupportBuildInfo::unknown())
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui_with_build_info(
     config: Option<PathBuf>,
     build_info: SupportBuildInfo,
@@ -97,11 +108,13 @@ pub fn run_tui_with_build_context(
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui_resume(config: Option<PathBuf>, session_selector: Option<String>) -> Result<()> {
     run_tui_resume_with_build_info(config, session_selector, SupportBuildInfo::unknown())
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 pub fn run_tui_resume_with_build_info(
     config: Option<PathBuf>,
     session_selector: Option<String>,
@@ -138,10 +151,12 @@ fn run_tui_with_initial_session(
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(config.as_deref(), &cwd)?;
+    let boot_result = sigil_runtime::application_host::boot_current_schema(&config_path, &cwd)
+        .map_err(anyhow::Error::new);
     let (mut app, mut worker) = build_initial_app_with_session(
         cwd,
         config_path.clone(),
-        RootConfig::load(&config_path),
+        boot_result,
         initial_session,
         spawn_worker,
     )?;
@@ -432,6 +447,7 @@ fn finalize_terminal_presentation<B: Backend>(terminal: &mut Terminal<B>) -> Res
     // time out once the application loop has stopped. Exit cleanup must be write-only.
     backend.clear()?;
     backend.set_cursor_position(Position::ORIGIN)?;
+    let _phase_timing = crate::phase_timing::PhaseTimer::new("terminal_flush");
     backend.flush()
 }
 
@@ -506,7 +522,8 @@ async fn run_app(
     let mut terminal_events = EventStream::new();
     let mut needs_render = true;
     let mut last_spinner_tick = live_spinner_tick();
-    let mut latest_frame_area = Rect::default();
+    let mut presentation = PresentationSession::new();
+    let mut host_effects = SystemHostEffects;
     let mut attention =
         AttentionController::from_current_process(app.terminal_notification_config());
 
@@ -515,6 +532,9 @@ async fn run_app(
         let mut dirty = needs_render;
         dirty |= drain_worker_messages_with_attention(app, worker, &mut attention)?;
         dirty |= restart_worker_after_session_transition(app, worker, spawn_worker)?;
+        if dirty {
+            dirty |= refresh_application_projection(app, worker).await;
+        }
         attention.emit_pending_nonfatal(terminal.backend_mut());
         dirty |= app.poll_background_tasks();
         dirty |= flush_pending_worker_commands(app, worker)?;
@@ -551,7 +571,6 @@ async fn run_app(
             }
         }
 
-        let size = terminal.size()?;
         terminal.autoresize()?;
         let frame_area = terminal.get_frame().area();
         dirty |= app.set_terminal_size(frame_area.width, frame_area.height);
@@ -562,10 +581,7 @@ async fn run_app(
         }
 
         if dirty {
-            terminal.draw(|frame| {
-                latest_frame_area = frame.area();
-                ui::render(frame, app);
-            })?;
+            render_timed_frame(terminal, app, &mut presentation)?;
             let _ = app.maybe_start_automatic_update_check();
             let _ = app.acknowledge_active_egress_disclosure_frame();
             last_spinner_tick = spinner_tick;
@@ -625,27 +641,32 @@ async fn run_app(
         };
         match wake {
             WakeEvent::Terminal(event) => {
-                let mut next_event = Some(event?);
+                let mut next_event = Some(InputEvent::from(event?));
+                let mut batch_damage = Damage::NONE;
                 for processed_events in 0..EVENT_BATCH_LIMIT {
                     let Some(crossterm_event) = next_event.take() else {
                         break;
                     };
-                    let break_batch = process_terminal_event(
+                    let (break_batch, event_damage) = process_terminal_event(
                         terminal,
                         app,
                         worker,
-                        &mut needs_render,
-                        latest_frame_area,
-                        size.into(),
+                        &presentation,
                         crossterm_event,
                         &mut attention,
                         spawn_worker,
+                        &mut host_effects,
                     )?;
+                    batch_damage = batch_damage.union(event_damage);
                     if break_batch || processed_events + 1 >= EVENT_BATCH_LIMIT {
                         break;
                     }
-                    next_event = event::poll(Duration::ZERO)?.then(event::read).transpose()?;
+                    next_event = event::poll(Duration::ZERO)?
+                        .then(event::read)
+                        .transpose()?
+                        .map(InputEvent::from);
                 }
+                needs_render |= !batch_damage.is_empty();
             }
             WakeEvent::Worker(message) => {
                 needs_render |=
@@ -671,68 +692,86 @@ fn process_terminal_event<F>(
     terminal: &mut TuiTerminal,
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
-    needs_render: &mut bool,
-    latest_frame_area: Rect,
-    terminal_size: Rect,
-    crossterm_event: CrosstermEvent,
+    presentation: &PresentationSession,
+    input_event: InputEvent,
     attention: &mut AttentionController,
     spawn_worker: F,
-) -> Result<bool>
+    host_effects: &mut impl HostEffects,
+) -> Result<(bool, Damage)>
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
-    match crossterm_event {
-        CrosstermEvent::Resize(_, _) => {
+    match input_event {
+        InputEvent::Resize { .. } => {
             terminal.autoresize()?;
-            *needs_render = true;
-            Ok(true)
+            Ok((true, Damage::TERMINAL))
         }
-        CrosstermEvent::Mouse(mouse) => {
-            let layout = mouse_layout_snapshot(latest_frame_area, terminal_size, app);
-            let outcome = app.handle_mouse_event(mouse.into(), &layout)?;
-            *needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
-            Ok(false)
+        InputEvent::Mouse(mouse) => {
+            let Some(committed) = presentation.current() else {
+                // There is no safe coordinate authority before the first successful frame or
+                // while the terminal epoch is poisoned. The owner loop will either present a
+                // fresh frame or terminate after a present fault.
+                return Ok((false, Damage::NONE));
+            };
+            let outcome = app.handle_committed_mouse_event(mouse.into(), committed)?;
+            let damage =
+                apply_mouse_outcome_with_host(app, worker, outcome, spawn_worker, host_effects)?;
+            Ok((false, damage))
         }
-        CrosstermEvent::Paste(text) => {
+        InputEvent::Paste(text) => {
             app.handle_paste_text(&text);
-            *needs_render = true;
-            Ok(false)
+            Ok((false, Damage::INPUT))
         }
-        CrosstermEvent::FocusGained => {
+        InputEvent::Focus(FocusChange::Gained) => {
             attention.observe_focus(true);
-            Ok(false)
+            Ok((false, Damage::NONE))
         }
-        CrosstermEvent::FocusLost => {
+        InputEvent::Focus(FocusChange::Lost) => {
             attention.observe_focus(false);
-            Ok(false)
+            Ok((false, Damage::NONE))
         }
-        CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-            if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
-                && key.modifiers == KeyModifiers::CONTROL
+        InputEvent::Key(key) if key.kind == InputKeyEventKind::Press => {
+            if matches!(key.code, InputKeyCode::Char('v') | InputKeyCode::Char('V'))
+                && key.modifiers == Modifiers::CONTROL
                 && app.can_accept_image_attachment_input()
             {
-                match crate::clipboard_image::read_clipboard_image_png() {
+                match host_effects.read_clipboard_image_png() {
                     Ok(Some(encoded_png)) => {
                         app.handle_clipboard_image(encoded_png);
-                        *needs_render = true;
-                        return Ok(false);
+                        return Ok((false, Damage::HOST_EFFECT));
                     }
                     Ok(None) => {}
                     Err(_) => {
                         app.report_clipboard_image_failure();
-                        *needs_render = true;
-                        return Ok(false);
+                        return Ok((false, Damage::HOST_EFFECT));
                     }
                 }
             }
-            let action = app.handle_key_event(key)?;
-            *needs_render |= apply_key_action(app, worker, action, spawn_worker)?;
-            Ok(false)
+            let may_change_state = key.may_change_state();
+            let action = app.handle_key_event(key.to_crossterm())?;
+            let break_batch = matches!(action, Some(AppAction::TrustWorkspace));
+            let damage = apply_key_action_with_host(
+                app,
+                worker,
+                action,
+                if may_change_state {
+                    Damage::INPUT
+                } else {
+                    Damage::NONE
+                },
+                spawn_worker,
+                host_effects,
+            )?;
+            // Trust installs the worker and application port synchronously, while the first
+            // application projection is committed on the next owner-loop iteration. Stop this
+            // input batch so buffered prompt bytes cannot race that initial frontier.
+            Ok((break_batch, damage))
         }
-        _ => Ok(false),
+        InputEvent::Key(_) => Ok((false, Damage::NONE)),
     }
 }
 
+#[cfg(test)]
 fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) -> LayoutSnapshot {
     let screen = if frame_area.width == 0 || frame_area.height == 0 {
         Rect::new(0, 0, terminal_size.width, terminal_size.height)
@@ -740,6 +779,63 @@ fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) 
         frame_area
     };
     LayoutSnapshot::from_app(screen, app)
+}
+
+fn render_timed_frame<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut AppState,
+    presentation: &mut PresentationSession,
+) -> Result<()> {
+    let _phase_timing = crate::phase_timing::PhaseTimer::new("terminal_present");
+    let generation = presentation
+        .begin_prepare()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let attempt = presentation
+        .begin_present(generation)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let mut prepared = None;
+    let mut egress_rendered = false;
+    app.begin_egress_disclosure_frame();
+    let draw_result = terminal.draw(|frame| {
+        // Layout, cell output, and the interaction facts are captured by this one render
+        // transaction. Input never reconstructs this layout from the mutable AppState.
+        let surface = build_surface_model(
+            frame.area(),
+            app,
+            crate::surface::SurfaceState {
+                frame_generation: generation.value(),
+                terminal_epoch: presentation.terminal_epoch().value(),
+            },
+        );
+        egress_rendered = surface.egress_disclosure.is_some()
+            && surface.layout.egress_disclosure.is_some()
+            && !surface.user_input_open
+            && !surface.plan_workbench_open;
+        let layout = std::sync::Arc::new(surface.layout.clone());
+        ui::render_surface(frame, &surface);
+        prepared = Some((frame.area(), layout, frame.buffer_mut().clone()));
+    });
+    if let Err(error) = draw_result {
+        presentation
+            .fail_after_io(generation, attempt, error.to_string())
+            .map_err(|state_error| anyhow::anyhow!(state_error))?;
+        return Err(anyhow::anyhow!("terminal present failed: {error}"));
+    }
+    if egress_rendered {
+        app.mark_egress_disclosure_rendered();
+    }
+    let Some((area, layout, surface)) = prepared else {
+        presentation
+            .fail_after_io(generation, attempt, "terminal draw callback did not run")
+            .map_err(|state_error| anyhow::anyhow!(state_error))?;
+        return Err(anyhow::anyhow!(
+            "terminal present failed: draw callback did not run"
+        ));
+    };
+    presentation
+        .finish_draw(generation, attempt, area, surface, layout)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -752,10 +848,17 @@ fn build_initial_app<F>(
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
+    let boot_result = match load_result {
+        Ok(_root_config) => {
+            sigil_runtime::application_host::boot_current_schema(&config_path, &cwd)
+                .map_err(anyhow::Error::new)
+        }
+        Err(error) => Err(error),
+    };
     build_initial_app_with_session(
         cwd,
         config_path,
-        load_result,
+        boot_result,
         InitialSessionTarget::Fresh,
         spawn_worker_fn,
     )
@@ -764,7 +867,7 @@ where
 fn build_initial_app_with_session<F>(
     cwd: PathBuf,
     config_path: PathBuf,
-    load_result: Result<RootConfig>,
+    boot_result: Result<sigil_runtime::application_host::RuntimeCurrentBootTransactionV1>,
     initial_session: InitialSessionTarget<'_>,
     mut spawn_worker_fn: F,
 ) -> Result<(AppState, Option<WorkerRuntime>)>
@@ -772,51 +875,22 @@ where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
     let mut worker = None;
-    let app = match load_result {
-        Ok(root_config) => {
+    let app = match boot_result {
+        Ok(transaction) => {
+            // Runtime owns the indivisible current-schema boot transaction. The TUI consumes its
+            // frozen config/path/composition values and performs no independent authority load.
+            let (root_config, workspace_root, paths, boot_cutover, composition, _registration) =
+                transaction.into_published_parts();
             let mut app = AppState::from_root_config(&config_path, &root_config);
-            // RFC-0071 R71.6: compose the authority surface once at boot and share it with the
-            // worker and the UI (input history through the managed seam). A failed composition
-            // aborts startup: no run without a consistent authority surface.
-            {
-                let paths = sigil_runtime::resolve_sigil_paths(
-                    &root_config.storage,
-                    &root_config.session,
-                    &app.workspace_root,
-                );
-                for anchor in [&paths.state_root, &paths.scratch_root] {
-                    std::fs::create_dir_all(anchor).map_err(anyhow::Error::new)?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(anchor, std::fs::Permissions::from_mode(0o700))
-                            .map_err(anyhow::Error::new)?;
-                    }
-                }
-                std::fs::create_dir_all(paths.state_root.join("cache"))
-                    .map_err(anyhow::Error::new)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(
-                        paths.state_root.join("cache"),
-                        std::fs::Permissions::from_mode(0o700),
-                    )
-                    .map_err(anyhow::Error::new)?;
-                }
-                let (boot_cutover, composition) =
-                    sigil_runtime::r71_authority_composition::compose_current_boot_authority(
-                        &config_path,
-                        &paths.state_root,
-                        &paths.cache_root,
-                        &paths.scratch_root,
-                    )
-                    .map_err(anyhow::Error::new)?;
-                app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
-                app.set_authority_composition(std::sync::Arc::new(composition));
-            }
+            app.set_frozen_boot_paths(workspace_root, paths);
+            app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
+            app.set_authority_composition(std::sync::Arc::new(composition));
+            // Restore the requested target before evaluating trust. A managed session log is
+            // the durable source of both the target timeline and its workspace-trust decision;
+            // checking the freshly-created bootstrap session first would send `resume` back to
+            // the trust gate and then start a new session instead of the requested one.
+            restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
             if app.workspace_is_trusted_from_history() {
-                restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
                 let trust_ready = match app.ensure_current_workspace_trust_decision(
                     "trusted workspace carried into session",
                 ) {
@@ -877,6 +951,57 @@ where
     Ok((app, worker))
 }
 
+#[cfg(not(test))]
+#[doc(hidden)]
+pub fn install_current_boot_transaction(
+    app: &mut AppState,
+    config_path: &Path,
+    session_route: Option<sigil_kernel::ResolvedModelRoute>,
+    launch_cwd: &Path,
+) -> Result<RootConfig> {
+    // Authority composition always loads and validates the persisted configuration itself. The
+    // optional route is a narrow session overlay used only to derive the worker configuration;
+    // it can never select workspace/storage/execution authority roots.
+    let transaction = sigil_runtime::application_host::boot_current_schema(config_path, launch_cwd)
+        .map_err(anyhow::Error::new)?;
+    let persisted_config = transaction.config().clone();
+    let session_config = session_route
+        .as_ref()
+        .map(|route| app.runtime_config_for_session_route(persisted_config.clone(), route))
+        .transpose()?
+        .unwrap_or_else(|| persisted_config.clone());
+    let (persisted_config, workspace_root, paths, boot_cutover, composition, _registration) =
+        transaction.into_published_parts();
+    app.set_frozen_boot_paths(workspace_root, paths);
+    app.set_boot_cutover(std::sync::Arc::new(boot_cutover));
+    app.set_authority_composition(std::sync::Arc::new(composition));
+    app.apply_persisted_config_snapshot(&persisted_config);
+    app.apply_session_runtime_config(&session_config);
+    Ok(session_config)
+}
+
+#[cfg(test)]
+fn install_current_boot_transaction(
+    app: &mut AppState,
+    _config_path: &Path,
+    session_route: Option<sigil_kernel::ResolvedModelRoute>,
+    _launch_cwd: &Path,
+) -> Result<RootConfig> {
+    // Unit action tests inject a worker factory and intentionally exercise only action ordering;
+    // the shipping launcher uses the production implementation above.
+    let persisted_config = app
+        .persisted_config_snapshot()
+        .cloned()
+        .context("test boot requires persisted config")?;
+    let session_config = session_route
+        .as_ref()
+        .map(|route| app.runtime_config_for_session_route(persisted_config.clone(), route))
+        .transpose()?
+        .unwrap_or_else(|| persisted_config.clone());
+    app.apply_session_runtime_config(&session_config);
+    Ok(session_config)
+}
+
 fn restore_initial_session_from_disk(
     app: &mut AppState,
     root_config: &RootConfig,
@@ -909,14 +1034,36 @@ fn restore_initial_session_from_disk(
     }
 }
 
+#[cfg(test)]
 fn process_app_action_with_spawner<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     action: AppAction,
-    mut spawn_worker_fn: F,
+    spawn_worker_fn: F,
 ) -> Result<()>
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    let mut host_effects = TestHostEffects;
+    process_app_action_with_spawner_and_host(
+        app,
+        worker,
+        action,
+        spawn_worker_fn,
+        &mut host_effects,
+    )
+}
+
+fn process_app_action_with_spawner_and_host<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: AppAction,
+    mut spawn_worker_fn: F,
+    host_effects: &mut H,
+) -> Result<()>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
 {
     match action {
         AppAction::SetupCompleted {
@@ -925,16 +1072,32 @@ where
         } => {
             let support_build_info = app.support_build_info().clone();
             let update_build_info = app.update_build_info().clone();
+            let root_config = *root_config;
             *app = AppState::from_root_config(&config_path, &root_config);
             app.set_support_build_info(support_build_info);
             app.set_update_build_info(update_build_info);
+            let root_config = match install_current_boot_transaction(
+                app,
+                &config_path,
+                app.current_session_route(),
+                &std::env::current_dir()?,
+            ) {
+                Ok(root_config) => root_config,
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("setup completed but authority boot is unavailable: {error:#}"),
+                    )?;
+                    return Ok(());
+                }
+            };
             if let Err(error) =
                 app.ensure_current_workspace_trust_decision("trusted by user during quick setup")
             {
                 apply_worker_startup_recovery(app, &error, &app.session_log_path.clone())?;
                 return Ok(());
             }
-            match spawn_worker_fn(*root_config, app) {
+            match spawn_worker_fn(root_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
                     app,
@@ -948,7 +1111,7 @@ where
                 return Ok(());
             }
             shutdown_and_join_worker(worker);
-            let Some(root_config) = app.root_config_snapshot().cloned() else {
+            let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
                 report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
                 return Ok(());
             };
@@ -960,12 +1123,87 @@ where
                 )?,
             }
         }
-        AppAction::ConfigSaved { root_config }
-        | AppAction::RuntimeConfigUpdated { root_config } => {
-            let Some(runtime_config) = app.runtime_config_for_current_session(*root_config)? else {
+        AppAction::PersistConfiguration { request } => {
+            let persist_action = AppAction::PersistConfiguration {
+                request: std::sync::Arc::clone(&request),
+            };
+            let receipt = match try_execute_application_action(app, worker, &persist_action) {
+                Ok(Some(receipt)) => receipt,
+                Ok(None) => {
+                    report_worker_unavailable(
+                        app,
+                        "configuration save requires the application port",
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("configuration save was not admitted: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let settled = matches!(
+                receipt,
+                sigil_application::ApplicationCommandReceipt::Settled(_)
+                    | sigil_application::ApplicationCommandReceipt::Replayed(_)
+            );
+            report_application_receipt(app, &receipt)?;
+            if settled {
+                app.apply_persisted_config_snapshot(&request.next_base);
+                match request.follow_up {
+                    crate::app::ConfigurationSaveFollowUp::RebootRuntime => {
+                        return process_app_action_with_spawner_and_host(
+                            app,
+                            worker,
+                            AppAction::ConfigSaved {
+                                root_config: Box::new(request.next_base.clone()),
+                            },
+                            spawn_worker_fn,
+                            host_effects,
+                        );
+                    }
+                    crate::app::ConfigurationSaveFollowUp::ApplyActiveRunPermissionMode(mode) => {
+                        return process_app_action_with_spawner_and_host(
+                            app,
+                            worker,
+                            AppAction::UpdateActiveRunPermissionMode { mode },
+                            spawn_worker_fn,
+                            host_effects,
+                        );
+                    }
+                    crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel => {
+                        app.apply_saved_default_model(request.next_base.clone());
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        AppAction::ConfigSaved { .. } | AppAction::RuntimeConfigUpdated { .. } => {
+            let Some(session_route) = app.current_session_route() else {
                 return Ok(());
             };
+            let config_path = app.config_path.clone();
+            let launch_cwd = std::env::current_dir()?;
             shutdown_and_join_worker(worker);
+            #[cfg(not(test))]
+            app.clear_boot_authority();
+            let runtime_config = match install_current_boot_transaction(
+                app,
+                &config_path,
+                Some(session_route),
+                &launch_cwd,
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("configuration saved but authority reboot failed: {error:#}"),
+                    )?;
+                    return Ok(());
+                }
+            };
             match spawn_worker_fn(runtime_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
@@ -974,21 +1212,137 @@ where
                 )?,
             }
         }
-        AppAction::UpdateActiveRunPermissionMode { mode } => {
-            if let Some(runtime) = worker.as_ref() {
-                let _ = runtime
-                    .worker_tx
-                    .send(super::runner::WorkerCommand::UpdateActiveRunPermissionMode { mode });
+        AppAction::SessionRuntimeRouteUpdated { route } => {
+            #[cfg(not(test))]
+            {
+                let receipt = match try_execute_application_action(
+                    app,
+                    worker,
+                    &AppAction::SessionRuntimeRouteUpdated {
+                        route: route.clone(),
+                    },
+                ) {
+                    Ok(Some(receipt)) => receipt,
+                    Ok(None) => {
+                        report_worker_unavailable(
+                            app,
+                            "model route selection requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        report_worker_unavailable(
+                            app,
+                            &format!("model route selection was not admitted: {error}"),
+                        )?;
+                        return Ok(());
+                    }
+                };
+                report_application_receipt(app, &receipt)?;
+                if !matches!(
+                    receipt,
+                    sigil_application::ApplicationCommandReceipt::Settled(_)
+                        | sigil_application::ApplicationCommandReceipt::Replayed(_)
+                ) {
+                    return Ok(());
+                }
+            }
+            let persisted_config = app
+                .persisted_config_snapshot()
+                .cloned()
+                .context("session route update requires the persisted runtime config")?;
+            let runtime_config = app.runtime_config_for_session_route(persisted_config, &route)?;
+            app.apply_session_runtime_config(&runtime_config);
+            shutdown_and_join_worker(worker);
+            match spawn_worker_fn(runtime_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => report_worker_unavailable(
+                    app,
+                    &format!("model route changed; agent runtime remains unavailable: {error:#}"),
+                )?,
             }
         }
         AppAction::SetDefaultModel {
             root_config,
             expected_root_config,
         } => {
+            #[cfg(not(test))]
+            {
+                let request = std::sync::Arc::new(crate::app::ConfigurationSaveRequest {
+                    expected: *expected_root_config.clone(),
+                    next_base: *root_config.clone(),
+                    config_path: app.config_path.clone(),
+                    follow_up: crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel,
+                    root_only: true,
+                    draft: std::sync::Mutex::new(None),
+                });
+                let receipt = match try_execute_application_action(
+                    app,
+                    worker,
+                    &AppAction::PersistConfiguration { request },
+                ) {
+                    Ok(Some(receipt)) => receipt,
+                    Ok(None) => {
+                        report_worker_unavailable(
+                            app,
+                            "default model save requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        report_worker_unavailable(
+                            app,
+                            &format!("default model save was not admitted: {error}"),
+                        )?;
+                        return Ok(());
+                    }
+                };
+                report_application_receipt(app, &receipt)?;
+                if matches!(
+                    receipt,
+                    sigil_application::ApplicationCommandReceipt::Settled(_)
+                        | sigil_application::ApplicationCommandReceipt::Replayed(_)
+                ) {
+                    app.apply_saved_default_model(*root_config);
+                }
+                return Ok(());
+            }
+            #[cfg(test)]
             root_config.save_if_unchanged(&app.config_path, &expected_root_config)?;
+            #[cfg(test)]
             app.apply_saved_default_model(*root_config);
         }
         AppAction::StartNewSession { session_log_path } => {
+            match try_execute_application_action(
+                app,
+                worker,
+                &AppAction::StartNewSession {
+                    session_log_path: session_log_path.clone(),
+                },
+            ) {
+                Ok(Some(receipt)) => {
+                    report_application_receipt(app, &receipt)?;
+                    return Ok(());
+                }
+                Ok(None) => {
+                    #[cfg(not(test))]
+                    {
+                        report_worker_unavailable(
+                            app,
+                            "application session creation requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                }
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("application session creation was not admitted: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            }
+            #[cfg(test)]
             if let Some(runtime) = worker.as_ref()
                 && runtime
                     .worker_tx
@@ -999,10 +1353,12 @@ where
             {
                 return Ok(());
             }
+            #[cfg(test)]
             let root_config = app
-                .root_config_snapshot()
+                .session_runtime_config_snapshot()
                 .cloned()
                 .context("new session requires the current runtime config")?;
+            #[cfg(test)]
             let preparation = (|| -> Result<_> {
                 let (_, fallback_route) =
                     sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
@@ -1024,6 +1380,7 @@ where
                 .map_err(anyhow::Error::new)?;
                 Ok((attachment, session))
             })();
+            #[cfg(test)]
             let (attachment, session) = match preparation {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -1031,9 +1388,13 @@ where
                     return Ok(());
                 }
             };
+            #[cfg(test)]
             let provider_name = session.provider_name().to_owned();
+            #[cfg(test)]
             let model_name = session.model_name().to_owned();
+            #[cfg(test)]
             let mut entries = session.entries().to_vec();
+            #[cfg(test)]
             if let Err(error) = app.ensure_target_workspace_trust_decision_with_attachment(
                 &session_log_path,
                 &mut entries,
@@ -1043,15 +1404,20 @@ where
                 apply_worker_startup_recovery(app, &error, &session_log_path)?;
                 return Ok(());
             }
+            #[cfg(test)]
             shutdown_and_join_worker(worker);
+            #[cfg(test)]
             app.handle_worker_message(WorkerMessage::NewSessionStarted {
                 session_log_path: session_log_path.clone(),
                 provider_name,
                 model_name,
                 entries,
             })?;
+            #[cfg(test)]
             let _ = app.take_worker_rebind_required();
+            #[cfg(test)]
             app.retain_worker_session_attachment(session_log_path, attachment);
+            #[cfg(test)]
             match spawn_worker_fn(root_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
@@ -1061,10 +1427,42 @@ where
             }
         }
         AppAction::SwitchSession { session_log_path } => {
+            match try_execute_application_action(
+                app,
+                worker,
+                &AppAction::SwitchSession {
+                    session_log_path: session_log_path.clone(),
+                },
+            ) {
+                Ok(Some(receipt)) => {
+                    report_application_receipt(app, &receipt)?;
+                    return Ok(());
+                }
+                Ok(None) => {
+                    #[cfg(not(test))]
+                    {
+                        report_worker_unavailable(
+                            app,
+                            "application session switch requires the application port",
+                        )?;
+                        return Ok(());
+                    }
+                }
+                Err(error) => {
+                    report_worker_unavailable(
+                        app,
+                        &format!("application session switch was not admitted: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            }
+            #[cfg(test)]
             let attachment_recovery_binding = app
                 .pending_session_attachment_recovery_binding_for(&session_log_path)
                 .map(str::to_owned);
+            #[cfg(test)]
             app.mark_pending_session_transition_target(session_log_path.clone());
+            #[cfg(test)]
             if let Some(runtime) = worker.as_ref()
                 && runtime
                     .worker_tx
@@ -1076,10 +1474,12 @@ where
             {
                 return Ok(());
             }
+            #[cfg(test)]
             let root_config = app
-                .root_config_snapshot()
+                .session_runtime_config_snapshot()
                 .cloned()
                 .context("session switch requires the current runtime config")?;
+            #[cfg(test)]
             let preparation = (|| -> Result<_> {
                 let (_, fallback_route) =
                     sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
@@ -1108,6 +1508,7 @@ where
                 .map_err(anyhow::Error::new)?;
                 Ok((target_attachment, target))
             })();
+            #[cfg(test)]
             let (target_attachment, target) = match preparation {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -1115,9 +1516,13 @@ where
                     return Ok(());
                 }
             };
+            #[cfg(test)]
             let provider_name = target.provider_name().to_owned();
+            #[cfg(test)]
             let model_name = target.model_name().to_owned();
+            #[cfg(test)]
             let mut entries = target.entries().to_vec();
+            #[cfg(test)]
             if let Err(error) = app.ensure_target_workspace_trust_decision_with_attachment(
                 &session_log_path,
                 &mut entries,
@@ -1127,14 +1532,18 @@ where
                 apply_worker_startup_recovery(app, &error, &session_log_path)?;
                 return Ok(());
             }
+            #[cfg(test)]
             shutdown_and_join_worker(worker);
+            #[cfg(test)]
             app.handle_worker_message(WorkerMessage::SessionSwitched {
                 session_log_path: session_log_path.clone(),
                 provider_name,
                 model_name,
                 entries,
             })?;
+            #[cfg(test)]
             app.retain_worker_session_attachment(session_log_path, target_attachment);
+            #[cfg(test)]
             match spawn_worker_fn(root_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
@@ -1146,47 +1555,44 @@ where
             }
         }
         AppAction::CopyToClipboard { text } => {
-            match clipboard::copy_text(&text, app.terminal_osc52_clipboard_enabled()) {
-                ClipboardCopyOutcome::Copied => app.record_clipboard_copy_success(&text),
-                ClipboardCopyOutcome::Unavailable(reason) => {
-                    app.record_clipboard_copy_unavailable(&reason);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::CopyText {
+                    text,
+                    secret: false,
+                },
+                host_effects,
+            )?;
         }
         AppAction::CopySecretToClipboard { text } => {
-            match clipboard::copy_text(text.expose_secret(), app.terminal_osc52_clipboard_enabled())
-            {
-                ClipboardCopyOutcome::Copied => {
-                    app.record_clipboard_copy_success(text.expose_secret());
-                }
-                ClipboardCopyOutcome::Unavailable(reason) => {
-                    app.record_clipboard_copy_unavailable(&reason);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::CopyText {
+                    text: text.expose_secret().to_owned(),
+                    secret: true,
+                },
+                host_effects,
+            )?;
         }
         AppAction::OpenExternalUrl { url } => {
-            match launch_external_target(ExternalLaunchTarget::Url(&url)) {
-                Ok(()) => app.record_feedback_external_action_success("opening bug report form"),
-                Err(error) => {
-                    app.record_feedback_external_action_failure("open bug report form", &error);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::OpenExternalUrl { url, secret: false },
+                host_effects,
+            )?;
         }
         AppAction::OpenSecretExternalUrl { url } => {
-            match launch_external_target(ExternalLaunchTarget::Url(url.expose_secret())) {
-                Ok(()) => app.record_feedback_external_action_success("opening authorization page"),
-                Err(error) => {
-                    app.record_feedback_external_action_failure("open authorization page", &error);
-                }
-            }
+            process_host_request(
+                app,
+                HostRequest::OpenExternalUrl {
+                    url: url.expose_secret().to_owned(),
+                    secret: true,
+                },
+                host_effects,
+            )?;
         }
         AppAction::RevealFile { path } => {
-            match launch_external_target(ExternalLaunchTarget::RevealFile(&path)) {
-                Ok(()) => app.record_feedback_external_action_success("revealing feedback report"),
-                Err(error) => {
-                    app.record_feedback_external_action_failure("reveal feedback report", &error);
-                }
-            }
+            process_host_request(app, HostRequest::RevealFile(path), host_effects)?;
         }
         AppAction::CheckForUpdate {
             force_refresh,
@@ -1197,12 +1603,202 @@ where
         AppAction::ApplyUpdate { channel } => {
             app.start_update_apply(channel);
         }
-        action => {
-            let command = app.into_worker_command(action);
-            send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
-        }
+        action => match try_execute_application_action(app, worker, &action) {
+            Ok(Some(receipt)) => report_application_receipt(app, &receipt)?,
+            Ok(None) => {
+                let command = app.into_worker_command(action);
+                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            }
+            Err(_error)
+                if matches!(
+                    action,
+                    AppAction::ApprovalDecision { .. }
+                        | AppAction::ContinueTask { .. }
+                        | AppAction::PauseTask { .. }
+                ) =>
+            {
+                // These controls are first surfaced by the worker event stream. The application
+                // projection may still be one frontier behind after a fresh resume, so do not
+                // turn a temporarily missing projection binding into a deadlocked approval or
+                // task recovery action. The worker command carries the exact durable identity
+                // and remains the lossless fallback until the application port catches up.
+                let command = app.into_worker_command(action);
+                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            }
+            Err(error) if application_action_has_lossless_worker_fallback(&action, &error) => {
+                // After resume the worker can be ready before the application projection client
+                // has reconnected. These submissions carry the same durable session identity
+                // through the worker command path and are safe to admit exactly once; waiting
+                // for the projection would otherwise discard a user prompt while the UI reports
+                // an unavailable session. Other application errors remain fail-closed above.
+                let command = app.into_worker_command(action);
+                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            }
+            Err(error) => {
+                report_worker_unavailable(
+                    app,
+                    &format!("application command was not admitted: {error}"),
+                )?;
+            }
+        },
     }
     flush_pending_worker_commands(app, worker)?;
+    Ok(())
+}
+
+fn try_execute_application_action(
+    app: &AppState,
+    worker: &Option<WorkerRuntime>,
+    action: &AppAction,
+) -> Result<Option<sigil_application::ApplicationCommandReceipt>> {
+    #[cfg(not(test))]
+    {
+        worker
+            .as_ref()
+            .map(|runtime| {
+                let attachment_recovery_binding = match action {
+                    AppAction::SwitchSession { session_log_path } => {
+                        app.pending_session_attachment_recovery_binding_for(session_log_path)
+                    }
+                    _ => None,
+                };
+                runtime.application.try_execute_action(
+                    action,
+                    app.active_conversation_queue_target().as_ref(),
+                    attachment_recovery_binding,
+                )
+            })
+            .transpose()?
+            .flatten()
+            .map_or(Ok(None), |receipt| Ok(Some(receipt)))
+    }
+    #[cfg(test)]
+    {
+        let _ = (app, worker, action);
+        Ok(None)
+    }
+}
+
+fn application_action_has_lossless_worker_fallback(
+    action: &AppAction,
+    error: &anyhow::Error,
+) -> bool {
+    let application_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<sigil_application::ApplicationError>());
+    let Some(application_error) = application_error else {
+        return false;
+    };
+    match action {
+        AppAction::SubmitPrompt(_)
+        | AppAction::SubmitPromptWithAttachments { .. }
+        | AppAction::SubmitPlanPrompt(_)
+        | AppAction::CreateTaskFromPlan { .. } => {
+            matches!(
+                application_error,
+                sigil_application::ApplicationError::Unavailable
+            )
+        }
+        AppAction::CancelRun => match application_error {
+            sigil_application::ApplicationError::Unavailable => true,
+            sigil_application::ApplicationError::InvalidRequest(message) => {
+                message == "cannot cancel without an active application run binding"
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(not(test))]
+async fn refresh_application_projection(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) -> bool {
+    let Some(application) = worker.as_ref().map(|runtime| &runtime.application) else {
+        return false;
+    };
+    match application.refresh().await {
+        Ok(projection) => app.apply_application_projection(&projection),
+        Err(error) => {
+            tracing::debug!(%error, "application projection refresh unavailable");
+            false
+        }
+    }
+}
+
+fn report_application_receipt(
+    app: &mut AppState,
+    receipt: &sigil_application::ApplicationCommandReceipt,
+) -> Result<()> {
+    let notice = match receipt {
+        sigil_application::ApplicationCommandReceipt::Settled(_) => return Ok(()),
+        sigil_application::ApplicationCommandReceipt::Replayed(_) => "application command replayed",
+        sigil_application::ApplicationCommandReceipt::ReplayedUncertain(_) => {
+            "application command replayed; waiting for durable outcome"
+        }
+        sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+            return app.handle_worker_message(WorkerMessage::Notice(format!(
+                "application command rejected: {}",
+                rejection.reason
+            )));
+        }
+        sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
+            "application command payload conflicts with its durable reservation"
+        }
+        sigil_application::ApplicationCommandReceipt::InFlight(_) => {
+            "application command is already in flight"
+        }
+        sigil_application::ApplicationCommandReceipt::Uncertain(_) => {
+            "application command dispatched; waiting for durable outcome"
+        }
+    };
+    app.handle_worker_message(WorkerMessage::Notice(notice.to_owned()))
+}
+
+fn process_host_request<H: HostEffects>(
+    app: &mut AppState,
+    request: HostRequest,
+    host_effects: &mut H,
+) -> Result<()> {
+    match request {
+        HostRequest::CopyText {
+            text,
+            secret: _secret,
+        } => match host_effects.copy_text(&text, app.terminal_osc52_clipboard_enabled()) {
+            crate::clipboard::ClipboardCopyOutcome::Copied => {
+                app.record_clipboard_copy_success(&text)
+            }
+            crate::clipboard::ClipboardCopyOutcome::Unavailable(reason) => {
+                app.record_clipboard_copy_unavailable(&reason)
+            }
+        },
+        HostRequest::OpenExternalUrl { url, secret } => {
+            let target = ExternalLaunchTarget::Url(&url);
+            let success_notice = if secret {
+                "opening authorization page"
+            } else {
+                "opening bug report form"
+            };
+            let failure_notice = if secret {
+                "open authorization page"
+            } else {
+                "open bug report form"
+            };
+            match host_effects.launch_external(target) {
+                Ok(()) => app.record_feedback_external_action_success(success_notice),
+                Err(error) => app.record_feedback_external_action_failure(failure_notice, &error),
+            }
+        }
+        HostRequest::RevealFile(path) => {
+            match host_effects.launch_external(ExternalLaunchTarget::RevealFile(&path)) {
+                Ok(()) => app.record_feedback_external_action_success("revealing feedback report"),
+                Err(error) => {
+                    app.record_feedback_external_action_failure("reveal feedback report", &error)
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1223,114 +1819,6 @@ fn apply_worker_startup_recovery(
             target_session: None,
         });
     app.handle_worker_message(recovery)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExternalLaunchPlatform {
-    MacOs,
-    Windows,
-    Freedesktop,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ExternalLaunchTarget<'a> {
-    Url(&'a str),
-    RevealFile(&'a Path),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ExternalLaunchPlan {
-    program: &'static str,
-    args: Vec<OsString>,
-}
-
-fn external_launch_plan(
-    target: ExternalLaunchTarget<'_>,
-    platform: ExternalLaunchPlatform,
-) -> Result<ExternalLaunchPlan> {
-    if let ExternalLaunchTarget::Url(url) = target
-        && (!url.starts_with("https://") || url.chars().any(char::is_control))
-    {
-        anyhow::bail!("external URL must be a valid HTTPS URL");
-    }
-
-    let plan = match (platform, target) {
-        (ExternalLaunchPlatform::MacOs, ExternalLaunchTarget::Url(url)) => ExternalLaunchPlan {
-            program: "/usr/bin/open",
-            args: vec![OsString::from(url)],
-        },
-        (ExternalLaunchPlatform::MacOs, ExternalLaunchTarget::RevealFile(path)) => {
-            ExternalLaunchPlan {
-                program: "/usr/bin/open",
-                args: vec![OsString::from("-R"), path.as_os_str().to_owned()],
-            }
-        }
-        (ExternalLaunchPlatform::Windows, ExternalLaunchTarget::Url(url)) => ExternalLaunchPlan {
-            program: "rundll32.exe",
-            args: vec![
-                OsString::from("url.dll,FileProtocolHandler"),
-                OsString::from(url),
-            ],
-        },
-        (ExternalLaunchPlatform::Windows, ExternalLaunchTarget::RevealFile(path)) => {
-            let mut select_arg = OsString::from("/select,");
-            select_arg.push(path.as_os_str());
-            ExternalLaunchPlan {
-                program: "explorer.exe",
-                args: vec![select_arg],
-            }
-        }
-        (ExternalLaunchPlatform::Freedesktop, ExternalLaunchTarget::Url(url)) => {
-            ExternalLaunchPlan {
-                program: "xdg-open",
-                args: vec![OsString::from(url)],
-            }
-        }
-        (ExternalLaunchPlatform::Freedesktop, ExternalLaunchTarget::RevealFile(path)) => {
-            let parent = path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("support report has no parent directory"))?;
-            ExternalLaunchPlan {
-                program: "xdg-open",
-                args: vec![parent.as_os_str().to_owned()],
-            }
-        }
-        (ExternalLaunchPlatform::Unsupported, _) => {
-            anyhow::bail!("external opening is not supported on this platform");
-        }
-    };
-    Ok(plan)
-}
-
-const fn current_external_launch_platform() -> ExternalLaunchPlatform {
-    if cfg!(target_os = "macos") {
-        ExternalLaunchPlatform::MacOs
-    } else if cfg!(target_os = "windows") {
-        ExternalLaunchPlatform::Windows
-    } else if cfg!(unix) {
-        ExternalLaunchPlatform::Freedesktop
-    } else {
-        ExternalLaunchPlatform::Unsupported
-    }
-}
-
-#[cfg(not(test))]
-fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
-    let plan = external_launch_plan(target, current_external_launch_platform())?;
-    Command::new(plan.program)
-        .args(plan.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to launch {}", plan.program))?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
-    external_launch_plan(target, current_external_launch_platform()).map(|_| ())
 }
 
 #[cfg(test)]
@@ -1468,7 +1956,7 @@ where
         return Ok(false);
     }
     shutdown_and_join_worker(worker);
-    let Some(root_config) = app.root_config_snapshot().cloned() else {
+    let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
         report_worker_unavailable(
             app,
             "session changed but the runtime config is unavailable; no prompt was sent",
@@ -1548,7 +2036,7 @@ where
         command
     };
 
-    let Some(root_config) = app.root_config_snapshot().cloned() else {
+    let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
         app.enqueue_worker_command(command);
         report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
         return Ok(());
@@ -1609,6 +2097,7 @@ fn shutdown_and_join_worker(worker: &mut Option<WorkerRuntime>) {
     }
 }
 
+#[cfg(test)]
 fn apply_mouse_outcome<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
@@ -1618,16 +2107,38 @@ fn apply_mouse_outcome<F>(
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
-    match outcome {
-        AppMouseOutcome::Noop => Ok(false),
-        AppMouseOutcome::Redraw => Ok(true),
-        AppMouseOutcome::Action(action) => {
-            process_app_action_with_spawner(app, worker, action, &mut spawn_worker_fn)?;
-            Ok(true)
-        }
-    }
+    let mut host_effects = TestHostEffects;
+    let damage = apply_mouse_outcome_with_host(
+        app,
+        worker,
+        outcome,
+        &mut spawn_worker_fn,
+        &mut host_effects,
+    )?;
+    Ok(!damage.is_empty())
 }
 
+fn apply_mouse_outcome_with_host<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    outcome: AppMouseOutcome,
+    mut spawn_worker_fn: F,
+    host_effects: &mut H,
+) -> Result<Damage>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
+{
+    apply_event_effect(
+        app,
+        worker,
+        outcome.into_event_effect(),
+        &mut spawn_worker_fn,
+        host_effects,
+    )
+}
+
+#[cfg(test)]
 fn apply_key_action<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
@@ -1637,10 +2148,66 @@ fn apply_key_action<F>(
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
-    if let Some(action) = action {
-        process_app_action_with_spawner(app, worker, action, &mut spawn_worker_fn)?;
+    let mut host_effects = TestHostEffects;
+    let damage = apply_key_action_with_host(
+        app,
+        worker,
+        action,
+        Damage::FULL,
+        &mut spawn_worker_fn,
+        &mut host_effects,
+    )?;
+    Ok(!damage.is_empty())
+}
+
+fn apply_key_action_with_host<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: Option<AppAction>,
+    no_action_damage: Damage,
+    mut spawn_worker_fn: F,
+    host_effects: &mut H,
+) -> Result<Damage>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
+{
+    let effect = action.map_or(
+        EventEffect::LocalUpdate(no_action_damage),
+        AppAction::into_event_effect,
+    );
+    apply_event_effect(app, worker, effect, &mut spawn_worker_fn, host_effects)
+}
+
+fn apply_event_effect<F, H>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    effect: EventEffect,
+    spawn_worker_fn: &mut F,
+    host_effects: &mut H,
+) -> Result<Damage>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+    H: HostEffects,
+{
+    match effect {
+        EventEffect::Ignored => Ok(Damage::NONE),
+        EventEffect::LocalUpdate(damage) => Ok(damage),
+        EventEffect::OpaqueAction(action) => {
+            process_app_action_with_spawner_and_host(
+                app,
+                worker,
+                action,
+                spawn_worker_fn,
+                host_effects,
+            )?;
+            Ok(Damage::ASYNC)
+        }
+        EventEffect::HostRequest(request) => {
+            process_host_request(app, request, host_effects)?;
+            Ok(Damage::HOST_EFFECT)
+        }
     }
-    Ok(true)
 }
 
 fn next_mouse_capture_action(active: bool, desired: bool) -> Option<bool> {
@@ -1694,6 +2261,8 @@ fn shell_quote(value: &str) -> String {
 
 struct WorkerRuntime {
     worker_tx: runner::WorkerCommandSender,
+    #[cfg(not(test))]
+    application: application_bridge::TuiApplicationSession,
     #[cfg(test)]
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     #[cfg(not(test))]
@@ -1751,10 +2320,24 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
             explicit_selection: app.pending_session_route_selection().cloned(),
         },
         app.authority_composition().cloned(),
+        app.boot_cutover().cloned(),
         app.worker_session_attachment(),
     )?;
+    let application = match application_bridge::build_for_worker(
+        app,
+        spawned.command_tx.clone(),
+        app.runtime.reasoning_effort.clone(),
+    ) {
+        Ok(application) => application,
+        Err(error) => {
+            let _ = spawned.command_tx.send(WorkerCommand::Shutdown);
+            let _ = spawned.join_handle.join();
+            return Err(error.context("failed to attach TUI application port"));
+        }
+    };
     Ok(WorkerRuntime {
         worker_tx: spawned.command_tx,
+        application,
         worker_rx: WorkerMessageInbox::forward_from(spawned.message_rx)?,
         join_handle: Some(spawned.join_handle),
         ready: false,

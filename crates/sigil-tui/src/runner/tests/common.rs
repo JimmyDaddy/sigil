@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    fs,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, OnceLock, mpsc},
@@ -162,6 +163,9 @@ pub(super) struct TestWorker {
     command_tx: WorkerCommandSender,
     message_rx: mpsc::Receiver<WorkerMessage>,
     handle: Option<thread::JoinHandle<()>>,
+    managed_storage_writer:
+        Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    _authority_root: tempfile::TempDir,
 }
 
 impl TestWorker {
@@ -185,7 +189,7 @@ impl TestWorker {
     where
         F: Fn(&WorkerMessage) -> bool,
     {
-        self.recv_until_with_timeout(Duration::from_secs(3), predicate)
+        self.recv_until_with_timeout(Duration::from_secs(10), predicate)
     }
 
     pub(super) fn recv_until_with_timeout<F>(
@@ -217,6 +221,16 @@ impl TestWorker {
                 .map_err(|_| anyhow!("worker thread panicked during shutdown"))?;
         }
         Ok(())
+    }
+
+    pub(super) fn managed_storage_writer(
+        &self,
+    ) -> Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
+        Arc::clone(&self.managed_storage_writer)
+    }
+
+    pub(super) fn authority_root_path(&self) -> &Path {
+        self._authority_root.path()
     }
 }
 
@@ -335,18 +349,47 @@ where
     )
 }
 
-fn test_managed_extension_execution(
+pub(super) fn test_authority_composition(
     workspace_root: &Path,
-) -> Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1> {
-    Arc::new(
-        sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1::new(
+) -> Result<(
+    Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+    tempfile::TempDir,
+)> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
+
+    let authority_root = tempfile::Builder::new()
+        .prefix("sigil-tui-test-authority-")
+        .tempdir()?;
+    let state_root = authority_root.path().join("state");
+    let execution_temp_root = authority_root.path().join("execution-temp");
+    fs::create_dir_all(state_root.join("cache"))?;
+    fs::create_dir_all(&execution_temp_root)?;
+    let composition =
+        sigil_runtime::r71_authority_composition::compose_runtime_authority_for_test_execution(
+            &state_root,
+            &execution_temp_root,
+            sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
             Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
                 sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
             )),
-            Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
-            workspace_root.to_path_buf(),
-        ),
-    )
+            &[
+                Channel::ApplicationControlLog,
+                Channel::SessionLog,
+                Channel::SessionLifecycleLog,
+                Channel::InputHistory,
+                Channel::DurableMemory,
+                Channel::SessionCatalog,
+                Channel::ArtifactStaging,
+                Channel::ArtifactStore,
+                Channel::AdapterDurableState,
+                Channel::AdapterEgressDisclosure,
+                Channel::AdapterIdempotencyLedger,
+            ],
+        )?;
+    composition
+        .activate_workspace(workspace_root)
+        .map_err(anyhow::Error::msg)?;
+    Ok((Arc::new(composition), authority_root))
 }
 
 pub(super) fn spawn_test_worker_with_role_provider_builder<P>(
@@ -364,19 +407,30 @@ where
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
     let (message_tx, message_rx) = mpsc::channel();
+    let (authority_composition, authority_root) = test_authority_composition(&workspace_root)?;
     let options = sigil_runtime::build_run_options(
         &root_config,
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
         None,
-    );
+    )
+    .with_tool_authority(Arc::new(authority_composition.tool_authority.clone()));
     let agent = Arc::new(agent);
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
     let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(
         WorkerMcpRuntimeEventSender::new(event_tx.clone()),
     ));
     let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
-    let managed_extension_execution = Some(test_managed_extension_execution(&workspace_root));
+    let managed_extension_execution = Some(Arc::clone(&authority_composition.extension_execution));
+    let managed_verification_execution = Some(Arc::clone(&authority_composition.command_execution)
+        as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>);
+    let managed_storage_writer = Arc::clone(&authority_composition.storage_writer);
+    let retained_managed_storage_writer = Arc::clone(&managed_storage_writer);
+    let managed_artifact_store = super::super::ManagedTuiArtifactStoreLease::acquire(
+        Arc::clone(&managed_storage_writer),
+        &session_log_path,
+        &sigil_kernel::stable_event_uuid("sigil-session-path", &session_log_path.to_string_lossy()),
+    )?;
     let handle = thread::Builder::new()
         .name("sigil-test-agent-worker".to_owned())
         .spawn(move || {
@@ -408,10 +462,14 @@ where
                     role_provider_builder,
                     context_resolver,
                     managed_extension_execution,
+                    managed_verification_execution,
+                    managed_plan_review_child_resources: Some(
+                        authority_composition.plan_review_child_resource_provisioner(),
+                    ),
                 },
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
-                None,
-                None,
+                Some(managed_storage_writer),
+                Some(managed_artifact_store),
             );
         })
         .context("failed to spawn test worker")?;
@@ -420,6 +478,8 @@ where
         command_tx,
         message_rx,
         handle: Some(handle),
+        managed_storage_writer: retained_managed_storage_writer,
+        _authority_root: authority_root,
     })
 }
 

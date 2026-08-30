@@ -19,13 +19,13 @@ pub(crate) use overrides::{COLOR_TOKEN_GROUPS, COLOR_TOKEN_NAMES, ColorTokenGrou
 pub(crate) use palette::ThemePalette;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Theme {
+pub(crate) struct ThemeSpec {
     pub(crate) id: ThemeId,
     pub(crate) syntax_theme: SyntaxThemeId,
     pub(crate) palette: ThemePalette,
 }
 
-impl Theme {
+impl ThemeSpec {
     pub(crate) fn try_from_config(appearance: &AppearanceConfig) -> Result<Self> {
         let mut palette = builtin::palette_for(appearance.theme);
         overrides::apply_overrides(&mut palette, &appearance.colors)?;
@@ -49,11 +49,14 @@ impl Theme {
     }
 }
 
-impl Default for Theme {
+impl Default for ThemeSpec {
     fn default() -> Self {
         Self::builtin(ThemeId::SigilDark)
     }
 }
+
+/// Compatibility alias for widget modules that are migrated incrementally to `ThemeSpec`.
+pub(crate) type Theme = ThemeSpec;
 
 pub(crate) fn default_palette() -> ThemePalette {
     builtin::palette_for(ThemeId::SigilDark)

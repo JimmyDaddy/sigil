@@ -107,6 +107,11 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          # PR and manual verification runs must not spend the job timeout
+          # uploading a large release target. The default-branch push remains
+          # the cache writer; all runs may still restore an existing cache.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Linux package prerequisites
         if: runner.os == 'Linux'

@@ -3,15 +3,13 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, anyhow, bail};
 use sigil_kernel::{
     CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    CompletionCriteria, ControlEntry, EvidenceScope, JsonlSessionStore, ReceiptStatus, RootConfig,
+    CompletionCriteria, ControlEntry, EvidenceScope, JsonlSessionStore, ReceiptStatus,
     SandboxProfileRequirement, Session, ToolEffect, TrustedCheckSpec, VerificationAutoRunPolicy,
     VerificationCheckRunRequest, VerificationPolicy, VerificationPolicyChangedEntry,
     VerificationRecordedEntry, VerificationScope, VerificationVerdict, WorkspaceTrust,
     WorkspaceTrustRequirement, build_workspace_snapshot, run_verification_check,
     stable_workspace_id, write_file_with_mutation,
 };
-
-use crate::build_configured_execution_backend;
 
 use super::{MaterializedModelEvalFixture, ModelEvalPostRunMutation, sha256_digest};
 
@@ -42,8 +40,10 @@ pub async fn verify_model_eval_run(
         });
     }
 
-    let root_config = RootConfig::load(config_path)?;
-    let execution_backend = build_configured_execution_backend(&root_config)?;
+    let boot =
+        crate::r71_authority_composition::boot_current_schema(config_path, &fixture.workspace_root)
+            .map_err(|error| anyhow!("model-eval authority boot failed: {error}"))?;
+    let execution_port = std::sync::Arc::clone(&boot.composition().command_execution);
     let store = JsonlSessionStore::new(session_path)?;
     let mut session = Session::load_from_store(provider, model, store)?;
     let scope = EvidenceScope::Run(run_id.to_owned());
@@ -115,7 +115,7 @@ pub async fn verify_model_eval_run(
     for trusted_check in &trusted_checks {
         let recorded = run_verification_check(
             &mut session,
-            execution_backend.as_ref(),
+            execution_port.as_ref(),
             VerificationCheckRunRequest {
                 workspace_root: fixture.workspace_root.clone(),
                 scope: scope.clone(),

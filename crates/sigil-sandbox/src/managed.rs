@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use sigil_kernel::managed_execution::{
     AccessWideningPolicyV1, BoundedOutputSummaryV1, BoundedProcessInputV1,
     BoundedProcessOutputFrameV1, BoundedPtySizeV1, ExecutionResourceReceiptV1,
@@ -31,10 +32,10 @@ use sigil_kernel::managed_execution::{
 use sigil_kernel::resource::{
     CanonicalHash, EffectiveEnforcementV1, EnforcementCompletenessV1,
     EnforcementRequirementClassV1, EnvironmentProfileClassV1, IssuedExecutionAdmissionBundleV1,
-    OpaqueProcessRef, OpaqueResourceId, OpaqueSpawnIntentId, PhysicalAttemptId,
-    ReflectiveOpaqueProcessRef, RequestedEnforcementV1, ResourceAccessV1, ResourceCleanupStatusV1,
-    ResourceJournalScopeV1, ResourceKindV1, ResourceOwnerScopeV1, ResourceRefV1,
-    SandboxBackendClassV1,
+    OpaquePermissionSubjectRef, OpaqueProcessRef, OpaqueResourceId, OpaqueSpawnIntentId,
+    PhysicalAttemptId, ReflectiveOpaqueProcessRef, RequestedEnforcementV1, ResourceAccessV1,
+    ResourceCleanupStatusV1, ResourceJournalScopeV1, ResourceKindV1, ResourceOwnerScopeV1,
+    ResourceRefV1, SandboxBackendClassV1,
 };
 
 use crate::environment::{apply_reserved_environment, standard_reserved_environment};
@@ -69,7 +70,194 @@ fn env_hash(env: &BTreeMap<String, String>) -> CanonicalHash {
 pub struct SandboxManagedExecutionServiceV1 {
     planner: Arc<dyn ManagedExecutionPlannerV1>,
     execution_temp_root: PathBuf,
+    process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
+    one_shot_launcher: Option<Arc<dyn ManagedOneShotLaunchServiceV1>>,
+    terminal_launcher: Option<Arc<dyn ManagedTerminalLaunchServiceV1>>,
     extension_launcher: Option<Arc<dyn ManagedExtensionLaunchServiceV1>>,
+    code_intel_launcher: Option<Arc<dyn ManagedCodeIntelLaunchServiceV1>>,
+}
+
+/// Host-private one-shot launch seam. The service owns admission, planning, output bounds and
+/// receipts; this injected launcher owns only the physical cwd/process material for one bound
+/// command. Keeping it separate prevents a path-bearing command from entering the kernel request.
+pub trait ManagedOneShotLaunchServiceV1: Send + Sync {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
+/// Host-private terminal launch seam. Persistent terminal cwd and argv remain bound to the
+/// runtime-resolved plan; the sandbox service performs admission and process ownership around
+/// this one physical launch.
+pub trait ManagedTerminalLaunchServiceV1: Send + Sync {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1>;
+
+    fn launch_pty(
+        &self,
+        _request: &ManagedExecutionRequestV1,
+        _environment: &BTreeMap<String, String>,
+        _size: BoundedPtySizeV1,
+    ) -> Result<ManagedPtyLaunchV1, ManagedExecutionErrorV1> {
+        Err(ManagedExecutionErrorV1::ProviderUnavailable)
+    }
+}
+
+/// Sandbox-owned PTY launch material. Portable-PTY objects never cross the kernel/runtime
+/// contract; they are consumed immediately by the managed process handle below.
+pub struct ManagedPtyLaunchV1 {
+    master: Box<dyn MasterPty + Send>,
+    reader: Box<dyn std::io::Read + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+/// Real command-backed terminal launcher. It is plan-bound by construction and is not a generic
+/// fallback: production composition must inject it explicitly for the Terminal purpose.
+pub struct CommandManagedTerminalLaunchServiceV1 {
+    program: PathBuf,
+    args: Vec<OsString>,
+    cwd: PathBuf,
+    environment: Vec<(OsString, OsString)>,
+    enforcement: ManagedExtensionLaunchEnforcementV1,
+}
+
+impl CommandManagedTerminalLaunchServiceV1 {
+    #[must_use]
+    pub fn new(
+        program: PathBuf,
+        args: Vec<OsString>,
+        cwd: PathBuf,
+        environment: Vec<(OsString, OsString)>,
+        enforcement: ManagedExtensionLaunchEnforcementV1,
+    ) -> Self {
+        Self {
+            program,
+            args,
+            cwd,
+            environment,
+            enforcement,
+        }
+    }
+}
+
+impl ManagedTerminalLaunchServiceV1 for CommandManagedTerminalLaunchServiceV1 {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        let launcher = CommandManagedExtensionLaunchServiceV1::new(
+            self.program.clone(),
+            self.args.clone(),
+            self.cwd.clone(),
+            self.environment.clone(),
+            self.enforcement.clone(),
+        );
+        ManagedExtensionLaunchServiceV1::launch(&launcher, request, environment)
+    }
+
+    fn launch_pty(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+        size: BoundedPtySizeV1,
+    ) -> Result<ManagedPtyLaunchV1, ManagedExecutionErrorV1> {
+        let expected_argv = std::iter::once(self.program.as_os_str().to_os_string())
+            .chain(self.args.iter().cloned())
+            .collect::<Vec<_>>();
+        let expected_environment = self
+            .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        if request.argv != expected_argv || request.environment != expected_environment {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        if size.rows == 0 || size.cols == 0 {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        let pty = native_pty_system()
+            .openpty(PtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let reader = pty
+            .master
+            .try_clone_reader()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let writer = pty
+            .master
+            .take_writer()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let mut command = CommandBuilder::new(&self.program);
+        command.args(&self.args);
+        command.cwd(&self.cwd);
+        command.env_clear();
+        for (key, value) in environment {
+            command.env(key, value);
+        }
+        let child = pty
+            .slave
+            .spawn_command(command)
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        Ok(ManagedPtyLaunchV1 {
+            master: pty.master,
+            reader,
+            writer,
+            child,
+        })
+    }
+}
+
+/// Local host launcher used by the runtime managed one-shot route. It is valid only when the
+/// planner has selected the explicit-unconfined Local profile; the sandbox still performs that
+/// check before invoking this launcher.
+pub struct CommandManagedOneShotLaunchServiceV1 {
+    cwd: PathBuf,
+    cwd_subject_ref: OpaquePermissionSubjectRef,
+}
+
+impl CommandManagedOneShotLaunchServiceV1 {
+    #[must_use]
+    pub fn new(cwd: PathBuf, cwd_subject_ref: OpaquePermissionSubjectRef) -> Self {
+        Self {
+            cwd,
+            cwd_subject_ref,
+        }
+    }
+}
+
+impl ManagedOneShotLaunchServiceV1 for CommandManagedOneShotLaunchServiceV1 {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        if request.argv.is_empty() || request.cwd_subject_ref != self.cwd_subject_ref {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
+        let mut command = Command::new(&request.argv[0]);
+        command
+            .args(request.argv.iter().skip(1))
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+            .spawn()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
+    }
 }
 
 /// Observed enforcement returned by the host-injected extension launcher. The sandbox owns the
@@ -89,6 +277,18 @@ pub struct ManagedExtensionLaunchEnforcementV1 {
 /// plan and is injected into the sandbox service for that launch only. It is deliberately not a
 /// generic execution fallback: absence of this seam keeps Extension admission fail closed.
 pub trait ManagedExtensionLaunchServiceV1: Send + Sync {
+    fn enforcement(&self) -> ManagedExtensionLaunchEnforcementV1;
+
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
+/// Host-private code-intelligence launch seam. It is separate from extension launch so an MCP
+/// admission cannot be reused to start a language server.
+pub trait ManagedCodeIntelLaunchServiceV1: Send + Sync {
     fn enforcement(&self) -> ManagedExtensionLaunchEnforcementV1;
 
     fn launch(
@@ -163,10 +363,36 @@ impl ManagedExtensionLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        sigil_process::configure_process_tree(&mut command);
+        if self.enforcement.requested.require_process_tree_ownership || cfg!(unix) {
+            sigil_process::configure_process_tree(&mut command);
+        }
         command
             .spawn()
             .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
+    }
+}
+
+impl ManagedCodeIntelLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 {
+    fn enforcement(&self) -> ManagedExtensionLaunchEnforcementV1 {
+        self.enforcement.clone()
+    }
+
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        ManagedExtensionLaunchServiceV1::launch(self, request, environment)
+    }
+}
+
+impl ManagedTerminalLaunchServiceV1 for CommandManagedExtensionLaunchServiceV1 {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Child, ManagedExecutionErrorV1> {
+        ManagedExtensionLaunchServiceV1::launch(self, request, environment)
     }
 }
 
@@ -176,6 +402,7 @@ enum SigilPurpose {
     OneShot,
     Terminal,
     Extension,
+    CodeIntel,
 }
 
 /// Fully bound local execution context; every check happens before any platform call.
@@ -202,8 +429,41 @@ impl SandboxManagedExecutionServiceV1 {
         Self {
             planner,
             execution_temp_root,
+            process_inventory: None,
+            one_shot_launcher: None,
+            terminal_launcher: None,
             extension_launcher: None,
+            code_intel_launcher: None,
         }
+    }
+
+    /// Attaches the authority-owned durable process inventory. Production launch routes must
+    /// provide it; absence keeps physical spawn fail closed.
+    #[must_use]
+    pub fn with_process_inventory(
+        mut self,
+        inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    ) -> Self {
+        self.process_inventory = Some(inventory);
+        self
+    }
+
+    #[must_use]
+    pub fn with_one_shot_launcher(
+        mut self,
+        launcher: Arc<dyn ManagedOneShotLaunchServiceV1>,
+    ) -> Self {
+        self.one_shot_launcher = Some(launcher);
+        self
+    }
+
+    #[must_use]
+    pub fn with_terminal_launcher(
+        mut self,
+        launcher: Arc<dyn ManagedTerminalLaunchServiceV1>,
+    ) -> Self {
+        self.terminal_launcher = Some(launcher);
+        self
     }
 
     #[must_use]
@@ -212,6 +472,15 @@ impl SandboxManagedExecutionServiceV1 {
         launcher: Arc<dyn ManagedExtensionLaunchServiceV1>,
     ) -> Self {
         self.extension_launcher = Some(launcher);
+        self
+    }
+
+    #[must_use]
+    pub fn with_code_intel_launcher(
+        mut self,
+        launcher: Arc<dyn ManagedCodeIntelLaunchServiceV1>,
+    ) -> Self {
+        self.code_intel_launcher = Some(launcher);
         self
     }
 
@@ -224,12 +493,16 @@ impl SandboxManagedExecutionServiceV1 {
             IssuedExecutionAdmissionBundleV1::OneShot { .. } => SigilPurpose::OneShot,
             IssuedExecutionAdmissionBundleV1::Terminal { .. } => SigilPurpose::Terminal,
             IssuedExecutionAdmissionBundleV1::Extension { .. } => SigilPurpose::Extension,
+            IssuedExecutionAdmissionBundleV1::CodeIntel { .. } => SigilPurpose::CodeIntel,
         };
         let execution_purpose = match purpose {
             SigilPurpose::OneShot => sigil_kernel::managed_execution::ExecutionPurposeV1::OneShot,
             SigilPurpose::Terminal => sigil_kernel::managed_execution::ExecutionPurposeV1::Terminal,
             SigilPurpose::Extension => {
                 sigil_kernel::managed_execution::ExecutionPurposeV1::ExtensionProcess
+            }
+            SigilPurpose::CodeIntel => {
+                sigil_kernel::managed_execution::ExecutionPurposeV1::CodeIntelProcess
             }
         };
         let plan_request = ManagedExecutionPlanRequestV1 {
@@ -292,6 +565,23 @@ impl SandboxManagedExecutionServiceV1 {
                     enforcement.effective_access,
                 )
             }
+            SigilPurpose::CodeIntel => {
+                let Some(launcher) = &self.code_intel_launcher else {
+                    return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+                };
+                let enforcement = launcher.enforcement();
+                if enforcement.requested.profile_hash != draft.environment_profile.profile_hash {
+                    return Err(ManagedExecutionErrorV1::ExecutionPlanDrift);
+                }
+                (
+                    enforcement.requested,
+                    enforcement.backend,
+                    enforcement.completeness,
+                    enforcement.effective_capability_set_hash,
+                    enforcement.proof_set_hash,
+                    enforcement.effective_access,
+                )
+            }
             _ => match draft.environment_profile.profile_class {
                 EnvironmentProfileClassV1::ExplicitUnconfined => (
                     RequestedEnforcementV1 {
@@ -331,19 +621,17 @@ impl SandboxManagedExecutionServiceV1 {
             .map_err(|_| ManagedExecutionErrorV1::ExecutionPlanDrift)?;
 
         let standard = standard_reserved_environment(&self.execution_temp_root);
-        let mut candidate = standard.clone();
-        let (_override, mut env) =
-            apply_reserved_environment(&mut candidate, &standard, None, false);
-        // Agreed (planner-sealed) environment overlays the reserved baseline: same semantic
-        // writer contract as the terminal/extension launcher, never unverified values. The
-        // local reserved map is String-keyed, so config-granted UTF-8 env values apply exactly;
-        // non-UTF-8 env strings stay rejected (Local never serves extension launches).
+        let mut candidate = BTreeMap::new();
+        // Start with the planner-sealed request environment, then let the sandbox apply its
+        // reserved bindings last. A caller may request TMPDIR/HOME, but it can never redirect
+        // those names away from the authority-issued ExecutionTemp generation.
         for (key, value) in &request.environment {
-            env.insert(
+            candidate.insert(
                 key.to_string_lossy().into_owned(),
                 value.to_string_lossy().into_owned(),
             );
         }
+        let (_override, env) = apply_reserved_environment(&mut candidate, &standard, None, false);
         let environment_binding_hash = env_hash(&env);
 
         let requirement = draft
@@ -513,6 +801,7 @@ fn bounded_read(reader: &mut impl Read, cap_bytes: u64) -> std::io::Result<Bound
         summary: BoundedOutputSummaryV1 {
             observed_bytes: observed,
             retained_bytes: retained.len() as u64,
+            retained_payload: retained.clone(),
             content_digest: content_digest(&retained),
             truncated: observed > cap_bytes,
             artifact_ref: None,
@@ -565,6 +854,74 @@ async fn poll_termination(child: &mut Child, max_runtime_ms: u64) -> ProcessTerm
     }
 }
 
+/// Waits for a native child without placing an unbounded `Child::wait` call on a Tokio worker. A
+/// caller-side timeout can cancel this future between probes when Tokio is present, while the
+/// synchronous fallback preserves compatibility with the crate's non-Tokio unit-test executor.
+async fn wait_for_child_status(child: Arc<Mutex<Child>>) -> Result<ExitStatus, std::io::Error> {
+    loop {
+        let status = {
+            let mut child = child
+                .lock()
+                .map_err(|_| std::io::Error::other("managed child lock poisoned"))?;
+            child.try_wait()?
+        };
+        if let Some(status) = status {
+            return Ok(status);
+        }
+        yield_between_child_probes().await;
+    }
+}
+
+/// PTY equivalent of [`wait_for_child_status`]. `portable-pty` exposes a synchronous child
+/// interface, so probe it without submitting an unbounded wait that cannot be cancelled when the
+/// managed caller's deadline expires.
+async fn wait_for_pty_child_status(
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+) -> Result<portable_pty::ExitStatus, std::io::Error> {
+    loop {
+        let status = {
+            let mut child = child
+                .lock()
+                .map_err(|_| std::io::Error::other("managed PTY child lock poisoned"))?;
+            child.try_wait()?
+        };
+        if let Some(status) = status {
+            return Ok(status);
+        }
+        yield_between_child_probes().await;
+    }
+}
+
+async fn yield_between_child_probes() {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    } else {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn terminate_reap_and_settle(
+    child: &mut Child,
+    process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
+    inventory: &dyn sigil_resource_authority::AuthorityProcessInventoryPortV1,
+    claim: &mut Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
+) -> Result<(), ManagedExecutionErrorV1> {
+    if let Some(process_owner) = process_owner {
+        let _ = process_owner.terminate();
+    }
+    let _ = child.kill();
+    child
+        .wait()
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+    inventory
+        .settle_spawn(
+            claim
+                .take()
+                .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+        )
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)
+}
+
 /// Per-channel capped retained buffer plus truncation observation.
 #[derive(Default)]
 struct CapState {
@@ -595,6 +952,7 @@ impl CapState {
         BoundedOutputSummaryV1 {
             observed_bytes: self.observed,
             retained_bytes: self.retained.len() as u64,
+            retained_payload: self.retained.clone(),
             content_digest: content_digest(&self.retained),
             truncated: self.observed > self.cap,
             artifact_ref: None,
@@ -668,34 +1026,132 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         if request.limits.pty_required || request.capture.pty {
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
+        if request.limits.max_runtime_ms == 0 {
+            return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+        }
         let prepared = self.prepare(&bundle, &request)?;
-        let mut command = Command::new(&request.argv[0]);
-        command
-            .args(request.argv.iter().skip(1))
-            .env_clear()
-            .envs(prepared.env.iter())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
+        let Some(launcher) = &self.one_shot_launcher else {
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        };
+        let inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let claim = inventory
+            .prepare_spawn(prepared.attempt_id.as_str())
             .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let mut child = match launcher.launch(&request, &prepared.env) {
+            Ok(child) => child,
+            Err(error) => {
+                inventory
+                    .settle_spawn(claim)
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                return Err(error);
+            }
+        };
+        if inventory.attach_spawn(&claim, child.id()).is_err() {
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = inventory.settle_spawn(claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        }
+        let process_owner = if prepared
+            .requested_enforcement
+            .require_process_tree_ownership
+            || cfg!(unix)
+        {
+            match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
+                Ok(owner) => Some(owner),
+                Err(_error) => {
+                    let _ = child.kill();
+                    if child.wait().is_ok() {
+                        let _ = inventory.settle_spawn(claim);
+                    }
+                    return Err(ManagedExecutionErrorV1::ConfinementUnproven);
+                }
+            }
+        } else {
+            None
+        };
+        let mut claim = Some(claim);
         let cap = request.limits.max_output_bytes;
-        let stdout_pipe = child
-            .stdout
-            .take()
-            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
-        let stderr_pipe = child
-            .stderr
-            .take()
-            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let stdout_pipe = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let stderr_pipe = match child.stderr.take() {
+            Some(pipe) => pipe,
+            None => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
         let mut stdout_pipe = stdout_pipe;
         let mut stderr_pipe = stderr_pipe;
-        let stdout_outcome = bounded_read(&mut stdout_pipe, cap)
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-        let stderr_outcome = bounded_read(&mut stderr_pipe, cap)
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        let stdout_outcome = match bounded_read(&mut stdout_pipe, cap) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
+        };
+        let stderr_outcome = match bounded_read(&mut stderr_pipe, cap) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
+        };
         let termination = poll_termination(&mut child, request.limits.max_runtime_ms).await;
+        if matches!(termination, ProcessTerminationV1::OutcomeUncertain { .. }) {
+            if let Some(process_owner) = process_owner.as_ref() {
+                let _ = process_owner.terminate();
+            }
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                inventory
+                    .settle_spawn(
+                        claim
+                            .take()
+                            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+                    )
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+            } else {
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
+        } else {
+            inventory
+                .settle_spawn(
+                    claim
+                        .take()
+                        .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+                )
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
         let process_receipt = process_receipt_from(
             &prepared,
             termination,
@@ -717,56 +1173,143 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         request: ManagedExecutionRequestV1,
     ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
         let is_extension = matches!(bundle, IssuedExecutionAdmissionBundleV1::Extension { .. });
-        if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. }) && !is_extension {
+        let is_code_intel = matches!(bundle, IssuedExecutionAdmissionBundleV1::CodeIntel { .. });
+        if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. })
+            && !is_extension
+            && !is_code_intel
+        {
             return Err(ManagedExecutionErrorV1::AdmissionMismatch);
         }
-        if request.limits.pty_required || request.capture.pty {
-            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
-        }
         let prepared = self.prepare(&bundle, &request)?;
-        let mut child = if is_extension {
-            let Some(launcher) = &self.extension_launcher else {
-                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
-            };
-            launcher.launch(&request, &prepared.env)?
-        } else {
-            let mut command = Command::new(&request.argv[0]);
-            command
-                .args(request.argv.iter().skip(1))
-                .env_clear()
-                .envs(prepared.env.iter())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            sigil_process::configure_process_tree(&mut command);
-            command
-                .spawn()
-                .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?
-        };
-        let process_owner = match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
-            Ok(owner) => owner,
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+        let inventory = self
+            .process_inventory
+            .as_ref()
+            .ok_or(ManagedExecutionErrorV1::ProviderUnavailable)?;
+        if request.limits.pty_required || request.capture.pty {
+            if is_extension || is_code_intel {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
+            let Some(size) = request.pty_size else {
+                return Err(ManagedExecutionErrorV1::AdmissionMismatch);
+            };
+            let Some(launcher) = &self.terminal_launcher else {
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            };
+            let claim = inventory
+                .prepare_spawn(prepared.attempt_id.as_str())
+                .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+            let launch = match launcher.launch_pty(&request, &prepared.env, size) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    inventory
+                        .settle_spawn(claim)
+                        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                    return Err(error);
+                }
+            };
+            return self.start_persistent_pty(
+                prepared,
+                launch,
+                request.limits.max_output_bytes,
+                Arc::clone(inventory),
+                claim,
+            );
+        }
+        let claim = inventory
+            .prepare_spawn(prepared.attempt_id.as_str())
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        let launched = if is_extension {
+            let Some(launcher) = &self.extension_launcher else {
+                let _ = inventory.settle_spawn(claim);
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            };
+            launcher.launch(&request, &prepared.env)
+        } else if is_code_intel {
+            let Some(launcher) = &self.code_intel_launcher else {
+                let _ = inventory.settle_spawn(claim);
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            };
+            launcher.launch(&request, &prepared.env)
+        } else if let Some(launcher) = &self.terminal_launcher {
+            launcher.launch(&request, &prepared.env)
+        } else {
+            #[cfg(not(test))]
+            {
+                let _ = inventory.settle_spawn(claim);
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+            #[cfg(test)]
+            {
+                let mut command = Command::new(&request.argv[0]);
+                command
+                    .args(request.argv.iter().skip(1))
+                    .env_clear()
+                    .envs(prepared.env.iter())
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                command
+                    .spawn()
+                    .map_err(|_error| ManagedExecutionErrorV1::ProviderUnavailable)
+            }
+        };
+        let mut child = match launched {
+            Ok(child) => child,
+            Err(error) => {
+                inventory
+                    .settle_spawn(claim)
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                return Err(error);
+            }
+        };
+        if inventory.attach_spawn(&claim, child.id()).is_err() {
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = inventory.settle_spawn(claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        }
+        let process_owner = if prepared
+            .requested_enforcement
+            .require_process_tree_ownership
+            || cfg!(unix)
+        {
+            match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
+                Ok(owner) => Some(owner),
+                Err(_error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = inventory.settle_spawn(claim);
+                    return Err(ManagedExecutionErrorV1::ConfinementUnproven);
+                }
+            }
+        } else {
+            None
         };
         let cap = request.limits.max_output_bytes;
         let stdout_pipe = match child.stdout.take() {
             Some(pipe) => pipe,
             None => {
-                let _ = process_owner.terminate();
+                if let Some(process_owner) = process_owner.as_ref() {
+                    let _ = process_owner.terminate();
+                }
                 let _ = child.kill();
-                let _ = child.wait();
+                if child.wait().is_ok() {
+                    let _ = inventory.settle_spawn(claim);
+                }
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
         };
         let stderr_pipe = match child.stderr.take() {
             Some(pipe) => pipe,
             None => {
-                let _ = process_owner.terminate();
+                if let Some(process_owner) = process_owner.as_ref() {
+                    let _ = process_owner.terminate();
+                }
                 let _ = child.kill();
-                let _ = child.wait();
+                if child.wait().is_ok() {
+                    let _ = inventory.settle_spawn(claim);
+                }
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
         };
@@ -800,15 +1343,140 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             attempt_id: prepared.attempt_id.clone(),
             prepared,
             finalizing: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            process_inventory: Arc::clone(inventory),
+            process_claim: Some(claim),
         };
         Ok(Box::new(handle))
     }
 }
 
+impl SandboxManagedExecutionServiceV1 {
+    fn start_persistent_pty(
+        &self,
+        prepared: PreparedLocalRunV1,
+        launch: ManagedPtyLaunchV1,
+        cap: u64,
+        process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+        process_claim: sigil_resource_authority::AuthorityProcessInventoryClaimV1,
+    ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
+        let process_id = launch.child.process_id();
+        let Some(process_id) = process_id else {
+            let mut child = launch.child;
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = process_inventory.settle_spawn(process_claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        };
+        if process_inventory
+            .attach_spawn(&process_claim, process_id)
+            .is_err()
+        {
+            let mut child = launch.child;
+            let _ = child.kill();
+            if child.wait().is_ok() {
+                let _ = process_inventory.settle_spawn(process_claim);
+            }
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        }
+        let process_owner = if prepared
+            .requested_enforcement
+            .require_process_tree_ownership
+            || cfg!(unix)
+        {
+            match sigil_process::ProcessTreeOwnerGuard::assign(Some(process_id)) {
+                Ok(owner) => Some(owner),
+                Err(_error) => {
+                    let mut child = launch.child;
+                    let _ = child.kill();
+                    if child.wait().is_ok() {
+                        let _ = process_inventory.settle_spawn(process_claim);
+                    }
+                    return Err(ManagedExecutionErrorV1::ConfinementUnproven);
+                }
+            }
+        } else {
+            None
+        };
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
+        let stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
+        let stderr_cap = Arc::new(Mutex::new(CapState::new(cap)));
+        spawn_drain(
+            launch.reader,
+            ManagedProcessOutputChannelV1::Pty,
+            cap,
+            frame_tx,
+            Arc::clone(&stdout_cap),
+        );
+        let handle = LocalPersistentPtyProcessHandleV1 {
+            child: Arc::new(Mutex::new(launch.child)),
+            process_owner,
+            master: Arc::new(Mutex::new(Some(launch.master))),
+            stdin: Arc::new(Mutex::new(Some(launch.writer))),
+            stdin_open: Arc::new(AtomicBool::new(true)),
+            frame_rx: Some(frame_rx),
+            stdout_cap,
+            stderr_cap,
+            attempt_id: prepared.attempt_id.clone(),
+            prepared,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            process_inventory,
+            process_claim: Some(process_claim),
+        };
+        #[cfg(windows)]
+        spawn_windows_pty_exit_watcher(&handle.child, &handle.master);
+        Ok(Box::new(handle))
+    }
+}
+
+/// ConPTY does not necessarily close the reader when the child exits while the master handle is
+/// still alive.  The managed stream contract exposes a per-channel EOF frame, so observe process
+/// exit independently and release the host-owned master before consumers wait for that frame.
+///
+/// This is Windows-only: on Unix, polling `try_wait` would reap the child before
+/// `wait_and_finalize` can publish its receipt.
+#[cfg(windows)]
+fn spawn_windows_pty_exit_watcher(
+    child: &Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    master: &Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+) {
+    let child = Arc::downgrade(child);
+    let master = Arc::downgrade(master);
+    std::thread::spawn(move || {
+        loop {
+            let Some(child_ref) = child.upgrade() else {
+                return;
+            };
+            let exited = {
+                let mut child = match child_ref.lock() {
+                    Ok(child) => child,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                matches!(child.try_wait(), Ok(Some(_)))
+            };
+            if exited {
+                if let Some(master_ref) = master.upgrade() {
+                    match master_ref.lock() {
+                        Ok(mut master) => {
+                            master.take();
+                        }
+                        Err(poisoned) => {
+                            poisoned.into_inner().take();
+                        }
+                    }
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
 /// Local persistent process handle (non-clone, non-serialize).
 struct LocalPersistentProcessHandleV1 {
     child: Arc<Mutex<Child>>,
-    process_owner: sigil_process::ProcessTreeOwnerGuard,
+    process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdin_open: Arc<AtomicBool>,
     frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
@@ -817,6 +1485,9 @@ struct LocalPersistentProcessHandleV1 {
     attempt_id: PhysicalAttemptId,
     prepared: PreparedLocalRunV1,
     finalizing: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    process_claim: Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
 }
 
 struct LocalPersistentOutputStreamV1 {
@@ -926,7 +1597,10 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         &mut self,
         _reason: ProcessCancelReasonV1,
     ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
-        let _ = self.process_owner.terminate();
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(process_owner) = self.process_owner.as_ref() {
+            let _ = process_owner.terminate();
+        }
         let mut guard = self
             .child
             .lock()
@@ -942,18 +1616,29 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
         self.finalizing.store(true, Ordering::SeqCst);
-        let termination = {
-            let mut guard = self
-                .child
-                .lock()
-                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-            match guard.wait() {
-                Ok(status) => classify_status(status),
-                Err(_) => ProcessTerminationV1::OutcomeUncertain {
+        let wait_result = wait_for_child_status(Arc::clone(&self.child)).await;
+        let (termination, reaped) = match wait_result {
+            Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
+                let _ = status;
+                (ProcessTerminationV1::Cancelled, true)
+            }
+            Ok(status) => (classify_status(status), true),
+            Err(_) => (
+                ProcessTerminationV1::OutcomeUncertain {
                     evidence_digest: zero_hash(),
                 },
-            }
+                false,
+            ),
         };
+        if reaped {
+            let claim = self
+                .process_claim
+                .take()
+                .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
+            self.process_inventory
+                .settle_spawn(claim)
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
         // Drain whatever the pipes still hold so EOF markers land (bounded by pipe content).
         if let Some(mut rx) = self.frame_rx.take() {
             while let Some(frame) = rx.recv().await {
@@ -986,6 +1671,7 @@ fn zero_summary() -> BoundedOutputSummaryV1 {
     BoundedOutputSummaryV1 {
         observed_bytes: 0,
         retained_bytes: 0,
+        retained_payload: Vec::new(),
         content_digest: zero_hash(),
         truncated: false,
         artifact_ref: None,
@@ -994,502 +1680,264 @@ fn zero_summary() -> BoundedOutputSummaryV1 {
 
 impl LocalPersistentProcessHandleV1 {
     fn handle_resource_receipt(&self) -> ExecutionResourceReceiptV1 {
-        let prepared = &self.prepared;
-        ExecutionResourceReceiptV1 {
-            physical_attempt_id: prepared.attempt_id.clone(),
-            manifest_hash: prepared.draft.draft_hash,
-            sandbox_binding_hash: prepared.launch_plan.launch_plan_hash,
-            requested_enforcement: prepared.requested_enforcement.clone(),
-            effective_enforcement: EffectiveEnforcementV1 {
-                backend: prepared.effective_backend,
-                completeness: prepared.enforcement_completeness,
-                effective_capability_set_hash: prepared.effective_capability_set_hash,
-                access_widening_set_hash: zero_hash(),
-                functional_probe_hash: prepared.launch_plan.launch_plan_hash,
-                proof_set_hash: prepared.enforcement_proof_hash,
-            },
-            resources: vec![prepared.resource_receipt.clone()],
-            enforcement_proof_set_hash: prepared.launch_plan.launch_plan_hash,
-            environment_binding_hash: prepared.environment_binding_hash,
-            cleanup_status: ResourceCleanupStatusV1::Released,
-            effect_settlement: sigil_kernel::recovery::EffectSettlementV1::Applied,
+        resource_receipt_from_prepared(&self.prepared)
+    }
+}
+
+fn resource_receipt_from_prepared(prepared: &PreparedLocalRunV1) -> ExecutionResourceReceiptV1 {
+    ExecutionResourceReceiptV1 {
+        physical_attempt_id: prepared.attempt_id.clone(),
+        manifest_hash: prepared.draft.draft_hash,
+        sandbox_binding_hash: prepared.launch_plan.launch_plan_hash,
+        requested_enforcement: prepared.requested_enforcement.clone(),
+        effective_enforcement: EffectiveEnforcementV1 {
+            backend: prepared.effective_backend,
+            completeness: prepared.enforcement_completeness,
+            effective_capability_set_hash: prepared.effective_capability_set_hash,
+            access_widening_set_hash: zero_hash(),
+            functional_probe_hash: prepared.launch_plan.launch_plan_hash,
+            proof_set_hash: prepared.enforcement_proof_hash,
+        },
+        resources: vec![prepared.resource_receipt.clone()],
+        enforcement_proof_set_hash: prepared.launch_plan.launch_plan_hash,
+        environment_binding_hash: prepared.environment_binding_hash,
+        cleanup_status: ResourceCleanupStatusV1::Released,
+        effect_settlement: sigil_kernel::recovery::EffectSettlementV1::Applied,
+    }
+}
+
+struct LocalPersistentPtyProcessHandleV1 {
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    stdin: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
+    stdin_open: Arc<AtomicBool>,
+    frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
+    stdout_cap: Arc<Mutex<CapState>>,
+    stderr_cap: Arc<Mutex<CapState>>,
+    attempt_id: PhysicalAttemptId,
+    prepared: PreparedLocalRunV1,
+    cancelled: Arc<AtomicBool>,
+    process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
+    process_claim: Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
+}
+
+#[async_trait]
+impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
+    fn process_ref(&self) -> ReflectiveOpaqueProcessRef {
+        ReflectiveOpaqueProcessRef::new(OpaqueProcessRef::new(format!(
+            "process-{}",
+            self.attempt_id.as_str()
+        )))
+    }
+
+    fn physical_attempt_id(&self) -> PhysicalAttemptId {
+        self.attempt_id.clone()
+    }
+
+    fn take_output_stream(
+        &mut self,
+    ) -> Result<Box<dyn ManagedProcessOutputStreamV1>, ManagedProcessControlErrorV1> {
+        let Some(rx) = self.frame_rx.take() else {
+            return Err(ManagedProcessControlErrorV1::StreamAlreadyTaken);
+        };
+        Ok(Box::new(LocalPersistentOutputStreamV1 { rx }))
+    }
+
+    async fn write_stdin(
+        &mut self,
+        input: BoundedProcessInputV1,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        if !self.stdin_open.load(Ordering::SeqCst) {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "write_stdin",
+            });
         }
+        let mut guard =
+            self.stdin
+                .lock()
+                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                    action: "write_stdin",
+                })?;
+        let Some(writer) = guard.as_mut() else {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "write_stdin",
+            });
+        };
+        use std::io::Write;
+        writer
+            .write_all(&input.payload)
+            .and_then(|_| writer.flush())
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "write_stdin",
+            })?;
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::WriteStdin,
+        ))
+    }
+
+    async fn resize_pty(
+        &mut self,
+        size: BoundedPtySizeV1,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        if size.rows == 0 || size.cols == 0 {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            });
+        }
+        let guard = self
+            .master
+            .lock()
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            })?;
+        let Some(master) = guard.as_ref() else {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            });
+        };
+        master
+            .resize(PtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "resize_pty",
+            })?;
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::ResizePty,
+        ))
+    }
+
+    async fn close_stdin(
+        &mut self,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        if !self.stdin_open.swap(false, Ordering::SeqCst) {
+            return Err(ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            });
+        }
+        let mut guard =
+            self.stdin
+                .lock()
+                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                    action: "close_stdin",
+                })?;
+        guard.take();
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::WriteStdin,
+        ))
+    }
+
+    async fn cancel(
+        &mut self,
+        _reason: ProcessCancelReasonV1,
+    ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(process_owner) = self.process_owner.as_ref() {
+            process_owner
+                .terminate()
+                .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
+        }
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
+        let _ = child.kill();
+        Ok(control_receipt(
+            &self.attempt_id,
+            ProcessControlActionV1::Cancel,
+        ))
+    }
+
+    async fn wait_and_finalize(
+        mut self: Box<Self>,
+    ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
+        let wait_result = wait_for_pty_child_status(Arc::clone(&self.child)).await;
+        let (termination, reaped) = match wait_result {
+            Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
+                let _ = status;
+                (ProcessTerminationV1::Cancelled, true)
+            }
+            Ok(status) => (classify_pty_status(status), true),
+            Err(_) => (
+                ProcessTerminationV1::OutcomeUncertain {
+                    evidence_digest: zero_hash(),
+                },
+                false,
+            ),
+        };
+        if reaped {
+            let claim = self
+                .process_claim
+                .take()
+                .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
+            self.process_inventory
+                .settle_spawn(claim)
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
+        // Closing the master releases the PTY reader after the child has been reaped.
+        self.master
+            .lock()
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+            .take();
+        if let Some(mut rx) = self.frame_rx.take() {
+            while let Some(frame) = rx.recv().await {
+                let _ = frame;
+            }
+        }
+        let stdout_summary = self
+            .stdout_cap
+            .lock()
+            .map(|cap| cap.summary())
+            .unwrap_or_else(|_| zero_summary());
+        let stderr_summary = self
+            .stderr_cap
+            .lock()
+            .map(|cap| cap.summary())
+            .unwrap_or_else(|_| zero_summary());
+        Ok(ManagedExecutionReceiptV1 {
+            physical_attempt_id: self.attempt_id.clone(),
+            process: process_receipt_from(
+                &self.prepared,
+                termination,
+                stdout_summary,
+                stderr_summary,
+            ),
+            resources: resource_receipt_from_prepared(&self.prepared),
+            check: None,
+        })
+    }
+}
+
+fn classify_pty_status(status: portable_pty::ExitStatus) -> ProcessTerminationV1 {
+    #[cfg(unix)]
+    if let Some(signal) = status.signal() {
+        return ProcessTerminationV1::Signaled {
+            signal: pty_signal_number(signal),
+        };
+    }
+    ProcessTerminationV1::Exited {
+        code: i32::try_from(status.exit_code()).unwrap_or(-1),
+    }
+}
+
+#[cfg(unix)]
+fn pty_signal_number(signal: &str) -> u32 {
+    match signal.to_ascii_uppercase().as_str() {
+        "SIGKILL" | "KILLED" => 9,
+        "SIGTERM" | "TERMINATED" => 15,
+        "SIGINT" | "INTERRUPTED" => 2,
+        "SIGHUP" | "HANGUP" => 1,
+        _ => 0,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sigil_kernel::managed_execution::{
-        CaptureModeV1, ExecutionCapturePolicy, ManagedExecutionPlanErrorV1,
-    };
-    use sigil_kernel::managed_execution::{EnvironmentProfileRefV1, ExecutionResourceLimits};
-    use sigil_kernel::resource::{
-        BoundedVec, OpaqueAdmissionId, OpaqueExecutionPlanDraftId, OpaquePermissionSubjectRef,
-        OpaqueRequirementId, OpaqueSessionId, ResourceBlockerScopeV1, ResourceCleanupPolicyV1,
-        ResourceLeaseLifetimeV1, ResourcePurposeV1, ResourceQuotaClassV1, ResourceQuotaProfileV1,
-        ResourceRequirementKeyV1, ResourceRequirementSetV1, ResourceRequirementV1,
-        ResourceRetentionPolicyV1, ResourceVisibilityV1,
-    };
-    use std::ffi::OsString;
-
-    fn cap() -> ExecutionCapturePolicy {
-        ExecutionCapturePolicy {
-            stdout_capture: CaptureModeV1::BoundedRing { max_bytes: 4096 },
-            stderr_capture: CaptureModeV1::BoundedRing { max_bytes: 4096 },
-            pty: false,
-        }
-    }
-
-    fn limits() -> ExecutionResourceLimits {
-        ExecutionResourceLimits {
-            max_output_bytes: 4096,
-            max_runtime_ms: 15_000,
-            max_children: 1,
-            max_fds: 16,
-            pty_required: false,
-        }
-    }
-
-    fn quota() -> ResourceQuotaProfileV1 {
-        ResourceQuotaProfileV1 {
-            class: ResourceQuotaClassV1::AttemptEphemeral,
-            max_bytes: 1024 * 1024,
-            max_entries: 1024,
-            max_open_holders: 1,
-            max_age_ms: None,
-            hard_runtime_enforcement_required: false,
-            profile_hash: zero_hash(),
-        }
-    }
-
-    fn draft_hash_for(argv: &[&str], isolation: bool) -> CanonicalHash {
-        let mut acc = b"test-plan-v1".to_vec();
-        for arg in argv {
-            acc.extend_from_slice(arg.as_bytes());
-            acc.push(0);
-        }
-        acc.push(if isolation { b'i' } else { b'u' });
-        content_digest(&acc)
-    }
-
-    struct TestPlannerV1 {
-        isolation: bool,
-    }
-
-    impl ManagedExecutionPlannerV1 for TestPlannerV1 {
-        fn plan_execution(
-            &self,
-            request: ManagedExecutionPlanRequestV1,
-        ) -> Result<ManagedExecutionPlanDraftV1, ManagedExecutionPlanErrorV1> {
-            let argv: Vec<String> = request
-                .argv
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect();
-            let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-            let draft_hash = draft_hash_for(&argv_refs, self.isolation);
-            let profile_class = if self.isolation {
-                EnvironmentProfileClassV1::FreshIsolatedHome
-            } else {
-                EnvironmentProfileClassV1::ExplicitUnconfined
-            };
-            let access =
-                std::collections::BTreeSet::from([ResourceAccessV1::Read, ResourceAccessV1::Write]);
-            let requirement = ResourceRequirementV1 {
-                requirement_id: OpaqueRequirementId::new("req-1".to_owned()),
-                physical_owner_scope: ResourceOwnerScopeV1::Application,
-                stable_key: ResourceRequirementKeyV1 {
-                    blocker_scope: ResourceBlockerScopeV1::Session(OpaqueSessionId::new(
-                        "s-1".to_owned(),
-                    )),
-                    kind: ResourceKindV1::ExecutionTemp,
-                    purpose: ResourcePurposeV1::ExecutionPrerequisite,
-                    access: access.clone(),
-                    lease_lifetime: ResourceLeaseLifetimeV1::ToolCall,
-                    quota_profile: quota(),
-                    retention_policy: ResourceRetentionPolicyV1::ReleaseOnSettlement,
-                    cleanup_policy: ResourceCleanupPolicyV1::ReleaseExactGenerationOnSettlement,
-                    environment_class: profile_class,
-                    toolchain_class: None,
-                    subject_binding_hash: None,
-                    canonical_hash: zero_hash(),
-                },
-                kind: ResourceKindV1::ExecutionTemp,
-                lease_lifetime: ResourceLeaseLifetimeV1::ToolCall,
-                access,
-                purpose: ResourcePurposeV1::ExecutionPrerequisite,
-                visibility: ResourceVisibilityV1::HostOnly,
-                quota_profile: quota(),
-                retention_policy: ResourceRetentionPolicyV1::ReleaseOnSettlement,
-                cleanup_policy: ResourceCleanupPolicyV1::ReleaseExactGenerationOnSettlement,
-                implicit: false,
-            };
-            Ok(ManagedExecutionPlanDraftV1 {
-                draft_id: OpaqueExecutionPlanDraftId::new("d-1".to_owned()),
-                argv_digest: draft_hash,
-                structured_command_digest: request.structured_command_digest,
-                cwd_subject_binding_hash: zero_hash(),
-                attempt_journal_scope: ResourceJournalScopeV1::Application,
-                attempt_journal_scope_hash: zero_hash(),
-                resource_plan_hash: zero_hash(),
-                resource_requirements: ResourceRequirementSetV1 {
-                    schema_version: 1,
-                    requirements: BoundedVec::try_from_vec(vec![requirement]).expect("bounded"),
-                    canonical_hash: zero_hash(),
-                },
-                environment_profile: EnvironmentProfileRefV1 {
-                    profile_class,
-                    profile_hash: zero_hash(),
-                },
-                toolchain_plan_hash: zero_hash(),
-                resolver_proof_digest: zero_hash(),
-                sandbox_preview_hash: zero_hash(),
-                sandbox_binder_registration_hash: zero_hash(),
-                sandbox_provider_generation: 1,
-                capture_policy_hash: zero_hash(),
-                resource_limits_hash: zero_hash(),
-                environment_digest: sigil_kernel::managed_execution::canonical_environment_digest(
-                    &request.environment,
-                ),
-                draft_hash,
-            })
-        }
-    }
-
-    fn exec_request(argv: &[&str], isolation: bool) -> ManagedExecutionRequestV1 {
-        let argv_owned: Vec<OsString> = argv.iter().map(OsString::from).collect();
-        let draft_hash = draft_hash_for(argv, isolation);
-        ManagedExecutionRequestV1 {
-            argv: argv_owned,
-            cwd_subject_ref: OpaquePermissionSubjectRef::new("subj-1".to_owned()),
-            structured_command_digest: zero_hash(),
-            admission_ref: OpaqueAdmissionId::new("adm-1".to_owned()),
-            execution_plan_draft_hash: draft_hash,
-            environment_profile: EnvironmentProfileRefV1 {
-                profile_class: if isolation {
-                    EnvironmentProfileClassV1::FreshIsolatedHome
-                } else {
-                    EnvironmentProfileClassV1::ExplicitUnconfined
-                },
-                profile_hash: zero_hash(),
-            },
-            capture: cap(),
-            limits: limits(),
-            environment: Vec::new(),
-        }
-    }
-
-    fn bundle(kind: &str) -> IssuedExecutionAdmissionBundleV1 {
-        match kind {
-            "one-shot" => IssuedExecutionAdmissionBundleV1::OneShot {
-                consumer_token: sigil_kernel::resource::OpaqueResourceId::new("tok".to_owned()),
-                resource_capability: sigil_kernel::resource::OpaqueResourceId::new(
-                    "cap".to_owned(),
-                ),
-            },
-            "terminal" => IssuedExecutionAdmissionBundleV1::Terminal {
-                consumer_token: sigil_kernel::resource::OpaqueResourceId::new("tok".to_owned()),
-                resource_capability: sigil_kernel::resource::OpaqueResourceId::new(
-                    "cap".to_owned(),
-                ),
-            },
-            _ => IssuedExecutionAdmissionBundleV1::Extension {
-                consumer_token: sigil_kernel::resource::OpaqueResourceId::new("tok".to_owned()),
-                resource_capability: sigil_kernel::resource::OpaqueResourceId::new(
-                    "cap".to_owned(),
-                ),
-            },
-        }
-    }
-
-    fn service(isolation: bool, root: &std::path::Path) -> SandboxManagedExecutionServiceV1 {
-        SandboxManagedExecutionServiceV1::new(
-            Arc::new(TestPlannerV1 { isolation }),
-            root.to_path_buf(),
-        )
-    }
-
-    #[test]
-    fn r71_managed_execute_once_yields_truthful_receipt() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let receipt = futures::executor::block_on(svc.execute_once(
-            bundle("one-shot"),
-            exec_request(&["/bin/sh", "-c", "printf hello-world"], false),
-        ))
-        .expect("execute");
-        assert!(matches!(
-            receipt.process.termination,
-            ProcessTerminationV1::Exited { code: 0 }
-        ));
-        assert_eq!(receipt.process.stdout_summary.retained_bytes, 11);
-        assert!(!receipt.process.stdout_summary.truncated);
-        assert_eq!(receipt.process.stdout_summary.observed_bytes, 11);
-        // Local is truthful none, never a fabricated subset.
-        assert_eq!(
-            receipt.resources.effective_enforcement.completeness,
-            EnforcementCompletenessV1::None
-        );
-        assert_eq!(
-            receipt.resources.cleanup_status,
-            ResourceCleanupStatusV1::Released
-        );
-        assert_eq!(
-            receipt.resources.resources[0].enforcement,
-            EnforcementCompletenessV1::None
-        );
-    }
-
-    #[test]
-    fn r71_managed_required_isolation_fails_closed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(true, dir.path());
-        let error = futures::executor::block_on(svc.execute_once(
-            bundle("one-shot"),
-            exec_request(&["/bin/sh", "-c", "exit 0"], true),
-        ))
-        .expect_err("isolation required");
-        assert!(matches!(
-            error,
-            ManagedExecutionErrorV1::ConfinementUnproven
-        ));
-    }
-
-    #[test]
-    fn r71_managed_wrong_bundle_purpose_fails_closed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let error = futures::executor::block_on(svc.execute_once(
-            bundle("terminal"),
-            exec_request(&["/bin/sh", "-c", "exit 0"], false),
-        ))
-        .expect_err("purpose mismatch");
-        assert!(matches!(error, ManagedExecutionErrorV1::AdmissionMismatch));
-    }
-
-    #[test]
-    fn r71_managed_draft_drift_rejected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
-        request.execution_plan_draft_hash = zero_hash();
-        let error = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
-            .expect_err("drift");
-        assert!(matches!(error, ManagedExecutionErrorV1::ExecutionPlanDrift));
-    }
-
-    #[test]
-    fn r71_managed_output_cap_truncates_truthfully() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let mut request = exec_request(&["/bin/sh", "-c", "printf '%0100d' 7"], false);
-        request.limits.max_output_bytes = 10;
-        request.capture.stdout_capture = CaptureModeV1::BoundedRing { max_bytes: 10 };
-        let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
-            .expect("execute");
-        assert!(receipt.process.stdout_summary.truncated);
-        assert_eq!(receipt.process.stdout_summary.observed_bytes, 100);
-        assert_eq!(receipt.process.stdout_summary.retained_bytes, 10);
-    }
-
-    #[test]
-    fn r71_managed_pty_required_fails_closed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
-        request.limits.pty_required = true;
-        let error = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
-            .expect_err("pty");
-        assert!(matches!(
-            error,
-            ManagedExecutionErrorV1::ProviderUnavailable
-        ));
-    }
-
-    #[test]
-    fn r71_managed_persistent_stdin_echo_finalizes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let mut handle = futures::executor::block_on(svc.start_persistent(
-            bundle("terminal"),
-            exec_request(&["/bin/sh", "-c", "cat"], false),
-        ))
-        .expect("spawn");
-        futures::executor::block_on(handle.write_stdin(BoundedProcessInputV1 {
-            payload: b"ping\n".to_vec(),
-        }))
-        .expect("write");
-        futures::executor::block_on(handle.close_stdin()).expect("close");
-        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("finalize");
-        assert!(matches!(
-            receipt.process.termination,
-            ProcessTerminationV1::Exited { code: 0 }
-        ));
-        // The drain thread retained the echoed bytes under the cap.
-        assert_eq!(receipt.process.stdout_summary.retained_bytes, 5);
-        assert!(!receipt.process.stdout_summary.truncated);
-    }
-
-    #[test]
-    fn r71_managed_extension_uses_injected_real_command_launcher() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let enforcement = ManagedExtensionLaunchEnforcementV1 {
-            requested: RequestedEnforcementV1 {
-                requirement: EnforcementRequirementClassV1::ExplicitUnconfined,
-                deny_ambient_system_temp_write: false,
-                deny_ambient_home_write: false,
-                deny_ungranted_workspace_write: false,
-                require_process_tree_ownership: false,
-                require_network_policy: false,
-                requested_capability_set_hash: zero_hash(),
-                profile_hash: zero_hash(),
-            },
-            backend: SandboxBackendClassV1::LocalUnconfined,
-            completeness: EnforcementCompletenessV1::None,
-            effective_access: std::collections::BTreeSet::new(),
-            effective_capability_set_hash: zero_hash(),
-            proof_set_hash: zero_hash(),
-        };
-        let launcher = Arc::new(CommandManagedExtensionLaunchServiceV1::new(
-            PathBuf::from("/bin/sh"),
-            vec![OsString::from("-c"), OsString::from("printf extension")],
-            std::env::current_dir().expect("cwd"),
-            Vec::new(),
-            enforcement,
-        ));
-        let svc = service(false, dir.path()).with_extension_launcher(launcher);
-        let mut handle = futures::executor::block_on(svc.start_persistent(
-            bundle("extension"),
-            exec_request(&["/bin/sh", "-c", "printf extension"], false),
-        ))
-        .expect("extension spawn");
-        let mut stream = handle.take_output_stream().expect("stream");
-        let mut output = Vec::new();
-        while let Some(frame) = futures::executor::block_on(stream.next_frame()).expect("frame") {
-            if !frame.end_of_stream {
-                output.extend(frame.payload);
-            }
-        }
-        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("finalize");
-        assert_eq!(output, b"extension");
-        assert!(matches!(
-            receipt.process.termination,
-            ProcessTerminationV1::Exited { code: 0 }
-        ));
-    }
-
-    #[test]
-    fn r71_managed_stream_is_single_flight_with_exact_one_eof() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let mut handle = futures::executor::block_on(svc.start_persistent(
-            bundle("terminal"),
-            exec_request(&["/bin/sh", "-c", "printf stream-out"], false),
-        ))
-        .expect("spawn");
-        let mut stream = handle.take_output_stream().expect("stream");
-        // Second take is refused (single-flight).
-        let second_take = handle.take_output_stream();
-        assert!(matches!(
-            second_take,
-            Err(ManagedProcessControlErrorV1::StreamAlreadyTaken)
-        ));
-        let mut eof_count: i32 = 0;
-        let mut payload_seen = 0usize;
-        while let Some(frame) = futures::executor::block_on(stream.next_frame()).expect("frame") {
-            if frame.end_of_stream {
-                eof_count += 1;
-            } else {
-                payload_seen += frame.payload.len();
-            }
-        }
-        // Stash the stream back so finalize drains coherently.
-        drop(stream);
-        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("finalize");
-        assert_eq!(payload_seen, 10);
-        assert!(eof_count >= 2, "mock: stdout+stderr EOF frames");
-        assert!(matches!(
-            receipt.process.termination,
-            ProcessTerminationV1::Exited { code: 0 }
-        ));
-    }
-
-    #[test]
-    fn r71_managed_environment_planner_sealed_and_reaches_child() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let mut request = exec_request(
-            &["/bin/sh", "-c", "test \"$R71_ENV_SEAL\" = \"yes\""],
-            false,
-        );
-        request.environment = vec![(OsString::from("R71_ENV_SEAL"), OsString::from("yes"))];
-        let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
-            .expect("agreed environment must execute");
-        assert!(matches!(
-            receipt.process.termination,
-            ProcessTerminationV1::Exited { code: 0 }
-        ));
-    }
-
-    #[test]
-    fn r71_environment_digest_is_order_independent_and_exact() {
-        use sigil_kernel::managed_execution::canonical_environment_digest;
-        let a = vec![
-            (OsString::from("A"), OsString::from("1")),
-            (OsString::from("B"), OsString::from("2")),
-        ];
-        let b = vec![
-            (OsString::from("B"), OsString::from("2")),
-            (OsString::from("A"), OsString::from("1")),
-        ];
-        let c = vec![
-            (OsString::from("A"), OsString::from("2")),
-            (OsString::from("B"), OsString::from("1")),
-        ];
-        assert_eq!(
-            canonical_environment_digest(&a),
-            canonical_environment_digest(&b)
-        );
-        assert_ne!(
-            canonical_environment_digest(&a),
-            canonical_environment_digest(&c)
-        );
-    }
-
-    #[test]
-    fn r71_managed_over_bound_agreement_fails_closed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let svc = service(false, dir.path());
-        let too_few_envs = {
-            let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
-            request.environment = Vec::new();
-            request
-        };
-        // argv over the closed entry bound: fail closed, never partial execution.
-        let mut argv = Vec::new();
-        for index in 0..=sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ARGV_ENTRIES {
-            argv.push(OsString::from(format!("arg-{index}")));
-        }
-        let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
-        request.argv = argv;
-        let error = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
-            .expect_err("over-bound argv must refuse");
-        assert!(matches!(error, ManagedExecutionErrorV1::AdmissionMismatch));
-        // env over the closed entry bound: fail closed.
-        let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
-        request.environment = (0
-            ..=sigil_kernel::managed_execution::MAX_MANAGED_EXECUTION_ENV_ENTRIES)
-            .map(|index| {
-                (
-                    OsString::from(format!("K{index}")),
-                    OsString::from(index.to_string()),
-                )
-            })
-            .collect();
-        let error = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
-            .expect_err("over-bound env must refuse");
-        assert!(matches!(error, ManagedExecutionErrorV1::AdmissionMismatch));
-        let _ = too_few_envs;
-    }
-}
+#[path = "tests/managed_tests.rs"]
+mod tests;

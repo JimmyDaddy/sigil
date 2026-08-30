@@ -360,6 +360,8 @@ fn verification_policy_scope_trust_and_effect_helpers_cover_edges() -> Result<()
     assert!(super::default_scope_excludes().contains(&"target/**".to_owned()));
     assert!(!super::default_scope_excludes().contains(&".sigil/**".to_owned()));
     assert!(super::default_scope_excludes().contains(&".sigil/sessions/**".to_owned()));
+    assert!(super::default_scope_excludes().contains(&"**/*.jsonl.writer-lock".to_owned()));
+    assert!(super::default_scope_excludes().contains(&"**/*.jsonl.attachment-lock".to_owned()));
     assert!(super::default_scope_excludes().contains(&".next/**".to_owned()));
     assert!(super::default_scope_excludes().contains(&"__pycache__/**".to_owned()));
     let repo_scope = VerificationScope::all_tracked("scope-main");

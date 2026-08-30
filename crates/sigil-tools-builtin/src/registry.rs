@@ -3,28 +3,31 @@ use std::{
     sync::Arc,
 };
 
-use sigil_kernel::{ExecutionBackend, ExecutionConfig, ToolRegistry};
+#[cfg(any(test, feature = "test-support"))]
+use crate::execution_backends::LocalExecutionBackend;
 
 use crate::{
     changeset_tool::ApplyChangeSetTool,
     constants::{CHANGESET_ARTIFACT_ROOT, WORKSPACE_TEMP_ROOT},
-    execution_backends::LocalExecutionBackend,
     file_tools::{
         DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, WriteFileTool,
     },
+    managed_execution::ManagedCommandExecutionPortV1,
     scratch_namespace::ScratchNamespaceControl,
     shell::BashTool,
     shell_runtime::ResolvedShell,
     terminal_process::{self, TerminalExecutionConfig},
     terminal_tools::{
-        TerminalCancelTool, TerminalInputTool, TerminalLifecycleRoute, TerminalProcessManagers,
-        TerminalReadTool, TerminalResizeTool, TerminalStartTool, TerminalTaskControlHandle,
-        TerminalWaitTool,
+        TerminalCancelTool, TerminalInputTool, TerminalLifecycleRoute,
+        TerminalManagerExecutionOwnerV1, TerminalProcessManagers, TerminalReadTool,
+        TerminalResizeTool, TerminalStartTool, TerminalTaskControlHandle, TerminalWaitTool,
     },
     tool_artifact_tool::ReadToolArtifactTool,
     vcs_inspect::VcsInspectTool,
 };
-
+use sigil_kernel::ToolRegistry;
+#[cfg(any(test, feature = "test-support"))]
+use sigil_kernel::{ExecutionBackend, ExecutionConfig};
 /// Handles returned by built-in tool registration: terminal task control and the shared
 /// session-scoped scratch lease registry used by maintenance GC.
 #[derive(Debug, Clone)]
@@ -61,6 +64,7 @@ impl BuiltinToolPaths {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     register_builtin_tools_with_paths(
         registry,
@@ -76,6 +80,41 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     );
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub fn register_builtin_tools(registry: &mut ToolRegistry) {
+    register_builtin_tools_with_unavailable_managed_execution(
+        registry,
+        BuiltinToolPaths {
+            changesets_root: PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+            changesets_label_root: PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+            terminal_tasks_root: PathBuf::from(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            terminal_tasks_label_root: PathBuf::from(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            scratch_root: PathBuf::from(WORKSPACE_TEMP_ROOT),
+            scratch_label: WORKSPACE_TEMP_ROOT.to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        },
+    );
+}
+
+/// Registers built-ins without selecting a process backend. This is the safe default for
+/// callers that only need tool contracts or diagnostics; command and terminal execution fail
+/// closed until the runtime supplies an authority-owned managed execution route.
+pub fn register_builtin_tools_with_unavailable_managed_execution(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+        registry,
+        paths,
+        Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1),
+        TerminalExecutionConfig::default(),
+        None,
+        None,
+        Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -87,6 +126,15 @@ pub fn register_builtin_tools_with_paths(
     )
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub fn register_builtin_tools_with_paths(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_unavailable_managed_execution(registry, paths)
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_and_execution_backend(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -102,6 +150,7 @@ pub fn register_builtin_tools_with_paths_and_execution_backend(
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_execution_backend_and_execution_config(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -122,6 +171,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_and_execution_config(
 ///
 /// `external_scratch_control` shares the process-scoped scratch lease registry across repeated
 /// surface assemblies (Desktop serve); `None` creates a fresh registry (TUI worker).
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -141,6 +191,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_
 }
 
 /// Registers built-ins with a factory that freezes a lifecycle sink from each exact tool context.
+#[cfg(any(test, feature = "test-support"))]
 pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -159,6 +210,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
@@ -166,6 +218,95 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     terminal_execution_config: TerminalExecutionConfig,
     terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
     external_scratch_control: Option<ScratchNamespaceControl>,
+) -> BuiltinToolHandles {
+    let managed_executor: Arc<dyn ManagedCommandExecutionPortV1> = Arc::new(
+        crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
+            backend: Arc::clone(&execution_backend),
+        },
+    );
+    register_builtin_tools_with_legacy_terminal(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+    )
+}
+
+/// Registers built-ins with an authority-owned managed command port and a fail-closed terminal
+/// port. Callers that have not composed the authority owner must use the unavailable helper.
+pub fn register_builtin_tools_with_managed_execution_and_terminal_config(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+        Arc::new(crate::managed_execution::UnavailableManagedCommandExecutionPortV1),
+    )
+}
+
+/// Registers built-ins with managed one-shot and persistent terminal execution ports.
+///
+/// The terminal port is mandatory in normal builds, so terminal startup cannot fall back to a
+/// direct `Command` or PTY spawn when authority composition is missing.
+pub fn register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+    managed_terminal: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+        TerminalManagerExecutionOwnerV1::Managed(managed_terminal),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn register_builtin_tools_with_legacy_terminal(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+        registry,
+        paths,
+        managed_executor,
+        terminal_execution_config,
+        terminal_lifecycle_route,
+        external_scratch_control,
+        TerminalManagerExecutionOwnerV1::LegacyDirect,
+    )
+}
+
+fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    terminal_execution_config: TerminalExecutionConfig,
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+    terminal_owner: TerminalManagerExecutionOwnerV1,
 ) -> BuiltinToolHandles {
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
@@ -180,8 +321,17 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
             ScratchNamespaceControl::unavailable()
         }
     });
+    let terminal_managers = match terminal_owner {
+        TerminalManagerExecutionOwnerV1::Managed(managed_terminal) => {
+            TerminalProcessManagers::new_managed(terminal_execution_config, managed_terminal)
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        TerminalManagerExecutionOwnerV1::LegacyDirect => {
+            TerminalProcessManagers::new_legacy(terminal_execution_config)
+        }
+    };
     let terminal_managers = Arc::new(
-        TerminalProcessManagers::new(terminal_execution_config)
+        terminal_managers
             .with_lifecycle_route(terminal_lifecycle_route)
             .with_scratch_task_leases(Some(Arc::clone(&scratch_control.tasks))),
     );
@@ -210,7 +360,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         scratch_quota: paths.scratch_quota,
         scratch_control: scratch_control.clone(),
         scratch_namespaces: Arc::clone(&scratch_control.namespaces),
-        backend: Arc::clone(&execution_backend),
+        executor: managed_executor,
         shell: default_shell,
     }));
     registry.register(Arc::new(TerminalStartTool {

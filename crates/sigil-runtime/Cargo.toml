@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -22,8 +25,10 @@ reqwest.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-application = { path = "../sigil-application" }
 sigil-code-intel = { path = "../sigil-code-intel" }
 sigil-mcp = { path = "../sigil-mcp" }
+sigil-process-observer = { path = "../sigil-process-observer" }
 sigil-resource-authority = { path = "../sigil-resource-authority" }
 sigil-sandbox = { path = "../sigil-sandbox" }
 sigil-updater = { path = "../sigil-updater" }
@@ -42,9 +47,13 @@ uuid.workspace = true
 url.workspace = true
 unicode-normalization.workspace = true
 unicode-segmentation.workspace = true
+windows-sys.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
+sigil-resource-authority = { path = "../sigil-resource-authority", features = ["test-support"] }
+sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 tokio.workspace = true
 
 [lints]

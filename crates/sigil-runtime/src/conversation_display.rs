@@ -828,15 +828,31 @@ pub fn conversation_display_page(
     limit: usize,
     current_workspace_snapshot_id: Option<&str>,
 ) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
-    let store = ToolArtifactStore::for_session_path(session_path);
-    conversation_display_page_with_artifact_store(
-        session_path,
-        expected_scope,
-        cursor,
-        limit,
-        current_workspace_snapshot_id,
-        &store,
-    )
+    #[cfg(not(test))]
+    {
+        let _ = (
+            session_path,
+            expected_scope,
+            cursor,
+            limit,
+            current_workspace_snapshot_id,
+        );
+        Err(ConversationDisplayProjectionError::from(anyhow!(
+            "conversation display requires an authority-managed artifact route"
+        )))
+    }
+    #[cfg(test)]
+    {
+        let store = ToolArtifactStore::for_session_path(session_path);
+        conversation_display_page_with_artifact_store(
+            session_path,
+            expected_scope,
+            cursor,
+            limit,
+            current_workspace_snapshot_id,
+            &store,
+        )
+    }
 }
 
 /// Projects one canonical display page using an already authority-routed artifact store.
