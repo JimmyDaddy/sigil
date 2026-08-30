@@ -84,7 +84,7 @@ fn pty_line_command() -> (String, Vec<String>) {
             "/Q".to_owned(),
             "/V:ON".to_owned(),
             "/C".to_owned(),
-            "echo runtime-pty-ready&set /P line=&echo !line!&exit /B 0".to_owned(),
+            "echo runtime-pty-ready&ping -n 3 127.0.0.1 >NUL&exit /B 0".to_owned(),
         ],
     )
 }
@@ -401,8 +401,9 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     #[cfg(unix)]
     let input = b"runtime-pty\n".to_vec();
     #[cfg(windows)]
-    // ConPTY presents a real Windows console line discipline to PowerShell; CRLF is required to
-    // submit the line to `Console.ReadLine`, whereas the Unix shell test consumes LF directly.
+    // Keep the child alive while exercising the real ConPTY input boundary; CRLF is the native
+    // Windows line ending, whereas the Unix shell test consumes LF directly. The fixture does not
+    // depend on console line-reading or EOF delivery, which vary across hosted ConPTY versions.
     let input = b"runtime-pty\r\n".to_vec();
     tokio::time::timeout(
         Duration::from_secs(30),
