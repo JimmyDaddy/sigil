@@ -38,28 +38,6 @@ fn comspec_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"))
 }
 
-#[cfg(windows)]
-fn powershell_path() -> PathBuf {
-    let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&path) {
-            candidates.push(directory.join("pwsh.exe"));
-            candidates.push(directory.join("powershell.exe"));
-        }
-    }
-    for variable in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(directory) = std::env::var_os(variable) {
-            let directory = PathBuf::from(directory);
-            candidates.push(directory.join(r"PowerShell\7\pwsh.exe"));
-            candidates.push(directory.join(r"WindowsPowerShell\v1.0\powershell.exe"));
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"))
-}
-
 #[cfg(unix)]
 fn pty_environment() -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::new()
@@ -100,13 +78,13 @@ fn pty_line_command() -> (String, Vec<String>) {
 #[cfg(windows)]
 fn pty_line_command() -> (String, Vec<String>) {
     (
-        powershell_path().to_string_lossy().into_owned(),
+        comspec_path().to_string_lossy().into_owned(),
         vec![
-            "-NoLogo".to_owned(),
-            "-NoProfile".to_owned(),
-            "-NonInteractive".to_owned(),
-            "-Command".to_owned(),
-            "[Console]::WriteLine('runtime-pty-ready'); [Console]::Out.Flush(); $line = [Console]::ReadLine(); [Console]::WriteLine($line); exit 0".to_owned(),
+            "/D".to_owned(),
+            "/Q".to_owned(),
+            "/V:ON".to_owned(),
+            "/C".to_owned(),
+            "echo runtime-pty-ready&set /P line=&echo !line!&exit /B 0".to_owned(),
         ],
     )
 }

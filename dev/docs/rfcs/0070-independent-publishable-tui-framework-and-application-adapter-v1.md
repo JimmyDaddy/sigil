@@ -3591,3 +3591,15 @@ terminated. Persistent process and PTY finalization now perform the blocking chi
 Windows exit watcher only releases the master after a positive `try_wait` result. This preserves fail-closed
 uncertain-status handling and process-inventory settlement while making a still-running child observable as a bounded
 test failure. Local managed-resource adapter tests remain `7/7`, and a new exact-SHA hosted run is required.
+
+### R70.8 Windows hosted PTY fixture shell correction（2026-08-30）
+
+The exact-SHA run `33284933116` confirmed that the non-blocking finalization path and EOF synchronization no longer
+hang, but the Windows PTY control test still received a `portable-pty` exit code of `0xffffffff` (`-1`) from the
+PowerShell ConPTY fixture after the readiness/input/close sequence. The managed receipt retained the complete output,
+EOF and released resource state; only the fixture's zero-exit assertion failed. The test fixture now uses the Windows
+built-in `ComSpec`/`cmd.exe`, delayed expansion for input echo, and explicit `exit /B 0`. This removes the
+PowerShell-specific ConPTY exit-status ambiguity while retaining readiness synchronization, CRLF input, PTY resize,
+EOF, zero-exit and managed resource-receipt assertions. Local Unix managed-resource adapter tests remain `7/7`.
+The failed run is not qualification evidence; a new exact-SHA CI and package run is required. crates.io publication and
+release-cycle validation remain intentionally deferred and are not represented as completed evidence.
