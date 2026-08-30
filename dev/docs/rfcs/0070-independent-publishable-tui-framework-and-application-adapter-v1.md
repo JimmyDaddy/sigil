@@ -3537,6 +3537,15 @@ which brings an unfixable `extract-zip 2.0.1` advisory; the dev-only browser set
 `pnpm audit --audit-level high` pass locally. This is a dev-toolchain dependency correction and does not close
 R70.8's exact-SHA hosted qualification, real crates.io preview publication, release cycle, or user validation.
 
+### R70.8 Fuzz workspace lockfile synchronization（2026-08-30）
+
+The final hosted workspace check found that the independently locked `fuzz` workspace had not recorded the target
+resolved `portable-pty 0.8.1` graph introduced for Windows ConPTY compatibility. The generated
+`fuzz/Cargo.lock` is now synchronized and `cargo check --locked --manifest-path fuzz/Cargo.toml
+--bin shell_permission_plan` passes locally. This is a lockfile-only correction; it preserves the fuzz target's
+separate workspace boundary and does not close hosted qualification, crates.io publication, release-cycle, or user
+validation requirements.
+
 ### R70.8 Windows hosted ConPTY dependency correction（2026-08-30）
 
 The exact-SHA run `33280134869` isolated the remaining failure to the dedicated
