@@ -231,9 +231,28 @@ fn session_recovery_quarantines_tampered_external_sidecar_and_url_descriptor() -
             expires_at_ms: u64::MAX,
         }),
     ))?;
+    // Recovery through an already-live Session must quarantine and audit too, without relying
+    // on a later full load to produce the missing durable audit.
+    original.reconcile_plan_review_revision_terminal("not-started")?;
+    assert!(!serde_json::to_string(original.entries())?.contains("recovery-secret"));
+    assert_eq!(
+        crate::JsonlSessionStore::read_entries(store.path())?
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                crate::SessionLogEntry::Control(crate::ControlEntry::ContextAssemblySkipped(_))
+            ))
+            .count(),
+        1
+    );
     drop(original);
 
     let mut recovered = crate::Session::load_from_store("provider", "model", store)?;
+    assert!(
+        recovered
+            .reconcile_plan_review_revision_terminal("not-started")?
+            .is_none()
+    );
     let recovered_json = serde_json::to_string(recovered.entries())?;
     for secret in [
         "recovery-secret",

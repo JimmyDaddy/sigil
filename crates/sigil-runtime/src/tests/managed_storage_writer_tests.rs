@@ -97,6 +97,49 @@ fn adapter(anchor: &Path, table: AuthorityStorageGrantTableV1) -> ManagedStorage
     ManagedStorageWriterAdapterV1::new(service, anchor.to_path_buf(), hash(10))
 }
 
+/// Existing-only continuation is a production journal protocol, never a no-journal adapter
+/// shortcut. All recovery/mutation fixtures below start from this same real authority service.
+fn journal_backed_session_log_service(
+    anchor: &Path,
+) -> std::sync::Arc<AuthorityManagedStorageServiceV1> {
+    let mut table = AuthorityStorageGrantTableV1::new();
+    table.register(session_log_grant()).expect("register");
+    std::sync::Arc::new(
+        AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            AuthorityGeneration {
+                epoch: 1,
+                instance_hash: hash(8),
+            },
+            anchor.join("authority-resources.journal.json"),
+            hash(0x91),
+            hash(0x92),
+        )
+        .expect("journal-backed authority service"),
+    )
+}
+
+fn journal_backed_session_log_writer_with_service(
+    anchor: &Path,
+    service: std::sync::Arc<AuthorityManagedStorageServiceV1>,
+) -> ManagedStorageWriterAdapterV1 {
+    use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+
+    ManagedStorageWriterAdapterV1::with_storage_issuer(
+        service,
+        anchor.to_path_buf(),
+        hash(10),
+        std::sync::Arc::new(KernelCapabilityBrokerV1::new()),
+    )
+}
+
+fn journal_backed_session_log_writer(anchor: &Path) -> ManagedStorageWriterAdapterV1 {
+    journal_backed_session_log_writer_with_service(
+        anchor,
+        journal_backed_session_log_service(anchor),
+    )
+}
+
 #[test]
 fn r71_sw_session_log_batch_round_trip() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -410,6 +453,284 @@ fn r71_sw_named_acquire_per_session_and_unsafe_key_rejected() {
         error,
         ManagedStorageWriterErrorV1::LeafEscapesAnchor
     ));
+}
+
+fn finalized_kernel_session_log_namespace(
+    writer: &ManagedStorageWriterAdapterV1,
+    key: &str,
+) -> std::path::PathBuf {
+    let lease = writer
+        .acquire_named(StorageWriterChannelV1::SessionLog, key)
+        .expect("initial named admission");
+    let path = lease.path().to_path_buf();
+    {
+        let store = sigil_kernel::JsonlSessionStore::new(path.join("records.jsonl"))
+            .expect("initial kernel session store");
+        store
+            .append_event(
+                sigil_kernel::DurableEventType::RunStatusChanged,
+                sigil_kernel::EventClass::Critical,
+                serde_json::json!({"status": "waiting"}),
+            )
+            .expect("initial durable event");
+    }
+    writer.finalize(lease).expect("initial finalize");
+    path
+}
+
+#[test]
+fn r71_sw_existing_session_log_recovery_reopens_bytes_without_initializing_artifacts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let writer = journal_backed_session_log_writer(dir.path());
+    let key = "plan-review-research";
+    let path = finalized_kernel_session_log_namespace(&writer, key);
+    let record_path = path.join("records.jsonl");
+    let marker_path = path.join("authority-admission.json");
+    let original_record = std::fs::read(&record_path).expect("original record");
+    let original_marker = std::fs::read(&marker_path).expect("original marker");
+
+    let recovery = writer
+        .acquire_existing_session_log_for_recovery(key)
+        .expect("existing-only admission");
+    assert_eq!(
+        writer
+            .read_existing_session_log_bytes(&recovery, 1024)
+            .expect("recovery bytes"),
+        original_record
+    );
+    writer
+        .finalize_existing_session_log_recovery(recovery)
+        .expect("recovery finalize");
+
+    assert_eq!(
+        std::fs::read(&record_path).expect("record remains"),
+        original_record
+    );
+    assert_eq!(
+        std::fs::read(&marker_path).expect("marker remains"),
+        original_marker
+    );
+    assert!(
+        !dir.path()
+            .join("managed/artifact-staging")
+            .join(key)
+            .exists()
+    );
+    assert!(!dir.path().join("managed/artifact-store").join(key).exists());
+}
+
+#[test]
+fn r71_sw_existing_session_log_mutation_reopens_only_a_prior_kernel_stream() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let writer = journal_backed_session_log_writer(dir.path());
+    let key = "plan-review-research-mutation";
+    let path = finalized_kernel_session_log_namespace(&writer, key);
+    let record_path = path.join("records.jsonl");
+    let marker_path = path.join("authority-admission.json");
+    let original = std::fs::read(&record_path).expect("original record");
+    let marker = std::fs::read(&marker_path).expect("original marker");
+
+    let lease = writer
+        .acquire_existing_session_log_for_mutation(key)
+        .expect("existing mutation admission");
+    writer
+        .with_existing_session_log_mutation(&lease, |store| {
+            assert_eq!(
+                store
+                    .read_event_records_writer()
+                    .expect("original records")
+                    .len(),
+                1
+            );
+            store
+                .append_event(
+                    sigil_kernel::DurableEventType::RunFinalized,
+                    sigil_kernel::EventClass::Critical,
+                    serde_json::json!({"status": "completed"}),
+                )
+                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+            Ok::<_, ManagedStorageWriterErrorV1>(())
+        })
+        .expect("existing kernel session store");
+    writer
+        .finalize_existing_session_log_mutation(lease)
+        .expect("existing mutation finalize");
+
+    let after = std::fs::read(&record_path).expect("updated record");
+    assert!(after.starts_with(&original));
+    assert_eq!(
+        sigil_kernel::JsonlSessionStore::read_event_records(&record_path)
+            .expect("updated records")
+            .len(),
+        2
+    );
+    assert_eq!(std::fs::read(&marker_path).expect("marker remains"), marker);
+    assert!(
+        !dir.path()
+            .join("managed/artifact-staging")
+            .join(key)
+            .exists()
+    );
+    assert!(!dir.path().join("managed/artifact-store").join(key).exists());
+}
+
+#[test]
+fn r71_sw_existing_session_log_mutation_rejects_a_stale_continuation_after_foreign_settlement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first_service = journal_backed_session_log_service(dir.path());
+    let writer = journal_backed_session_log_writer_with_service(
+        dir.path(),
+        std::sync::Arc::clone(&first_service),
+    );
+    let key = "plan-review-research-stale-continuation";
+    let path = finalized_kernel_session_log_namespace(&writer, key);
+    let record_path = path.join("records.jsonl");
+    let original = std::fs::read(&record_path).expect("original child stream");
+
+    let lease = writer
+        .acquire_existing_session_log_for_mutation(key)
+        .expect("continuation admission");
+
+    // A second real authority is opened after the continuation admission. Its bridge settlement
+    // advances durable state while the first service retains a stale in-memory journal snapshot.
+    let foreign = journal_backed_session_log_service(dir.path());
+    foreign
+        .reconcile_unsettled_storage_grants_with_physical_bridge()
+        .expect("foreign continuation settlement");
+
+    let error = writer
+        .with_existing_session_log_mutation(&lease, |store| {
+            store
+                .append_event(
+                    sigil_kernel::DurableEventType::RunFinalized,
+                    sigil_kernel::EventClass::Critical,
+                    serde_json::json!({"status": "must-not-append"}),
+                )
+                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+            Ok::<_, ManagedStorageWriterErrorV1>(())
+        })
+        .expect_err("stale continuation must fail before the child write callback");
+    assert!(matches!(
+        error,
+        ManagedStorageWriterErrorV1::LeaseRejected(_)
+    ));
+    assert_eq!(
+        std::fs::read(&record_path).expect("child stream remains unchanged"),
+        original
+    );
+}
+
+#[test]
+fn r71_sw_existing_session_log_mutation_refuses_missing_kernel_writer_lock_before_admission() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let writer = journal_backed_session_log_writer(dir.path());
+    let key = "plan-review-research-mutation-missing-writer-lock";
+    let path = finalized_kernel_session_log_namespace(&writer, key);
+    let writer_lock = path.join("records.jsonl.writer-lock");
+    std::fs::remove_file(&writer_lock).expect("remove kernel writer lock");
+
+    let error = writer
+        .acquire_existing_session_log_for_mutation(key)
+        .expect_err("missing existing kernel writer lock must fail before admission");
+    assert!(error.to_string().contains("session writer lock is missing"));
+    assert!(!writer_lock.exists());
+}
+
+#[test]
+fn r71_sw_existing_session_log_recovery_refuses_missing_namespace_before_admission() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let writer = journal_backed_session_log_writer(dir.path());
+    let key = "missing-plan-review-research";
+    let path = writer
+        .managed_named_leaf_path(StorageWriterChannelV1::SessionLog, key)
+        .expect("managed path");
+
+    let error = writer
+        .acquire_existing_session_log_for_recovery(key)
+        .expect_err("missing namespace must not be initialized");
+    assert!(error.to_string().contains("namespace is missing"));
+    assert!(!path.exists());
+
+    // A normal subsequent admission proves the rejected recovery never consumed a holder.
+    let lease = writer
+        .acquire_named(StorageWriterChannelV1::SessionLog, key)
+        .expect("normal admission remains available");
+    writer.finalize(lease).expect("normal finalize");
+}
+
+#[test]
+fn r71_sw_existing_session_log_recovery_refuses_missing_record_without_reseeding() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let writer = journal_backed_session_log_writer(dir.path());
+    let key = "missing-plan-review-record";
+    let path = finalized_kernel_session_log_namespace(&writer, key);
+    let record_path = path.join("records.jsonl");
+    std::fs::remove_file(&record_path).expect("remove fixture record");
+
+    let error = writer
+        .acquire_existing_session_log_for_recovery(key)
+        .expect_err("missing record must not be initialized");
+    assert!(error.to_string().contains("record is missing"));
+    assert!(!record_path.exists());
+
+    // As above, no recovery admission is left live when validation fails before admission.
+    let lease = writer
+        .acquire_named(StorageWriterChannelV1::SessionLog, key)
+        .expect("normal admission remains available");
+    writer.finalize(lease).expect("normal finalize");
+}
+
+#[test]
+fn r71_sw_existing_session_log_recovery_refuses_missing_lock_without_creating_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let writer = journal_backed_session_log_writer(dir.path());
+    let key = "missing-plan-review-lock";
+    let path = finalized_kernel_session_log_namespace(&writer, key);
+    let lock_path = path.join(".authority-storage.lock");
+    std::fs::remove_file(&lock_path).expect("remove fixture lock");
+
+    let error = writer
+        .acquire_existing_session_log_for_recovery(key)
+        .expect_err("missing recovery lock must not be created");
+    assert!(error.to_string().contains("lock is missing"));
+    assert!(!lock_path.exists());
+
+    let lease = writer
+        .acquire_named(StorageWriterChannelV1::SessionLog, key)
+        .expect("normal admission remains available");
+    writer.finalize(lease).expect("normal finalize");
+}
+
+#[cfg(unix)]
+#[test]
+fn r71_sw_existing_session_log_recovery_refuses_symlinked_record_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let writer = journal_backed_session_log_writer(dir.path());
+    let key = "symlinked-plan-review-record";
+    let path = finalized_kernel_session_log_namespace(&writer, key);
+    let record_path = path.join("records.jsonl");
+    let external = dir.path().join("external-record.jsonl");
+    std::fs::write(&external, b"outside").expect("external fixture");
+    std::fs::remove_file(&record_path).expect("remove fixture record");
+    symlink(&external, &record_path).expect("record symlink");
+
+    assert!(
+        writer
+            .acquire_existing_session_log_for_recovery(key)
+            .is_err()
+    );
+    assert!(
+        std::fs::symlink_metadata(&record_path)
+            .expect("symlink remains")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(&external).expect("external remains"),
+        b"outside"
+    );
 }
 
 #[test]

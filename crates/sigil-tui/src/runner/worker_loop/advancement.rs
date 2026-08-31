@@ -723,6 +723,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         cancellation_target,
+        revision_terminal_run_id: None,
         url_capability_registrar,
         image_attachment_resolver,
     });
@@ -997,6 +998,7 @@ where
                 cancellation_owner,
                 cancellation_recorder,
                 cancellation_target,
+                revision_terminal_run_id: None,
                 url_capability_registrar,
                 image_attachment_resolver,
             });
@@ -2087,6 +2089,55 @@ where
                 let _ = message_tx.send(WorkerMessage::PlanReviewBlocked {
                     reason,
                     paused,
+                    entries,
+                });
+            }
+            RunTaskPayload::PlanReviewCancelled => {
+                let entries = state
+                    .session
+                    .current
+                    .as_ref()
+                    .map(|session| session.entries().to_vec())
+                    .unwrap_or_default();
+                let _ = message_tx.send(WorkerMessage::RunCancelled {
+                    session_log_path: state.session.log_path.clone(),
+                    provider_name: state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| session.provider_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
+                    model_name: state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| session.model_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.model.clone()),
+                    entries,
+                });
+            }
+            RunTaskPayload::PlanReviewInterrupted { reason } => {
+                let entries = state
+                    .session
+                    .current
+                    .as_ref()
+                    .map(|session| session.entries().to_vec())
+                    .unwrap_or_default();
+                let _ = message_tx.send(WorkerMessage::RunInterrupted {
+                    session_log_path: state.session.log_path.clone(),
+                    provider_name: state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| session.provider_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
+                    model_name: state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| session.model_name().to_owned())
+                        .unwrap_or_else(|| root_config.agent.model.clone()),
+                    reason,
                     entries,
                 });
             }

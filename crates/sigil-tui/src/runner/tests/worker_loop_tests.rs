@@ -1,28 +1,179 @@
-use std::{collections::BTreeMap, sync::mpsc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, mpsc},
+};
 
 use sigil_kernel::{
     AgentConfig, CodeIntelligenceConfig, CompactionConfig, ContextSource, ControlEntry,
     DurableEventType, JsonlSessionStore, McpServerConfig, MemoryConfig,
     MutationArtifactCleanupRequested, MutationArtifactLifecycleRecorded,
-    MutationArtifactLifecycleStatus, MutationEventRecorder, PermissionConfig, RootConfig, RunEvent,
-    Session, SessionConfig, SessionLogEntry, SessionStreamRecord, StorageConfig, TaskConfig,
-    TaskId, ToolEffect, VerificationCheckConfig, VerificationConfig, WorkspaceConfig,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, bytes_hash, config::TerminalConfig,
-    stable_workspace_id,
+    MutationArtifactLifecycleStatus, MutationEventRecorder, PermissionConfig, PublicRunEventKind,
+    RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry, SessionStreamRecord,
+    StorageConfig, TaskConfig, TaskId, ToolEffect, VerificationCheckConfig, VerificationConfig,
+    WorkspaceConfig, WorkspaceTrust, WorkspaceTrustDecisionEntry, bytes_hash,
+    config::TerminalConfig, stable_workspace_id,
 };
 
 use crate::runner::{
     event_bridge::ChannelEventHandler,
     protocol::WorkerMessage,
     worker_loop::{
-        VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, append_plan_draft,
+        PlanReviewExecutionResult, VerificationCheckPromotionKind,
+        VerificationCheckPromotionOutcome, append_mcp_elicitation_audits, append_plan_draft,
         chat_agent_run_input_with_repo_context, clean_mutation_artifacts,
         configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,
         configured_provider_route_concurrency_limit, delete_mutation_artifact,
-        materialize_task_verification_config, prepare_task_run_cancellation,
-        promote_workspace_verification_check,
+        deliver_durable_revision_terminal_after_audit, materialize_task_verification_config,
+        prepare_task_run_cancellation, preserve_revision_result_after_audit,
+        promote_workspace_verification_check, revision_terminal_worker_message,
+        tui_plan_review_result_from_durable_revision_outcome,
     },
 };
+
+#[test]
+fn durable_revision_terminals_keep_their_typed_worker_projection() {
+    let cancelled = tui_plan_review_result_from_durable_revision_outcome(
+        sigil_runtime::PlanReviewRunOutcome::Cancelled,
+    )
+    .expect("cancelled revision is a durable terminal, not an adapter error");
+    assert!(matches!(cancelled, PlanReviewExecutionResult::Cancelled));
+
+    let interrupted = tui_plan_review_result_from_durable_revision_outcome(
+        sigil_runtime::PlanReviewRunOutcome::Interrupted("provider stopped".to_owned()),
+    )
+    .expect("interrupted revision is a durable terminal, not an adapter error");
+    assert!(matches!(
+        interrupted,
+        PlanReviewExecutionResult::Interrupted { ref reason }
+            if reason == "provider stopped"
+    ));
+
+    let entries = Vec::new();
+    let cancelled = revision_terminal_worker_message(
+        &PublicRunEventKind::RunCancelled,
+        std::path::Path::new("session.jsonl"),
+        "provider".to_owned(),
+        "model".to_owned(),
+        entries.clone(),
+    )
+    .expect("exact cancelled outbox must map to the existing typed message");
+    assert!(matches!(cancelled, WorkerMessage::RunCancelled { .. }));
+
+    let interrupted = revision_terminal_worker_message(
+        &PublicRunEventKind::RunInterrupted {
+            reason: "durable interruption".to_owned(),
+        },
+        std::path::Path::new("session.jsonl"),
+        "provider".to_owned(),
+        "model".to_owned(),
+        entries,
+    )
+    .expect("exact interrupted outbox must map to the existing typed message");
+    assert!(matches!(
+        interrupted,
+        WorkerMessage::RunInterrupted { ref reason, .. } if reason == "durable interruption"
+    ));
+
+    let finished = revision_terminal_worker_message(
+        &PublicRunEventKind::RunFinished {
+            final_text: "the original durable revision result".to_owned(),
+        },
+        std::path::Path::new("session.jsonl"),
+        "provider".to_owned(),
+        "model".to_owned(),
+        Vec::new(),
+    )
+    .expect("a later adapter-side error must not replace the durable success projection");
+    assert!(matches!(
+        finished,
+        WorkerMessage::PlanRunFinished { ref result, .. }
+            if result.final_text == "the original durable revision result"
+    ));
+}
+
+#[test]
+fn durable_revision_success_survives_a_real_post_run_audit_append_failure() {
+    let audit_buffer = Arc::new(Mutex::new(Vec::<ControlEntry>::new()));
+    let poisoning_buffer = Arc::clone(&audit_buffer);
+    let _ = std::panic::catch_unwind(move || {
+        let _guard = poisoning_buffer
+            .lock()
+            .expect("new audit buffer should be lockable before fault injection");
+        panic!("inject post-run audit lock failure");
+    });
+
+    let mut session = Session::new("provider", "model");
+    let audit_result = append_mcp_elicitation_audits(&mut session, &audit_buffer);
+    assert!(
+        audit_result.is_err(),
+        "the test must exercise the real post-run audit append failure"
+    );
+
+    let (message_tx, message_rx) = mpsc::channel();
+    let payload = preserve_revision_result_after_audit(
+        Ok(PlanReviewExecutionResult::Finished(
+            sigil_kernel::AgentRunResult {
+                final_text: "original durable revision result".to_owned(),
+                tool_calls: 0,
+                final_message_id: None,
+            },
+        )),
+        audit_result,
+        &message_tx,
+    )
+    .expect("audit delivery degradation must not replace the completed revision result");
+    assert!(matches!(
+        payload,
+        PlanReviewExecutionResult::Finished(result)
+            if result.final_text == "original durable revision result"
+    ));
+    assert!(matches!(
+        message_rx
+            .recv()
+            .expect("audit degradation should be surfaced as a Notice"),
+        WorkerMessage::Notice(message)
+            if message.contains("revision audit delivery failed; durable execution state is unchanged")
+    ));
+}
+
+#[test]
+fn active_cancel_delivery_keeps_the_exact_revision_terminal_after_audit_failure() {
+    let audit_buffer = Arc::new(Mutex::new(Vec::<ControlEntry>::new()));
+    let poisoning_buffer = Arc::clone(&audit_buffer);
+    let _ = std::panic::catch_unwind(move || {
+        let _guard = poisoning_buffer
+            .lock()
+            .expect("new audit buffer should be lockable before fault injection");
+        panic!("inject active-cancel audit lock failure");
+    });
+    let mut session = Session::new("provider", "model");
+    let audit_result = append_mcp_elicitation_audits(&mut session, &audit_buffer);
+    assert!(audit_result.is_err());
+
+    let (message_tx, message_rx) = mpsc::channel();
+    deliver_durable_revision_terminal_after_audit(
+        &PublicRunEventKind::RunCancelled,
+        audit_result,
+        std::path::Path::new("session.jsonl"),
+        "provider".to_owned(),
+        "model".to_owned(),
+        Vec::new(),
+        &message_tx,
+    );
+    assert!(matches!(
+        message_rx
+            .recv()
+            .expect("audit degradation should be surfaced before terminal delivery"),
+        WorkerMessage::Notice(message)
+            if message.contains("revision audit delivery failed; durable execution state is unchanged")
+    ));
+    assert!(matches!(
+        message_rx
+            .recv()
+            .expect("exact durable terminal must still reach the active-cancel consumer"),
+        WorkerMessage::RunCancelled { .. }
+    ));
+}
 
 #[test]
 fn append_plan_draft_preserves_plain_model_output_without_graph_contract() {

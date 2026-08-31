@@ -20,9 +20,10 @@ use tempfile::tempdir;
 use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
-        PlannedProvider, StreamPlan, failing_role_provider_builder, planned_role_provider_builder,
-        planned_role_provider_builder_with_stream_start_signal, routed_test_root_config,
-        routed_unauthenticated_test_root_config, spawn_test_worker,
+        PlannedProvider, StreamPlan, TestWorker, failing_role_provider_builder,
+        planned_role_provider_builder, planned_role_provider_builder_with_stream_start_signal,
+        routed_session_identity, routed_test_root_config, routed_unauthenticated_test_root_config,
+        spawn_test_worker, spawn_test_worker_with_existing_authority_composition,
         spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
         wait_for_session_entry,
     },
@@ -69,6 +70,563 @@ fn task_workspace_read_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(PlannerDiscoveryReadTool));
     registry
+}
+
+/// Initializes a fresh test session through the real route-bound `Session` API before any worker
+/// opens it. The worker bootstrap intentionally preserves an existing identity rather than
+/// deriving a connection route from configuration, so switch fixtures must model a session whose
+/// route was selected at creation time.
+fn initialize_routed_plan_review_session(
+    root_config: &sigil_kernel::RootConfig,
+    session_log_path: &std::path::Path,
+    model_name: &str,
+) -> Result<()> {
+    let identity = routed_session_identity(root_config, model_name)?;
+    let sigil_kernel::ControlEntry::SessionIdentity {
+        provider_name,
+        resolved_model_route: Some(route),
+        ..
+    } = &identity
+    else {
+        return Err(anyhow!(
+            "routed test identity must contain a resolved model route"
+        ));
+    };
+    let store = JsonlSessionStore::new(session_log_path)?;
+    let mut session =
+        Session::new_with_route(provider_name.clone(), route.clone()).with_store(store);
+    session.append_control(identity)?;
+    Ok(())
+}
+
+/// Starts an actual composed TUI worker through the explicit PlanReview flow and leaves its
+/// managed research child suspended on a real input request.  The private-recovery cases below
+/// add a child receipt after this point to model a process that accepted the child decision but
+/// exited before its parent Waiting attempt was settled.
+fn waiting_managed_plan_review_research_worker(
+    session_name: &str,
+) -> Result<(
+    tempfile::TempDir,
+    std::path::PathBuf,
+    TestWorker,
+    sigil_kernel::PublicUserInputRequestV1,
+)> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions")
+        .join(format!("{session_name}.jsonl"));
+    let question_args = r#"{
+        "prompt": "Choose the migration boundary",
+        "questions": [{
+            "id": "scope",
+            "header": "Scope",
+            "question": "Which module should be migrated first?",
+            "required": true,
+            "field": {"kind": "text", "multiline": false, "max_chars": 120}
+        }]
+    }"#;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::ToolCallStart {
+            id: "ask-managed-research".to_owned(),
+            name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+        },
+        ProviderChunk::ToolCallArgsDelta {
+            id: "ask-managed-research".to_owned(),
+            delta: question_args.to_owned(),
+        },
+        ProviderChunk::ToolCallComplete(ToolCall {
+            id: "ask-managed-research".to_owned(),
+            name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: question_args.to_owned(),
+        }),
+        ProviderChunk::Done,
+    ])]);
+    let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
+    initialize_routed_plan_review_session(&root_config, &session_log_path, "planned-model")?;
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "prepare a migration plan".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker
+        .recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))
+        .context("explicit plan review did not start")?;
+    let requested = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::UserInputRequested { .. })
+    })?;
+    let WorkerMessage::UserInputRequested { request, .. } = requested else {
+        unreachable!("recv_until only returns UserInputRequested");
+    };
+    if !matches!(
+        &request.source,
+        sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
+    ) {
+        return Err(anyhow!(
+            "explicit plan review must suspend on a managed PlanReviewResearch request"
+        ));
+    }
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    let projection = sigil_kernel::PlanReviewProjection::from_entries(&entries);
+    let attempt = projection
+        .reviews()
+        .next()
+        .and_then(sigil_kernel::PlanReviewProjectionEntry::latest_attempt)
+        .context("explicit managed plan review lost its Waiting attempt")?;
+    assert_eq!(
+        attempt.explicit_objective.as_deref(),
+        Some("prepare a migration plan"),
+        "the source-less /plan lifecycle must carry its safe durable recovery objective"
+    );
+    Ok((temp, session_log_path, worker, request))
+}
+
+/// Writes an authentic child receipt into the exact composed `research/0` log.
+/// This is setup for the worker consumer test, not a synthetic event: the child request was
+/// emitted by the preceding PlanReview run and the same authority writer admits and settles the
+/// session-log namespace around the durable receipt append.
+fn persist_managed_plan_review_research_decision(
+    worker: &TestWorker,
+    request: &sigil_kernel::PublicUserInputRequestV1,
+    command_id: &str,
+    decision: sigil_kernel::UserInputDecisionV1,
+) -> Result<sigil_kernel::UserInputDecisionCommandV1> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1;
+
+    let sigil_kernel::UserInputSourceV1::PlanReviewResearch { attempt_id, .. } = &request.source
+    else {
+        return Err(anyhow!(
+            "only a PlanReviewResearch request owns a managed research child"
+        ));
+    };
+    let key = format!("pr-{}-research-0", attempt_id.as_str());
+    let writer = worker.managed_storage_writer();
+    let lease = writer
+        .acquire_named(StorageWriterChannelV1::SessionLog, &key)
+        .context("failed to admit the existing managed plan-review research SessionLog")?;
+    let result = (|| -> Result<_> {
+        let store = JsonlSessionStore::new(lease.path().join("records.jsonl"))?;
+        let mut child = Session::load_from_store("planned", "planned-model", store)?;
+        if child.session_scope_id() != request.identity.session_scope_id.as_str() {
+            return Err(anyhow!(
+                "managed child receipt belongs to another child session scope"
+            ));
+        }
+        let command = sigil_kernel::UserInputDecisionCommandV1 {
+            identity: request.identity.clone(),
+            request_hash: request.request_hash.clone(),
+            command_id: sigil_kernel::UserInputCommandId::new(command_id.to_owned())?,
+            decision,
+        };
+        let receipt = sigil_kernel::accept_user_input_decision(&mut child, command.clone(), 120)?;
+        assert!(
+            !receipt.idempotent_replay,
+            "fixture must append a new child receipt"
+        );
+        assert_eq!(receipt.request.identity, command.identity);
+        assert_eq!(receipt.request.request_hash, command.request_hash);
+        let child_projection = child.user_input_projection()?;
+        let state = child_projection
+            .request(&command.identity)
+            .context("managed child receipt was not projected")?;
+        let accepted = state
+            .decision
+            .as_ref()
+            .context("managed child receipt has no durable decision")?;
+        assert_eq!(accepted.identity, command.identity);
+        assert_eq!(accepted.request_hash, command.request_hash);
+        assert_eq!(accepted.command_id, command.command_id);
+        assert_eq!(
+            receipt
+                .request
+                .answer_receipt
+                .as_ref()
+                .map(|answer| &answer.command_id),
+            Some(&command.command_id),
+            "public child receipt must bind the exact accepted command id"
+        );
+        match (&command.decision, &accepted.decision) {
+            (
+                sigil_kernel::UserInputDecisionV1::Submitted {
+                    answers: expected_answers,
+                },
+                sigil_kernel::UserInputDurableDecisionV1::Submitted {
+                    answer_hash,
+                    answered_question_ids,
+                    answers: Some(actual_answers),
+                },
+            ) => {
+                assert_eq!(actual_answers, expected_answers);
+                assert_eq!(
+                    answered_question_ids,
+                    &expected_answers
+                        .iter()
+                        .map(|answer| answer.question_id.clone())
+                        .collect::<Vec<_>>()
+                );
+                assert!(!answer_hash.is_empty());
+                assert_eq!(
+                    state.status,
+                    sigil_kernel::UserInputStatusV1::DecisionAccepted,
+                    "a submitted child answer remains pending until the parent continuation"
+                );
+                assert!(receipt.continuation_required);
+                assert!(receipt.request.resolution.is_none());
+                assert!(matches!(
+                    receipt.request.answer_receipt,
+                    Some(sigil_kernel::PublicUserInputAnswerReceiptV1 {
+                        decision: sigil_kernel::PublicUserInputDecisionKindV1::Submitted,
+                        answer_hash: Some(_),
+                        ..
+                    })
+                ));
+            }
+            (
+                sigil_kernel::UserInputDecisionV1::RunCancelled,
+                sigil_kernel::UserInputDurableDecisionV1::RunCancelled,
+            ) => {
+                assert_eq!(state.status, sigil_kernel::UserInputStatusV1::Resolved);
+                assert!(!receipt.continuation_required);
+                assert_eq!(
+                    receipt.request.resolution,
+                    Some(sigil_kernel::UserInputResolutionV1::RunCancelled)
+                );
+                assert!(matches!(
+                    receipt.request.answer_receipt,
+                    Some(sigil_kernel::PublicUserInputAnswerReceiptV1 {
+                        decision: sigil_kernel::PublicUserInputDecisionKindV1::RunCancelled,
+                        answer_hash: None,
+                        ..
+                    })
+                ));
+            }
+            (
+                sigil_kernel::UserInputDecisionV1::Declined,
+                sigil_kernel::UserInputDurableDecisionV1::Declined,
+            ) => {
+                assert_eq!(state.status, sigil_kernel::UserInputStatusV1::Resolved);
+                assert!(!receipt.continuation_required);
+                assert_eq!(
+                    receipt.request.resolution,
+                    Some(sigil_kernel::UserInputResolutionV1::Declined)
+                );
+                assert!(matches!(
+                    receipt.request.answer_receipt,
+                    Some(sigil_kernel::PublicUserInputAnswerReceiptV1 {
+                        decision: sigil_kernel::PublicUserInputDecisionKindV1::Declined,
+                        answer_hash: None,
+                        ..
+                    })
+                ));
+            }
+            _ => {
+                return Err(anyhow!(
+                    "managed child receipt changed the requested decision"
+                ));
+            }
+        }
+        Ok(command)
+    })();
+    writer
+        .finalize(lease)
+        .map(|_| ())
+        .context("failed to settle the managed plan-review research SessionLog receipt")?;
+    result
+}
+
+fn persist_managed_plan_review_research_cancel(
+    worker: &TestWorker,
+    request: &sigil_kernel::PublicUserInputRequestV1,
+    command_id: &str,
+) -> Result<sigil_kernel::UserInputDecisionCommandV1> {
+    persist_managed_plan_review_research_decision(
+        worker,
+        request,
+        command_id,
+        sigil_kernel::UserInputDecisionV1::RunCancelled,
+    )
+}
+
+fn persisted_managed_plan_review_research_answer(
+    worker: &TestWorker,
+    request: &sigil_kernel::PublicUserInputRequestV1,
+    command_id: &str,
+    answer: &str,
+) -> Result<sigil_kernel::UserInputDecisionCommandV1> {
+    persist_managed_plan_review_research_decision(
+        worker,
+        request,
+        command_id,
+        sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: answer.to_owned(),
+                },
+            }],
+        },
+    )
+}
+
+fn assert_waiting_plan_review_recovery_entries(
+    entries: &[SessionLogEntry],
+    private_answer: &str,
+) -> Result<()> {
+    let timeline = serde_json::to_string(entries)?;
+    assert!(
+        !timeline.contains(private_answer),
+        "a managed child answer must not leak into parent session entries or the public timeline projection"
+    );
+    let projection = sigil_kernel::PlanReviewProjection::from_entries(entries);
+    let latest_attempt = projection
+        .reviews()
+        .next()
+        .and_then(sigil_kernel::PlanReviewProjectionEntry::latest_attempt)
+        .context("recovery lost the parent plan-review attempt")?;
+    assert_eq!(
+        latest_attempt.status,
+        sigil_kernel::PlanReviewAttemptStatus::WaitingForInput,
+        "recovery must not automatically settle the parent Waiting attention fact"
+    );
+    Ok(())
+}
+
+fn assert_exact_recovered_plan_review_command(
+    recovered: &sigil_kernel::UserInputDecisionCommandV1,
+    expected: &sigil_kernel::UserInputDecisionCommandV1,
+) {
+    assert_eq!(recovered.identity, expected.identity);
+    assert_eq!(recovered.request_hash, expected.request_hash);
+    assert_eq!(recovered.command_id, expected.command_id);
+    assert_eq!(
+        serde_json::to_value(&recovered.decision).expect("recovered decision serializes"),
+        serde_json::to_value(&expected.decision).expect("expected decision serializes"),
+        "recovery must re-read the durable child decision instead of synthesizing an answer"
+    );
+}
+
+#[test]
+fn plan_review_research_private_resume_replays_the_exact_managed_child_cancel() -> Result<()> {
+    let (_temp, session_log_path, worker, request) =
+        waiting_managed_plan_review_research_worker("session-private-research-resume")?;
+    let command = persist_managed_plan_review_research_cancel(
+        &worker,
+        &request,
+        "private-managed-research-cancel",
+    )?;
+
+    // This is the private worker ingress used after the application service has cached the
+    // original command as Uncertain.  It carries only public matching fields; the worker must
+    // re-read the authoritative child receipt above before it can re-enter the normal dispatcher.
+    worker.send(WorkerCommand::ResumeRecoveredPlanReviewResearch {
+        command_id: command.command_id.as_str().to_owned(),
+        request_id: request.identity.request_id.as_str().to_owned(),
+        generation: request.identity.generation,
+        expected_request_hash: request.request_hash.clone(),
+    })?;
+    let applied = worker.recv_until_with_timeout_diagnostic(
+        "private plan-review resume dispatch",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::UserInputDecisionApplied { .. }),
+    )?;
+    let WorkerMessage::UserInputDecisionApplied {
+        request: applied_request,
+        continuation_started,
+        entries,
+    } = applied
+    else {
+        unreachable!("recv_until only returns UserInputDecisionApplied");
+    };
+    assert_eq!(applied_request.identity, request.identity);
+    assert_eq!(applied_request.request_hash, request.request_hash);
+    assert!(
+        !continuation_started,
+        "a recovered child cancel must not spawn a new plan review"
+    );
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+            if attempt.status == sigil_kernel::PlanReviewAttemptStatus::Cancelled
+    )));
+    let durable_entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(
+        durable_entries.iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if attempt.status == sigil_kernel::PlanReviewAttemptStatus::Cancelled
+        )),
+        "the worker dispatcher must settle the real parent Waiting attempt"
+    );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn plan_review_research_private_resume_rejects_a_mismatched_managed_child_receipt() -> Result<()> {
+    let (_temp, session_log_path, worker, request) =
+        waiting_managed_plan_review_research_worker("session-private-research-mismatch")?;
+    let command = persist_managed_plan_review_research_cancel(
+        &worker,
+        &request,
+        "private-managed-research-mismatch",
+    )?;
+
+    worker.send(WorkerCommand::ResumeRecoveredPlanReviewResearch {
+        command_id: command.command_id.as_str().to_owned(),
+        request_id: request.identity.request_id.as_str().to_owned(),
+        generation: request.identity.generation,
+        expected_request_hash: format!("{}-mismatch", request.request_hash),
+    })?;
+    let notice = worker.recv_until_with_timeout_diagnostic(
+        "private plan-review mismatch rejection",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::Notice(text) if text.contains("no longer matches")),
+    )?;
+    assert!(matches!(
+        notice,
+        WorkerMessage::Notice(ref text) if text == "recovered plan-review input no longer matches the selected request"
+    ));
+    let durable_entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(
+        durable_entries.iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+        )),
+        "a mismatched private resume must not settle the parent attention fact"
+    );
+    assert!(
+        !durable_entries.iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if attempt.status == sigil_kernel::PlanReviewAttemptStatus::Cancelled
+        )),
+        "a mismatch must not dispatch the recovered child decision"
+    );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn startup_recovers_managed_plan_review_research_attention_without_executing_private_answer()
+-> Result<()> {
+    let (temp, session_log_path, mut original, request) =
+        waiting_managed_plan_review_research_worker("session-restart-private-research")?;
+    let private_answer = "restart-only managed answer";
+    let accepted = persisted_managed_plan_review_research_answer(
+        &original,
+        &request,
+        "restart-private-managed-answer",
+        private_answer,
+    )?;
+    let authority_composition = original.authority_composition();
+    original.stop()?;
+
+    let workspace_root = temp.path().to_path_buf();
+    let restarted = spawn_test_worker_with_existing_authority_composition(
+        routed_unauthenticated_test_root_config(&workspace_root, "planned-model"),
+        session_log_path.clone(),
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace_root,
+        authority_composition,
+    )?;
+    let recovered = restarted.recv_until_with_timeout_diagnostic(
+        "startup managed plan-review recovery",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::RecoveredUserInputAttention { .. }),
+    )?;
+    let WorkerMessage::RecoveredUserInputAttention { command, entries } = recovered else {
+        unreachable!("recovery predicate only returns its private worker message");
+    };
+    assert_exact_recovered_plan_review_command(&command, &accepted);
+    assert_waiting_plan_review_recovery_entries(&entries, private_answer)?;
+
+    let durable_entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert_waiting_plan_review_recovery_entries(&durable_entries, private_answer)?;
+    restarted.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn switch_recovers_managed_plan_review_research_attention_after_session_switched() -> Result<()> {
+    let (temp, target_session_log_path, mut original, request) =
+        waiting_managed_plan_review_research_worker("session-switch-private-research")?;
+    let private_answer = "switch-only managed answer";
+    let accepted = persisted_managed_plan_review_research_answer(
+        &original,
+        &request,
+        "switch-private-managed-answer",
+        private_answer,
+    )?;
+    let authority_composition = original.authority_composition();
+    original.stop()?;
+
+    let workspace_root = temp.path().to_path_buf();
+    let current_session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-before-managed-recovery-switch.jsonl");
+    let worker = spawn_test_worker_with_existing_authority_composition(
+        routed_unauthenticated_test_root_config(&workspace_root, "planned-model"),
+        current_session_log_path,
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace_root,
+        authority_composition,
+    )?;
+    let ready = worker.recv_with_timeout(Duration::from_secs(10))?;
+    assert!(matches!(ready, WorkerMessage::WorkerReady));
+
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: target_session_log_path.clone(),
+        attachment_recovery_binding: None,
+    })?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut switched = false;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!(
+                "timed out waiting for private plan-review recovery after SessionSwitched"
+            ));
+        }
+        let message = worker.recv_with_timeout(remaining)?;
+        match message {
+            WorkerMessage::SessionSwitched {
+                session_log_path,
+                entries,
+                ..
+            } => {
+                assert_eq!(session_log_path, target_session_log_path);
+                assert_waiting_plan_review_recovery_entries(&entries, private_answer)?;
+                switched = true;
+            }
+            WorkerMessage::RecoveredUserInputAttention { command, entries } => {
+                assert!(
+                    switched,
+                    "a session switch must reach the App before its private managed-input recovery"
+                );
+                assert_exact_recovered_plan_review_command(&command, &accepted);
+                assert_waiting_plan_review_recovery_entries(&entries, private_answer)?;
+                break;
+            }
+            WorkerMessage::SessionAttachmentTransferred { .. } => {}
+            unexpected => {
+                return Err(anyhow!(
+                    "unexpected worker message while switching to managed plan-review recovery: {unexpected:?}"
+                ));
+            }
+        }
+    }
+
+    let durable_entries = JsonlSessionStore::read_entries(&target_session_log_path)?;
+    assert_waiting_plan_review_recovery_entries(&durable_entries, private_answer)?;
+    worker.shutdown()?;
+    Ok(())
 }
 
 #[test]
@@ -2724,7 +3282,7 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
     let revised = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::PlanRunFinished { .. })
     })?;
-    let WorkerMessage::PlanRunFinished { entries, .. } = revised else {
+    let WorkerMessage::PlanRunFinished { entries, result } = revised else {
         unreachable!("recv_until only returns PlanRunFinished");
     };
     let drafts = entries
@@ -2772,6 +3330,46 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
                     && attempt.plan_id.as_str() == revised_draft_plan_id
         )),
         "the revision attempt terminates as DraftReady in the returned session"
+    );
+    let revision_attempt = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                    && attempt.plan_id.as_str() == revised_draft_plan_id =>
+            {
+                Some(attempt)
+            }
+            _ => None,
+        })
+        .expect("actual finalized revision attempt");
+    let records = sigil_kernel::JsonlSessionStore::read_event_records(&session_log_path)?;
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let run_id = sigil_kernel::plan_review_revision_run_id(revision_attempt);
+    let terminal = projection
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == run_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal.len(),
+        1,
+        "the real TUI revision commits exactly one terminal outbox"
+    );
+    assert!(
+        matches!(&terminal[0].event.event,
+            sigil_kernel::PublicRunEventKind::RunFinished { final_text }
+                if final_text == &result.final_text
+        ),
+        "the worker must surface the original durable public result"
+    );
+    assert!(
+        records.iter().any(
+            |record| record.stored_event().event_id == terminal[0].domain_event_id
+                && record.stored_event().event_kind()
+                    == Some(sigil_kernel::DurableEventType::PlanReviewAttempt)
+        ),
+        "revision outbox must bind the actual attempt, not a fabricated root run"
     );
     worker.shutdown()?;
     Ok(())

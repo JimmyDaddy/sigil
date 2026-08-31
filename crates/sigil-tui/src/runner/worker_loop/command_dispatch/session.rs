@@ -510,12 +510,20 @@ where
                             session_log_path: transition.session_log_path.clone(),
                             attachment: Arc::clone(&transition.session_attachment),
                         });
+                        let entries = transition.entries;
+                        let recovered_plan_review_input = transition.recovered_plan_review_input;
                         let _ = message_tx.send(WorkerMessage::SessionSwitched {
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
                             model_name: transition.model_name,
-                            entries: transition.entries,
+                            entries: entries.clone(),
                         });
+                        if let Some(command) = recovered_plan_review_input {
+                            let _ = message_tx.send(WorkerMessage::RecoveredUserInputAttention {
+                                command,
+                                entries,
+                            });
+                        }
                         return WorkerCommandDispatchControl::Break;
                     }
                     Err(error) => {

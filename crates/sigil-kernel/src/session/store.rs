@@ -1,7 +1,10 @@
 use super::active_projection::ActiveSessionProjection;
 #[cfg(test)]
 use super::writer::SessionWriterFault;
-use super::writer::{PendingStoredEvent, SharedSessionCoordinator, shared_session_writer};
+use super::writer::{
+    PendingStoredEvent, SharedSessionCoordinator, shared_existing_session_writer,
+    shared_session_writer,
+};
 use super::*;
 use crate::EventId;
 use thiserror::Error;
@@ -120,6 +123,30 @@ impl JsonlSessionStore {
         Ok(Self { path, writer })
     }
 
+    /// Reopens one already-published durable stream without creating, permission-hardening, or
+    /// reseeding either its data file or writer sidecar.
+    ///
+    /// The shared coordinator becomes permanently require-existing for this canonical path. A
+    /// valid crash tail may still be recovered by normal writer operations, but an absent or
+    /// empty recovered stream is rejected rather than treated as a fresh session.
+    pub fn open_existing(path: impl Into<PathBuf>) -> Result<Self> {
+        let (path, writer) = shared_existing_session_writer(path)?;
+        Ok(Self { path, writer })
+    }
+
+    /// Structurally parses bytes previously obtained from a caller-validated session-log object.
+    ///
+    /// This reuses the kernel's stored-event, checksum, sequence, and same-session validation.
+    /// It deliberately does not prove that the bytes came from a particular storage authority;
+    /// callers must retain their own exact-scope admission and no-follow provenance checks.
+    pub fn read_event_records_from_validated_bytes(
+        bytes: &[u8],
+    ) -> Result<Vec<SessionStreamRecord>> {
+        let content = std::str::from_utf8(bytes)
+            .context("validated session-log bytes are not valid UTF-8")?;
+        read_stream_records_from_str(Path::new("<validated-session-log-bytes>"), content)
+    }
+
     /// Returns a consistent scheduler-facing projection and its exact durable frontier.
     ///
     /// The first call may rebuild from the durable stream. Subsequent ordinary appends advance
@@ -131,6 +158,13 @@ impl JsonlSessionStore {
     /// validation.
     pub fn active_projection_snapshot(&self) -> Result<ActiveSessionProjectionSnapshot> {
         self.writer.snapshot()
+    }
+
+    pub(super) fn with_locked_projection<T>(
+        &self,
+        adopt: impl FnOnce(ActiveSessionProjectionSnapshot) -> Result<T>,
+    ) -> Result<T> {
+        self.writer.with_locked_projection(adopt)
     }
 
     /// Returns privacy-safe process-local active projection counters.
@@ -627,11 +661,7 @@ impl JsonlSessionStore {
 
     /// Reads all durable records in writer mode, performing tail recovery when needed.
     pub fn read_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        writer.read_records_writer()
+        self.writer.read_reconciled_records()
     }
 
     pub(super) fn load_entries_writer_reconciled(

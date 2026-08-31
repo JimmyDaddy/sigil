@@ -90,6 +90,159 @@ fn hot_append_and_ready_snapshot_do_not_increase_full_scan_count() -> Result<()>
 }
 
 #[test]
+fn writer_recovery_refreshes_shared_projection_once_before_cheap_snapshots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("recovery.jsonl"))?;
+    store.active_projection_snapshot()?;
+    let recorder = Arc::new(NoticeRecorder::default());
+    let _subscription = store.register_active_projection_observer(recorder.clone());
+    let entries = (0..2)
+        .map(|ordinal| {
+            SessionLogEntry::Control(ControlEntry::Note {
+                kind: "recovered_bundle".to_owned(),
+                data: serde_json::json!({ "ordinal": ordinal }),
+            })
+        })
+        .collect::<Vec<_>>();
+    store.inject_writer_fault(SessionWriterFault::PartialFirstRecord)?;
+    assert!(store.append_session_entry_events(&entries).is_err());
+    assert_eq!(
+        store
+            .active_projection_snapshot()?
+            .durable_session_entry_count(),
+        0
+    );
+    store.read_event_records_writer()?;
+    assert_eq!(
+        store
+            .active_projection_snapshot()?
+            .durable_session_entry_count(),
+        2
+    );
+    let scans = store.writer_full_scan_count()?;
+    for _ in 0..3 {
+        store.active_projection_snapshot()?;
+    }
+    assert_eq!(
+        store.writer_full_scan_count()?,
+        scans,
+        "ready snapshot remains I/O-free"
+    );
+    let notices = recorder.notices.lock().expect("notice lock").len();
+    store.read_event_records_writer()?;
+    assert_eq!(
+        recorder.notices.lock().expect("notice lock").len(),
+        notices,
+        "reading an already-current prefix does not invent another source wake"
+    );
+    assert_eq!(notices, 1);
+    Ok(())
+}
+
+#[test]
+fn open_existing_recovers_the_original_bundle_and_shared_projection_in_one_scan() -> Result<()> {
+    for fault in [
+        SessionWriterFault::BeforeWrite,
+        SessionWriterFault::PartialFirstRecord,
+        SessionWriterFault::PartialSecondRecord,
+        SessionWriterFault::BeforeSync,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("existing-recovery.jsonl");
+        let store = JsonlSessionStore::new(&path)?;
+        store.append(&SessionLogEntry::Control(ControlEntry::Note {
+            kind: "original".to_owned(),
+            data: serde_json::Value::Null,
+        }))?;
+        store.active_projection_snapshot()?;
+        let original = fs::read(&path)?;
+        let entries = (0..2)
+            .map(|ordinal| {
+                SessionLogEntry::Control(ControlEntry::Note {
+                    kind: "existing_recovered_bundle".to_owned(),
+                    data: serde_json::json!({ "ordinal": ordinal }),
+                })
+            })
+            .collect::<Vec<_>>();
+        store.inject_writer_fault(fault)?;
+        assert!(store.append_session_entry_events(&entries).is_err());
+        assert_eq!(
+            store
+                .active_projection_snapshot()?
+                .durable_session_entry_count(),
+            1
+        );
+        let scans = store.writer_full_scan_count()?;
+
+        let reopened = JsonlSessionStore::open_existing(&path)?;
+
+        assert_eq!(store.writer_full_scan_count()?, scans + 1);
+        assert_eq!(
+            store
+                .active_projection_snapshot()?
+                .durable_session_entry_count(),
+            3
+        );
+        assert_eq!(
+            reopened
+                .active_projection_snapshot()?
+                .durable_session_entry_count(),
+            3
+        );
+        let recovered = fs::read(&path)?;
+        assert!(recovered.starts_with(&original));
+        let durable = JsonlSessionStore::read_entries(&path)?;
+        assert_eq!(
+            serde_json::to_value(&durable[1..])?,
+            serde_json::to_value(&entries)?
+        );
+        reopened.read_event_records_writer()?;
+        assert_eq!(
+            fs::read(&path)?,
+            recovered,
+            "recovery must not repeat or replace the bundle"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn writer_locked_projection_adoption_excludes_concurrent_append() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("locked-adoption.jsonl"))?;
+    store.active_projection_snapshot()?;
+    let append_store = store.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = store.with_locked_projection(|snapshot| {
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("start receiver exists");
+            let result = append_store.append(&SessionLogEntry::Control(ControlEntry::Note {
+                kind: "concurrent-append".to_owned(),
+                data: serde_json::Value::Null,
+            }));
+            done_tx.send(result).expect("completion receiver exists");
+        });
+        started_rx.recv()?;
+        assert!(matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(snapshot.durable_session_entry_count(), 0);
+        Ok(worker)
+    })?;
+    done_rx.recv_timeout(std::time::Duration::from_secs(5))??;
+    worker.join().expect("append worker completed");
+    assert_eq!(
+        store
+            .active_projection_snapshot()?
+            .durable_session_entry_count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn first_hot_append_seeds_a_new_stream_projection_without_a_second_scan() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

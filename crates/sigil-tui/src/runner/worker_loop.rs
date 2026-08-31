@@ -91,10 +91,48 @@ mod state;
 mod task_runtime;
 mod terminal_control;
 
+/// Reads a recoverable PlanReview research receipt while the worker retains the composed child
+/// authority.  The returned command is an in-process handoff to the existing Resume form only;
+/// it must never enter a public projection, event, or UI DTO.
+pub(in crate::runner) fn recover_managed_plan_review_research_attention(
+    state: &WorkerLoopState,
+) -> anyhow::Result<Option<sigil_kernel::UserInputDecisionCommandV1>> {
+    let Some(session) = state.session.current.as_ref() else {
+        return Ok(None);
+    };
+    let has_waiting_plan_review =
+        sigil_kernel::PlanReviewProjection::from_entries(session.entries())
+            .reviews()
+            .any(|review| {
+                review.latest_attempt().is_some_and(|attempt| {
+                    attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+                })
+            });
+    if !has_waiting_plan_review {
+        return Ok(None);
+    }
+    let provisioner = state
+        .managed_plan_review_child_resources
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "current-schema plan-review input recovery requires the composed child resource bundle"
+            )
+        })?;
+    sigil_runtime::PlanReviewCoordinator::recover_managed_plan_review_research_input(
+        session,
+        provisioner.as_ref(),
+    )
+}
+
 pub(in crate::runner) use active_run::{
     ActiveRun, ActiveRunStopDisposition, RunTaskPayload, RunTaskResult,
     bind_task_run_cancellation_scope, cancel_active_run, prepare_run_cancellation,
     prepare_task_run_cancellation,
+};
+#[cfg(test)]
+pub(in crate::runner) use active_run::{
+    deliver_durable_revision_terminal_after_audit, revision_terminal_worker_message,
 };
 pub(in crate::runner) use advancement::{
     WorkerAdvancementContext, WorkerAdvancementControl, advance_worker_loop,
@@ -105,7 +143,11 @@ pub(in crate::runner) use advancement::{
     pending_agent_continuations_from_active_projection, task_completion_progress_for_active_task,
 };
 #[cfg(test)]
+pub(in crate::runner) use agent_runtime::PlanReviewExecutionResult;
+#[cfg(test)]
 pub(in crate::runner) use agent_runtime::agent_result_continuation_run_result;
+#[cfg(test)]
+pub(in crate::runner) use agent_runtime::tui_plan_review_result_from_durable_revision_outcome;
 pub(in crate::runner) use agent_runtime::{
     WorkerAgentEventSink, WorkerSupervisorEventSink, agent_result_continuation_new_thread_ids,
     cancel_agent_thread, close_agent_thread, collect_finished_background_agent_runs,
@@ -121,6 +163,8 @@ pub(in crate::runner) use checkpoint_runtime::{
     execute_current_checkpoint_restore, fork_current_conversation,
     preview_current_checkpoint_restore,
 };
+#[cfg(test)]
+pub(in crate::runner) use command_dispatch::preserve_revision_result_after_audit;
 pub(in crate::runner) use command_dispatch::{
     WorkerCommandContext, WorkerCommandDispatchControl, dispatch_worker_command,
 };

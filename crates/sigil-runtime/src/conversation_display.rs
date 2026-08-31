@@ -2276,6 +2276,13 @@ impl PlanReviewDisplayProjection {
         let guidance_pending = self
             .pending_revision_guidance
             .contains(&active_attempt.plan_id);
+        let revision_attempt_exists_for_active_plan = draft.is_some_and(|draft| {
+            self.attempts.iter().any(|attempt| {
+                attempt.revision_request_id.is_some()
+                    && attempt.base_plan_id.as_ref() == Some(&active_attempt.plan_id)
+                    && attempt.base_plan_hash.as_deref() == Some(draft.plan_hash.as_str())
+            })
+        });
         // Plan review is text approval, not Task compilation. A missing/failed preflight
         // candidate does not hide Run; post-approval materialization owns any blocker.
         let allowed_actions = if let Some(blocker) = materialization_blocker {
@@ -2303,6 +2310,15 @@ impl PlanReviewDisplayProjection {
             match legacy_recovery.map_or(latest_decision, |_| {
                 Some(sigil_kernel::PlanDecision::RevisionFailed)
             }) {
+                // Guidance is accepted before an HTTP/TUI adapter claims the revision worker.
+                // When that claim is rejected before an executor records `Started`, the
+                // unchanged DraftReady attempt remains the durable authority and the user may
+                // explicitly save it instead of leaving an unreachable guidance-only state.
+                Some(sigil_kernel::PlanDecision::RevisionRequested)
+                    if !revision_attempt_exists_for_active_plan =>
+                {
+                    vec![sigil_kernel::PublicPlanAction::Save]
+                }
                 Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
                 Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
                     sigil_kernel::PublicPlanAction::Run,

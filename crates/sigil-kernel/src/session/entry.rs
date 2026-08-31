@@ -418,6 +418,9 @@ impl ControlEntry {
             Self::UserInputContinuationStarted(entry) => entry.validate(),
             Self::UserInputContinuationReleased(entry) => entry.validate(),
             Self::UserInputResolved(entry) => entry.validate(),
+            Self::PlanReviewAttempt(entry) => {
+                crate::conversation_route::validate_attempt_payload(entry)
+            }
             Self::AgentUserInputRoute(entry) => entry.validate(),
             Self::ExecutablePlanCandidatePreparedV1(candidate) => candidate.validate(),
             Self::PlanReadyCommittedV1(marker) => marker.validate(),

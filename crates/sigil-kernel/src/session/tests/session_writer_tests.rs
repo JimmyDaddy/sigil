@@ -171,6 +171,178 @@ fn session_writer_creates_and_repairs_owner_only_data_and_lease_files() -> Resul
 }
 
 #[test]
+fn session_writer_open_existing_reuses_only_a_prior_nonempty_stream() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    {
+        let store = JsonlSessionStore::new(&path)?;
+        store.append_event(
+            DurableEventType::RunStatusChanged,
+            EventClass::Critical,
+            serde_json::json!({"status": "waiting"}),
+        )?;
+    }
+    let original = fs::read(&path)?;
+    let lease_path = writer_lease_path(&path);
+    assert!(lease_path.is_file());
+
+    let reopened = JsonlSessionStore::open_existing(&path)?;
+    assert_eq!(reopened.read_event_records_writer()?.len(), 1);
+    reopened.append_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        serde_json::json!({"status": "completed"}),
+    )?;
+
+    let after = fs::read(&path)?;
+    assert!(after.starts_with(&original));
+    assert_eq!(JsonlSessionStore::read_event_records(&path)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn session_writer_open_existing_refuses_missing_stream_without_creating_any_object() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("missing-session.jsonl");
+    let lease_path = writer_lease_path(&path);
+
+    assert!(JsonlSessionStore::open_existing(&path).is_err());
+    assert!(!path.exists());
+    assert!(!lease_path.exists());
+    Ok(())
+}
+
+#[test]
+fn session_writer_open_existing_refuses_empty_stream_without_reseeding() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("empty-session.jsonl");
+    let lease_path = writer_lease_path(&path);
+    fs::write(&path, b"\n")?;
+    fs::write(&lease_path, b"")?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&lease_path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(windows)]
+    {
+        crate::secure_private_path_permissions(&path)?;
+        crate::secure_private_path_permissions(&lease_path)?;
+    }
+
+    let error = JsonlSessionStore::open_existing(&path)
+        .expect_err("empty existing stream must never become a fresh session");
+    assert!(error.to_string().contains("must not be reseeded"));
+    assert_eq!(fs::read(&path)?, b"\n");
+    assert!(lease_path.is_file());
+    Ok(())
+}
+
+#[test]
+fn session_writer_open_existing_shared_handle_rejects_removed_record_without_recreating_it()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("removed-record.jsonl");
+    let ordinary = JsonlSessionStore::new(&path)?;
+    ordinary.append_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        serde_json::json!({"status": "durable"}),
+    )?;
+    fs::remove_file(&path)?;
+
+    assert!(JsonlSessionStore::open_existing(&path).is_err());
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn session_writer_open_existing_shared_handle_rejects_removed_sidecar_without_recreating_it()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("removed-sidecar.jsonl");
+    let ordinary = JsonlSessionStore::new(&path)?;
+    ordinary.append_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        serde_json::json!({"status": "durable"}),
+    )?;
+    let lease_path = writer_lease_path(&path);
+    fs::remove_file(&lease_path)?;
+
+    assert!(JsonlSessionStore::open_existing(&path).is_err());
+    assert!(!lease_path.exists());
+    assert_eq!(JsonlSessionStore::read_event_records(&path)?.len(), 1);
+    drop(ordinary);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn session_writer_open_existing_rejects_symlink_without_following_or_repairing_it() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let external = temp.path().join("external.jsonl");
+    {
+        let store = JsonlSessionStore::new(&external)?;
+        store.append_event(
+            DurableEventType::RunStatusChanged,
+            EventClass::Critical,
+            serde_json::json!({"status": "external"}),
+        )?;
+    }
+    let original = fs::read(&external)?;
+    let alias = temp.path().join("alias.jsonl");
+    symlink(&external, &alias)?;
+
+    assert!(JsonlSessionStore::open_existing(&alias).is_err());
+    assert!(fs::symlink_metadata(&alias)?.file_type().is_symlink());
+    assert_eq!(fs::read(&external)?, original);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn session_writer_open_existing_rejects_unsafe_permissions_without_repairing_them() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("unsafe-session.jsonl");
+    {
+        let store = JsonlSessionStore::new(&path)?;
+        store.append_event(
+            DurableEventType::RunStatusChanged,
+            EventClass::Critical,
+            serde_json::json!({"status": "durable"}),
+        )?;
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+
+    assert!(JsonlSessionStore::open_existing(&path).is_err());
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o644);
+    Ok(())
+}
+
+#[test]
+fn session_writer_validated_bytes_parser_reuses_stream_contract() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        serde_json::json!({"status": "durable"}),
+    )?;
+    let bytes = fs::read(&path)?;
+    assert_eq!(
+        JsonlSessionStore::read_event_records_from_validated_bytes(&bytes)?.len(),
+        1
+    );
+    assert!(JsonlSessionStore::read_event_records_from_validated_bytes(b"not-json\n").is_err());
+    Ok(())
+}
+
+#[test]
 #[ignore = "release-profile long-session performance evidence"]
 fn session_writer_long_session_evidence() -> Result<()> {
     const EVENT_COUNT: usize = 10_000;

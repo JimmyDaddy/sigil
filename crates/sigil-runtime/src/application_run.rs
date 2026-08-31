@@ -2978,6 +2978,9 @@ where
     H: EventHandler + Send,
     A: ApprovalHandler + Send,
 {
+    if request.revision_request_id.is_some() {
+        bail!("revision plan review must execute through the atomic revision terminal/outbox path");
+    }
     let ApplicationPlanReviewRuntime {
         options,
         root_config,
@@ -6363,12 +6366,24 @@ struct ApplicationRunEventState {
 }
 
 impl ApplicationRunEventSequence {
+    #[cfg(test)]
     fn new(session_id: String, run_id: String) -> Self {
+        Self::with_initial_sequence(session_id, run_id, 0)
+    }
+
+    /// Rejoins one adapter-owned public stream from its already durable sequence watermark.
+    ///
+    /// The caller may only supply a value read from that adapter's canonical journal; this keeps
+    /// an interrupted/restarted runtime bridge from reusing an earlier public sequence.
+    fn with_initial_sequence(session_id: String, run_id: String, sequence: u64) -> Self {
         Self {
             session_id,
             run_id,
             outbox: None,
-            state: Arc::new(Mutex::new(ApplicationRunEventState::default())),
+            state: Arc::new(Mutex::new(ApplicationRunEventState {
+                sequence,
+                ..ApplicationRunEventState::default()
+            })),
         }
     }
 
@@ -6451,6 +6466,49 @@ impl ApplicationRunEventSequence {
         Ok(())
     }
 
+    /// Emits the one resumable plan-review suspension event without creating a terminal outbox.
+    ///
+    /// `RunAwaitingUserInput` closes the current adapter stream, but it does not finalize the
+    /// durable PlanReview attempt: the same child logical run may resume after an exact answer.
+    /// A1 therefore keeps it on the existing live-delivery path instead of creating a second
+    /// terminal bundle before A2 owns nonterminal/replay semantics.
+    fn emit_resumable_awaiting_user_input<H>(
+        &mut self,
+        handler: &mut H,
+        event: PublicRunEventKind,
+    ) -> Result<PublicRunEvent>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        if !matches!(event, PublicRunEventKind::RunAwaitingUserInput { .. }) {
+            bail!("resumable application event must be RunAwaitingUserInput");
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        let public = PublicRunEvent::new(
+            self.session_id.clone(),
+            self.run_id.clone(),
+            sequence,
+            event,
+        );
+        // A2 owns durable nonterminal delivery. The current live notifier must not rewrite the
+        // durable Waiting fact into a different domain conclusion when adapter delivery fails.
+        if handler.handle_public_event(public.clone()).is_err() {
+            state.delivery_degraded = true;
+        }
+        state.sequence = sequence;
+        Ok(public)
+    }
+
     fn emit_terminal<H>(
         &self,
         lifecycle: &ConversationRunLifecycleRecorder,
@@ -6528,6 +6586,55 @@ impl ApplicationRunEventSequence {
             state.delivery_degraded = true;
         }
         state.terminal_delivered = delivered && receipt_recorded;
+        Ok(())
+    }
+
+    fn prepare_terminal_public_event(&self, event: PublicRunEventKind) -> Result<PublicRunEvent> {
+        if !is_terminal_public_run_event(&event) {
+            bail!("application terminal preparation requires a terminal public run event");
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        Ok(PublicRunEvent::new(
+            self.session_id.clone(),
+            self.run_id.clone(),
+            sequence,
+            event,
+        ))
+    }
+
+    fn mark_terminal_committed(&self, event: &PublicRunEvent) -> Result<()> {
+        if event.session_id != self.session_id || event.run_id != self.run_id {
+            bail!("committed application terminal belongs to another event stream");
+        }
+        if !is_terminal_public_run_event(&event.event) {
+            bail!("committed application terminal has a nonterminal public payload");
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let expected_sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        if event.sequence != expected_sequence {
+            bail!("committed application terminal sequence does not match the runtime bridge");
+        }
+        state.sequence = event.sequence;
+        state.terminal = true;
         Ok(())
     }
 
@@ -6625,18 +6732,35 @@ fn application_task_run_status_label(status: TaskRunStatus) -> &'static str {
     }
 }
 
+/// One application-surface revision execution and its optional durable terminal outbox.
+///
+/// A waiting research-input suspension is not a revision finalizer: the same attempt can resume,
+/// so it deliberately has no terminal outbox in this result.
+#[derive(Debug, Clone)]
+pub struct PlanReviewRevisionExecution {
+    /// The exact domain outcome reconstructed from the current execution or durable terminal.
+    pub outcome: crate::PlanReviewRunOutcome,
+    /// The only terminal payload an adapter may publish. `None` is only valid for a resumable
+    /// waiting-input outcome.
+    pub terminal_outbox: Option<PublicEventOutboxEntryV1>,
+    /// The live-only suspension event for a resumable research question. It is never a terminal
+    /// outbox; a later answer resumes this same child logical run.
+    pub waiting_public_event: Option<PublicRunEvent>,
+}
+
 /// Executes one prepared plan review revision on an application-surface session.
 ///
 /// HTTP/Desktop use this so `Revise` actually runs the new read-only plan review instead of
 /// leaving a dangling `Started` attempt. The run is fail-closed: only the frozen read-only tool
-/// surface is exposed and the permission mode is read-only; every terminal outcome (draft
-/// committed, no-draft closure, cancelled, failed) is written durably through
-/// [`PlanReviewCoordinator::close_plan_review_run`].
+/// surface is exposed and the permission mode is read-only. Every revision finalizer is committed
+/// with its exact public outbox before this function returns it to an adapter; an uncertain
+/// append is reconciled from the writer before any generic failure is considered.
 pub async fn execute_plan_review_revision_with_managed_execution<H>(
     root_config: &RootConfig,
     workspace_root: &Path,
     session_log_path: &Path,
     request: &crate::PlanReviewRunRequest,
+    initial_public_sequence: u64,
     handler: &mut H,
     cancellation: Option<sigil_kernel::RunCancellationHandle>,
     managed_command_execution: Option<
@@ -6646,7 +6770,7 @@ pub async fn execute_plan_review_revision_with_managed_execution<H>(
     child_resource_provisioner: Option<
         Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
     >,
-) -> Result<crate::PlanReviewRunOutcome>
+) -> Result<PlanReviewRevisionExecution>
 where
     H: ApplicationRunEventHandler + Send,
 {
@@ -6662,6 +6786,18 @@ where
             None,
             None,
         )?;
+    if let Some(outbox) =
+        session.reconcile_plan_review_revision_terminal(&request.child_logical_run_id())?
+    {
+        let outcome = crate::PlanReviewCoordinator::revision_outcome_from_terminal(
+            &session, request, &outbox,
+        )?;
+        return Ok(PlanReviewRevisionExecution {
+            outcome,
+            terminal_outbox: Some(outbox),
+            waiting_public_event: None,
+        });
+    }
     let model_ref = session
         .resolved_model_route()
         .map(|route| route.model_ref.clone())
@@ -6672,7 +6808,15 @@ where
         current_unix_time_ms(),
     )?;
     let cancellation_handle = cancellation.unwrap_or_else(|| RunCancellationOwner::new().handle());
-    let outcome = (async {
+    let mut bridge = PublicApplicationEventBridge::new(
+        ApplicationRunEventSequence::with_initial_sequence(
+            session.session_scope_id().to_owned(),
+            request.child_logical_run_id(),
+            initial_public_sequence,
+        ),
+        handler,
+    );
+    let execution = (async {
         let provider = crate::build_provider_for_model_ref_async(root_config, &model_ref).await?;
         let mut base_registry = sigil_kernel::ToolRegistry::new();
         let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
@@ -6734,13 +6878,6 @@ where
             options = options.with_tool_authority(tool_authority);
         }
         let agent = crate::configured_agent(root_config, provider, base_registry)?;
-        let mut bridge = PublicApplicationEventBridge::new(
-            ApplicationRunEventSequence::new(
-                session.session_scope_id().to_owned(),
-                request.child_logical_run_id(),
-            ),
-            handler,
-        );
         let outcome = match child_resource_provisioner {
             Some(provisioner) => {
                 crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
@@ -6781,88 +6918,118 @@ where
         };
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(error) => {
-                let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
-                    &mut session,
-                    request,
-                    &crate::PlanReviewRunOutcome::Failed(
-                        "plan review run failed before an outcome".to_owned(),
-                    ),
-                    current_unix_time_ms(),
-                );
-                if let Err(close_error) = close {
-                    bail!(
-                        "plan review run failed ({error:#}) and its terminal closure also failed ({close_error:#})"
-                    );
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        match &outcome {
-            crate::PlanReviewRunOutcome::AwaitingUserInput { .. } => {
-                crate::PlanReviewCoordinator::close_plan_review_run(
-                    &mut session,
-                    request,
-                    &outcome,
-                    current_unix_time_ms(),
-                )?;
-            }
-            crate::PlanReviewRunOutcome::DraftReady { draft } => {
-                let compile_input = crate::PlanReviewCoordinator::plan_compile_input(
-                    &session,
-                    root_config,
-                    workspace_root,
-                    request,
-                )?;
-                crate::PlanReviewCoordinator::commit_draft_from_child(
-                    &mut session,
-                    draft,
-                    request,
-                    &compile_input,
-                    current_unix_time_ms(),
-                )?;
-            }
-            crate::PlanReviewRunOutcome::CompletedWithoutDraft => {
-                crate::PlanReviewCoordinator::complete_without_draft(
-                    &mut session,
-                    request,
-                    current_unix_time_ms(),
-                )?;
-            }
-            crate::PlanReviewRunOutcome::Cancelled
-            | crate::PlanReviewRunOutcome::Interrupted(_)
-            | crate::PlanReviewRunOutcome::Blocked(_)
-            | crate::PlanReviewRunOutcome::Paused(_)
-            | crate::PlanReviewRunOutcome::Failed(_)
-            | crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(_) => {
-                crate::PlanReviewCoordinator::close_plan_review_run(
-                    &mut session,
-                    request,
-                    &outcome,
-                    current_unix_time_ms(),
-                )?;
-            }
-        }
         Ok(outcome)
     })
-    .await
-    .map_err(|error| {
-        let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
+    .await;
+    let outcome = match execution {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(outbox) =
+                session.reconcile_plan_review_revision_terminal(&request.child_logical_run_id())?
+            {
+                let outcome = crate::PlanReviewCoordinator::revision_outcome_from_terminal(
+                    &session, request, &outbox,
+                )?;
+                bridge.mark_plan_review_revision_terminal_committed(&outbox.event)?;
+                return Ok(PlanReviewRevisionExecution {
+                    outcome,
+                    terminal_outbox: Some(outbox),
+                    waiting_public_event: None,
+                });
+            }
+            // The execution future has actually ended, and writer recovery just established
+            // that no earlier finalizer won. This is a confirmed interruption, not a Failed
+            // fallback. If either the new bundle or its recovery fails below, return that error
+            // unchanged and retain Started for a later strict recovery attempt.
+            let interrupted = crate::PlanReviewRunOutcome::Interrupted(
+                "plan review revision execution ended before a terminal outcome".to_owned(),
+            );
+            let public_kind =
+                crate::PlanReviewCoordinator::revision_terminal_public_event(&interrupted)
+                    .expect("Interrupted is a revision terminal public event");
+            let public_event = bridge.prepare_plan_review_revision_terminal(public_kind)?;
+            let outbox = match crate::PlanReviewCoordinator::commit_revision_terminal_with_outbox(
+                &mut session,
+                request,
+                &interrupted,
+                public_event,
+                current_unix_time_ms(),
+            ) {
+                Ok(outbox) => outbox,
+                Err(commit_error) => match session
+                    .reconcile_plan_review_revision_terminal(&request.child_logical_run_id())?
+                {
+                    Some(outbox) => outbox,
+                    None => return Err(commit_error.context(format!(
+                        "plan review revision execution failed ({error:#}) and its interrupted terminal bundle was not confirmed"
+                    ))),
+                },
+            };
+            let durable_outcome = crate::PlanReviewCoordinator::revision_outcome_from_terminal(
+                &session, request, &outbox,
+            )?;
+            bridge.mark_plan_review_revision_terminal_committed(&outbox.event)?;
+            return Ok(PlanReviewRevisionExecution {
+                outcome: durable_outcome,
+                terminal_outbox: Some(outbox),
+                waiting_public_event: None,
+            });
+        }
+    };
+    if matches!(
+        &outcome,
+        crate::PlanReviewRunOutcome::AwaitingUserInput { .. }
+    ) {
+        crate::PlanReviewCoordinator::close_plan_review_run(
             &mut session,
             request,
-            &crate::PlanReviewRunOutcome::Failed(
-                "plan review revision failed after the attempt started".to_owned(),
-            ),
+            &outcome,
             current_unix_time_ms(),
-        );
-        match close {
-            Ok(()) => error,
-            Err(close_error) => anyhow::anyhow!(
-                "plan review revision failed ({error:#}) and its terminal closure also failed ({close_error:#})"
-            ),
-        }
-    })?;
-    Ok(outcome)
+        )?;
+        let crate::PlanReviewRunOutcome::AwaitingUserInput { request: pending } = &outcome else {
+            unreachable!("AwaitingUserInput was matched above");
+        };
+        let waiting_public_event = bridge.emit_resumable_plan_review_waiting(
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: pending.identity.request_id.as_str().to_owned(),
+                generation: pending.identity.generation,
+                request_hash: pending.request_hash.clone(),
+            },
+        )?;
+        return Ok(PlanReviewRevisionExecution {
+            outcome,
+            terminal_outbox: None,
+            waiting_public_event: Some(waiting_public_event),
+        });
+    }
+    let public_kind = crate::PlanReviewCoordinator::revision_terminal_public_event(&outcome)
+        .context("revision final outcome did not produce a public terminal payload")?;
+    let public_event = bridge.prepare_plan_review_revision_terminal(public_kind)?;
+    let outbox = match crate::PlanReviewCoordinator::commit_revision_terminal_with_outbox(
+        &mut session,
+        request,
+        &outcome,
+        public_event,
+        current_unix_time_ms(),
+    ) {
+        Ok(outbox) => outbox,
+        Err(error) => match session
+            .reconcile_plan_review_revision_terminal(&request.child_logical_run_id())?
+        {
+            Some(outbox) => outbox,
+            None => return Err(error),
+        },
+    };
+    let durable_outcome =
+        crate::PlanReviewCoordinator::revision_outcome_from_terminal(&session, request, &outbox)?;
+    bridge.mark_plan_review_revision_terminal_committed(&outbox.event)?;
+    Ok(PlanReviewRevisionExecution {
+        outcome: durable_outcome,
+        terminal_outbox: Some(outbox),
+        waiting_public_event: None,
+    })
 }
 
 /// Test-only compatibility wrapper for plan-review fixtures that do not compose authority.
@@ -6883,6 +7050,7 @@ where
         workspace_root,
         session_log_path,
         request,
+        0,
         handler,
         cancellation,
         None,
@@ -6890,6 +7058,7 @@ where
         None,
     )
     .await
+    .map(|execution| execution.outcome)
 }
 
 struct PublicApplicationEventBridge<'a, H> {
@@ -6935,6 +7104,25 @@ where
             redactor,
             event,
         )
+    }
+
+    fn prepare_plan_review_revision_terminal(
+        &self,
+        event: PublicRunEventKind,
+    ) -> Result<PublicRunEvent> {
+        self.events.prepare_terminal_public_event(event)
+    }
+
+    fn mark_plan_review_revision_terminal_committed(&self, event: &PublicRunEvent) -> Result<()> {
+        self.events.mark_terminal_committed(event)
+    }
+
+    fn emit_resumable_plan_review_waiting(
+        &mut self,
+        event: PublicRunEventKind,
+    ) -> Result<PublicRunEvent> {
+        self.events
+            .emit_resumable_awaiting_user_input(self.handler, event)
     }
 }
 

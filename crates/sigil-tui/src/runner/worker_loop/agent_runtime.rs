@@ -350,6 +350,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         cancellation_target: RunCancellationTarget::Run,
+        revision_terminal_run_id: None,
         url_capability_registrar,
         image_attachment_resolver,
     })
@@ -595,6 +596,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         cancellation_target: RunCancellationTarget::Run,
+        revision_terminal_run_id: None,
         url_capability_registrar,
         image_attachment_resolver,
     }))
@@ -604,6 +606,111 @@ pub(in crate::runner) enum PlanReviewExecutionResult {
     Finished(sigil_kernel::AgentRunResult),
     AwaitingUserInput(sigil_kernel::UserInputRequestRefV1),
     Blocked { reason: String, paused: bool },
+    Cancelled,
+    Interrupted { reason: String },
+}
+
+fn commit_tui_plan_review_revision_terminal(
+    session: &mut Session,
+    request: &sigil_runtime::PlanReviewRunRequest,
+    outcome: &sigil_runtime::PlanReviewRunOutcome,
+) -> std::result::Result<sigil_runtime::PlanReviewRunOutcome, String> {
+    if request.revision_request_id.is_none() {
+        return Err("non-revision plan review cannot commit a revision terminal".to_owned());
+    }
+    let run_id = request.child_logical_run_id();
+    let outbox = match session
+        .reconcile_plan_review_revision_terminal(&run_id)
+        .map_err(|error| format!("failed to recover durable plan revision terminal: {error:#}"))?
+    {
+        Some(outbox) => outbox,
+        None => {
+            let event =
+                sigil_runtime::PlanReviewCoordinator::revision_terminal_public_event(outcome)
+                    .ok_or_else(|| {
+                        "waiting plan-review input must not finalize a revision".to_owned()
+                    })?;
+            let sequence = session
+                .next_plan_review_public_sequence(&run_id)
+                .map_err(|error| {
+                    format!("failed to allocate plan revision terminal sequence: {error:#}")
+                })?;
+            let public = sigil_kernel::PublicRunEvent::new(
+                session.session_scope_id(),
+                run_id.clone(),
+                sequence,
+                event,
+            );
+            match sigil_runtime::PlanReviewCoordinator::commit_revision_terminal_with_outbox(
+                session,
+                request,
+                outcome,
+                public,
+                current_unix_time_ms(),
+            ) {
+                Ok(outbox) => outbox,
+                Err(commit_error) => match session
+                    .reconcile_plan_review_revision_terminal(&run_id)
+                    .map_err(|recovery_error| {
+                        format!(
+                            "failed to recover durable plan revision terminal after commit error ({commit_error:#}): {recovery_error:#}"
+                        )
+                    })? {
+                    Some(outbox) => outbox,
+                    None => {
+                        return Err(format!(
+                            "failed to commit durable plan revision terminal: {commit_error:#}"
+                        ));
+                    }
+                },
+            }
+        }
+    };
+    sigil_runtime::PlanReviewCoordinator::revision_outcome_from_terminal(session, request, &outbox)
+        .map_err(|error| format!("failed to reconstruct durable plan revision outcome: {error:#}"))
+}
+
+pub(in crate::runner) fn tui_plan_review_result_from_durable_revision_outcome(
+    outcome: sigil_runtime::PlanReviewRunOutcome,
+) -> std::result::Result<PlanReviewExecutionResult, String> {
+    match outcome {
+        sigil_runtime::PlanReviewRunOutcome::DraftReady { draft } => Ok(
+            PlanReviewExecutionResult::Finished(sigil_kernel::AgentRunResult {
+                final_text: format!("Plan ready: {}", draft.summary),
+                tool_calls: 0,
+                final_message_id: None,
+            }),
+        ),
+        sigil_runtime::PlanReviewRunOutcome::CompletedWithoutDraft => Ok(
+            PlanReviewExecutionResult::Finished(sigil_kernel::AgentRunResult {
+                final_text: "Plan review closed without a draft; no task was created.".to_owned(),
+                tool_calls: 0,
+                final_message_id: None,
+            }),
+        ),
+        sigil_runtime::PlanReviewRunOutcome::Cancelled => Ok(PlanReviewExecutionResult::Cancelled),
+        sigil_runtime::PlanReviewRunOutcome::Interrupted(reason) => {
+            Ok(PlanReviewExecutionResult::Interrupted { reason })
+        }
+        sigil_runtime::PlanReviewRunOutcome::Failed(error)
+        | sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => Err(error),
+        sigil_runtime::PlanReviewRunOutcome::Blocked(reason) => {
+            Ok(PlanReviewExecutionResult::Blocked {
+                reason,
+                paused: false,
+            })
+        }
+        sigil_runtime::PlanReviewRunOutcome::Paused(reason) => {
+            Ok(PlanReviewExecutionResult::Blocked {
+                reason,
+                paused: true,
+            })
+        }
+        sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput { .. } => Err(
+            "waiting plan-review input must not be reconstructed from a durable terminal"
+                .to_owned(),
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -758,6 +865,44 @@ where
             }
         }
     };
+    if request.revision_request_id.is_some() {
+        let durable_outcome = match outcome_result {
+            Ok(sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput { request: pending }) => {
+                sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                    run_session,
+                    request,
+                    &sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput {
+                        request: pending.clone(),
+                    },
+                    current_unix_time_ms(),
+                )
+                .map_err(|error| format!("failed to suspend plan review: {error:#}"))?;
+                return Ok(PlanReviewExecutionResult::AwaitingUserInput(
+                    sigil_kernel::UserInputRequestRefV1 {
+                        identity: pending.identity.clone(),
+                        request_hash: pending.request_hash.clone(),
+                    },
+                ));
+            }
+            Ok(outcome) => {
+                commit_tui_plan_review_revision_terminal(run_session, request, &outcome)?
+            }
+            Err(_) => {
+                // The supervised future has ended. The atomic helper first reconciles an existing
+                // bundle; when none exists it records the precise Interrupted fact. Any writer
+                // uncertainty propagates and leaves Started for a later strict recovery.
+                commit_tui_plan_review_revision_terminal(
+                    run_session,
+                    request,
+                    &sigil_runtime::PlanReviewRunOutcome::Interrupted(
+                        "plan review revision execution ended before a terminal outcome".to_owned(),
+                    ),
+                )?
+            }
+        };
+        return tui_plan_review_result_from_durable_revision_outcome(durable_outcome);
+    }
+
     let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -836,10 +981,11 @@ where
             ))
         }
         sigil_runtime::PlanReviewRunOutcome::Cancelled => {
+            let terminal = sigil_runtime::PlanReviewRunOutcome::Cancelled;
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
                 run_session,
                 request,
-                &sigil_runtime::PlanReviewRunOutcome::Cancelled,
+                &terminal,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {
@@ -850,10 +996,11 @@ where
             Err("plan review was cancelled before a draft".to_owned())
         }
         sigil_runtime::PlanReviewRunOutcome::Interrupted(error) => {
+            let terminal = sigil_runtime::PlanReviewRunOutcome::Interrupted(error.clone());
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
                 run_session,
                 request,
-                &sigil_runtime::PlanReviewRunOutcome::Interrupted(error.clone()),
+                &terminal,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {
@@ -862,10 +1009,11 @@ where
             Err(error)
         }
         sigil_runtime::PlanReviewRunOutcome::Blocked(reason) => {
+            let terminal = sigil_runtime::PlanReviewRunOutcome::Blocked(reason.clone());
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
                 run_session,
                 request,
-                &sigil_runtime::PlanReviewRunOutcome::Blocked(reason.clone()),
+                &terminal,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| format!(
@@ -877,10 +1025,11 @@ where
             })
         }
         sigil_runtime::PlanReviewRunOutcome::Paused(reason) => {
+            let terminal = sigil_runtime::PlanReviewRunOutcome::Paused(reason.clone());
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
                 run_session,
                 request,
-                &sigil_runtime::PlanReviewRunOutcome::Paused(reason.clone()),
+                &terminal,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| format!(
@@ -892,10 +1041,11 @@ where
             })
         }
         sigil_runtime::PlanReviewRunOutcome::Failed(error) => {
+            let terminal = sigil_runtime::PlanReviewRunOutcome::Failed(error.clone());
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
                 run_session,
                 request,
-                &sigil_runtime::PlanReviewRunOutcome::Failed(error.clone()),
+                &terminal,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {
@@ -904,10 +1054,12 @@ where
             Err(error)
         }
         sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => {
+            let terminal =
+                sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone());
             sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
                 run_session,
                 request,
-                &sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone()),
+                &terminal,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {
@@ -1459,6 +1611,12 @@ where
                             Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
                                 RunTaskPayload::PlanReviewBlocked { reason, paused }
                             }
+                            Ok(PlanReviewExecutionResult::Cancelled) => {
+                                RunTaskPayload::PlanReviewCancelled
+                            }
+                            Ok(PlanReviewExecutionResult::Interrupted { reason }) => {
+                                RunTaskPayload::PlanReviewInterrupted { reason }
+                            }
                             Err(error) => RunTaskPayload::Chat {
                                 result: Err(error),
                                 plan_mode: false,
@@ -1525,6 +1683,13 @@ where
                     provider_logical_run_id: None,
                     agent_result_continuation_thread_ids: Vec::new(),
                 },
+                payload @ (RunTaskPayload::PlanReviewCancelled
+                | RunTaskPayload::PlanReviewInterrupted { .. }) => {
+                    let _ = run_message_tx.send(WorkerMessage::Notice(format!(
+                        "plan revision terminal is durable, but MCP elicitation audit delivery failed: {error}"
+                    )));
+                    payload
+                }
                 RunTaskPayload::Task {
                     task_id, queue_id, ..
                 } => RunTaskPayload::Task {
@@ -1554,6 +1719,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         cancellation_target: RunCancellationTarget::Run,
+        revision_terminal_run_id: None,
         url_capability_registrar,
         image_attachment_resolver,
     })
@@ -1666,6 +1832,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         cancellation_target: RunCancellationTarget::Run,
+        revision_terminal_run_id: None,
         url_capability_registrar,
         image_attachment_resolver,
     })

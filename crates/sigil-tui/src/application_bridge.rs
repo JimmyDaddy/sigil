@@ -1787,6 +1787,10 @@ impl TuiWorkerCommandExecutor {
                             "configuration binding is not owned by this TUI connection".to_owned(),
                         )
                     })?;
+                // Tests intentionally suppress physical config persistence, but must still
+                // resolve the caller-owned binding above.
+                #[cfg(test)]
+                let _ = &target;
                 #[cfg(not(test))]
                 let draft = target
                     .draft
@@ -2018,3 +2022,7 @@ fn tui_permission_mode(mode: ApplicationPermissionMode) -> sigil_kernel::Permiss
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/application_bridge_tests.rs"]
+mod tests;

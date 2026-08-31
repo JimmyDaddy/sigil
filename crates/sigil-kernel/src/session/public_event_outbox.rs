@@ -52,6 +52,7 @@ impl PublicEventOutboxProjectionV1 {
             projection.apply_record(record)?;
         }
         projection.validate_terminal_pairs(records)?;
+        super::plan_review_terminal::validate_revision_pairs(records, &projection)?;
         Ok(projection)
     }
 
@@ -75,6 +76,15 @@ impl PublicEventOutboxProjectionV1 {
             .values()
             .filter(|entry| is_terminal_event(&entry.event.event))
         {
+            if envelopes
+                .get(entry.domain_event_id.as_str())
+                .is_some_and(|event| {
+                    event.event_kind() == Some(DurableEventType::PlanReviewAttempt)
+                })
+            {
+                // The revision domain validates its own exact attempt/draft/decision bundle.
+                continue;
+            }
             let (domain, terminal) = terminals
                 .get(entry.domain_event_id.as_str())
                 .context("public terminal has no exact conversation domain event")?;
@@ -191,7 +201,7 @@ impl PublicEventOutboxRecorder {
     }
 
     /// Appends one idempotent nonterminal public event before an adapter receives it.
-    /// Terminal events must use the conversation lifecycle recorder's crash-safe bundle.
+    /// Terminal events must use their domain owner's crash-safe terminal bundle.
     pub fn append_outbox(&self, entry: &PublicEventOutboxEntryV1) -> Result<bool> {
         validate_outbox_entry(entry)?;
         if is_terminal_event(&entry.event.event) {
@@ -235,7 +245,7 @@ impl PublicEventOutboxRecorder {
     }
 }
 
-fn is_terminal_event(event: &crate::PublicRunEventKind) -> bool {
+pub(super) fn is_terminal_event(event: &crate::PublicRunEventKind) -> bool {
     matches!(
         event,
         crate::PublicRunEventKind::RunFinished { .. }

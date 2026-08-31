@@ -114,6 +114,7 @@ fn r71_durable_journal_replays_after_process_restart_and_rejects_corruption() {
                 namespace_hash: journal_encode(b"namespace-1"),
                 grant: Box::new(sample_grant()),
                 request: Box::new(sample_request()),
+                continuation_from: None,
             })
             .expect("append admission");
         assert_eq!(record.sequence, 2, "genesis is persisted before admissions");
@@ -130,6 +131,53 @@ fn r71_durable_journal_replays_after_process_restart_and_rejects_corruption() {
     std::fs::write(&path, b"truncated").expect("corrupt journal");
     let error = ResourceJournalFileV1::open(&path, h).expect_err("corruption fails closed");
     assert!(matches!(error, JournalErrorV1::Corrupt(_)));
+}
+
+#[test]
+fn r71_journal_legacy_terminal_without_physical_binding_cannot_close_continuation() {
+    let directory = tempfile::tempdir().expect("journal directory");
+    let path = directory.path().join("authority.journal.json");
+    let h = header();
+    let grant = sample_grant();
+    let original = sigil_kernel::managed_storage::ManagedStorageExistingNamespaceBindingV1 {
+        original_handle_id: sigil_kernel::resource::OpaqueKernelCapabilityHandleId::new(
+            "original-handle".to_owned(),
+        ),
+        original_namespace_hash: journal_encode(b"original-namespace"),
+        original_admission:
+            sigil_kernel::managed_storage::ManagedStorageDurableAdmissionBindingV1 {
+                grant_hash: grant.grant_hash,
+                admission_sequence: 7,
+                admission_record_hash: journal_encode(b"original-admission"),
+            },
+    };
+    let mut journal = ResourceJournalFileV1::open(&path, h).expect("journal");
+    let continuation = journal
+        .append_event(ResourceJournalEventV1::StorageNamespaceAdmitted {
+            grant_hash: grant.grant_hash,
+            handle_id: "continuation-handle".to_owned(),
+            namespace_hash: journal_encode(b"continuation-namespace"),
+            grant: Box::new(grant.clone()),
+            request: Box::new(sample_request()),
+            continuation_from: Some(original),
+        })
+        .expect("continuation admission");
+    journal
+        .append_event(ResourceJournalEventV1::GenerationSettled {
+            grant_hash: grant.grant_hash,
+            resource_id: grant.resource_ref.resource_id.as_str().to_owned(),
+            generation: grant.resource_ref.generation,
+            cleanup_status: "legacy-unbound-terminal".to_owned(),
+            physical_frontier_hash: None,
+            physical_observation_record_hash: None,
+        })
+        .expect("unbound legacy terminal");
+
+    let (_, terminal) = journal.storage_admission_state();
+    assert!(
+        !terminal.contains(&continuation.sequence),
+        "zero-physical legacy terminal cannot settle a continuation"
+    );
 }
 
 fn sample_grant() -> StorageAdmissionGrantV1 {

@@ -131,6 +131,7 @@ mod conversation_queue_promotion;
 mod effect_reconciliation;
 mod entry;
 mod facade;
+mod plan_review_terminal;
 mod portable_compaction;
 mod projection;
 mod provider_attempt;
@@ -221,6 +222,7 @@ pub(crate) use effect_reconciliation::{
 };
 pub use entry::*;
 pub use facade::{Session, StableCompactionSnapshot};
+pub use plan_review_terminal::plan_review_revision_run_id;
 pub use portable_compaction::{
     PortableSemanticCompactionOutcome, PortableSemanticCompactionPreflight,
     PortableSemanticCompactionRequest, PortableTargetRequestMaterial,

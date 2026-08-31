@@ -303,6 +303,17 @@ pub enum WorkerCommand {
         expected_request_hash: String,
         decision: sigil_kernel::UserInputDecisionV1,
     },
+    /// Private TUI composition recovery for one already accepted PlanReview research input.
+    ///
+    /// This intentionally carries no decision payload. The worker re-reads the exact accepted
+    /// child receipt under its managed authority before feeding the existing user-input
+    /// dispatcher. It is not an application command or transport DTO.
+    ResumeRecoveredPlanReviewResearch {
+        command_id: String,
+        request_id: String,
+        generation: u32,
+        expected_request_hash: String,
+    },
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
@@ -696,6 +707,13 @@ pub enum WorkerMessage {
     },
     UserInputRequested {
         request: sigil_kernel::PublicUserInputRequestV1,
+        entries: Vec<SessionLogEntry>,
+    },
+    /// Private worker-to-App handoff for an already accepted durable input.  It is never
+    /// serialized into a public projection or emitted across a transport boundary; the App only
+    /// uses it to select the existing Resume action for the matching public request.
+    RecoveredUserInputAttention {
+        command: sigil_kernel::UserInputDecisionCommandV1,
         entries: Vec<SessionLogEntry>,
     },
     UserInputDecisionApplied {

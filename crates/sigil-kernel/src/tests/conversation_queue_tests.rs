@@ -263,7 +263,12 @@ fn direct_promotion_atomically_binds_a_safe_message_and_replays_after_reload() -
     let content = fs::read_to_string(&path)?;
     assert!(!content.contains("raw-promotion-secret"));
 
-    let restored = Session::load_from_store("mock", "model", store.clone())?;
+    let mut restored = Session::load_from_store("mock", "model", store.clone())?;
+    assert!(
+        restored
+            .reconcile_plan_review_revision_terminal("not-started")?
+            .is_none()
+    );
     assert!(restored.entries().iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(entry))

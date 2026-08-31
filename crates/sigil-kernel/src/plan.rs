@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ConversationRouteDecisionId, ConversationTurnRef, IntentPlanProposalV1, IntentProposalUnitV1,
-    PlanReviewId, TaskStepIntentAliasBindingV1,
+    PlanReviewId, PlanReviewProjection, TaskStepIntentAliasBindingV1,
     session::{ControlEntry, SessionLogEntry},
     task::{
         AgentRole, TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskBlockerV1, TaskCapabilityV2,
@@ -243,19 +243,37 @@ pub fn plan_review_detail_from_entries(
     if draft.plan_hash != expected_plan_hash {
         bail!("plan detail does not bind the exact plan hash");
     }
-    let mut attempts = entries.iter().filter_map(|entry| match entry {
-        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
-            if &attempt.plan_id == plan_id =>
+    let attempts = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if &attempt.plan_id == plan_id =>
+            {
+                Some(attempt)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(first) = attempts.first() {
+        if attempts
+            .iter()
+            .any(|attempt| attempt.plan_review_id != first.plan_review_id)
         {
-            Some(attempt)
+            bail!("plan detail is bound to multiple review lifecycles");
         }
-        _ => None,
-    });
-    let first = attempts.next();
+        let projection = PlanReviewProjection::from_entries(entries);
+        let review = projection
+            .review(&first.plan_review_id)
+            .context("plan detail lost its exact review lifecycle")?;
+        if !review.conflicts.is_empty() {
+            bail!("plan detail review lifecycle has conflicting durable facts");
+        }
+    }
+    let first = attempts.first().copied();
     let source = first
         .map(|attempt| attempt.source)
         .unwrap_or(crate::PlanReviewSource::ExplicitPlanCommand);
-    let latest = attempts.next_back().or(first);
+    let latest = attempts.last().copied();
     if latest.is_some_and(|attempt| {
         !matches!(
             attempt.status,

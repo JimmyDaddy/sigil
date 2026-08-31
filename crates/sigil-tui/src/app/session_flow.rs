@@ -488,6 +488,43 @@ impl AppState {
         }
     }
 
+    /// Applies one worker-recovered private command to the existing public attention form.
+    ///
+    /// The App receives no managed authority or child path. It only filters the command against
+    /// parent-derived public truth and reuses the ordinary Resume action, whose worker dispatcher
+    /// revalidates identity and hash before every durable mutation.
+    pub(super) fn restore_durable_attention_surfaces_with_recovery_command(
+        &mut self,
+        command: sigil_kernel::UserInputDecisionCommandV1,
+    ) {
+        self.clear_pending_plan_approval();
+        self.clear_pending_user_input();
+        match sigil_runtime::conversation_display::public_user_inputs_from_entries(
+            &self.session_browser.current_entries,
+        ) {
+            Ok(requests) => {
+                let command_matches_request = requests.iter().any(|request| {
+                    request.identity == command.identity
+                        && request.request_hash == command.request_hash
+                });
+                if command_matches_request {
+                    self.set_pending_user_inputs(requests, Some(command));
+                    self.last_notice = Some(
+                        "an accepted input decision is ready to resume; choose Resume".to_owned(),
+                    );
+                } else {
+                    self.set_pending_user_inputs(requests, None);
+                    self.last_notice = Some(
+                        "accepted input recovery no longer matches the durable request".to_owned(),
+                    );
+                }
+            }
+            Err(error) => {
+                self.last_notice = Some(format!("user input recovery unavailable: {error}"));
+            }
+        }
+    }
+
     pub(super) fn append_current_session_control(&mut self, control: ControlEntry) {
         self.session_browser
             .current_entries

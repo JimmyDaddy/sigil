@@ -396,6 +396,53 @@ impl AppState {
         })
     }
 
+    /// Recognizes only the private PlanReview research recovery form that the worker populated
+    /// from an exact durable child receipt.  The returned worker command deliberately excludes
+    /// the answer: the worker re-reads and validates the authoritative receipt before it enters
+    /// the ordinary submit dispatcher.
+    ///
+    /// This prevents the durable application reservation cache from treating a historical
+    /// `Uncertain` application receipt as a replacement for the worker-owned recovery path.
+    pub(crate) fn recovered_plan_review_research_resume_command(
+        &self,
+        action: &AppAction,
+    ) -> Option<crate::runner::WorkerCommand> {
+        let form = self.composer.pending_user_input.as_ref()?;
+        let request = form.request.as_ref()?;
+        let recovery = form.recovery_command.as_ref()?;
+        let AppAction::SubmitUserInputDecision {
+            command_id: Some(command_id),
+            request_id,
+            generation,
+            expected_request_hash,
+            decision,
+        } = action
+        else {
+            return None;
+        };
+        if !matches!(
+            &request.source,
+            sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
+        ) || recovery.identity != request.identity
+            || recovery.request_hash != request.request_hash
+            || recovery.command_id.as_str() != command_id
+            || recovery.identity.request_id.as_str() != request_id
+            || recovery.identity.generation != *generation
+            || recovery.request_hash.as_str() != expected_request_hash.as_str()
+            || &recovery.decision != decision
+        {
+            return None;
+        }
+        Some(
+            crate::runner::WorkerCommand::ResumeRecoveredPlanReviewResearch {
+                command_id: recovery.command_id.as_str().to_owned(),
+                request_id: recovery.identity.request_id.as_str().to_owned(),
+                generation: recovery.identity.generation,
+                expected_request_hash: recovery.request_hash.clone(),
+            },
+        )
+    }
+
     pub(crate) fn set_pending_user_input(
         &mut self,
         request: sigil_kernel::PublicUserInputRequestV1,

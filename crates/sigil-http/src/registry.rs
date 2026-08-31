@@ -637,37 +637,6 @@ impl HttpSessionRunRegistry {
         })
     }
 
-    /// Claims the session foreground slot for a supervised background run (plan review revision).
-    ///
-    /// The slot blocks concurrent durable mutations, queued commands, and new foreground runs for
-    /// the whole revision, mirroring the reservation a foreground run holds while it executes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the session is missing or already owns a foreground run.
-    pub(crate) fn bind_supervised_session_run(
-        &self,
-        session_id: &str,
-        run_id: &str,
-    ) -> Result<(), HttpRegistryError> {
-        let mut state = self.lock_state();
-        state.ensure_accepting_commands()?;
-        let session = state.sessions.get_mut(session_id).ok_or_else(|| {
-            HttpRegistryError::SessionNotFound {
-                session_id: session_id.to_owned(),
-            }
-        })?;
-        if let Some(existing) = session.foreground_run_id.as_ref() {
-            return Err(HttpRegistryError::SessionForegroundRunActive {
-                session_id: session_id.to_owned(),
-                run_id: existing.clone(),
-            });
-        }
-        session.foreground_run_id = Some(run_id.to_owned());
-        session.foreground_owner_generation = session.foreground_owner_generation.saturating_add(1);
-        Ok(())
-    }
-
     /// Atomically registers an adapter-visible supervised continuation and claims its foreground
     /// slot. The caller must either start an owned worker or invoke
     /// [`Self::rollback_supervised_session_run_registration`] before returning an error.
@@ -728,6 +697,124 @@ impl HttpSessionRunRegistry {
         );
         run.status = HttpRunStatus::Running;
         let snapshot = run.snapshot();
+        session.run_ids.push(run_id.to_owned());
+        session.foreground_run_id = Some(run_id.to_owned());
+        session.foreground_owner_generation = session.foreground_owner_generation.saturating_add(1);
+        state.runs.insert(run_id.to_owned(), run);
+        Ok(snapshot)
+    }
+
+    /// Registers a revision child run, or reopens only the exact adapter checkpoint left by a
+    /// durable `WaitingForInput` attempt.
+    ///
+    /// The production driver validates the durable PlanReview binding before calling the resume
+    /// branch.  This registry method only preserves the adapter's session/run ownership and does
+    /// not derive or alter any domain lifecycle fact.
+    pub(crate) fn register_or_resume_supervised_revision_run(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        permission_mode: HttpPermissionMode,
+        prompt_preview: &str,
+        resume_waiting_attempt: bool,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        let mut state = self.lock_state();
+        state.ensure_accepting_commands()?;
+        let durable_session_id = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            })?
+            .binding
+            .session_scope_id
+            .clone();
+        {
+            let session = state.sessions.get(session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                }
+            })?;
+            if let Some(existing) = session.foreground_run_id.as_ref() {
+                return Err(HttpRegistryError::SessionForegroundRunActive {
+                    session_id: session_id.to_owned(),
+                    run_id: existing.clone(),
+                });
+            }
+            if let Some(existing) = session.release_pending_run_id.as_ref() {
+                return Err(HttpRegistryError::SessionRunCleanupActive {
+                    session_id: session_id.to_owned(),
+                    run_id: existing.clone(),
+                });
+            }
+        }
+        if !state
+            .durable_session_mutations
+            .contains(&durable_session_id)
+        {
+            return Err(HttpRegistryError::DurableSessionMutationActive);
+        }
+        if state.runs.contains_key(run_id) {
+            if !resume_waiting_attempt {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "resume supervised revision run",
+                    run_id: run_id.to_owned(),
+                    message: "revision run does not have an exact durable waiting attempt"
+                        .to_owned(),
+                });
+            }
+            let snapshot =
+                {
+                    let run = state.runs.get_mut(run_id).ok_or_else(|| {
+                        HttpRegistryError::RunNotFound {
+                            run_id: run_id.to_owned(),
+                        }
+                    })?;
+                    if run.session_id != session_id {
+                        return Err(HttpRegistryError::CommandSessionMismatch {
+                            command_session_id: session_id.to_owned(),
+                            run_id: run_id.to_owned(),
+                            run_session_id: run.session_id.clone(),
+                        });
+                    }
+                    if run.status != HttpRunStatus::Paused {
+                        return Err(HttpRegistryError::DriverRejected {
+                            operation: "resume supervised revision run",
+                            run_id: run_id.to_owned(),
+                            message: "revision run is not durably paused for input".to_owned(),
+                        });
+                    }
+                    run.status = HttpRunStatus::Running;
+                    run.previous_status = None;
+                    run.cancel_operation = None;
+                    run.pause_operation = None;
+                    run.advance_stream_sequence();
+                    run.snapshot()
+                };
+            let session = state.sessions.get_mut(session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                }
+            })?;
+            session.foreground_run_id = Some(run_id.to_owned());
+            session.foreground_owner_generation =
+                session.foreground_owner_generation.saturating_add(1);
+            return Ok(snapshot);
+        }
+        let mut run = HttpRunState::new(
+            run_id.to_owned(),
+            session_id.to_owned(),
+            permission_mode,
+            None,
+            safe_persistence_text(prompt_preview),
+        );
+        run.status = HttpRunStatus::Running;
+        let snapshot = run.snapshot();
+        let session = state.sessions.get_mut(session_id).ok_or_else(|| {
+            HttpRegistryError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            }
+        })?;
         session.run_ids.push(run_id.to_owned());
         session.foreground_run_id = Some(run_id.to_owned());
         session.foreground_owner_generation = session.foreground_owner_generation.saturating_add(1);
@@ -2147,6 +2234,82 @@ impl HttpSessionRunRegistry {
             return Ok(snapshot);
         }
         state.transition_run_terminal(run_id, outcome)
+    }
+
+    /// Records a `WaitingForInput` checkpoint for a supervised PlanReview revision.
+    ///
+    /// The caller has already verified the durable attempt and must only use this for the
+    /// live-only suspension event.  Generic runs retain their ordinary immutable terminal rules.
+    pub(crate) fn record_supervised_revision_waiting(
+        &self,
+        run_id: &str,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        let mut state = self.lock_state();
+        let run = state
+            .runs
+            .get(run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        if run.status != HttpRunStatus::Running {
+            return Err(HttpRegistryError::DriverRejected {
+                operation: "record supervised revision waiting",
+                run_id: run_id.to_owned(),
+                message: "revision run is not running".to_owned(),
+            });
+        }
+        state.transition_run_terminal(run_id, HttpRunTerminalOutcome::Paused)
+    }
+
+    /// Replaces the adapter-only resumable pause with the exact durable revision terminal after
+    /// its stream has been reconciled.  No generic run may use this transition.
+    pub(crate) fn record_supervised_revision_terminal_with_reconciliation<F>(
+        &self,
+        run_id: &str,
+        outcome: HttpRunTerminalOutcome,
+        reconcile: F,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let mut state = self.lock_state();
+        let requested = outcome.status();
+        let (current, snapshot, should_reconcile) = {
+            let run = state
+                .runs
+                .get(run_id)
+                .ok_or_else(|| HttpRegistryError::RunNotFound {
+                    run_id: run_id.to_owned(),
+                })?;
+            if run.status.is_terminal()
+                && run.status != requested
+                && run.status != HttpRunStatus::Paused
+            {
+                return Err(HttpRegistryError::RunTerminalConflict {
+                    run_id: run_id.to_owned(),
+                    current: run.status,
+                    requested: outcome,
+                });
+            }
+            (
+                run.status,
+                run.snapshot(),
+                run.terminal_tasks
+                    .values()
+                    .all(|task| task.status.is_terminal()),
+            )
+        };
+        if should_reconcile {
+            reconcile().map_err(|message| HttpRegistryError::DriverRejected {
+                operation: "reconcile supervised revision terminal stream",
+                run_id: run_id.to_owned(),
+                message,
+            })?;
+        }
+        if current.is_terminal() && current != HttpRunStatus::Paused {
+            return Ok(snapshot);
+        }
+        state.transition_supervised_revision_terminal(run_id, outcome)
     }
 
     /// Applies one generation-aware terminal lifecycle update to a run snapshot.
@@ -5388,6 +5551,23 @@ impl HttpRegistryState {
         run_id: &str,
         outcome: HttpRunTerminalOutcome,
     ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        self.transition_terminal(run_id, outcome, false)
+    }
+
+    fn transition_supervised_revision_terminal(
+        &mut self,
+        run_id: &str,
+        outcome: HttpRunTerminalOutcome,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        self.transition_terminal(run_id, outcome, true)
+    }
+
+    fn transition_terminal(
+        &mut self,
+        run_id: &str,
+        outcome: HttpRunTerminalOutcome,
+        allow_resumable_pause_replacement: bool,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
         let requested = outcome.status();
         let session_id = {
             let run = self
@@ -5396,7 +5576,9 @@ impl HttpRegistryState {
                 .ok_or_else(|| HttpRegistryError::RunNotFound {
                     run_id: run_id.to_owned(),
                 })?;
-            if run.status.is_terminal() {
+            if run.status.is_terminal()
+                && !(allow_resumable_pause_replacement && run.status == HttpRunStatus::Paused)
+            {
                 if run.status == requested {
                     return Ok(run.snapshot());
                 }

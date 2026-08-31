@@ -2002,6 +2002,7 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
         plan_id: sigil_kernel::PlanId::new("plan_draft_pending")?,
         source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
         source_turn: source.clone(),
+        explicit_objective: None,
         route_decision_id: Some(decision_id.clone()),
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: None,

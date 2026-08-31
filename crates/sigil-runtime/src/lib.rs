@@ -280,8 +280,8 @@ pub use plan_review_coordinator::{
     RejectPlanRequest, RejectedPlan, TASK_ADMISSION_MIN_DISK_SPACE_BYTES,
     TaskAdmissionProbeContext, admit_adopted_task, application_plan_decision,
     application_plan_review_research_input_decision, application_plan_revision_guidance_decision,
-    application_record_revision_failure, build_task_admission_probes, now_ms,
-    plan_handoff_workspace_snapshot_id, plan_run_rejection_message,
+    build_task_admission_probes, now_ms, plan_handoff_workspace_snapshot_id,
+    plan_run_rejection_message,
 };
 pub use plugins::{
     ManagedPluginHookExecutionPortV1, ManagedPluginHookExecutionRequestV1, PluginDiscoveryReport,

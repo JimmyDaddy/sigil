@@ -454,6 +454,82 @@ fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::R
 }
 
 #[test]
+fn process_app_action_forwards_private_plan_review_recovery_to_the_worker() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let request = sigil_kernel::PublicUserInputRequestV1 {
+        identity: sigil_kernel::UserInputIdentityV1 {
+            session_scope_id: sigil_kernel::SessionScopeId::new("launcher-recovery-session")?,
+            root_logical_run_id: sigil_kernel::LogicalRunId::new(
+                "plan-review-launcher-recovery-run",
+            )?,
+            source_thread_id: sigil_kernel::AgentThreadId::new("main")?,
+            request_id: sigil_kernel::UserInputRequestId::new("launcher-recovery-request")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        request_hash: format!("sha256:{}", "b".repeat(64)),
+        source: sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+            plan_review_id: sigil_kernel::PlanReviewId::new("launcher-recovery-review")?,
+            attempt_id: sigil_kernel::PlanReviewAttemptId::new("launcher-recovery-attempt")?,
+        },
+        purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+        prompt: "Choose the managed research scope".to_owned(),
+        questions: vec![sigil_kernel::UserInputQuestionV1 {
+            id: "scope".to_owned(),
+            header: "Scope".to_owned(),
+            question: "Which module should be migrated first?".to_owned(),
+            description: None,
+            required: true,
+            field: sigil_kernel::UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 64,
+            },
+        }],
+        allowed_actions: vec![sigil_kernel::UserInputActionV1::CancelRun],
+        requested_at_unix_ms: 10,
+        status: sigil_kernel::UserInputStatusV1::Requested,
+        answer_receipt: None,
+        resolution: None,
+    };
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: request.identity.clone(),
+        request_hash: request.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("launcher-recovery-command")?,
+        decision: sigil_kernel::UserInputDecisionV1::RunCancelled,
+    };
+    app.set_pending_user_input_recovery(request.clone(), command.clone());
+    let action = app
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))?
+        .expect("the recovered form must expose its existing Resume action");
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+        ready: true,
+    });
+
+    process_app_action(&mut app, &mut worker, action)?;
+
+    let sent = command_rx.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(
+        sent,
+        WorkerCommand::ResumeRecoveredPlanReviewResearch {
+            command_id,
+            request_id,
+            generation: 1,
+            expected_request_hash,
+        } if command_id == command.command_id.as_str()
+            && request_id == request.identity.request_id.as_str()
+            && expected_request_hash == request.request_hash
+    ));
+    Ok(())
+}
+
+#[test]
 fn process_app_action_queues_worker_command_until_runtime_is_ready() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let _ = app.drain_pending_worker_commands();

@@ -48,7 +48,9 @@ mod session;
 mod verification_checkpoint;
 
 #[cfg(test)]
-pub(in crate::runner) use run_plan::validate_task_pause_request;
+pub(in crate::runner) use run_plan::{
+    preserve_revision_result_after_audit, validate_task_pause_request,
+};
 #[cfg(test)]
 pub(in crate::runner) use session::read_tool_artifact_page_for_display;
 
@@ -129,6 +131,12 @@ pub(in crate::runner) enum RunPlanCommand {
         generation: u32,
         expected_request_hash: String,
         decision: sigil_kernel::UserInputDecisionV1,
+    },
+    ResumeRecoveredPlanReviewResearch {
+        command_id: String,
+        request_id: String,
+        generation: u32,
+        expected_request_hash: String,
     },
 }
 
@@ -437,6 +445,17 @@ pub(in crate::runner) fn classify_worker_command(
             generation,
             expected_request_hash,
             decision,
+        }),
+        WorkerCommand::ResumeRecoveredPlanReviewResearch {
+            command_id,
+            request_id,
+            generation,
+            expected_request_hash,
+        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ResumeRecoveredPlanReviewResearch {
+            command_id,
+            request_id,
+            generation,
+            expected_request_hash,
         }),
         WorkerCommand::InspectLocalSession {
             request_id,

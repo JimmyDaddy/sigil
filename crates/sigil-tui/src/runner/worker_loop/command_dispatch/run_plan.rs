@@ -6,27 +6,6 @@ use super::super::agent_runtime::{
 use super::*;
 use sigil_kernel::EventHandler;
 
-fn record_tui_revision_spawn_failure(
-    session: &mut sigil_kernel::Session,
-    request: &sigil_runtime::PlanReviewRunRequest,
-    reason: &str,
-) -> anyhow::Result<()> {
-    let (Some(base_plan_id), Some(base_plan_hash)) = (
-        request.base_plan_id.as_ref(),
-        request.base_plan_hash.as_ref(),
-    ) else {
-        anyhow::bail!("revision request is missing its base plan binding");
-    };
-    sigil_runtime::PlanReviewCoordinator::record_revision_failure(
-        session,
-        base_plan_id,
-        base_plan_hash,
-        reason,
-        current_unix_time_ms(),
-    )?;
-    Ok(())
-}
-
 pub(super) fn dispatch_run_plan_command<P>(
     context: WorkerCommandContext<'_, P>,
     command: RunPlanCommand,
@@ -56,8 +35,8 @@ where
     let plan_review_root_config = Arc::new(root_config.clone());
     let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
-    while let Some(command_result) = command_result.take() {
-        match command_result {
+    while let Some(current_command) = command_result.take() {
+        match current_command {
             RunPlanCommand::Submit {
                 prompt,
                 attachments,
@@ -318,6 +297,12 @@ where
                                 }
                                 Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
                                     RunTaskPayload::PlanReviewBlocked { reason, paused }
+                                }
+                                Ok(PlanReviewExecutionResult::Cancelled) => {
+                                    RunTaskPayload::PlanReviewCancelled
+                                }
+                                Ok(PlanReviewExecutionResult::Interrupted { reason }) => {
+                                    RunTaskPayload::PlanReviewInterrupted { reason }
                                 }
                                 Err(error) => RunTaskPayload::Chat {
                                     result: Err(error),
@@ -729,6 +714,12 @@ where
                                         Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
                                             RunTaskPayload::PlanReviewBlocked { reason, paused }
                                         }
+                                        Ok(PlanReviewExecutionResult::Cancelled) => {
+                                            RunTaskPayload::PlanReviewCancelled
+                                        }
+                                        Ok(PlanReviewExecutionResult::Interrupted { reason }) => {
+                                            RunTaskPayload::PlanReviewInterrupted { reason }
+                                        }
                                         Err(error) => RunTaskPayload::Chat {
                                             result: Err(error),
                                             plan_mode,
@@ -806,6 +797,13 @@ where
                                     agent_result_continuation_thread_ids: Vec::new(),
                                 }
                             }
+                            payload @ (RunTaskPayload::PlanReviewCancelled
+                            | RunTaskPayload::PlanReviewInterrupted { .. }) => {
+                                let _ = run_message_tx.send(WorkerMessage::Notice(format!(
+                                    "plan revision terminal is durable, but MCP elicitation audit delivery failed: {error}"
+                                )));
+                                payload
+                            }
                             RunTaskPayload::Task {
                                 task_id, queue_id, ..
                             } => RunTaskPayload::Task {
@@ -835,6 +833,7 @@ where
                     cancellation_owner,
                     cancellation_recorder,
                     cancellation_target: RunCancellationTarget::Run,
+                    revision_terminal_run_id: None,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });
@@ -978,6 +977,7 @@ where
                     cancellation_owner,
                     cancellation_recorder,
                     cancellation_target: RunCancellationTarget::Run,
+                    revision_terminal_run_id: None,
                     url_capability_registrar,
                     image_attachment_resolver,
                 });
@@ -1209,6 +1209,48 @@ where
                         "no active run to cancel".to_owned(),
                     ));
                 }
+            }
+            RunPlanCommand::ResumeRecoveredPlanReviewResearch {
+                command_id,
+                request_id,
+                generation,
+                expected_request_hash,
+            } => {
+                let recovered = super::super::recover_managed_plan_review_research_attention(state);
+                let recovered = match recovered {
+                    Ok(Some(command)) => command,
+                    Ok(None) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "accepted plan-review input is no longer recoverable; reload the session"
+                                .to_owned(),
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "accepted plan-review input recovery is unavailable: {error:#}"
+                        )));
+                        continue;
+                    }
+                };
+                if recovered.command_id.as_str() != command_id
+                    || recovered.identity.request_id.as_str() != request_id
+                    || recovered.identity.generation != generation
+                    || recovered.request_hash != expected_request_hash
+                {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "recovered plan-review input no longer matches the selected request"
+                            .to_owned(),
+                    ));
+                    continue;
+                }
+                command_result = Some(RunPlanCommand::SubmitUserInputDecision {
+                    command_id: Some(recovered.command_id.as_str().to_owned()),
+                    request_id: recovered.identity.request_id.as_str().to_owned(),
+                    generation: recovered.identity.generation,
+                    expected_request_hash: recovered.request_hash,
+                    decision: recovered.decision,
+                });
             }
             RunPlanCommand::SubmitUserInputDecision {
                 command_id,
@@ -1494,6 +1536,7 @@ where
                         cancellation_owner,
                         cancellation_recorder,
                         cancellation_target,
+                        revision_terminal_run_id: None,
                         url_capability_registrar,
                         image_attachment_resolver,
                     });
@@ -1561,6 +1604,10 @@ where
                     sigil_kernel::UserInputSourceV1::PlanRevision { .. }
                         | sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
                 ) {
+                    let managed_plan_review_child_resources = state
+                        .managed_plan_review_child_resources
+                        .as_ref()
+                        .map(Arc::clone);
                     let accepted = {
                         let Some(session) = state.session.current.as_mut() else {
                             let _ = message_tx.send(WorkerMessage::RunFailed(
@@ -1599,15 +1646,23 @@ where
                                 snapshot_id,
                                 current_unix_time_ms(),
                             )
+                            .map(|(receipt, request)| (receipt, request, None))
                         } else {
-                            sigil_runtime::PlanReviewCoordinator::accept_plan_review_research_input(
-                                session,
-                                command,
-                                current_unix_time_ms(),
-                            )
+                            match managed_plan_review_child_resources.as_ref() {
+                                Some(provisioner) => sigil_runtime::PlanReviewCoordinator::accept_plan_review_research_input_with_terminal_sequence(
+                                    session,
+                                    command,
+                                    current_unix_time_ms(),
+                                    None,
+                                    provisioner.as_ref(),
+                                ),
+                                None => Err(anyhow::anyhow!(
+                                    "current-schema plan-review research input requires the composed child resource bundle"
+                                )),
+                            }
                         }
                     };
-                    let (receipt, revision_request) = match accepted {
+                    let (receipt, revision_request, _terminal_outbox) = match accepted {
                         Ok(accepted) => accepted,
                         Err(error) => {
                             let _ = message_tx.send(WorkerMessage::RunFailed(format!(
@@ -1630,7 +1685,7 @@ where
                     let Some(run_request) = revision_request else {
                         continue;
                     };
-                    let Some(mut run_session) = state.session.current.take() else {
+                    let Some(run_session) = state.session.current.take() else {
                         let _ = message_tx.send(WorkerMessage::RunFailed(
                             "session state is unavailable for plan revision".to_owned(),
                         ));
@@ -1648,19 +1703,9 @@ where
                     let cancellation_recorder = match run_session.run_cancellation_recorder() {
                         Ok(recorder) => recorder,
                         Err(error) => {
-                            let recovery = record_tui_revision_spawn_failure(
-                                &mut run_session,
-                                &run_request,
-                                &format!("revision cancellation setup failed: {error}"),
-                            );
                             state.session.current = Some(run_session);
                             let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                "failed to create cancellation recorder for plan revision: {error}{}",
-                                recovery
-                                    .err()
-                                    .map_or_else(String::new, |recovery_error| format!(
-                                        "; recovery failed: {recovery_error:#}"
-                                    ))
+                                "failed to create cancellation recorder for plan revision: {error}"
                             )));
                             continue;
                         }
@@ -1675,20 +1720,8 @@ where
                     if let Err(error) = state
                         .acquire_route_execution_owner_for_scope(run_session.session_scope_id())
                     {
-                        let recovery = record_tui_revision_spawn_failure(
-                            &mut run_session,
-                            &run_request,
-                            &format!("revision route ownership failed: {error}"),
-                        );
                         state.session.current = Some(run_session);
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                            "{error}{}",
-                            recovery
-                                .err()
-                                .map_or_else(String::new, |recovery_error| format!(
-                                    "; recovery failed: {recovery_error:#}"
-                                ))
-                        )));
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error.to_string()));
                         continue;
                     }
                     let (approval_tx, approval_rx) = mpsc::channel();
@@ -1703,6 +1736,7 @@ where
                         .managed_plan_review_child_resources
                         .as_ref()
                         .map(Arc::clone);
+                    let revision_terminal_run_id = run_request.child_logical_run_id();
                     let handle = runtime.spawn(async move {
                         let _run_task_guard = run_task_guard;
                         let mut run_session = run_session;
@@ -1727,13 +1761,14 @@ where
                             managed_plan_review_child_resources,
                         )
                         .await;
-                        let result = match append_mcp_elicitation_audits(
-                            &mut run_session,
-                            &run_elicitation_audit_buffer,
-                        ) {
-                            Ok(()) => result,
-                            Err(error) => Err(error),
-                        };
+                        let result = preserve_revision_result_after_audit(
+                            result,
+                            append_mcp_elicitation_audits(
+                                &mut run_session,
+                                &run_elicitation_audit_buffer,
+                            ),
+                            &run_message_tx,
+                        );
                         let payload = match result {
                             Ok(PlanReviewExecutionResult::Finished(result)) => {
                                 RunTaskPayload::Chat {
@@ -1750,6 +1785,12 @@ where
                             }
                             Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
                                 RunTaskPayload::PlanReviewBlocked { reason, paused }
+                            }
+                            Ok(PlanReviewExecutionResult::Cancelled) => {
+                                RunTaskPayload::PlanReviewCancelled
+                            }
+                            Ok(PlanReviewExecutionResult::Interrupted { reason }) => {
+                                RunTaskPayload::PlanReviewInterrupted { reason }
                             }
                             Err(error) => RunTaskPayload::Chat {
                                 result: Err(error),
@@ -1775,6 +1816,7 @@ where
                         cancellation_owner,
                         cancellation_recorder,
                         cancellation_target: RunCancellationTarget::Run,
+                        revision_terminal_run_id: Some(revision_terminal_run_id),
                         url_capability_registrar,
                         image_attachment_resolver,
                     });
@@ -1900,6 +1942,22 @@ where
         }
     }
     control
+}
+
+/// Keeps the execution result authoritative when the post-run audit append fails. The audit is
+/// still attempted by the caller; this only prevents adapter delivery degradation from changing
+/// a separately durable revision result.
+pub(in crate::runner) fn preserve_revision_result_after_audit(
+    result: std::result::Result<PlanReviewExecutionResult, String>,
+    audit_result: std::result::Result<(), String>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) -> std::result::Result<PlanReviewExecutionResult, String> {
+    if let Err(error) = audit_result {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "revision audit delivery failed; durable execution state is unchanged: {error}"
+        )));
+    }
+    result
 }
 
 pub(in crate::runner) fn validate_task_pause_request(

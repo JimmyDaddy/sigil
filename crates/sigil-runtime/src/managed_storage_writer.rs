@@ -13,12 +13,13 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 
 use sigil_kernel::managed_storage::{
+    ManagedStorageDurableAdmissionBindingV1, ManagedStorageExistingNamespaceBindingV1,
     ManagedStorageNamespaceHandleV1, ManagedStorageServiceV1, ManagedStorageStorageReceiptV1,
 };
 use sigil_kernel::resource::{
     AdapterDurableStateClassV1, CanonicalHash, ManagedStorageCapabilityFamilyV1,
-    ManagedStorageSemanticOwnerV1, MemoryScopeClassV1, ResourceJournalScopeV1,
-    ResourceOwnerScopeV1,
+    ManagedStorageSemanticOwnerV1, MemoryScopeClassV1, OpaqueKernelCapabilityHandleId,
+    ResourceJournalScopeV1, ResourceOwnerScopeV1,
 };
 
 /// Closed semantic writer channel (row-aligned with the R71.6 mandatory adapter kinds).
@@ -160,6 +161,71 @@ impl ManagedStorageWriterLeaseV1 {
     /// Closed writer channel this lease was admitted for.
     pub fn channel(&self) -> StorageWriterChannelV1 {
         self.channel
+    }
+}
+
+/// The common, already-admitted physical SessionLog namespace behind the narrow read and
+/// mutation leases below. It intentionally remains private so neither caller can widen a
+/// recovered child session into a generic managed-storage capability.
+struct ManagedExistingSessionLogAdmissionV1 {
+    handle: ManagedStorageNamespaceHandleV1,
+    path: PathBuf,
+}
+
+/// Runtime's strictly structural view of the original schema-2 admission marker. It is only
+/// converted into kernel evidence for RA; parsing it locally never authorizes a continuation.
+#[derive(serde::Deserialize)]
+struct ExistingSessionLogAdmissionMarkerV2 {
+    schema_version: u32,
+    handle_id: String,
+    namespace_hash: CanonicalHash,
+    grant_hash: CanonicalHash,
+    admission_sequence: u64,
+    admission_record_hash: CanonicalHash,
+}
+
+impl ManagedExistingSessionLogAdmissionV1 {
+    fn session_log_path(&self) -> PathBuf {
+        self.path.join("records.jsonl")
+    }
+}
+
+/// Crate-private read lease for an already-existing SessionLog namespace.
+///
+/// Recovery needs the same one-shot authority admission and settlement accounting as a writer
+/// batch, but may only reopen bytes that were durably present before the admission. It never
+/// creates or repairs the namespace, record, lock, or admission marker.
+pub(crate) struct ManagedExistingSessionLogReadLeaseV1 {
+    admission: ManagedExistingSessionLogAdmissionV1,
+}
+
+impl std::fmt::Debug for ManagedExistingSessionLogReadLeaseV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedExistingSessionLogReadLeaseV1")
+            .field("session_log_path", &"<opaque>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ManagedExistingSessionLogReadLeaseV1 {
+    fn session_log_path(&self) -> PathBuf {
+        self.admission.session_log_path()
+    }
+}
+
+/// Crate-private mutation lease for a pre-existing SessionLog only. It carries one ordinary
+/// storage admission, but exposes no artifact lease, raw managed path, or creation primitive.
+pub(crate) struct ManagedExistingSessionLogMutationLeaseV1 {
+    admission: ManagedExistingSessionLogAdmissionV1,
+}
+
+impl std::fmt::Debug for ManagedExistingSessionLogMutationLeaseV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedExistingSessionLogMutationLeaseV1")
+            .field("session_log_path", &"<opaque>")
+            .finish_non_exhaustive()
     }
 }
 
@@ -331,6 +397,116 @@ impl ManagedStorageWriterAdapterV1 {
     ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
         let (semantic_owner, _, _) = channel.mapping();
         self.acquire_owned(channel, semantic_owner, key)
+    }
+
+    /// Admits an existing SessionLog namespace for recovery without initializing any filesystem
+    /// object. The deterministic key is controller-owned; callers receive only a narrow
+    /// crate-private read lease and must explicitly settle it.
+    ///
+    /// This keeps recovery on the normal authority admission journal without treating a missing
+    /// child log as a new session. It intentionally does not open artifact namespaces.
+    pub(crate) fn acquire_existing_session_log_for_recovery(
+        &self,
+        key: &str,
+    ) -> Result<ManagedExistingSessionLogReadLeaseV1, ManagedStorageWriterErrorV1> {
+        Ok(ManagedExistingSessionLogReadLeaseV1 {
+            admission: self.admit_existing_session_log(key)?,
+        })
+    }
+
+    /// Admits an already-published SessionLog for one controller-owned mutation batch. The
+    /// returned lease intentionally has no artifact capability and may only mutate the original
+    /// JSONL stream through [`Self::with_existing_session_log_mutation`].
+    pub(crate) fn acquire_existing_session_log_for_mutation(
+        &self,
+        key: &str,
+    ) -> Result<ManagedExistingSessionLogMutationLeaseV1, ManagedStorageWriterErrorV1> {
+        Ok(ManagedExistingSessionLogMutationLeaseV1 {
+            admission: self.admit_existing_session_log(key)?,
+        })
+    }
+
+    /// Performs the common pre-admission physical checks and authority admission for both narrow
+    /// existing-only SessionLog capabilities. No caller may get a read or mutation wrapper until
+    /// all original namespace objects are present and private.
+    fn admit_existing_session_log(
+        &self,
+        key: &str,
+    ) -> Result<ManagedExistingSessionLogAdmissionV1, ManagedStorageWriterErrorV1> {
+        let channel = StorageWriterChannelV1::SessionLog;
+        let (semantic_owner, capability_family, leaf) = channel.mapping();
+        let path = self.managed_named_leaf_path(channel, key)?;
+        ensure_existing_private_recovery_directory(&path)?;
+        let record_file = path.join("records.jsonl");
+        ensure_existing_private_recovery_file(&record_file, "record")?;
+        ensure_existing_nonempty_session_log(&record_file)?;
+        ensure_existing_private_recovery_file(
+            &existing_session_writer_lock_path(&record_file)?,
+            "session writer lock",
+        )?;
+        ensure_existing_private_recovery_file(&path.join(".authority-storage.lock"), "lock")?;
+        let original = self.existing_session_log_marker_binding(&path)?;
+
+        let capability = match &self.storage_issuer {
+            Some(broker) => {
+                let proof = broker
+                    .seal_storage_namespace_proof(capability_family, writer_namespace_hash(leaf));
+                broker
+                    .issue_storage_namespace_capability(proof)
+                    .map_err(|error| {
+                        ManagedStorageWriterErrorV1::AdmissionFailed(format!("{error:?}"))
+                    })?
+            }
+            None => {
+                sigil_kernel::managed_storage::ValidatedStorageAdmissionCapabilityV1::startup_probe(
+                )
+            }
+        };
+        let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
+            semantic_owner,
+            capability_family,
+            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+            source:
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash: self.cutover_manifest_hash,
+                    application_generation: 1,
+                },
+            owner_scope: ResourceOwnerScopeV1::Application,
+            journal_scope: ResourceJournalScopeV1::Application,
+        };
+        let handle = self
+            .service
+            .admit_existing_namespace(request, capability, original)
+            .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        Ok(ManagedExistingSessionLogAdmissionV1 { handle, path })
+    }
+
+    fn existing_session_log_marker_binding(
+        &self,
+        namespace: &Path,
+    ) -> Result<ManagedStorageExistingNamespaceBindingV1, ManagedStorageWriterErrorV1> {
+        let marker_path = namespace.join("authority-admission.json");
+        ensure_existing_private_recovery_file(&marker_path, "admission marker")?;
+        let marker: ExistingSessionLogAdmissionMarkerV2 =
+            serde_json::from_slice(&read_no_follow_file(&marker_path)?).map_err(|_| {
+                ManagedStorageWriterErrorV1::AdmissionFailed(
+                    "managed existing session-log marker is not current schema-2".to_owned(),
+                )
+            })?;
+        if marker.schema_version != 2 || marker.handle_id.is_empty() {
+            return Err(ManagedStorageWriterErrorV1::AdmissionFailed(
+                "managed existing session-log marker is not current schema-2".to_owned(),
+            ));
+        }
+        Ok(ManagedStorageExistingNamespaceBindingV1 {
+            original_handle_id: OpaqueKernelCapabilityHandleId::new(marker.handle_id),
+            original_namespace_hash: marker.namespace_hash,
+            original_admission: ManagedStorageDurableAdmissionBindingV1 {
+                grant_hash: marker.grant_hash,
+                admission_sequence: marker.admission_sequence,
+                admission_record_hash: marker.admission_record_hash,
+            },
+        })
     }
 
     /// Admit + prepare one NAMED durable-memory namespace for the exact scope class. The two
@@ -669,6 +845,81 @@ impl ManagedStorageWriterAdapterV1 {
         Ok(bytes)
     }
 
+    /// Reads the already-existing child SessionLog bound to a recovery-only admission.
+    pub(crate) fn read_existing_session_log_bytes(
+        &self,
+        lease: &ManagedExistingSessionLogReadLeaseV1,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ManagedStorageWriterErrorV1> {
+        let record_file = lease.session_log_path();
+        ensure_existing_private_recovery_file(&record_file, "record")?;
+        let metadata = std::fs::symlink_metadata(&record_file)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if metadata.len() > max_bytes as u64 {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "managed recovery record object exceeds {max_bytes} bytes"
+            )));
+        }
+        let bytes = read_no_follow_file(&record_file)?;
+        if bytes.len() > max_bytes {
+            return Err(ManagedStorageWriterErrorV1::Io(format!(
+                "managed recovery record object exceeds {max_bytes} bytes"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// Runs one existing-only child mutation while holding the same physical lock the authority
+    /// uses for frontier proof and settlement. Callers must keep the SessionLog and any Session
+    /// inside this critical section and return only the decision result, so authority
+    /// reconciliation cannot settle between durable-current validation and the child append.
+    pub(crate) fn with_existing_session_log_mutation<T, E>(
+        &self,
+        lease: &ManagedExistingSessionLogMutationLeaseV1,
+        operation: impl FnOnce(&sigil_kernel::JsonlSessionStore) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ManagedStorageWriterErrorV1>,
+    {
+        let _namespace_lock =
+            open_existing_namespace_lock(&lease.admission.path).map_err(E::from)?;
+        self.service
+            .validate_namespace_write(&lease.admission.handle)
+            .map_err(|error| {
+                E::from(ManagedStorageWriterErrorV1::LeaseRejected(
+                    error.to_string(),
+                ))
+            })?;
+        let store = self
+            .open_existing_session_store_while_locked(lease)
+            .map_err(E::from)?;
+        operation(&store)
+    }
+
+    /// Reopens the exact original SessionLog under a mutation-only existing admission while its
+    /// caller already holds the matching physical namespace lock. The kernel store is itself
+    /// require-existing: it may reconcile a legitimate interrupted tail, but cannot create a
+    /// missing record or writer sidecar and cannot turn an empty recovered stream into a new
+    /// child session.
+    fn open_existing_session_store_while_locked(
+        &self,
+        lease: &ManagedExistingSessionLogMutationLeaseV1,
+    ) -> Result<sigil_kernel::JsonlSessionStore, ManagedStorageWriterErrorV1> {
+        ensure_existing_private_recovery_directory(&lease.admission.path)?;
+        ensure_existing_private_recovery_file(&lease.admission.session_log_path(), "record")?;
+        ensure_existing_nonempty_session_log(&lease.admission.session_log_path())?;
+        ensure_existing_private_recovery_file(
+            &existing_session_writer_lock_path(&lease.admission.session_log_path())?,
+            "session writer lock",
+        )?;
+        ensure_existing_private_recovery_file(
+            &lease.admission.path.join(".authority-storage.lock"),
+            "lock",
+        )?;
+        sigil_kernel::JsonlSessionStore::open_existing(lease.admission.session_log_path())
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))
+    }
+
     /// Replaces the owner-controlled record object atomically. This is used only by semantic
     /// adapters whose durable state is rebuilt from one bounded canonical snapshot; the caller
     /// still holds the admitted namespace for the whole replacement.
@@ -709,6 +960,60 @@ impl ManagedStorageWriterAdapterV1 {
                 "writer-batch-complete".to_owned(),
             )
             .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
+    }
+
+    /// Settles an existing-only SessionLog recovery admission without creating or repairing its
+    /// lock or record object.
+    pub(crate) fn finalize_existing_session_log_recovery(
+        &self,
+        lease: ManagedExistingSessionLogReadLeaseV1,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
+        self.finalize_existing_session_log_admission(
+            lease.admission,
+            "writer-existing-session-log-recovery-complete",
+        )
+    }
+
+    /// Settles an existing-only mutation admission from the post-append physical frontier.
+    pub(crate) fn finalize_existing_session_log_mutation(
+        &self,
+        lease: ManagedExistingSessionLogMutationLeaseV1,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
+        self.finalize_existing_session_log_admission(
+            lease.admission,
+            "writer-existing-session-log-mutation-complete",
+        )
+    }
+
+    fn finalize_existing_session_log_admission(
+        &self,
+        admission: ManagedExistingSessionLogAdmissionV1,
+        completion_reason: &str,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
+        let (byte_length, record_count, content_hash) =
+            self.existing_session_log_recovery_frontier(&admission)?;
+        self.service
+            .finalize_namespace_with_physical_frontier(
+                admission.handle,
+                byte_length,
+                record_count,
+                content_hash,
+                completion_reason.to_owned(),
+            )
+            .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
+    }
+
+    fn existing_session_log_recovery_frontier(
+        &self,
+        admission: &ManagedExistingSessionLogAdmissionV1,
+    ) -> Result<(u64, u64, CanonicalHash), ManagedStorageWriterErrorV1> {
+        let _namespace_lock = open_existing_namespace_lock(&admission.path)?;
+        let record_file = admission.session_log_path();
+        ensure_existing_private_recovery_file(&record_file, "record")?;
+        let bytes = read_no_follow_file(&record_file)?;
+        let record_count =
+            managed_physical_record_count(StorageWriterChannelV1::SessionLog, &bytes)?;
+        Ok((bytes.len() as u64, record_count, content_hash(&bytes)))
     }
 
     /// Internal artifact-layer liveness check. Artifact physical operations must keep the
@@ -821,6 +1126,113 @@ fn open_namespace_lock(directory: &Path) -> Result<std::fs::File, ManagedStorage
     file.lock_exclusive()
         .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
     Ok(file)
+}
+
+/// Opens an already-durable recovery lock without creating it or repairing its permissions.
+/// Recovery uses the lock only to observe a stable frontier for its one-shot settlement.
+fn open_existing_namespace_lock(
+    directory: &Path,
+) -> Result<std::fs::File, ManagedStorageWriterErrorV1> {
+    let path = directory.join(".authority-storage.lock");
+    ensure_existing_private_recovery_file(&path, "lock")?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        options.access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE);
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    ensure_existing_private_recovery_file(&path, "lock")?;
+    file.lock_exclusive()
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    Ok(file)
+}
+
+fn ensure_existing_private_recovery_directory(
+    path: &Path,
+) -> Result<(), ManagedStorageWriterErrorV1> {
+    reject_existing_reparse_components(path)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ManagedStorageWriterErrorV1::Io("managed recovery namespace is missing".to_owned())
+        } else {
+            ManagedStorageWriterErrorV1::Io(error.to_string())
+        }
+    })?;
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
+        return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
+    }
+    let is_private = sigil_kernel::private_path_permissions_are_restricted(path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    if !is_private {
+        return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
+    }
+    Ok(())
+}
+
+fn ensure_existing_private_recovery_file(
+    path: &Path,
+    object: &str,
+) -> Result<(), ManagedStorageWriterErrorV1> {
+    reject_existing_reparse_components(path)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ManagedStorageWriterErrorV1::Io(format!("managed recovery {object} is missing"))
+        } else {
+            ManagedStorageWriterErrorV1::Io(error.to_string())
+        }
+    })?;
+    if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
+        return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
+    }
+    let is_private = sigil_kernel::private_path_permissions_are_restricted(path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    if !is_private {
+        return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
+    }
+    Ok(())
+}
+
+/// Returns the kernel-owned sidecar name for an already-published SessionLog. This adapter uses
+/// it only as an existing-object precondition; the kernel remains the sole implementation that
+/// opens, locks, and writes the sidecar.
+fn existing_session_writer_lock_path(
+    record_file: &Path,
+) -> Result<PathBuf, ManagedStorageWriterErrorV1> {
+    let name = record_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            ManagedStorageWriterErrorV1::Io(
+                "managed existing session-log record has no UTF-8 filename".to_owned(),
+            )
+        })?;
+    Ok(record_file.with_file_name(format!("{name}.writer-lock")))
+}
+
+fn ensure_existing_nonempty_session_log(path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    if metadata.len() == 0 {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed existing session-log record is empty and must not be reseeded".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn is_safe_physical_metadata(metadata: &std::fs::Metadata) -> bool {

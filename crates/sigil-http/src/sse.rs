@@ -1241,6 +1241,50 @@ impl HttpLiveEventBus {
         self.publish_run_event_with_policy_locked(event, Some(approval_request), false, false)
     }
 
+    /// Gives a durable domain commit the next sequence while holding the same publication lock
+    /// that will publish its exact event.
+    ///
+    /// This is deliberately narrower than a general reservation API: a failed commit publishes
+    /// nothing and consumes no sequence, while a successful commit cannot race another producer
+    /// into the same sequence before the canonical event reaches the journal.
+    pub(crate) fn commit_and_publish_next_run_event<T, F>(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        commit: F,
+    ) -> Result<T, HttpEventPublishError>
+    where
+        F: FnOnce(u64) -> Result<(T, PublicRunEvent), HttpEventPublishError>,
+    {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
+        let latest = self
+            .latest_run_sequence(session_id, run_id)
+            .map_err(|error| HttpEventPublishError::Journal {
+                message: error.to_string(),
+            })?
+            .unwrap_or(0);
+        let sequence = latest
+            .checked_add(1)
+            .ok_or_else(|| HttpEventPublishError::Journal {
+                message: "http event sequence exhausted".to_owned(),
+            })?;
+        let (value, event) = commit(sequence)?;
+        if event.session_id != session_id || event.run_id != run_id || event.sequence != sequence {
+            return Err(HttpEventPublishError::Journal {
+                message:
+                    "durable commit returned a public event outside its allocated HTTP sequence"
+                        .to_owned(),
+            });
+        }
+        self.publish_run_event_with_policy_locked(event, None, false, false)?;
+        Ok(value)
+    }
+
     fn publish_next_run_event_with_policy(
         &self,
         mut event: PublicRunEvent,
@@ -1295,6 +1339,30 @@ impl HttpLiveEventBus {
                 session_id: session_id.to_owned(),
                 run_id: run_id.to_owned(),
             });
+        let _ = self.sender.send(HttpLiveBusMessage::StreamClosed {
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+        });
+        Ok(())
+    }
+
+    /// Ends the current live SSE delivery for a resumable run without sealing its durable
+    /// protocol stream.
+    ///
+    /// A plan-review research question suspends one child logical run.  Its next answer resumes
+    /// that exact run and must retain the journal sequence, so this is deliberately not
+    /// [`Self::close_run_stream`].
+    pub(crate) fn close_live_run_delivery(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<(), HttpEventPublishError> {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
         let _ = self.sender.send(HttpLiveBusMessage::StreamClosed {
             session_id: session_id.to_owned(),
             run_id: run_id.to_owned(),

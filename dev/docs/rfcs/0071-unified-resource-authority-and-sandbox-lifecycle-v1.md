@@ -6902,6 +6902,28 @@ Initiated或ProcessSpawned recovery时RA不能自行判断进程已死。termina
 
 kernel consumer contract只暴露`ManagedStorageNamespaceHandleV1`，不会反向依赖authority token。`AuthorityStorageAdmissionTokenV1`只存在authority service private handle table；factory返回的authority-owned `ManagedStorageServiceV1::admit_namespace`按值消费kernel签发的`ValidatedStorageAdmissionCapabilityV1`，由注入的kernel verifier取得bounded source view并先写完整`StorageNamespaceAdmitted` grant。RA再登记private table entry、提交authenticated realization evidence，经kernel `StorageCapabilityActivationValidatorV1 -> KernelCapabilityIssuerV1`构造opaque handle；若broker issuance失败，journal/table保留reconcilable revoked grant，不能把未签handle返回consumer。这里不存在第二个runtime/RA-local storage issuer。handle不实现`Clone/Serialize/Deserialize`，semantic writer无法构造或把session handle改成cache/artifact handle；每个operation都先经kernel verifier得到bounded handle/key view，再与RA table的semantic owner、namespace/capability family、owner scope、retention/quota、authority generation与grant hash逐项匹配。owner shutdown调用consumer port的`finalize_namespace(handle, reason)`，authority service先suspend handle、等待primitive/blob/database/semantic-lease holder归零，再移除table entry并按值finalize storage grant；host crash由journal重建holder/handle suspension状态。
 
+本批 PlanReview `research/0` 的 Waiting 输入恢复查询与已请求输入接受，只允许通过单独的
+`admit_existing_namespace` continuation port 重开既有 current-schema SessionLog；这不是对其他
+normal provision/acquire 生命周期的泛化替换。kernel binding 是可反序列化的 marker
+locator/evidence，不是 capability；RA 才能读取
+authenticated journal，确认同一 journal instance/authority generation 下原 `StorageNamespaceAdmitted`
+的 exact record hash/sequence/handle/namespace、匹配 current owner/family/purpose/owner-scope/
+journal-scope 的 grant，以及已结算 evidence。RA 还必须在 authority-owned root 中找到唯一未改写的
+schema-2 marker。成功时消费一枚新 broker claim、append 带 `continuation_from` 的新 admission，
+新 handle/physical frontier/terminal 仍是自己的 one-shot lifecycle，而 physical resolver 只按
+durable reference 读取原 marker；绝不重写、迁移或重签旧 marker。V1、缺失/非 terminal history、
+duplicate marker、跨 owner/root/epoch 或 grant compatibility drift 一律 fail closed，普通 admission
+resolver 也不得把 continuation binding 当作普通当前 marker。
+续用准入、真实子日志写入及 physical frontier 结算共用原 namespace 的 existing-only 物理锁；
+锁内重验唯一原目录与 marker，不创建缺失锁或修权限。写入前还须核对当前磁盘 journal 与本实例
+投影完全一致且该 continuation 仍未结算；另一实例已推进或结算时，旧实例在领域写入前拒绝。
+runtime 将 kernel Session 的读取/追加限制在该锁内 callback，只返回决定结果；释放锁后再显式
+finalize，由 RA 重新持锁证明 frontier，不能在持锁 callback 内递归结算或向外返回可写 Session。
+`continuation_from` 进入 `StorageNamespaceAdmitted` 的完整 payload hash；由于 resource journal 的
+canonical payload encoding 覆盖该字段，旧 journal 的同名 event 不能靠 `None` default 维持旧 hash。
+本批仅 fresh managed storage journal 可使用此格式；旧 journal 以 current-schema mismatch/corruption
+拒绝，不作 double-read、hash 重算、迁移、marker 补写或用户 state 打开测试。
+
 tool-call storage source共同绑定exact ToolPermissionDecision、permission continuity、logical tool start与journal scope，再通过closed`ToolStorageAdmissionBindingV1`区分：process output capture的ArtifactStaging/Store必须是`Execution { physical_attempt, draft, resource_plan }`；RFC-0002 mutation snapshot的WorkspaceMutationState/ArtifactStaging/Store必须是`InProcessStorage { storage_operation_attempt, storage_plan, requirement_set, operation }`且共享exact mutation bundle；remember/forget等其他无process storage tool也用InProcessStorage并按matrix限制owner。execution capture与mutation snapshot、两种binding variant、bundle内owner互换均拒绝。eager extension使用exact ExtensionDecision、extension admission/resource plan/durable scope/start event；support bundle、image/attachment与其他非tool writer使用已durable prepared的`SemanticTransaction` source；application state/cache绑定application cutover generation。kernel storage-source validator在admit首次resource-journal mutation前逐hash重验source仍current并签sealed proof，再由capability broker签handle；cancelled/stale allow、logical start未durable或任一draft/plan/start/config/schema/authority generation漂移都不materialize namespace。source drift或后续semantic drift立即suspend并revoke既有handle，不能复用旧entry。
 
 `ManagedStoragePhysicalBindingV1`冻结“新建还是复用”而不是让storage adapter猜目录。普通RuntimeState/Cache namespace可使用`AllocateManagedGeneration`；execution capture的ArtifactStaging必须使用`LinkExecutionLease`，其manifest grant/resource ref/binding/source frontier与`ApprovedExecutionAdmissionV1`逐hash一致，authority只追加holder/link fact，绝不再次`GenerationReserved`或创建第二个staging generation。shared ArtifactStore/RuntimeState handle使用`LinkSharedGeneration`，source journal先durable holder mutation，再向consumer journal写cross-journal link；binding/frontier drift失败。finalize storage holder只减本holder，不能提前cleanup仍被execution/shared lease持有的generation。

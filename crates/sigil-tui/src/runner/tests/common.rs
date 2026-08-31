@@ -165,7 +165,11 @@ pub(super) struct TestWorker {
     handle: Option<thread::JoinHandle<()>>,
     managed_storage_writer:
         Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
-    _authority_root: tempfile::TempDir,
+    authority_composition:
+        Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+    // The first worker that creates a test composition owns this directory. A restarted worker
+    // deliberately borrows that same composition, so it must not remove its authority root.
+    _authority_root: Option<tempfile::TempDir>,
 }
 
 impl TestWorker {
@@ -213,7 +217,40 @@ impl TestWorker {
         }
     }
 
-    pub(super) fn shutdown(mut self) -> Result<()> {
+    /// Waits for one test-stage message while retaining intervening worker output in a timeout
+    /// diagnostic. This prevents recovery tests from hiding a rejected private command behind a
+    /// generic channel timeout.
+    pub(super) fn recv_until_with_timeout_diagnostic<F>(
+        &self,
+        stage: &str,
+        timeout: Duration,
+        predicate: F,
+    ) -> Result<WorkerMessage>
+    where
+        F: Fn(&WorkerMessage) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        let mut observed = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!(
+                    "timed out waiting for {stage}; observed worker messages: {observed:?}"
+                ));
+            }
+            let message = self.message_rx.recv_timeout(remaining).map_err(|error| {
+                anyhow!(
+                    "timed out waiting for {stage}; observed worker messages: {observed:?}; receive error: {error}"
+                )
+            })?;
+            if predicate(&message) {
+                return Ok(message);
+            }
+            observed.push(format!("{message:?}"));
+        }
+    }
+
+    pub(super) fn stop(&mut self) -> Result<()> {
         let _ = self.command_tx.send(WorkerCommand::Shutdown);
         if let Some(handle) = self.handle.take() {
             handle
@@ -223,6 +260,10 @@ impl TestWorker {
         Ok(())
     }
 
+    pub(super) fn shutdown(mut self) -> Result<()> {
+        self.stop()
+    }
+
     pub(super) fn managed_storage_writer(
         &self,
     ) -> Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
@@ -230,7 +271,16 @@ impl TestWorker {
     }
 
     pub(super) fn authority_root_path(&self) -> &Path {
-        self._authority_root.path()
+        self._authority_root
+            .as_ref()
+            .expect("only the authority-composition owner exposes its temporary root")
+            .path()
+    }
+
+    pub(super) fn authority_composition(
+        &self,
+    ) -> Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1> {
+        Arc::clone(&self.authority_composition)
     }
 }
 
@@ -403,11 +453,62 @@ where
     P: Provider + Send + Sync + 'static,
 {
     install_qualified_rollout_manifest();
+    let (authority_composition, authority_root) = test_authority_composition(&workspace_root)?;
+    spawn_test_worker_with_role_provider_builder_and_authority(
+        root_config,
+        session_log_path,
+        agent,
+        workspace_root,
+        role_provider_builder,
+        authority_composition,
+        Some(authority_root),
+    )
+}
+
+/// Restarts a worker against an existing test authority composition. This is intentionally
+/// test-private: production composition remains a single boot-time authority construction.
+pub(super) fn spawn_test_worker_with_existing_authority_composition<P>(
+    root_config: RootConfig,
+    session_log_path: PathBuf,
+    agent: Agent<P>,
+    workspace_root: PathBuf,
+    authority_composition: Arc<
+        sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1,
+    >,
+) -> Result<TestWorker>
+where
+    P: Provider + Send + Sync + 'static,
+{
+    install_qualified_rollout_manifest();
+    spawn_test_worker_with_role_provider_builder_and_authority(
+        root_config,
+        session_log_path,
+        agent,
+        workspace_root,
+        Arc::new(RuntimeTaskRoleProviderBuilder),
+        authority_composition,
+        None,
+    )
+}
+
+fn spawn_test_worker_with_role_provider_builder_and_authority<P>(
+    root_config: RootConfig,
+    session_log_path: PathBuf,
+    agent: Agent<P>,
+    workspace_root: PathBuf,
+    role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    authority_composition: Arc<
+        sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1,
+    >,
+    authority_root: Option<tempfile::TempDir>,
+) -> Result<TestWorker>
+where
+    P: Provider + Send + Sync + 'static,
+{
     let (event_tx, event_rx) = mpsc::channel();
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
     let (message_tx, message_rx) = mpsc::channel();
-    let (authority_composition, authority_root) = test_authority_composition(&workspace_root)?;
     let options = sigil_runtime::build_run_options(
         &root_config,
         workspace_root.clone(),
@@ -426,6 +527,7 @@ where
         as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>);
     let managed_storage_writer = Arc::clone(&authority_composition.storage_writer);
     let retained_managed_storage_writer = Arc::clone(&managed_storage_writer);
+    let retained_authority_composition = Arc::clone(&authority_composition);
     let managed_artifact_store = super::super::ManagedTuiArtifactStoreLease::acquire(
         Arc::clone(&managed_storage_writer),
         &session_log_path,
@@ -479,6 +581,7 @@ where
         message_rx,
         handle: Some(handle),
         managed_storage_writer: retained_managed_storage_writer,
+        authority_composition: retained_authority_composition,
         _authority_root: authority_root,
     })
 }

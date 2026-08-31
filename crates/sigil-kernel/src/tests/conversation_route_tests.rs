@@ -50,6 +50,7 @@ fn attempt_entry(
         plan_id: plan_review_plan_id_for_attempt(plan_review_id, attempt_id),
         source: PlanReviewSource::AutomaticConversationRoute,
         source_turn: source_turn.clone(),
+        explicit_objective: None,
         route_decision_id: None,
         child_session_ref: plan_review_child_session_ref(plan_review_id, attempt_id),
         finalizer_session_ref: None,
@@ -63,6 +64,162 @@ fn attempt_entry(
         terminal_reason: None,
         recorded_at_ms: 42,
     }
+}
+
+#[test]
+fn explicit_plan_objective_is_required_without_upcasting_a_missing_durable_fact() -> Result<()> {
+    let session = Session::new("mock", "mock");
+    let turn = source_turn(&session, "explicit-source");
+    let review_id = plan_review_id_for_source(&turn);
+    let attempt_id = plan_review_attempt_id_for_review(&review_id);
+    let mut attempt = attempt_entry(
+        &review_id,
+        &attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &turn,
+    );
+    attempt.source = PlanReviewSource::ExplicitPlanCommand;
+    attempt.explicit_objective = Some("Keep the original migration boundary".to_owned());
+    PlanReviewProjection::default().validate_append(&attempt)?;
+    let encoded = serde_json::to_value(&attempt)?;
+    assert_eq!(
+        serde_json::from_value::<PlanReviewAttemptEntry>(encoded.clone())?,
+        attempt
+    );
+
+    let mut missing = encoded;
+    missing
+        .as_object_mut()
+        .expect("attempt object")
+        .remove("explicit_objective");
+    let missing = serde_json::from_value::<PlanReviewAttemptEntry>(missing)?;
+    assert!(missing.explicit_objective.is_none());
+    let mut blank = attempt.clone();
+    blank.explicit_objective = Some(" \n ".to_owned());
+    let mut automatic_with_explicit_text = attempt;
+    automatic_with_explicit_text.source = PlanReviewSource::AutomaticConversationRoute;
+    for invalid in [missing, blank, automatic_with_explicit_text] {
+        assert!(
+            PlanReviewProjection::default()
+                .validate_append(&invalid)
+                .is_err()
+        );
+        assert!(
+            PlanReviewProjection::from_entries(&[SessionLogEntry::Control(
+                crate::ControlEntry::PlanReviewAttempt(invalid)
+            ),])
+            .has_conflicts()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_plan_objective_cannot_drift_during_settlement_or_a_new_attempt() -> Result<()> {
+    let session = Session::new("mock", "mock");
+    let turn = source_turn(&session, "explicit-source");
+    let review_id = plan_review_id_for_source(&turn);
+    let attempt_id = plan_review_attempt_id_for_review(&review_id);
+    let mut started = attempt_entry(
+        &review_id,
+        &attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &turn,
+    );
+    started.source = PlanReviewSource::ExplicitPlanCommand;
+    started.explicit_objective = Some("Keep the original migration boundary".to_owned());
+    let mut entries = vec![SessionLogEntry::Control(
+        crate::ControlEntry::PlanReviewAttempt(started.clone()),
+    )];
+    let ready = PlanReviewAttemptEntry {
+        status: PlanReviewAttemptStatus::DraftReady,
+        recorded_at_ms: 43,
+        ..started.clone()
+    };
+    PlanReviewProjection::from_entries(&entries).validate_append(&ready)?;
+    let mut wrong_terminal = ready.clone();
+    wrong_terminal.explicit_objective = Some("Silently replace the original task".to_owned());
+    assert!(
+        PlanReviewProjection::from_entries(&entries)
+            .validate_append(&wrong_terminal)
+            .is_err()
+    );
+    let mut corrupted = entries.clone();
+    corrupted.push(SessionLogEntry::Control(
+        crate::ControlEntry::PlanReviewAttempt(wrong_terminal),
+    ));
+    assert!(PlanReviewProjection::from_entries(&corrupted).has_conflicts());
+
+    entries.push(SessionLogEntry::Control(
+        crate::ControlEntry::PlanReviewAttempt(ready),
+    ));
+    let next = PlanReviewAttemptEntry {
+        attempt_id: PlanReviewAttemptId::new("next-explicit-attempt")?,
+        plan_id: crate::PlanId::new("next-explicit-plan")?,
+        recorded_at_ms: 44,
+        ..started
+    };
+    PlanReviewProjection::from_entries(&entries).validate_append(&next)?;
+    let mut wrong_revision = next.clone();
+    wrong_revision.explicit_objective = Some("Different objective".to_owned());
+    let mut wrong_source = next;
+    wrong_source.source_turn.message_id = "different-source".to_owned();
+    for invalid in [wrong_revision, wrong_source] {
+        assert!(
+            PlanReviewProjection::from_entries(&entries)
+                .validate_append(&invalid)
+                .is_err()
+        );
+        let mut corrupted = entries.clone();
+        corrupted.push(SessionLogEntry::Control(
+            crate::ControlEntry::PlanReviewAttempt(invalid),
+        ));
+        assert!(PlanReviewProjection::from_entries(&corrupted).has_conflicts());
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_plan_objective_durable_append_rejects_unsafe_text_without_writing_it() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("explicit-objective.jsonl");
+    let store = crate::JsonlSessionStore::new(&path)?;
+    let mut session = Session::load_from_store("mock", "mock", store.clone())?;
+    session.append_user_message(crate::ModelMessage::user("Original safe input"))?;
+    let turn = source_turn(&session, "explicit-source");
+    let review_id = plan_review_id_for_source(&turn);
+    let attempt_id = plan_review_attempt_id_for_review(&review_id);
+    let mut attempt = attempt_entry(
+        &review_id,
+        &attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &turn,
+    );
+    attempt.source = PlanReviewSource::ExplicitPlanCommand;
+    let unsafe_objective = "Inspect https://example.com/private?token=private-plan-secret";
+    assert_ne!(
+        crate::safe_persistence_text(unsafe_objective),
+        unsafe_objective
+    );
+    attempt.explicit_objective = Some(unsafe_objective.to_owned());
+    let before = std::fs::read(&path)?;
+    assert!(
+        session
+            .append_control(crate::ControlEntry::PlanReviewAttempt(attempt.clone()))
+            .is_err()
+    );
+    assert!(
+        store
+            .append_session_entry_event(&SessionLogEntry::Control(
+                crate::ControlEntry::PlanReviewAttempt(attempt.clone()),
+            ))
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    attempt.explicit_objective = Some(crate::safe_persistence_text(unsafe_objective));
+    session.append_control(crate::ControlEntry::PlanReviewAttempt(attempt))?;
+    assert!(!String::from_utf8(std::fs::read(&path)?)?.contains("private-plan-secret"));
+    Ok(())
 }
 
 #[test]
@@ -623,8 +780,7 @@ fn reconcile_preserves_waiting_attempts_and_closes_abandoned_finalizers() -> Res
 }
 
 #[test]
-fn reconcile_recovers_finalizer_child_draft_and_switches_revision_lineage_atomically() -> Result<()>
-{
+fn reconcile_does_not_promote_child_draft_without_parent_revision_terminal_bundle() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let parent_path = temp.path().join("sessions/root.jsonl");
     let store = crate::JsonlSessionStore::new(&parent_path)?;
@@ -688,6 +844,7 @@ fn reconcile_recovers_finalizer_child_draft_and_switches_revision_lineage_atomic
             plan_id: revised_plan_id.clone(),
             source: PlanReviewSource::AutomaticConversationRoute,
             source_turn: turn,
+            explicit_objective: None,
             route_decision_id: None,
             child_session_ref: plan_review_child_session_ref(&review_id, &revision_attempt_id),
             finalizer_session_ref: Some(finalizer_ref.clone()),
@@ -720,17 +877,24 @@ fn reconcile_recovers_finalizer_child_draft_and_switches_revision_lineage_atomic
             .latest_attempt(&review_id)
             .expect("recovered revision")
             .status,
-        PlanReviewAttemptStatus::DraftReady
+        PlanReviewAttemptStatus::Interrupted
     );
     let plans = session.plan_artifact_projection();
-    assert_eq!(plans.plans.get(&revised_plan_id), Some(&revised_draft));
+    assert!(!plans.plans.contains_key(&revised_plan_id));
     assert_eq!(
         plans
             .latest_decision(&base_plan_id)
             .expect("recovered lineage decision")
             .decision,
-        crate::PlanDecision::RevisionSucceeded
+        crate::PlanDecision::RevisionFailed
     );
+    let outbox = crate::PublicEventOutboxProjectionV1::from_records(
+        &crate::JsonlSessionStore::read_event_records(&parent_path)?,
+    )?;
+    assert!(outbox.events_in_order().iter().any(|entry| matches!(
+        entry.event.event,
+        crate::PublicRunEventKind::RunInterrupted { .. }
+    )));
     Ok(())
 }
 

@@ -855,9 +855,91 @@ PublicEventDeliveryReceiptV1 {
 - Desktop continuity 必须识别 Paused/Blocked，不能把 Paused 映成 Cancelled；TUI 的
   application projection 在 AwaitingUserInput 后不再保持 active，待答问题仍保留。
 
-以上实施记录仅覆盖 root ConversationRun terminal bundle。PlanReview revision 的
-attempt/draft/decision 恢复和非终态 public event 的交付仍须分别满足本节的通用约束；
-不能据此认定这两条独立生命周期已经接入 root recorder 或完成 outbox 闭环。
+以上实施记录仅覆盖 root ConversationRun terminal bundle。
+
+PlanReview revision 的独立终态协议（2026-08-31）：
+
+- parent session 的既有 `PlanReviewAttempt` 是唯一领域 owner；不伪造
+  `ConversationRunStarted`，也不增设镜像 Started/Finalized 状态机。
+- 一个 revision 的 run identity 由既有 plan-review/attempt identity 确定。真正的
+  `Started` 绑定 revision request、ordinal、base plan/hash、source turn 和 child lineage。
+  guidance 已接受但同 base/hash 从未出现 attempt 时，adapter 登记失败不伪造终态；用户
+  仍可显式 Save 原草稿。首次 Started 与输入后 resume 都必须重验原 RevisionRequested，
+  已 Save 的基础计划不能被滞后的 prepared request 再启动；已有 attempt 不适用该例外。
+- 成功提交按 `PlanDraftCreated + RevisionSucceeded + PlanReviewAttempt(DraftReady) +
+  PublicEventOutbox` 一个既有 crash-safe append bundle 落盘；无 draft 的终态按
+  `RevisionFailed + PlanReviewAttempt(实际状态) + PublicEventOutbox` 同样落盘。
+  `RevisionFailed` 仅表示此次修订未替换基础计划，不把 Blocked/Paused/Interrupted
+  翻译为 run Failed。基础计划保持可审阅。
+- outbox 的 domain ID 指向该 attempt 终态 envelope，两个 envelope 紧邻，IDs、sequence、
+  完整 public payload 在第一次物理写入前固定。writer 锁下检查实际 Started、完整 lineage、
+  基础计划的 RevisionRequested 和 exact hash，禁止旧 split 状态补写或推导成功。
+- append acknowledgement、child settlement 或 adapter 失败后先恢复 writer intent、读取原 pair
+  并同步 live Session projection，不能用陈旧内存重新写失败。恢复已有完整 intent 只补原字节；
+  真正 unfinished revision 没有原 bundle 时只结算 Interrupted，不能从 child draft 推造成功。
+- HTTP、TUI 只交付同一原终态，不能再按 `Result::Err` 造 RunFailed；delivery receipt 与
+  adapter registry 分别恢复，ACK 不等于 registry 已收敛。非终态 live sequence 的重启连续性
+  与完整 public outbox 属于独立 E08/A2，不在此协议冒充已完成。
+  TUI 后置审计仍须尝试，失败单独 Notice，不覆盖实际 Finished/Cancelled/Interrupted。
+  HTTP receipt 或发布失败也必须尝试从原 terminal 收敛 registry/stream；独立返回 delivery
+  错误并保留原 pending outbox，由既有 attach replay 补交，不能让 Paused 残留成为新真相。
+- worker 活动期间 public sequence 由该 run 的单一 runtime live bridge 预留，session writer
+  只验证同 run 的 durable 序列不倒退并固定该值；它不是 session stream sequence。等待输入
+  时没有活动 worker，HTTP 取消沿原 journal publication lock 取得下一值、提交原子终态后
+  发布该 exact event；不另建 reservation registry，也不重编号已提交事件。无 live bridge
+  的离线恢复从已有 durable public frontier 取下一值，不要求终态固定为 1。
+- writer-read 补齐 intent 后须在同 writer 临界区更新共享投影，锁外发布变化；便宜的
+  snapshot 仍不做文件 I/O。live Session 只采纳已验证的同一恢复 prefix，重验 frontier，
+  保留外部内容隔离、runtime attachments 和既有 live-only promotion，不让恢复绕过安全过滤。
+  frontier 校验与 live adoption 同持 writer 锁，过滤 external sidecar 所需审计在锁外沿
+  原审计路径落盘。generic control API 对 candidate、base settlement 和 terminal 拆写
+  均拒绝，包括同一批次中 candidate 先于 revision Started 的逆序写法。
+- `WaitingForInput` 是可继续的 attempt suspension，同一 attempt 可在输入后重新 Started，
+  不是本协议的 revision finalization；不得用等待通知占用唯一最终 terminal pair。HTTP 复用
+  原 run registry 保留 Paused checkpoint，仅 exact request/attempt/base/child binding 可恢复；
+  历史 Waiting receipt 可幂等查询，但不能使已完成 attempt 再次恢复或阻塞新 run。取消超时
+  的 late worker 在实际退出前仍持有 session attachment，adapter 只报告 execution uncertain。
+- 显式 `/plan` 没有 provider-visible durable User turn，因此原 persistence-safe 目标必须作为
+  `PlanReviewAttempt.explicit_objective` 随首次 Started 落盘；automatic route 则只引用真实原 User
+  turn，不复制该字段。原目标是同一 review 的不可变 source binding，暂停、重试、修订和终态均
+  逐项保留并校验。修订指导仍由原 accepted user-input receipt 提供，不混入或覆盖原目标。
+  恢复按 source 读取该原事实，不伪造 User entry，不以通用提示词代替丢失目标；旧 explicit attempt
+  缺该事实时 fail closed，不补写、迁移或自动 upcast。
+- child-owned research input 的接受和取消必须通过同一 composed managed provisioner 对该
+  attempt 的既有 `research/0` SessionLog 做 existing-only mutation admission，再校验 child
+  session scope 并显式结算该 SessionLog admission；它不分配 artifact bundle，也不得在缺失
+  records 时创建目录、records、marker 或 lock。不得从 parent-relative `child_session_ref`
+  回退打开另一份 store，也不得为绕过该绑定放宽 scope 校验。中断后 continuation admission 只能
+  引用经验证的原 schema-2 marker 与唯一物理 namespace，并持有自己新的 admission/finalization
+  record；不得改写旧 marker、重签旧 user scope 或把空前缀提升为 child。TUI 与 HTTP 使用同一入口。
+  这里的“经验证”不是 runtime 解析 marker 后自行信任：runtime 只把 marker 的
+  `handle_id + namespace_hash + durable admission` 作为 evidence 交给 kernel port；RA 必须在
+  同一 authenticated resource journal instance/authority epoch 中逐项确认原 admission、唯一
+  schema-2 physical marker、历史 terminal/settlement evidence，以及 current grant 的
+  owner/family/purpose/owner-scope/journal-scope compatibility，才可消费新的 one-shot continuation
+  claim。新 journal admission durable 引用原 admission，restart 仍按该引用解析原 namespace；V1、
+  缺 marker、未结算、重复候选、跨 root/epoch 或任何 compatibility drift 均拒绝，不能通过重新建
+  marker、补签或普通 resolver fallback 恢复。同一 original marker 同时只能有一个未结算
+  continuation；read 与 mutation lifetime 重叠时后者按 typed duplicate/admission rejection 收敛，
+  不能并发取得两个 writer claim。
+  `StorageNamespaceAdmitted` 新增的 `continuation_from` 是 journal payload 的一部分；本仓库的
+  resource journal payload hash 覆盖完整 current-schema debug encoding，即使字段为 `None` 也不与
+  旧 record hash 等价。因此这条协议只适用于 fresh managed storage：旧 journal 不双读、不重算 hash、
+  不迁移或补写 marker，而是在打开时按 corruption/current-schema mismatch fail closed。该格式的验证
+  必须在同时隔离 storage roots 和 bootstrap user root 的自建临时目录创建新 journal，不得读取或改写用户历史 state。
+- 若 child 已接受输入而 parent 的结算或后续 resume 注册失败，session-attention 恢复必须仅从
+  无冲突投影中每个 review 的最新 `WaitingForInput` attempt 以 existing-only read admission 重开
+  同一已存在的 `research/0` SessionLog，依 exact parent identity/hash、attempt lineage 和 child
+  scope 读取原 receipt；该读取不得创建目录、records、marker、lock 或 artifact lease。缺失或损坏的
+  managed records、遗漏的 Submitted answer values、多个可恢复 foreground receipt 一律 fail-closed。
+  已 Resolved 的 child Cancel/Decline 仅在 parent 仍为该 exact Waiting 时可用于重做 parent
+  settlement。私有答案不得写回 parent log、public DTO、public projection、timeline 或持久 UI
+  cache；TUI worker 到 App 的既有非序列化 private recovery command 可暂存以复用 Resume 原决定，
+  但不另建复制状态机。TUI 的 exact Resume 仅在 form 的 `PlanReviewResearch` source、原 command id、
+  完整 request identity 与 hash 全部匹配时，经私有 worker recovery command 绕过已缓存的 application
+  `Uncertain` receipt；该 command 不携带答案，worker 必须重读同一 managed child receipt 后才复用既有
+  input dispatcher。恢复查询仍由 worker/runtime 持有 authority，HTTP 复用绕过 adapter receipt cache 的既有
+  session-attention resume 入口。
 
 ### 13.3 ProjectionDegraded
 

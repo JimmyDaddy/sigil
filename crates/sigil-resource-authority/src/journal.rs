@@ -5,12 +5,16 @@
 //! journal are two separate trust anchors (no self-allocation recursion).
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use sigil_kernel::managed_storage::{ManagedStorageAdmissionRequestV1, StorageAdmissionGrantV1};
+use sigil_kernel::managed_storage::{
+    ManagedStorageAdmissionRequestV1, ManagedStorageExistingNamespaceBindingV1,
+    StorageAdmissionGrantV1,
+};
 use sigil_kernel::resource::{CanonicalHash, ResourceJournalScopeV1};
 
 /// Journal header (frozen per shard instance).
@@ -71,6 +75,10 @@ pub enum ResourceJournalEventV1 {
         namespace_hash: CanonicalHash,
         grant: Box<StorageAdmissionGrantV1>,
         request: Box<ManagedStorageAdmissionRequestV1>,
+        /// When present, this new one-shot admission continues exactly one already-settled,
+        /// schema-2 physical namespace. The reference is verified by RA before append and again
+        /// by the physical resolver after restart; it never authorizes rewriting that marker.
+        continuation_from: Option<ManagedStorageExistingNamespaceBindingV1>,
     },
     GenerationReserved {
         resource_id: String,
@@ -449,6 +457,29 @@ impl ResourceJournalFileV1 {
         self.journal.tail()
     }
 
+    /// Verifies that this in-memory projection is still the exact durable snapshot on disk.
+    ///
+    /// Existing-namespace continuation writes call this while holding their owner-only physical
+    /// namespace lock. The check deliberately opens only the already-published journal object:
+    /// a missing, incomplete, reparse-point, or externally advanced snapshot is fail-closed and
+    /// is never recreated or adopted by this service instance.
+    pub(crate) fn assert_current_snapshot(&self) -> Result<(), JournalErrorV1> {
+        if self.poisoned {
+            return Err(JournalErrorV1::DurabilityUncertain(
+                "journal is poisoned after a prior post-rename durability failure".to_owned(),
+            ));
+        }
+        let snapshot = read_existing_durable_snapshot(&self.path)?;
+        let header = self
+            .journal
+            .header()
+            .ok_or(JournalErrorV1::InstanceMismatch)?;
+        if snapshot.header != header.clone() || snapshot.records != self.records {
+            return Err(JournalErrorV1::PreconditionMismatch);
+        }
+        Ok(())
+    }
+
     /// Returns the next durable sequence under the journal mutex owner. Callers that derive an
     /// operation id from this value must append the corresponding Prepared event while retaining
     /// their own journal lock, so two processes cannot reuse the same frontier.
@@ -560,7 +591,10 @@ impl ResourceJournalFileV1 {
 
         let mut admissions = Vec::new();
         let mut terminal = std::collections::BTreeSet::new();
-        let mut pending_by_grant: BTreeMap<String, Vec<(u64, CanonicalHash)>> = BTreeMap::new();
+        // The third field marks an existing-namespace continuation. A legacy/probe terminal
+        // without an authority-owned physical binding must never select one of those records.
+        let mut pending_by_grant: BTreeMap<String, Vec<(u64, CanonicalHash, bool)>> =
+            BTreeMap::new();
         for durable in &self.records {
             match &durable.payload {
                 ResourceJournalEventV1::StorageNamespaceAdmitted {
@@ -569,6 +603,7 @@ impl ResourceJournalFileV1 {
                     namespace_hash,
                     grant,
                     request,
+                    continuation_from,
                 } => {
                     admissions.push(ResourceJournalStorageAdmissionV1 {
                         admission_sequence: durable.record.sequence,
@@ -578,11 +613,16 @@ impl ResourceJournalFileV1 {
                         namespace_hash: *namespace_hash,
                         grant: (**grant).clone(),
                         request: (**request).clone(),
+                        continuation_from: continuation_from.clone(),
                     });
                     pending_by_grant
                         .entry(grant_hash.to_hex())
                         .or_default()
-                        .push((durable.record.sequence, *namespace_hash));
+                        .push((
+                            durable.record.sequence,
+                            *namespace_hash,
+                            continuation_from.is_some(),
+                        ));
                 }
                 ResourceJournalEventV1::GenerationSettled {
                     grant_hash,
@@ -609,11 +649,17 @@ impl ResourceJournalFileV1 {
                             })
                         })
                         // Legacy/probe settlements carry no physical binding. They are safe to
-                        // associate only with the most recent still-pending admission.
+                        // associate only with the most recent ordinary pending admission; a
+                        // continuation always requires its own physical observation binding.
                         .or_else(|| {
                             pending_by_grant
                                 .get(&grant_hash.to_hex())
-                                .and_then(|pending| pending.last().map(|(_, namespace)| *namespace))
+                                .and_then(|pending| {
+                                    pending
+                                        .iter()
+                                        .rfind(|(_, _, continuation)| !continuation)
+                                        .map(|(_, namespace, _)| *namespace)
+                                })
                         });
                     if let Some(namespace) = namespace
                         && let Some(sequence) =
@@ -645,7 +691,7 @@ impl ResourceJournalFileV1 {
                     let Some(pending) = pending_by_grant.get_mut(&grant_hash.to_hex()) else {
                         continue;
                     };
-                    let Some(index) = pending.iter().position(|(sequence, namespace)| {
+                    let Some(index) = pending.iter().position(|(sequence, namespace, _)| {
                         sequence == admission_sequence && namespace == namespace_hash
                     }) else {
                         continue;
@@ -1065,7 +1111,7 @@ fn persist_snapshot_file(
 }
 
 fn remove_pending_admission(
-    pending_by_grant: &mut BTreeMap<String, Vec<(u64, CanonicalHash)>>,
+    pending_by_grant: &mut BTreeMap<String, Vec<(u64, CanonicalHash, bool)>>,
     grant_hash: CanonicalHash,
     namespace_hash: CanonicalHash,
 ) -> Option<u64> {
@@ -1073,8 +1119,8 @@ fn remove_pending_admission(
     let pending = pending_by_grant.get_mut(&grant_key)?;
     let index = pending
         .iter()
-        .rposition(|(_, current)| *current == namespace_hash)?;
-    let (sequence, _) = pending.remove(index);
+        .rposition(|(_, current, _)| *current == namespace_hash)?;
+    let (sequence, _, _) = pending.remove(index);
     let remove_grant = pending.is_empty();
     if remove_grant {
         pending_by_grant.remove(&grant_key);
@@ -1091,6 +1137,56 @@ pub struct ResourceJournalStorageAdmissionV1 {
     pub namespace_hash: CanonicalHash,
     pub grant: StorageAdmissionGrantV1,
     pub request: ManagedStorageAdmissionRequestV1,
+    pub continuation_from: Option<ManagedStorageExistingNamespaceBindingV1>,
+}
+
+/// Reads and validates an already-published journal snapshot without creating a parent, journal,
+/// lock, or replacement file. This is intentionally narrower than [`ResourceJournalFileV1::open`]
+/// because a continuation must never repair a missing durable authority history.
+fn read_existing_durable_snapshot(path: &Path) -> Result<DurableJournalSnapshotV1, JournalErrorV1> {
+    let metadata = fs::symlink_metadata(path).map_err(map_io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(JournalErrorV1::Corrupt(
+            "journal path is not a regular file".to_owned(),
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options.open(path).map_err(map_io)?;
+    let opened = file.metadata().map_err(map_io)?;
+    if !opened.is_file() {
+        return Err(JournalErrorV1::Corrupt(
+            "journal path is not a regular file".to_owned(),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if opened.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(JournalErrorV1::Corrupt(
+                "journal path is a reparse point".to_owned(),
+            ));
+        }
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(map_io)?;
+    let snapshot: DurableJournalSnapshotV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| JournalErrorV1::Corrupt(error.to_string()))?;
+    replay_snapshot(&snapshot)?;
+    Ok(snapshot)
 }
 
 #[cfg(unix)]

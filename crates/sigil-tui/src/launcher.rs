@@ -1603,44 +1603,73 @@ where
         AppAction::ApplyUpdate { channel } => {
             app.start_update_apply(channel);
         }
-        action => match try_execute_application_action(app, worker, &action) {
-            Ok(Some(receipt)) => report_application_receipt(app, &receipt)?,
-            Ok(None) => {
-                let command = app.into_worker_command(action);
+        action => {
+            if let Some(command) = app.recovered_plan_review_research_resume_command(&action) {
+                // A recovered PlanReview child decision already owns the original application
+                // command id. Its prior enqueue may therefore be durably `Uncertain` in the
+                // application reservation store. Replaying it through that store would only
+                // return the cached receipt and never reach the worker. This narrow private
+                // command contains no answer and is revalidated by the worker against the
+                // actual managed child receipt before the ordinary input dispatcher runs.
                 send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            } else {
+                match try_execute_application_action(app, worker, &action) {
+                    Ok(Some(receipt)) => report_application_receipt(app, &receipt)?,
+                    Ok(None) => {
+                        let command = app.into_worker_command(action);
+                        send_worker_command_with_restart(
+                            app,
+                            worker,
+                            command,
+                            &mut spawn_worker_fn,
+                        )?;
+                    }
+                    Err(_error)
+                        if matches!(
+                            action,
+                            AppAction::ApprovalDecision { .. }
+                                | AppAction::ContinueTask { .. }
+                                | AppAction::PauseTask { .. }
+                        ) =>
+                    {
+                        // These controls are first surfaced by the worker event stream. The application
+                        // projection may still be one frontier behind after a fresh resume, so do not
+                        // turn a temporarily missing projection binding into a deadlocked approval or
+                        // task recovery action. The worker command carries the exact durable identity
+                        // and remains the lossless fallback until the application port catches up.
+                        let command = app.into_worker_command(action);
+                        send_worker_command_with_restart(
+                            app,
+                            worker,
+                            command,
+                            &mut spawn_worker_fn,
+                        )?;
+                    }
+                    Err(error)
+                        if application_action_has_lossless_worker_fallback(&action, &error) =>
+                    {
+                        // After resume the worker can be ready before the application projection client
+                        // has reconnected. These submissions carry the same durable session identity
+                        // through the worker command path and are safe to admit exactly once; waiting
+                        // for the projection would otherwise discard a user prompt while the UI reports
+                        // an unavailable session. Other application errors remain fail-closed above.
+                        let command = app.into_worker_command(action);
+                        send_worker_command_with_restart(
+                            app,
+                            worker,
+                            command,
+                            &mut spawn_worker_fn,
+                        )?;
+                    }
+                    Err(error) => {
+                        report_worker_unavailable(
+                            app,
+                            &format!("application command was not admitted: {error}"),
+                        )?;
+                    }
+                }
             }
-            Err(_error)
-                if matches!(
-                    action,
-                    AppAction::ApprovalDecision { .. }
-                        | AppAction::ContinueTask { .. }
-                        | AppAction::PauseTask { .. }
-                ) =>
-            {
-                // These controls are first surfaced by the worker event stream. The application
-                // projection may still be one frontier behind after a fresh resume, so do not
-                // turn a temporarily missing projection binding into a deadlocked approval or
-                // task recovery action. The worker command carries the exact durable identity
-                // and remains the lossless fallback until the application port catches up.
-                let command = app.into_worker_command(action);
-                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
-            }
-            Err(error) if application_action_has_lossless_worker_fallback(&action, &error) => {
-                // After resume the worker can be ready before the application projection client
-                // has reconnected. These submissions carry the same durable session identity
-                // through the worker command path and are safe to admit exactly once; waiting
-                // for the projection would otherwise discard a user prompt while the UI reports
-                // an unavailable session. Other application errors remain fail-closed above.
-                let command = app.into_worker_command(action);
-                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
-            }
-            Err(error) => {
-                report_worker_unavailable(
-                    app,
-                    &format!("application command was not admitted: {error}"),
-                )?;
-            }
-        },
+        }
     }
     flush_pending_worker_commands(app, worker)?;
     Ok(())

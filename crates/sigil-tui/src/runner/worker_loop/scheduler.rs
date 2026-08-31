@@ -300,6 +300,24 @@ pub(in crate::runner) fn run_worker_loop<P>(
         managed_artifact_store,
     );
     state.managed_plan_review_child_resources = managed_plan_review_child_resources;
+    match super::recover_managed_plan_review_research_attention(&state) {
+        Ok(Some(command)) => {
+            let entries = state
+                .session
+                .current
+                .as_ref()
+                .map(|session| session.entries().to_vec())
+                .unwrap_or_default();
+            let _ =
+                message_tx.send(WorkerMessage::RecoveredUserInputAttention { command, entries });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "accepted plan-review input recovery is unavailable: {error:#}"
+            )));
+        }
+    }
     // RFC-0062 14.1: one startup TTL sweep over the workspace scratch namespaces. Leases are
     // in-memory only, so a fresh worker cannot hold one; expired namespaces from crashed or
     // deleted sessions are reclaimed here, and the sweep never races a live tool or terminal

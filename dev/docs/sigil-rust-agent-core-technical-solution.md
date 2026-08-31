@@ -1114,6 +1114,12 @@ approved Plan作为 objective；不创建隐藏的单步 TaskPlan，也不再调
 所有 product surface 共享 `FailureScope × Recoverability × EffectSettlement` durable state，adapter / journal /
 projector delivery 失败不能改写已提交的 domain terminal。
 
+独立 PlanReview revision 直接以 parent 的既有 `PlanReviewAttempt` 为领域 owner，draft、基础计划
+修订决定、attempt 终态和完整 public outbox 使用一个 session writer bundle；不伪造 root
+ConversationRun 或另建镜像状态机。append 回执丢失先恢复原 bundle 并刷新安全的 live projection，
+HTTP/TUI 只交付原终态；真正 unfinished attempt 恢复为 Interrupted，不从 child 草稿猜成功。
+等待研究输入仍是可继续的 suspension，不占用该 attempt 唯一的最终 terminal。
+
 该边界适用于整个产品，不只限于 Plan / Task：production host 不得通过中英文短语、关键词、
 locale alias 或正则把任意用户自然语言映射成功能选择。显式 `/command` / `@agent` 语法、协议
 enum、literal search、路径/标识符检索和安全检测仍是确定性 parser 的职责，但不得反向充当

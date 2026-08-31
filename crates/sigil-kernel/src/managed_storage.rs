@@ -24,11 +24,24 @@ pub const MAX_STORAGE_LOGICAL_KEY_ATOMS: usize = 8;
 /// The runtime may persist these hashes in an owner-only physical marker, but it cannot use
 /// them to mint or reactivate a handle. They bind one physical namespace to one exact journal
 /// admission across process restarts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedStorageDurableAdmissionBindingV1 {
     pub grant_hash: CanonicalHash,
     pub admission_sequence: u64,
     pub admission_record_hash: CanonicalHash,
+}
+
+/// Durable evidence naming one already-published physical namespace.
+///
+/// This is a deserializable record locator, not an authority capability: callers may obtain it
+/// from an owner-only marker, but only a journal-backed managed-storage service can verify the
+/// historical admission, terminal evidence, current compatible grant, and physical marker before
+/// it consumes a new one-shot continuation claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedStorageExistingNamespaceBindingV1 {
+    pub original_handle_id: OpaqueKernelCapabilityHandleId,
+    pub original_namespace_hash: CanonicalHash,
+    pub original_admission: ManagedStorageDurableAdmissionBindingV1,
 }
 
 /// Opaque storage namespace handle (kernel-broker constructed; non-clone).
@@ -382,6 +395,23 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         request: ManagedStorageAdmissionRequestV1,
         capability: ValidatedStorageAdmissionCapabilityV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1>;
+
+    /// Consumes a fresh storage capability to continue one already-settled, schema-2 physical
+    /// namespace. The supplied binding is evidence only; implementations must fail closed unless
+    /// the authenticated journal and the unique unchanged physical marker prove it belongs to a
+    /// terminal admission compatible with `request` in the current authority epoch.
+    ///
+    /// The returned handle has its own admission/finalization identity. Implementations must not
+    /// overwrite or re-sign the historical marker, and probe-only services do not support this
+    /// operation.
+    fn admit_existing_namespace(
+        &self,
+        _request: ManagedStorageAdmissionRequestV1,
+        _capability: ValidatedStorageAdmissionCapabilityV1,
+        _original: ManagedStorageExistingNamespaceBindingV1,
+    ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    }
 
     /// Validates that a physical mutation is still covered by an admitted namespace. The
     /// runtime calls this while holding the namespace lock, so settlement wins the race before a

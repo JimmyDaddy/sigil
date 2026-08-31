@@ -325,6 +325,7 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
             session_attachment: None,
             expected_session_scope_id: binding.session_scope_id.clone(),
             run_id: "user-input-continuation-1".to_owned(),
+            revision_terminal_public_sequence: None,
             identity: requested.request.identity.clone(),
             request_hash: requested.request_hash.clone(),
             command_id: UserInputCommandId::new("user-input-command-1")?,
@@ -390,6 +391,7 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
         crate::application_run::application_recoverable_user_input_decision(
             &binding.session_log_path,
             &binding.session_scope_id,
+            None,
         )?
         .is_none(),
         "an unclassified transport outcome must not replay a possibly consumed answer"
@@ -451,6 +453,7 @@ async fn submitted_user_input_remains_retryable_when_provider_preparation_fails(
             session_attachment: None,
             expected_session_scope_id: binding.session_scope_id.clone(),
             run_id: "user-input-provider-failure-run".to_owned(),
+            revision_terminal_public_sequence: None,
             identity: requested.request.identity.clone(),
             request_hash: requested.request_hash.clone(),
             command_id: command_id.clone(),
@@ -3775,6 +3778,7 @@ credential = { source = "none" }
             session_attachment: None,
             expected_session_scope_id: session_scope_id.clone(),
             run_id: "application-planner-answer-run".to_owned(),
+            revision_terminal_public_sequence: None,
             identity: command.identity.clone(),
             request_hash: command.request_hash.clone(),
             command_id: command.command_id.clone(),
@@ -3791,6 +3795,7 @@ credential = { source = "none" }
     let recovered_command = crate::application_run::application_recoverable_user_input_decision(
         &session_path,
         &session_scope_id,
+        None,
     )?
     .expect("accepted planner answer must survive a controller crash before registration");
     assert_eq!(recovered_command, command);
@@ -3813,6 +3818,7 @@ credential = { source = "none" }
             session_attachment: None,
             expected_session_scope_id: session_scope_id.clone(),
             run_id: "application-planner-answer-recovery-run".to_owned(),
+            revision_terminal_public_sequence: None,
             identity: recovered_command.identity,
             request_hash: recovered_command.request_hash,
             command_id: recovered_command.command_id,
@@ -6300,16 +6306,20 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
     let mut session =
         Session::load_from_store("application-task-test", "application-task-model", store)?;
     let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?;
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        "message-pending-plan-route",
+        "run-pending-plan-route",
+    )?;
+    let mut source_message = ModelMessage::user("inspect the pending plan route");
+    source_message.id = source_turn.message_id.clone();
+    session.append_user_message(source_message)?;
     let request = crate::PlanReviewRunRequest {
         plan_review_id: sigil_kernel::PlanReviewId::new("review-pending-plan-route")?,
         attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-pending-plan-route")?,
         plan_id: sigil_kernel::PlanId::new("plan_pending_route")?,
         source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
-        source_turn: sigil_kernel::ConversationTurnRef::new(
-            session.session_scope_id(),
-            "message-pending-plan-route",
-            "run-pending-plan-route",
-        )?,
+        source_turn: source_turn.clone(),
         route_decision_id: None,
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
@@ -6317,6 +6327,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
+        explicit_objective: None,
         objective: "inspect the pending plan route".to_owned(),
         workspace_snapshot_id: base_snapshot.clone(),
     };
@@ -6394,11 +6405,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
     let action = sigil_kernel::RunPendingPlanAction {
         plan_id: plan_id.clone(),
         plan_hash: plan_hash.clone(),
-        source_turn: sigil_kernel::ConversationTurnRef::new(
-            session.session_scope_id(),
-            "message-pending-plan-route",
-            "run-pending-plan-route",
-        )?,
+        source_turn,
     };
     let root_output = AgentRunOutput {
         disposition: AgentRunDisposition::RunPendingPlan(action),
@@ -6484,16 +6491,20 @@ max_plan_steps = 64
     let mut session =
         Session::load_from_store("application-task-test", "application-task-model", store)?;
     let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?;
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        "message-pending-plan-blocked",
+        "run-pending-plan-blocked",
+    )?;
+    let mut source_message = ModelMessage::user("inspect the blocked pending plan route");
+    source_message.id = source_turn.message_id.clone();
+    session.append_user_message(source_message)?;
     let request = crate::PlanReviewRunRequest {
         plan_review_id: sigil_kernel::PlanReviewId::new("review-pending-plan-blocked")?,
         attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-pending-plan-blocked")?,
         plan_id: sigil_kernel::PlanId::new("plan_pending_blocked")?,
         source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
-        source_turn: sigil_kernel::ConversationTurnRef::new(
-            session.session_scope_id(),
-            "message-pending-plan-blocked",
-            "run-pending-plan-blocked",
-        )?,
+        source_turn: source_turn.clone(),
         route_decision_id: None,
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
@@ -6501,6 +6512,7 @@ max_plan_steps = 64
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
+        explicit_objective: None,
         objective: "inspect the blocked pending plan route".to_owned(),
         workspace_snapshot_id: base_snapshot.clone(),
     };
@@ -6578,11 +6590,7 @@ max_plan_steps = 64
     let action = sigil_kernel::RunPendingPlanAction {
         plan_id: plan_id.clone(),
         plan_hash: plan_hash.clone(),
-        source_turn: sigil_kernel::ConversationTurnRef::new(
-            session.session_scope_id(),
-            "message-pending-plan-blocked",
-            "run-pending-plan-blocked",
-        )?,
+        source_turn,
     };
     let root_output = AgentRunOutput {
         disposition: AgentRunDisposition::RunPendingPlan(action),

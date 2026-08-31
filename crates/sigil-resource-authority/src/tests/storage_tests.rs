@@ -124,6 +124,7 @@ fn r71_storage_rehydrates_pending_admission_requires_physical_bridge() {
                     namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
                     grant: Box::new(grant()),
                     request: Box::new(storage_test_request()),
+                    continuation_from: None,
                 },
             )
             .expect("admission");
@@ -180,6 +181,7 @@ fn r71_storage_rehydrates_source_bound_pending_grant_for_recovery_only() {
                     namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
                     grant: Box::new(historical.clone()),
                     request: Box::new(storage_test_request()),
+                    continuation_from: None,
                 },
             )
             .expect("admission");
@@ -237,6 +239,7 @@ fn r71_storage_quarantines_ambiguous_legacy_alias_without_selecting_or_deleting_
                     namespace_hash,
                     grant: Box::new(historical.clone()),
                     request: Box::new(storage_test_request()),
+                    continuation_from: None,
                 },
             )
             .expect("admission");
@@ -334,6 +337,7 @@ fn r71_storage_physical_bridge_replays_complete_seven_record_chain() {
                     namespace_hash,
                     grant: Box::new(grant.clone()),
                     request: Box::new(storage_test_request()),
+                    continuation_from: None,
                 },
             )
             .expect("admission");
@@ -490,6 +494,423 @@ fn r71_storage_restart_recovers_new_admission_after_same_grant_settled_once() {
     );
 }
 
+#[test]
+fn r71_storage_continuation_admits_a_new_claim_without_rewriting_schema_two_marker() {
+    use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+
+    let directory = tempfile::tempdir().expect("journal directory");
+    let path = directory.path().join("authority-resources.journal.json");
+    let header = storage_test_header();
+    let grant = grant();
+    let broker = KernelCapabilityBrokerV1::new();
+    let issue = || {
+        broker
+            .issue_storage_namespace_capability(
+                broker.seal_storage_namespace_proof(grant.capability_family, grant.namespace_hash),
+            )
+            .expect("one-shot capability")
+    };
+    let mut table = AuthorityStorageGrantTableV1::new();
+    table.register(grant.clone()).expect("grant");
+    let service = AuthorityManagedStorageServiceV1::new_with_journal(
+        table,
+        grant.authority_generation,
+        &path,
+        header.bootstrap_manifest_hash,
+        header.journal_instance_hash,
+    )
+    .expect("service");
+
+    let original = service
+        .admit_namespace(storage_test_request(), issue())
+        .expect("original admission");
+    let original_binding = continuation_binding(&original);
+    let namespace = directory.path().join("managed/session-log/research-0");
+    let bytes = b"{\"seq\":1}\n";
+    write_schema_two_physical_test_namespace(&namespace, &original, bytes);
+    let original_marker =
+        std::fs::read(namespace.join("authority-admission.json")).expect("original marker");
+    service
+        .finalize_namespace_with_physical_frontier(
+            original,
+            bytes.len() as u64,
+            1,
+            hash_bytes(bytes),
+            "original-settled".to_owned(),
+        )
+        .expect("original settlement");
+
+    service
+        .verify_existing_namespace_history(&storage_test_request(), &original_binding)
+        .expect("settled original history must be reusable");
+    service
+        .verify_existing_namespace_continuation(&storage_test_request(), &original_binding)
+        .expect("settled original marker must resolve exactly");
+    let continuation = service
+        .admit_existing_namespace(storage_test_request(), issue(), original_binding.clone())
+        .expect("continuation admission");
+    assert_ne!(
+        continuation.namespace_hash,
+        original_binding.original_namespace_hash
+    );
+    assert_eq!(
+        std::fs::read(namespace.join("authority-admission.json")).expect("marker remains"),
+        original_marker
+    );
+    service
+        .finalize_namespace_with_physical_frontier(
+            continuation,
+            bytes.len() as u64,
+            1,
+            hash_bytes(bytes),
+            "continuation-settled".to_owned(),
+        )
+        .expect("continuation settlement");
+
+    let journal = crate::journal::ResourceJournalFileV1::open(&path, header).expect("journal");
+    let (admissions, terminal) = journal.storage_admission_state();
+    let continued = admissions
+        .iter()
+        .find(|admission| admission.continuation_from.as_ref() == Some(&original_binding))
+        .expect("durable continuation admission");
+    assert!(terminal.contains(&continued.admission_sequence));
+    assert_eq!(
+        std::fs::read(namespace.join("authority-admission.json")).expect("marker unchanged"),
+        original_marker
+    );
+}
+
+#[test]
+fn r71_storage_continuation_rejects_nonterminal_history_and_missing_existing_lock() {
+    use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+
+    let directory = tempfile::tempdir().expect("journal directory");
+    let path = directory.path().join("authority-resources.journal.json");
+    let header = storage_test_header();
+    let grant = grant();
+    let broker = KernelCapabilityBrokerV1::new();
+    let issue = || {
+        broker
+            .issue_storage_namespace_capability(
+                broker.seal_storage_namespace_proof(grant.capability_family, grant.namespace_hash),
+            )
+            .expect("one-shot capability")
+    };
+    let mut table = AuthorityStorageGrantTableV1::new();
+    table.register(grant.clone()).expect("grant");
+    let service = AuthorityManagedStorageServiceV1::new_with_journal(
+        table,
+        grant.authority_generation,
+        &path,
+        header.bootstrap_manifest_hash,
+        header.journal_instance_hash,
+    )
+    .expect("service");
+    let bytes = b"{\"seq\":1}\n";
+    let pending = service
+        .admit_namespace(storage_test_request(), issue())
+        .expect("pending original");
+    let pending_binding = continuation_binding(&pending);
+    let pending_namespace = directory.path().join("managed/session-log/pending");
+    write_schema_two_physical_test_namespace(&pending_namespace, &pending, bytes);
+    let original_marker = std::fs::read(pending_namespace.join("authority-admission.json"))
+        .expect("schema-two marker");
+    assert!(matches!(
+        service.admit_existing_namespace(storage_test_request(), issue(), pending_binding.clone()),
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    ));
+
+    service
+        .finalize_namespace_with_physical_frontier(
+            pending,
+            bytes.len() as u64,
+            1,
+            hash_bytes(bytes),
+            "original-settled".to_owned(),
+        )
+        .expect("original settlement");
+
+    let mut ambiguous_table = AuthorityStorageGrantTableV1::new();
+    ambiguous_table
+        .register(grant.clone())
+        .expect("current grant");
+    let mut ambiguous_grant = grant.clone();
+    ambiguous_grant.grant_id =
+        sigil_kernel::resource::OpaqueStorageGrantId::new("ambiguous-current-grant".to_owned());
+    ambiguous_grant.grant_hash = CanonicalHash::from_bytes([0xaau8; 32]);
+    ambiguous_table
+        .register(ambiguous_grant)
+        .expect("second matching grant");
+    // The ambiguity check is independent of the historical journal. Bootstrap this service
+    // with its own two-grant quota cap so it reaches lookup instead of failing quota rollover.
+    let ambiguous_root = tempfile::tempdir().expect("ambiguous journal directory");
+    let ambiguous = AuthorityManagedStorageServiceV1::new_with_journal(
+        ambiguous_table,
+        grant.authority_generation,
+        ambiguous_root
+            .path()
+            .join("authority-resources.journal.json"),
+        header.bootstrap_manifest_hash,
+        header.journal_instance_hash,
+    )
+    .expect("ambiguous current service");
+    assert!(matches!(
+        ambiguous.admit_existing_namespace(
+            storage_test_request(),
+            issue(),
+            pending_binding.clone()
+        ),
+        Err(ManagedStorageErrorV1::FamilyMismatch)
+    ));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marker_path = pending_namespace.join("authority-admission.json");
+        std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o644))
+            .expect("make marker non-private");
+        assert!(matches!(
+            service.admit_existing_namespace(
+                storage_test_request(),
+                issue(),
+                pending_binding.clone()
+            ),
+            Err(ManagedStorageErrorV1::JournalUnavailable)
+        ));
+        std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore private marker");
+    }
+
+    sigil_kernel::atomic_publish_private_file(
+        &pending_namespace.join("authority-admission.json"),
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "handle_id": pending_binding.original_handle_id.as_str(),
+            "namespace_hash": pending_binding.original_namespace_hash,
+        }))
+        .expect("legacy marker json"),
+    )
+    .expect("replace marker with legacy fixture");
+    assert!(matches!(
+        service.admit_existing_namespace(storage_test_request(), issue(), pending_binding.clone()),
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    ));
+    sigil_kernel::atomic_publish_private_file(
+        &pending_namespace.join("authority-admission.json"),
+        &original_marker,
+    )
+    .expect("restore schema-two marker");
+
+    let duplicate_namespace = directory.path().join("managed/session-log/duplicate");
+    std::fs::create_dir_all(&duplicate_namespace).expect("duplicate namespace");
+    sigil_kernel::atomic_publish_private_file(
+        &duplicate_namespace.join("authority-admission.json"),
+        &original_marker,
+    )
+    .expect("duplicate marker");
+    sigil_kernel::atomic_publish_private_file(&duplicate_namespace.join("records.jsonl"), bytes)
+        .expect("duplicate records");
+    sigil_kernel::atomic_publish_private_file(
+        &duplicate_namespace.join(".authority-storage.lock"),
+        b"",
+    )
+    .expect("duplicate lock");
+    assert!(matches!(
+        service.admit_existing_namespace(storage_test_request(), issue(), pending_binding.clone()),
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    ));
+    std::fs::remove_dir_all(&duplicate_namespace).expect("remove duplicate fixture");
+
+    let continuation = service
+        .admit_existing_namespace(storage_test_request(), issue(), pending_binding.clone())
+        .expect("admit after exact marker is restored");
+    std::fs::remove_file(pending_namespace.join(".authority-storage.lock"))
+        .expect("remove existing lock");
+    assert!(matches!(
+        service.finalize_namespace_with_physical_frontier(
+            continuation,
+            bytes.len() as u64,
+            1,
+            hash_bytes(bytes),
+            "must-not-repair-deleted-lock".to_owned(),
+        ),
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    ));
+    assert!(matches!(
+        service.admit_existing_namespace(storage_test_request(), issue(), pending_binding),
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    ));
+    assert!(
+        !pending_namespace.join(".authority-storage.lock").exists(),
+        "existing-only admission must not recreate the deleted lock"
+    );
+}
+
+#[test]
+fn r71_storage_continuation_restart_revalidates_original_marker_reference() {
+    use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+
+    let directory = tempfile::tempdir().expect("journal directory");
+    let path = directory.path().join("authority-resources.journal.json");
+    let header = storage_test_header();
+    let grant = grant();
+    let broker = KernelCapabilityBrokerV1::new();
+    let issue = || {
+        broker
+            .issue_storage_namespace_capability(
+                broker.seal_storage_namespace_proof(grant.capability_family, grant.namespace_hash),
+            )
+            .expect("one-shot capability")
+    };
+    let bytes = b"{\"seq\":1}\n";
+    let namespace = directory
+        .path()
+        .join("managed/session-log/research-restart");
+    let original_binding;
+    let continuation_sequence;
+    {
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant.clone()).expect("grant");
+        let service = AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            grant.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("service");
+        let original = service
+            .admit_namespace(storage_test_request(), issue())
+            .expect("original admission");
+        original_binding = continuation_binding(&original);
+        write_schema_two_physical_test_namespace(&namespace, &original, bytes);
+        service
+            .finalize_namespace_with_physical_frontier(
+                original,
+                bytes.len() as u64,
+                1,
+                hash_bytes(bytes),
+                "original-settled".to_owned(),
+            )
+            .expect("original settlement");
+        let continuation = service
+            .admit_existing_namespace(storage_test_request(), issue(), original_binding.clone())
+            .expect("continuation admission");
+        continuation_sequence = continuation
+            .durable_admission()
+            .expect("durable continuation")
+            .admission_sequence;
+    }
+
+    let mut reopened_table = AuthorityStorageGrantTableV1::new();
+    reopened_table.register(grant.clone()).expect("grant");
+    let reopened = AuthorityManagedStorageServiceV1::new_with_journal(
+        reopened_table,
+        grant.authority_generation,
+        &path,
+        header.bootstrap_manifest_hash,
+        header.journal_instance_hash,
+    )
+    .expect("reopen");
+    let receipts = reopened
+        .reconcile_unsettled_storage_grants_with_physical_bridge()
+        .expect("reconcile continuation");
+    assert_eq!(receipts.len(), 1);
+    reopened
+        .require_startup_reconciliation()
+        .expect("continuation settled");
+
+    let journal = crate::journal::ResourceJournalFileV1::open(&path, header).expect("journal");
+    let (admissions, terminal) = journal.storage_admission_state();
+    let continued = admissions
+        .iter()
+        .find(|admission| admission.admission_sequence == continuation_sequence)
+        .expect("continued admission");
+    assert_eq!(
+        continued.continuation_from.as_ref(),
+        Some(&original_binding)
+    );
+    assert!(terminal.contains(&continuation_sequence));
+}
+
+#[test]
+fn r71_storage_continuation_two_authority_instances_keep_one_durable_claim() {
+    use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
+
+    let directory = tempfile::tempdir().expect("journal directory");
+    let path = directory.path().join("authority-resources.journal.json");
+    let header = storage_test_header();
+    let grant = grant();
+    let broker = KernelCapabilityBrokerV1::new();
+    let issue = || {
+        broker
+            .issue_storage_namespace_capability(
+                broker.seal_storage_namespace_proof(grant.capability_family, grant.namespace_hash),
+            )
+            .expect("one-shot capability")
+    };
+    let make_service = || {
+        let mut table = AuthorityStorageGrantTableV1::new();
+        table.register(grant.clone()).expect("grant");
+        AuthorityManagedStorageServiceV1::new_with_journal(
+            table,
+            grant.authority_generation,
+            &path,
+            header.bootstrap_manifest_hash,
+            header.journal_instance_hash,
+        )
+        .expect("service")
+    };
+    let first = make_service();
+    let bytes = b"{\"seq\":1}\n";
+    let original = first
+        .admit_namespace(storage_test_request(), issue())
+        .expect("original admission");
+    let original_binding = continuation_binding(&original);
+    let namespace = directory.path().join("managed/session-log/two-services");
+    write_schema_two_physical_test_namespace(&namespace, &original, bytes);
+    first
+        .finalize_namespace_with_physical_frontier(
+            original,
+            bytes.len() as u64,
+            1,
+            hash_bytes(bytes),
+            "original-settled".to_owned(),
+        )
+        .expect("original settlement");
+    let stale_second = make_service();
+
+    let continuation = first
+        .admit_existing_namespace(storage_test_request(), issue(), original_binding.clone())
+        .expect("first continuation");
+    assert!(matches!(
+        stale_second.admit_existing_namespace(storage_test_request(), issue(), original_binding),
+        Err(ManagedStorageErrorV1::JournalUnavailable)
+    ));
+    first
+        .finalize_namespace_with_physical_frontier(
+            continuation,
+            bytes.len() as u64,
+            1,
+            hash_bytes(bytes),
+            "continuation-settled".to_owned(),
+        )
+        .expect("settle first continuation");
+
+    let journal = crate::journal::ResourceJournalFileV1::open(&path, header).expect("journal");
+    assert_eq!(
+        journal
+            .storage_admission_state()
+            .0
+            .iter()
+            .filter(|admission| admission.continuation_from.is_some())
+            .count(),
+        1,
+        "snapshot predecessor CAS must leave one durable continuation"
+    );
+}
+
 fn write_physical_test_namespace(
     directory: &Path,
     handle: &ManagedStorageNamespaceHandleV1,
@@ -507,6 +928,48 @@ fn write_physical_test_namespace(
     )
     .expect("marker");
     std::fs::write(directory.join("records.jsonl"), records).expect("records");
+}
+
+fn continuation_binding(
+    handle: &ManagedStorageNamespaceHandleV1,
+) -> sigil_kernel::managed_storage::ManagedStorageExistingNamespaceBindingV1 {
+    let durable = handle
+        .durable_admission()
+        .expect("journal-backed original admission");
+    sigil_kernel::managed_storage::ManagedStorageExistingNamespaceBindingV1 {
+        original_handle_id: handle.handle_id.clone(),
+        original_namespace_hash: handle.namespace_hash,
+        original_admission: durable,
+    }
+}
+
+fn write_schema_two_physical_test_namespace(
+    directory: &Path,
+    handle: &ManagedStorageNamespaceHandleV1,
+    records: &[u8],
+) {
+    let durable = handle
+        .durable_admission()
+        .expect("journal-backed admission marker");
+    std::fs::create_dir_all(directory).expect("managed namespace");
+    sigil_kernel::secure_private_path_permissions(directory).expect("private managed namespace");
+    sigil_kernel::atomic_publish_private_file(
+        &directory.join("authority-admission.json"),
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "handle_id": handle.handle_id.as_str(),
+            "namespace_hash": handle.namespace_hash,
+            "grant_hash": durable.grant_hash,
+            "admission_sequence": durable.admission_sequence,
+            "admission_record_hash": durable.admission_record_hash,
+        }))
+        .expect("marker json"),
+    )
+    .expect("current marker");
+    sigil_kernel::atomic_publish_private_file(&directory.join("records.jsonl"), records)
+        .expect("records");
+    sigil_kernel::atomic_publish_private_file(&directory.join(".authority-storage.lock"), b"")
+        .expect("existing lock");
 }
 
 #[test]
@@ -628,6 +1091,7 @@ fn r71_storage_restart_keeps_quota_for_pending_legacy_owner_after_older_terminal
                         namespace_hash,
                         grant: Box::new(grant.clone()),
                         request: Box::new(storage_test_request()),
+                        continuation_from: None,
                     },
                 )
                 .expect("admission");
@@ -689,6 +1153,7 @@ fn r71_storage_physical_bridge_rejects_pending_without_marker() {
                     namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
                     grant: Box::new(grant.clone()),
                     request: Box::new(storage_test_request()),
+                    continuation_from: None,
                 },
             )
             .expect("admission");

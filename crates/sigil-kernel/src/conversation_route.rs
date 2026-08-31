@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -298,6 +298,11 @@ pub struct PlanReviewAttemptEntry {
     pub plan_id: PlanId,
     pub source: PlanReviewSource,
     pub source_turn: ConversationTurnRef,
+    /// Original persistence-safe objective for an explicit `/plan`, which has no durable user
+    /// turn. Automatic routes use their real source turn instead. This binding cannot change
+    /// across suspension, retry, or revision and never includes later revision guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit_objective: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_decision_id: Option<ConversationRouteDecisionId>,
     /// Retry-stable child session that owns the read-only plan review transcript.
@@ -989,7 +994,14 @@ fn legal_same_attempt_transition(
     )
 }
 
-fn validate_attempt_payload(entry: &PlanReviewAttemptEntry) -> Result<()> {
+pub(crate) fn validate_attempt_payload(entry: &PlanReviewAttemptEntry) -> Result<()> {
+    match (entry.source, entry.explicit_objective.as_deref()) {
+        (PlanReviewSource::ExplicitPlanCommand, Some(objective))
+            if !objective.trim().is_empty()
+                && crate::safe_persistence_text(objective) == objective => {}
+        (PlanReviewSource::AutomaticConversationRoute, None) => {}
+        _ => bail!("plan review source has no exact durable objective binding"),
+    }
     if entry.attempt_ordinal == 0 {
         bail!("plan review attempt ordinal must start at one");
     }
@@ -1013,12 +1025,20 @@ fn validate_attempt_payload(entry: &PlanReviewAttemptEntry) -> Result<()> {
     Ok(())
 }
 
+fn same_review_source_binding(
+    previous: &PlanReviewAttemptEntry,
+    next: &PlanReviewAttemptEntry,
+) -> bool {
+    previous.source == next.source
+        && previous.source_turn == next.source_turn
+        && previous.explicit_objective == next.explicit_objective
+}
+
 fn same_attempt_binding(previous: &PlanReviewAttemptEntry, next: &PlanReviewAttemptEntry) -> bool {
     previous.plan_review_id == next.plan_review_id
         && previous.attempt_id == next.attempt_id
         && previous.plan_id == next.plan_id
-        && previous.source == next.source
-        && previous.source_turn == next.source_turn
+        && same_review_source_binding(previous, next)
         && previous.route_decision_id == next.route_decision_id
         && previous.child_session_ref == next.child_session_ref
         // Older durable attempts did not carry these two fields. Permit a one-way enrichment, but
@@ -1099,6 +1119,7 @@ impl PlanReviewProjection {
     }
 
     fn apply(&mut self, entry: &PlanReviewAttemptEntry) {
+        let mut prior_review_conflicts = Vec::new();
         let review = self
             .reviews
             .entry(entry.plan_review_id.clone())
@@ -1122,6 +1143,7 @@ impl PlanReviewProjection {
                 previous_id.as_str(),
                 entry.plan_review_id.as_str()
             );
+            prior_review_conflicts.push((previous_id, conflict.clone()));
             review.conflicts.push(conflict.clone());
             self.conflicts.push(conflict);
         }
@@ -1137,18 +1159,33 @@ impl PlanReviewProjection {
                 previous_review.as_str(),
                 entry.plan_review_id.as_str()
             );
+            prior_review_conflicts.push((previous_review, conflict.clone()));
             review.conflicts.push(conflict.clone());
             self.conflicts.push(conflict);
         }
+        // Identity collisions invalidate both owners, independently of replay order. Consumers
+        // may inspect one review without being blocked by unrelated invalid reviews.
+        for (review_id, conflict) in prior_review_conflicts {
+            self.reviews
+                .entry(review_id)
+                .or_default()
+                .conflicts
+                .push(conflict);
+        }
+        let review = self
+            .reviews
+            .entry(entry.plan_review_id.clone())
+            .or_default();
         let same_as_last = review.attempts.last().is_some_and(|last| last == entry);
         if same_as_last {
             review.duplicates = review.duplicates.saturating_add(1);
             return;
         }
         if let Some(previous) = review.attempts.last()
-            && previous.attempt_id == entry.attempt_id
-            && (!legal_same_attempt_transition(previous.status, entry.status)
-                || !same_attempt_binding(previous, entry))
+            && (!same_review_source_binding(previous, entry)
+                || (previous.attempt_id == entry.attempt_id
+                    && (!legal_same_attempt_transition(previous.status, entry.status)
+                        || !same_attempt_binding(previous, entry))))
         {
             let conflict = format!(
                 "attempt {} has conflicting lifecycle facts",
@@ -1275,6 +1312,9 @@ impl PlanReviewProjection {
     pub fn validate_append(&self, entry: &PlanReviewAttemptEntry) -> Result<()> {
         validate_attempt_payload(entry)?;
         if let Some(previous) = self.latest_attempt(&entry.plan_review_id) {
+            if !same_review_source_binding(previous, entry) {
+                bail!("plan review attempt changes its original durable source objective");
+            }
             if previous.attempt_id == entry.attempt_id {
                 if previous == entry {
                     // identical duplicate is idempotent
@@ -1338,6 +1378,18 @@ impl PlanReviewProjection {
 /// boundary. Conflicted projections are left untouched (their conflict is already the fail-closed
 /// signal).
 pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64) -> Result<()> {
+    // Recover the original writer intent before interpreting attempts. In particular, an ACK
+    // failure after committing a revision must never be reclassified as an interrupted run.
+    session.reconcile_plan_review_revision_terminal("")?;
+    reconcile_plan_review_attempts_from_recovered_entries(session, now_ms)
+}
+
+/// Session loading already recovered the writer and validated its entries. Reuse that exact
+/// prefix instead of repeating startup replay or reintroducing quarantined external controls.
+pub(crate) fn reconcile_plan_review_attempts_from_recovered_entries(
+    session: &mut crate::Session,
+    now_ms: u64,
+) -> Result<()> {
     let projection = PlanReviewProjection::from_entries(session.entries());
     if projection.has_conflicts() {
         return Ok(());
@@ -1352,6 +1404,10 @@ pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64)
             attempt.status,
             PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
         ) {
+            continue;
+        }
+        if attempt.revision_request_id.is_some() {
+            pending.push((plan_review_id.clone(), attempt.clone(), false, None));
             continue;
         }
         let recovered_draft = if plan_projection.plans.contains_key(&attempt.plan_id) {
@@ -1392,6 +1448,7 @@ pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64)
             plan_id: attempt.plan_id,
             source: attempt.source,
             source_turn: attempt.source_turn,
+            explicit_objective: attempt.explicit_objective,
             route_decision_id: attempt.route_decision_id,
             child_session_ref: attempt.child_session_ref,
             finalizer_session_ref: attempt.finalizer_session_ref,
@@ -1406,6 +1463,34 @@ pub fn reconcile_plan_review_attempts(session: &mut crate::Session, now_ms: u64)
             recorded_at_ms: now_ms,
         };
         projection.validate_append(&entry)?;
+        if entry.revision_request_id.is_some() {
+            let (base_plan_id, base_plan_hash) =
+                revision_base.context("unfinished revision has no exact base plan")?;
+            let run_id = crate::plan_review_revision_run_id(&entry);
+            let event = crate::PublicRunEvent::new(
+                session.session_scope_id().to_owned(),
+                run_id.clone(),
+                session.next_plan_review_public_sequence(&run_id)?,
+                crate::PublicRunEventKind::RunInterrupted {
+                    reason: "Plan revision was interrupted before its result was committed."
+                        .to_owned(),
+                },
+            );
+            session.append_plan_review_revision_terminal(
+                entry,
+                None,
+                crate::PlanDecisionRecordedEntry {
+                    plan_id: base_plan_id,
+                    plan_hash: base_plan_hash,
+                    decision: crate::PlanDecision::RevisionFailed,
+                    decided_by: crate::PlanDecisionActor::System,
+                    decided_at_ms: now_ms,
+                    reason: Some("recovered interrupted revision attempt".to_owned()),
+                },
+                event,
+            )?;
+            continue;
+        }
         let mut controls = Vec::new();
         if let Some(draft) = recovered_draft {
             controls.push(ControlEntry::PlanDraftCreated(draft));

@@ -5660,6 +5660,7 @@ fn materialization_blocker_reopens_the_plan_with_retry_and_revise_actions() -> R
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
+        explicit_objective: Some("materialization blocker review".to_owned()),
         workspace_snapshot_id: None,
         pending_user_input: None,
         status: sigil_kernel::PlanReviewAttemptStatus::DraftReady,
@@ -6134,6 +6135,13 @@ fn accepted_user_input_restores_an_exact_resume_action_without_echoing_answers()
     app.set_pending_user_input_recovery(request.clone(), command.clone());
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        action
+            .as_ref()
+            .and_then(|action| app.recovered_plan_review_research_resume_command(action))
+            .is_none(),
+        "ordinary non-PlanReview recovery must continue through the application receipt path"
+    );
     assert!(matches!(
         action,
         Some(AppAction::SubmitUserInputDecision {
@@ -6147,6 +6155,148 @@ fn accepted_user_input_restores_an_exact_resume_action_without_echoing_answers()
             && expected_request_hash == request.request_hash
             && decision == command.decision
     ));
+    Ok(())
+}
+
+#[test]
+fn recovered_plan_review_attention_message_restores_the_existing_private_resume_action()
+-> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let public = pending_text_user_input_request()?;
+    let requested = sigil_kernel::UserInputRequestedV1::new(sigil_kernel::UserInputRequestV1 {
+        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+        identity: public.identity,
+        source: sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+            plan_review_id: sigil_kernel::PlanReviewId::new("tui-recovered-plan-review")?,
+            attempt_id: sigil_kernel::PlanReviewAttemptId::new("tui-recovered-attempt")?,
+        },
+        purpose: public.purpose,
+        prompt: public.prompt,
+        questions: public.questions,
+        allowed_actions: public.allowed_actions,
+        requested_at_unix_ms: public.requested_at_unix_ms,
+        continuation: Some(sigil_kernel::UserInputContinuationBindingV1 {
+            assistant_message_id: "recovered-plan-review-question-message".to_owned(),
+            tool_call_id: "recovered-plan-review-question-call".to_owned(),
+            provider_name: "planned".to_owned(),
+            model_name: "planned-model".to_owned(),
+        }),
+    })?;
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: requested.request.identity.clone(),
+        request_hash: requested.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("tui-recovered-plan-review-command")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "private managed child answer".to_owned(),
+                },
+            }],
+        },
+    };
+    let pending = sigil_kernel::UserInputRequestStateV1 {
+        requested,
+        status: sigil_kernel::UserInputStatusV1::Requested,
+        decision: None,
+        claim: None,
+        continuation: None,
+        resolution: None,
+    }
+    .public_view();
+    let started = sigil_kernel::PlanReviewAttemptEntry {
+        plan_review_id: sigil_kernel::PlanReviewId::new("tui-recovered-plan-review")?,
+        attempt_id: sigil_kernel::PlanReviewAttemptId::new("tui-recovered-attempt")?,
+        plan_id: sigil_kernel::PlanId::new("tui-recovered-plan")?,
+        source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+        source_turn: sigil_kernel::ConversationTurnRef {
+            session_scope_id: "tui-input-session".to_owned(),
+            message_id: "tui-recovered-message".to_owned(),
+            logical_run_id: "tui-recovered-parent-run".to_owned(),
+        },
+        route_decision_id: None,
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "managed/tui-recovered-research.jsonl",
+        )?,
+        finalizer_session_ref: Some(sigil_kernel::SessionRef::new_relative(
+            "managed/tui-recovered-finalizer.jsonl",
+        )?),
+        revision_request_id: Some(sigil_kernel::UserInputRequestId::new(
+            "tui-recovered-revision-request",
+        )?),
+        attempt_ordinal: 1,
+        base_plan_id: Some(sigil_kernel::PlanId::new("tui-recovered-base-plan")?),
+        base_plan_hash: Some(format!("sha256:{}", "a".repeat(64))),
+        explicit_objective: Some("recover the explicit plan review".to_owned()),
+        workspace_snapshot_id: Some("tui-recovered-workspace-snapshot".to_owned()),
+        pending_user_input: None,
+        status: sigil_kernel::PlanReviewAttemptStatus::Started,
+        terminal_reason: None,
+        recorded_at_ms: 10,
+    };
+    let waiting = sigil_kernel::PlanReviewAttemptEntry {
+        pending_user_input: Some(Box::new(pending)),
+        status: sigil_kernel::PlanReviewAttemptStatus::WaitingForInput,
+        recorded_at_ms: 11,
+        ..started.clone()
+    };
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(started)),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(waiting)),
+    ];
+
+    app.handle_worker_message(WorkerMessage::RecoveredUserInputAttention {
+        command: command.clone(),
+        entries,
+    })?;
+
+    assert_eq!(
+        app.last_notice(),
+        Some("an accepted input decision is ready to resume; choose Resume")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let private_resume = action
+        .as_ref()
+        .and_then(|action| app.recovered_plan_review_research_resume_command(action))
+        .expect("only the private plan-review recovery form may bypass application receipt replay");
+    assert!(matches!(
+        private_resume,
+        crate::runner::WorkerCommand::ResumeRecoveredPlanReviewResearch {
+            command_id,
+            request_id,
+            generation,
+            expected_request_hash,
+        } if command_id == command.command_id.as_str()
+            && request_id == command.identity.request_id.as_str()
+            && generation == command.identity.generation
+            && expected_request_hash == command.request_hash
+    ));
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitUserInputDecision {
+            command_id: Some(command_id),
+            request_id,
+            generation,
+            expected_request_hash,
+            decision,
+        }) if command_id == command.command_id.as_str()
+            && request_id == command.identity.request_id.as_str()
+            && generation == command.identity.generation
+            && expected_request_hash == command.request_hash
+            && decision == command.decision
+    ));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("private managed child answer")),
+        "the worker-private answer must not enter the parent timeline"
+    );
+    assert!(
+        !app.events
+            .iter()
+            .any(|event| event.detail.contains("private managed child answer")),
+        "the worker-private answer must not enter the public activity event log"
+    );
     Ok(())
 }
 

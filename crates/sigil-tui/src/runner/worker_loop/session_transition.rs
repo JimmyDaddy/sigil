@@ -76,6 +76,11 @@ pub(in crate::runner) struct SessionTransitionOutcome {
     pub(in crate::runner) provider_name: String,
     pub(in crate::runner) model_name: String,
     pub(in crate::runner) entries: Vec<SessionLogEntry>,
+    /// Private worker-owned recovery command for a durable PlanReview child receipt.  This never
+    /// crosses the application boundary; the dispatcher forwards it only after the target
+    /// session has become current so the App can reuse its existing Resume form.
+    pub(in crate::runner) recovered_plan_review_input:
+        Option<sigil_kernel::UserInputDecisionCommandV1>,
     pub(in crate::runner) session_attachment:
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 }
@@ -521,12 +526,23 @@ where
     state.agent.supervisor = target_agent_supervisor;
     state.run.pending_task_handoffs = pending_task_handoffs;
     register_worker_active_projection_observer(state).map_err(anyhow::Error::msg)?;
+    let recovered_plan_review_input =
+        match super::recover_managed_plan_review_research_attention(state) {
+            Ok(command) => command,
+            Err(error) => {
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "accepted plan-review input recovery is unavailable: {error:#}"
+                )));
+                None
+            }
+        };
 
     Ok(SessionTransitionOutcome {
         session_log_path,
         provider_name,
         model_name,
         entries,
+        recovered_plan_review_input,
         session_attachment: Arc::clone(&state.session.attachment_lease),
     })
 }

@@ -8,6 +8,10 @@ pub(in crate::runner) struct ActiveRun {
     pub(in crate::runner) cancellation_owner: RunCancellationOwner,
     pub(in crate::runner) cancellation_recorder: RunCancellationRecorder,
     pub(in crate::runner) cancellation_target: RunCancellationTarget,
+    /// Only revision workers bind a child logical run. It lets cancellation defer to an exact
+    /// already-committed revision terminal instead of overwriting it with a generic foreground
+    /// cancellation result.
+    pub(in crate::runner) revision_terminal_run_id: Option<String>,
     pub(in crate::runner) url_capability_registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
     pub(in crate::runner) image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
 }
@@ -248,9 +252,37 @@ pub(in crate::runner) fn cancel_active_run(
             // the detached session. Clear the delta before later cancellation-audit work so an
             // error in that work cannot carry already-projected controls into the next run.
             detached_durable_controls.clear();
-            if let Err(error) =
-                append_mcp_elicitation_audits(&mut session, &active_run.elicitation_audit_buffer)
-            {
+            let durable_revision_terminal =
+                if let Some(revision_run_id) = active_run.revision_terminal_run_id.as_deref() {
+                    match durable_revision_terminal_event(&mut session, revision_run_id) {
+                        Ok(Some(event)) => Some(event),
+                        Ok(None) => None,
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "could not reconcile the revision terminal before cancellation: {error}"
+                        )));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+            let audit_result =
+                append_mcp_elicitation_audits(&mut session, &active_run.elicitation_audit_buffer);
+            if let Some(event) = durable_revision_terminal.as_ref() {
+                deliver_durable_revision_terminal_after_audit(
+                    event,
+                    audit_result,
+                    current_session_log_path,
+                    session.provider_name().to_owned(),
+                    session.model_name().to_owned(),
+                    session.entries().to_vec(),
+                    message_tx,
+                );
+                *current_session = Some(session);
+                return;
+            }
+            if let Err(error) = audit_result {
                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 *current_session = Some(session);
                 return;
@@ -391,6 +423,109 @@ pub(in crate::runner) fn cancel_active_run(
     }
 }
 
+fn durable_revision_terminal_event(
+    session: &mut Session,
+    revision_run_id: &str,
+) -> std::result::Result<Option<sigil_kernel::PublicRunEventKind>, String> {
+    let Some(outbox) = session
+        .reconcile_plan_review_revision_terminal(revision_run_id)
+        .map_err(|error| format!("failed to read the durable revision terminal: {error:#}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(outbox.event.event))
+}
+
+pub(in crate::runner) fn revision_terminal_worker_message(
+    event: &sigil_kernel::PublicRunEventKind,
+    session_log_path: &Path,
+    provider_name: String,
+    model_name: String,
+    entries: Vec<SessionLogEntry>,
+) -> std::result::Result<WorkerMessage, String> {
+    Ok(match event {
+        sigil_kernel::PublicRunEventKind::RunFinished { final_text } => {
+            WorkerMessage::PlanRunFinished {
+                result: AgentRunResult {
+                    final_text: final_text.clone(),
+                    tool_calls: 0,
+                    final_message_id: None,
+                },
+                entries,
+            }
+        }
+        sigil_kernel::PublicRunEventKind::RunCancelled => WorkerMessage::RunCancelled {
+            session_log_path: session_log_path.to_path_buf(),
+            provider_name,
+            model_name,
+            entries,
+        },
+        sigil_kernel::PublicRunEventKind::RunInterrupted { reason } => {
+            WorkerMessage::RunInterrupted {
+                session_log_path: session_log_path.to_path_buf(),
+                provider_name,
+                model_name,
+                reason: reason.clone(),
+                entries,
+            }
+        }
+        sigil_kernel::PublicRunEventKind::RunFailed { error } => {
+            WorkerMessage::RunFailed(error.clone())
+        }
+        sigil_kernel::PublicRunEventKind::RunBlocked { reason } => {
+            WorkerMessage::PlanReviewBlocked {
+                reason: reason.clone(),
+                paused: false,
+                entries,
+            }
+        }
+        sigil_kernel::PublicRunEventKind::RunPaused { reason } => {
+            WorkerMessage::PlanReviewBlocked {
+                reason: reason.clone(),
+                paused: true,
+                entries,
+            }
+        }
+        _ => {
+            return Err("durable revision terminal has an unexpected public event kind".to_owned());
+        }
+    })
+}
+
+/// Completes TUI cancellation delivery from the already-reconciled revision terminal. An audit
+/// append failure remains visible as a Notice, but cannot rewrite that exact durable fact.
+pub(in crate::runner) fn deliver_durable_revision_terminal_after_audit(
+    event: &sigil_kernel::PublicRunEventKind,
+    audit_result: std::result::Result<(), String>,
+    session_log_path: &Path,
+    provider_name: String,
+    model_name: String,
+    entries: Vec<SessionLogEntry>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) {
+    if let Err(error) = audit_result {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "revision audit delivery failed; durable execution state is unchanged: {error}"
+        )));
+    }
+    match revision_terminal_worker_message(
+        event,
+        session_log_path,
+        provider_name,
+        model_name,
+        entries,
+    ) {
+        Ok(message) => {
+            let _ = message_tx.send(message);
+        }
+        Err(projection_error) => {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "could not project the durable revision terminal; durable execution state is unchanged: {projection_error}"
+            )));
+        }
+    }
+}
+
 fn load_active_run_session(
     provider_name: &str,
     model_name: &str,
@@ -450,6 +585,10 @@ pub(in crate::runner) enum RunTaskPayload {
     PlanReviewBlocked {
         reason: String,
         paused: bool,
+    },
+    PlanReviewCancelled,
+    PlanReviewInterrupted {
+        reason: String,
     },
     Agent {
         profile_id: String,

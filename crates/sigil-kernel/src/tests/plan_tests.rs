@@ -3,14 +3,15 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    ControlEntry, NetworkEffect, PlanApprovalPermission, PlanArtifactProjection, PlanDecision,
-    PlanDecisionActor, PlanDecisionRecordedEntry, PlanId, PlanSourceRef, SessionLogEntry,
-    TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess, ToolCategory,
-    ToolPreviewCapability, ToolSpec, plain_text_plan_draft_entry,
-    plain_text_plan_draft_entry_with_plan_id, plan_draft_created_entry,
-    plan_review_detail_from_entries, plan_task_input_from_draft, plan_text_hash,
-    plan_workspace_paths, submit_plan_draft_entry, task_id_from_plan_draft,
-    task_plan_from_plan_draft,
+    ControlEntry, ConversationTurnRef, NetworkEffect, PlanApprovalPermission,
+    PlanArtifactProjection, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanId,
+    PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus, PlanReviewId,
+    PlanReviewSource, PlanSourceRef, SessionLogEntry, TaskCreatedFromPlanEntry, TaskId,
+    TaskIsolationMode, TaskStepMode, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec,
+    plain_text_plan_draft_entry, plain_text_plan_draft_entry_with_plan_id,
+    plan_draft_created_entry, plan_review_child_session_ref, plan_review_detail_from_entries,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, submit_plan_draft_entry,
+    task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 
 fn tool_spec(
@@ -56,6 +57,40 @@ fn simple_structured_plan(summary: &str, title: &str, path: &str) -> String {
 ```
 "#
     )
+}
+
+fn explicit_plan_review_attempt(
+    plan_id: &PlanId,
+    objective: Option<&str>,
+    status: PlanReviewAttemptStatus,
+    recorded_at_ms: u64,
+) -> Result<PlanReviewAttemptEntry> {
+    let plan_review_id = PlanReviewId::new(format!("detail-review-{}", plan_id.as_str()))?;
+    let attempt_id = PlanReviewAttemptId::new(format!("detail-attempt-{}", plan_id.as_str()))?;
+    Ok(PlanReviewAttemptEntry {
+        plan_review_id: plan_review_id.clone(),
+        attempt_id: attempt_id.clone(),
+        plan_id: plan_id.clone(),
+        source: PlanReviewSource::ExplicitPlanCommand,
+        source_turn: ConversationTurnRef {
+            session_scope_id: "detail-session".to_owned(),
+            message_id: format!("plan-command-{}", plan_id.as_str()),
+            logical_run_id: format!("plan-run-{}", plan_id.as_str()),
+        },
+        explicit_objective: objective.map(str::to_owned),
+        route_decision_id: None,
+        child_session_ref: plan_review_child_session_ref(&plan_review_id, &attempt_id),
+        finalizer_session_ref: None,
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        workspace_snapshot_id: None,
+        pending_user_input: None,
+        status,
+        terminal_reason: None,
+        recorded_at_ms,
+    })
 }
 
 #[test]
@@ -753,6 +788,152 @@ fn plan_review_detail_preserves_complete_typed_content_and_exact_hash() -> Resul
     );
     assert!(detail.legacy_markdown.is_none());
     assert!(plan_review_detail_from_entries(&entries, &plan_id, "sha256:stale").is_err());
+    Ok(())
+}
+
+#[test]
+fn plan_review_detail_rejects_a_legacy_explicit_attempt_without_its_objective() -> Result<()> {
+    let plan_id = PlanId::new("plan-detail-legacy-explicit")?;
+    let draft = plain_text_plan_draft_entry_with_plan_id(
+        plan_id.clone(),
+        "Reject missing explicit objective",
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("nonempty draft");
+    let current = explicit_plan_review_attempt(
+        &plan_id,
+        Some("Original explicit plan objective"),
+        PlanReviewAttemptStatus::Started,
+        43,
+    )?;
+    let mut legacy = serde_json::to_value(current)?;
+    legacy
+        .as_object_mut()
+        .expect("attempt object")
+        .remove("explicit_objective");
+    let legacy: PlanReviewAttemptEntry = serde_json::from_value(legacy)?;
+    assert!(legacy.explicit_objective.is_none());
+    let ready = PlanReviewAttemptEntry {
+        status: PlanReviewAttemptStatus::DraftReady,
+        recorded_at_ms: 44,
+        ..legacy.clone()
+    };
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(legacy)),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(ready)),
+    ];
+
+    assert!(plan_review_detail_from_entries(&entries, &plan_id, &draft.plan_hash).is_err());
+    Ok(())
+}
+
+#[test]
+fn plan_review_detail_accepts_one_valid_review_without_trusting_an_unrelated_conflict() -> Result<()>
+{
+    let plan_id = PlanId::new("plan-detail-explicit-valid")?;
+    let draft = plain_text_plan_draft_entry_with_plan_id(
+        plan_id.clone(),
+        "Preserve explicit source",
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("nonempty draft");
+    let started = explicit_plan_review_attempt(
+        &plan_id,
+        Some("Original explicit plan objective"),
+        PlanReviewAttemptStatus::Started,
+        43,
+    )?;
+    let ready = PlanReviewAttemptEntry {
+        status: PlanReviewAttemptStatus::DraftReady,
+        recorded_at_ms: 44,
+        ..started.clone()
+    };
+    let unrelated = explicit_plan_review_attempt(
+        &PlanId::new("plan-detail-unrelated-invalid")?,
+        None,
+        PlanReviewAttemptStatus::Started,
+        45,
+    )?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(started)),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(ready)),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(unrelated)),
+    ];
+
+    let detail = plan_review_detail_from_entries(&entries, &plan_id, &draft.plan_hash)?;
+    assert_eq!(detail.source, PlanReviewSource::ExplicitPlanCommand);
+    Ok(())
+}
+
+#[test]
+fn plan_review_detail_rejects_later_cross_review_identity_collisions() -> Result<()> {
+    let plan_id = PlanId::new("plan-detail-collision-target")?;
+    let draft = plain_text_plan_draft_entry_with_plan_id(
+        plan_id.clone(),
+        "Preserve exact review identity",
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("nonempty draft");
+    let mut started = explicit_plan_review_attempt(
+        &plan_id,
+        Some("Original objective"),
+        PlanReviewAttemptStatus::Started,
+        43,
+    )?;
+    started.source = PlanReviewSource::AutomaticConversationRoute;
+    started.explicit_objective = None;
+    started.route_decision_id = Some(crate::ConversationRouteDecisionId::new(
+        "detail-route-identity",
+    )?);
+    let ready = PlanReviewAttemptEntry {
+        status: PlanReviewAttemptStatus::DraftReady,
+        recorded_at_ms: 44,
+        ..started.clone()
+    };
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(started.clone())),
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(ready)),
+    ];
+    plan_review_detail_from_entries(&entries, &plan_id, &draft.plan_hash)?;
+    let unrelated = explicit_plan_review_attempt(
+        &PlanId::new("plan-detail-collision-other")?,
+        Some("Other objective"),
+        PlanReviewAttemptStatus::Started,
+        45,
+    )?;
+    let mut attempt_collision = unrelated.clone();
+    attempt_collision.attempt_id = started.attempt_id.clone();
+    let mut route_collision = unrelated;
+    route_collision.source = PlanReviewSource::AutomaticConversationRoute;
+    route_collision.explicit_objective = None;
+    route_collision.route_decision_id = started.route_decision_id.clone();
+    for collision in [attempt_collision, route_collision] {
+        let other_review = collision.plan_review_id.clone();
+        let mut corrupted = entries.clone();
+        corrupted.push(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(
+            collision,
+        )));
+        let projection = crate::PlanReviewProjection::from_entries(&corrupted);
+        for review_id in [&started.plan_review_id, &other_review] {
+            assert!(
+                !projection
+                    .review(review_id)
+                    .expect("both owners exist")
+                    .conflicts
+                    .is_empty()
+            );
+        }
+        assert!(plan_review_detail_from_entries(&corrupted, &plan_id, &draft.plan_hash).is_err());
+    }
     Ok(())
 }
 

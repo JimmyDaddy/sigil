@@ -276,6 +276,7 @@ fn doctor_reports_current_plan_review_compatibility_without_mutating_sessions() 
             attempt_ordinal: 1,
             base_plan_id: None,
             base_plan_hash: None,
+            explicit_objective: Some("doctor plan review".to_owned()),
             workspace_snapshot_id: None,
             pending_user_input: None,
             status: sigil_kernel::PlanReviewAttemptStatus::Started,

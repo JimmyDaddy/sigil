@@ -16,6 +16,9 @@ pub struct ApplicationUserInputDecisionRequest {
     pub expected_session_scope_id: String,
     /// Adapter-owned physical run id reserved for a submitted-answer continuation.
     pub run_id: String,
+    /// Exact sequence reserved by the adapter's live event journal for a cancelled revision
+    /// terminal.  Normal and TUI-only decisions leave this absent and keep their existing path.
+    pub revision_terminal_public_sequence: Option<u64>,
     /// Exact public request identity rendered to the caller.
     pub identity: sigil_kernel::UserInputIdentityV1,
     /// Exact request hash rendered to the caller.
@@ -35,6 +38,7 @@ pub struct PreparedApplicationUserInputDecision {
     receipt: sigil_kernel::UserInputDecisionReceiptV1,
     continuation: Option<PreparedApplicationRun>,
     revision_request: Option<crate::PlanReviewRunRequest>,
+    revision_terminal_outbox: Option<sigil_kernel::PublicEventOutboxEntryV1>,
 }
 
 impl PreparedApplicationUserInputDecision {
@@ -48,6 +52,12 @@ impl PreparedApplicationUserInputDecision {
     #[must_use]
     pub fn has_continuation(&self) -> bool {
         self.continuation.is_some() || self.revision_request.is_some()
+    }
+
+    /// Returns the exact durable revision terminal that an adapter must replay unchanged.
+    #[must_use]
+    pub fn revision_terminal_outbox(&self) -> Option<&sigil_kernel::PublicEventOutboxEntryV1> {
+        self.revision_terminal_outbox.as_ref()
     }
 
     /// Separates the durable receipt from the optional supervised run.
@@ -171,10 +181,9 @@ pub fn application_session_has_unresolved_user_input(
     }
     let plan_reviews = sigil_kernel::PlanReviewProjection::from_entries(&entries);
     Ok(plan_reviews.reviews().any(|review| {
-        review
-            .attempts
-            .iter()
-            .any(|attempt| attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput)
+        review.attempts.last().is_some_and(|attempt| {
+            attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+        })
     }))
 }
 
@@ -187,12 +196,41 @@ pub fn application_session_has_unresolved_user_input(
 pub fn application_recoverable_user_input_decision(
     session_path: &Path,
     expected_session_scope_id: &str,
+    plan_review_child_resource_provisioner: Option<
+        &dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1,
+    >,
 ) -> Result<Option<sigil_kernel::UserInputDecisionCommandV1>> {
     let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
     if let Some(command) = sigil_kernel::recoverable_user_input_decision_from_entries(&entries)? {
         return Ok(Some(command));
     }
-    recoverable_agent_user_input_decision_from_child_sessions(session_path, &entries)
+    if let Some(command) =
+        recoverable_agent_user_input_decision_from_child_sessions(session_path, &entries)?
+    {
+        return Ok(Some(command));
+    }
+
+    let plan_reviews = sigil_kernel::PlanReviewProjection::from_entries(&entries);
+    let has_waiting_research = plan_reviews.reviews().any(|review| {
+        review.latest_attempt().is_some_and(|attempt| {
+            attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+        })
+    });
+    if !has_waiting_research {
+        return Ok(None);
+    }
+    let provisioner = plan_review_child_resource_provisioner.context(
+        "current-schema plan-review input recovery requires the composed child resource bundle",
+    )?;
+    let parent = Session::load_from_store(
+        "application-recovery",
+        "application-recovery",
+        JsonlSessionStore::open_existing(session_path)?,
+    )?;
+    if parent.session_scope_id() != expected_session_scope_id {
+        bail!("durable application session scope changed during plan-review input recovery");
+    }
+    crate::PlanReviewCoordinator::recover_managed_plan_review_research_input(&parent, provisioner)
 }
 
 /// Reconstructs one exact accepted command owned by a routed child session.
@@ -302,22 +340,34 @@ pub async fn prepare_application_user_input_decision(
         }
         let root_config = RootConfig::load(&request.config_path)
             .map_err(ApplicationRunPrepareError::execution)?;
-        let (receipt, revision_request) = crate::application_plan_review_research_input_decision(
-            &root_config,
-            &request.session_path,
-            &request.expected_session_scope_id,
-            sigil_kernel::UserInputDecisionCommandV1 {
-                identity: request.identity,
-                request_hash: request.request_hash,
-                command_id: request.command_id,
-                decision: request.decision,
-            },
-        )
-        .map_err(ApplicationRunPrepareError::execution)?;
+        let child_resource_provisioner = services
+            .authority_composition()
+            .map(|composition| composition.plan_review_child_resource_provisioner())
+            .ok_or_else(|| {
+                ApplicationRunPrepareError::execution(anyhow!(
+                    "current-schema plan-review research input requires the composed child resource bundle"
+                ))
+            })?;
+        let (receipt, revision_request, revision_terminal_outbox) =
+            crate::application_plan_review_research_input_decision(
+                &root_config,
+                &request.session_path,
+                &request.expected_session_scope_id,
+                sigil_kernel::UserInputDecisionCommandV1 {
+                    identity: request.identity,
+                    request_hash: request.request_hash,
+                    command_id: request.command_id,
+                    decision: request.decision,
+                },
+                request.revision_terminal_public_sequence,
+                child_resource_provisioner.as_ref(),
+            )
+            .map_err(ApplicationRunPrepareError::execution)?;
         return Ok(PreparedApplicationUserInputDecision {
             receipt,
             continuation: None,
             revision_request,
+            revision_terminal_outbox,
         });
     }
     let planner_route =
@@ -393,6 +443,7 @@ pub async fn prepare_application_user_input_decision(
                 receipt,
                 continuation: None,
                 revision_request: None,
+                revision_terminal_outbox: None,
             });
         }
         let task_execution = prepared
@@ -443,6 +494,7 @@ pub async fn prepare_application_user_input_decision(
             receipt,
             continuation: Some(prepared),
             revision_request: None,
+            revision_terminal_outbox: None,
         });
     }
     if request.identity.session_scope_id.as_str() != request.expected_session_scope_id {
@@ -482,6 +534,7 @@ pub async fn prepare_application_user_input_decision(
             receipt,
             continuation: None,
             revision_request,
+            revision_terminal_outbox: None,
         });
     }
 
@@ -571,6 +624,7 @@ pub async fn prepare_application_user_input_decision(
             receipt,
             continuation: None,
             revision_request: None,
+            revision_terminal_outbox: None,
         });
     }
     let preview =
@@ -734,6 +788,7 @@ pub async fn prepare_application_user_input_decision(
         receipt,
         continuation: Some(continuation),
         revision_request: None,
+        revision_terminal_outbox: None,
     })
 }
 

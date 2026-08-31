@@ -21,14 +21,15 @@ use sigil_kernel::{
     ConversationInputTerminalExpectation, ConversationInputTerminalFrontier,
     ConversationQueueDurableProjection, ConversationQueueMutation,
     ConversationQueueMutationCommand, ConversationQueueRevision, ExecutionContainmentRequest,
-    JsonlSessionStore, ModelMessage, PermissionDecisionReason, PermissionRisk,
-    ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
-    PublicEventOutboxProjectionV1, PublicRouteRecoveryAction, PublicRouteRecoveryCode,
-    PublicRunEvent, PublicRunEventKind, RootConfig, SecretString, SessionLogEntry, SessionRef,
-    ToolAnalysisStatus, ToolApproval, ToolApprovalContext, ToolApprovalUserDecision,
-    ToolArtifactAvailability, ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactRefV1,
-    ToolCall, ToolOperation, ToolOutputArchivedArtifactBindingV1, ToolPermissionEffect,
-    ToolPermissionSummary, ToolSpec, ToolSubject, conversation_promotion_capability_digest,
+    JsonlSessionStore, ModelMessage, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PermissionDecisionReason,
+    PermissionRisk, PlanReviewAttemptStatus, PlanReviewProjection, ProviderPhysicalAttemptOutcome,
+    ProviderPhysicalAttemptProjection, PublicEventDeliveryReceiptV1, PublicEventOutboxProjectionV1,
+    PublicEventOutboxRecorder, PublicRouteRecoveryAction, PublicRouteRecoveryCode, PublicRunEvent,
+    PublicRunEventKind, RootConfig, SecretString, SessionLogEntry, SessionRef, ToolAnalysisStatus,
+    ToolApproval, ToolApprovalContext, ToolApprovalUserDecision, ToolArtifactAvailability,
+    ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactRefV1, ToolCall, ToolOperation,
+    ToolOutputArchivedArtifactBindingV1, ToolPermissionEffect, ToolPermissionSummary, ToolSpec,
+    ToolSubject, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
     project_user_message_for_persistence_with_nonce_and_issued_at, safe_persistence_text,
     stable_event_uuid,
@@ -363,9 +364,94 @@ impl sigil_runtime::application_run::ApplicationRunEventHandler
         if event.session_id != self.durable_session_scope_id || event.run_id != self.run_id {
             anyhow::bail!("plan review revision event scope mismatch");
         }
-        self.event_bus.publish_next_run_event(event)?;
+        // The runtime bridge is the only sequence owner for this revision. Re-numbering here
+        // would make its later durable terminal outbox disagree with the already emitted stream.
+        let awaiting_input = matches!(
+            &event.event,
+            sigil_kernel::PublicRunEventKind::RunAwaitingUserInput { .. }
+        );
+        self.event_bus.publish_run_event(event)?;
+        if awaiting_input {
+            // End this SSE response without sealing the protocol journal: the exact same child
+            // logical run resumes after the accepted research answer.
+            self.event_bus
+                .close_live_run_delivery(&self.durable_session_scope_id, &self.run_id)?;
+        }
         Ok(())
     }
+
+    fn public_event_adapter_id(&self) -> &'static str {
+        "http"
+    }
+}
+
+fn revision_attempt_is_exact_waiting_input(
+    session_log_path: &Path,
+    request: &sigil_runtime::PlanReviewRunRequest,
+) -> Result<bool> {
+    let session = sigil_kernel::Session::load_from_store(
+        "http-plan-review-admission",
+        "unknown",
+        JsonlSessionStore::new(session_log_path)?,
+    )?;
+    let projection = PlanReviewProjection::from_entries(session.entries());
+    if projection.has_conflicts() {
+        anyhow::bail!("plan review projection is conflicted before supervised revision admission");
+    }
+    let Some(attempt) = projection.latest_attempt(&request.plan_review_id) else {
+        return Ok(false);
+    };
+    if attempt.attempt_id != request.attempt_id {
+        return Ok(false);
+    }
+    let exact = attempt.plan_id == request.plan_id
+        && attempt.source == request.source
+        && attempt.source_turn == request.source_turn
+        && attempt.route_decision_id == request.route_decision_id
+        && attempt.child_session_ref == request.child_session_ref
+        && attempt.finalizer_session_ref.as_ref() == Some(&request.finalizer_session_ref)
+        && attempt.revision_request_id == request.revision_request_id
+        && attempt.attempt_ordinal == request.attempt_ordinal
+        && attempt.base_plan_id == request.base_plan_id
+        && attempt.base_plan_hash == request.base_plan_hash
+        && attempt.workspace_snapshot_id == request.workspace_snapshot_id;
+    if !exact {
+        anyhow::bail!("plan review attempt binding does not match the supervised revision request");
+    }
+    Ok(attempt.status == PlanReviewAttemptStatus::WaitingForInput)
+}
+
+/// Whether this exact public research request still belongs to the current suspended attempt.
+/// Historical requests remain readable for command idempotency, but they must not reserve a new
+/// terminal sequence or reopen a finalized revision.
+fn plan_review_research_input_is_current_waiting(
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    identity: &sigil_kernel::UserInputIdentityV1,
+    request_hash: &str,
+) -> Result<bool> {
+    let session = sigil_kernel::Session::load_from_store(
+        "http-plan-review-input-admission",
+        "unknown",
+        JsonlSessionStore::new(session_log_path)?,
+    )?;
+    if session.session_scope_id() != durable_session_scope_id {
+        anyhow::bail!("plan-review research input belongs to another durable session");
+    }
+    let projection = PlanReviewProjection::from_entries(session.entries());
+    if projection.has_conflicts() {
+        anyhow::bail!("plan-review projection is conflicted before input admission");
+    }
+    let Some(historical) = projection.attempt_for_pending_user_input(identity, request_hash) else {
+        return Ok(false);
+    };
+    Ok(projection
+        .latest_attempt(&historical.plan_review_id)
+        .is_some_and(|latest| {
+            latest.attempt_id == historical.attempt_id
+                && latest.status == PlanReviewAttemptStatus::WaitingForInput
+                && latest.revision_request_id.is_some()
+        }))
 }
 
 enum PendingHttpCompaction {
@@ -504,10 +590,25 @@ impl HttpProductionRunDriver {
         let durable_session_scope_id = session.durable_session_scope_id.clone();
         let session_id = session.id.clone();
         let run_id = request.child_logical_run_id();
+        let initial_public_sequence = self
+            .event_bus
+            .latest_run_sequence(&durable_session_scope_id, &run_id)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "plan review revision public sequence recovery failed: {error}"
+                ))
+            })?
+            .unwrap_or(0);
         let attachment = self.acquire_session_attachment(session).map_err(|error| {
             HttpRunDriverError::new(format!("plan review revision attachment failed: {error}"))
         })?;
         let registry = self.attached_registry()?;
+        let waiting_attempt = revision_attempt_is_exact_waiting_input(&session_log_path, &request)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "plan review revision durable admission failed: {error:#}"
+                ))
+            })?;
         let (cancel_sender, mut cancel_receiver) = mpsc::unbounded_channel();
         {
             let mut runs = self
@@ -528,11 +629,20 @@ impl HttpProductionRunDriver {
                 }),
             );
         }
-        // The foreground slot is the last pre-spawn registration: a bind failure rolls the
-        // active-run registration back so a half-registered revision can never leave the session
-        // blocked behind a foreground slot no worker owns. The rollback only removes the run-map
-        // entry this call inserted — the slot was never claimed, so no unbind is performed.
-        if let Err(error) = registry.bind_supervised_session_run(&session.id, &run_id) {
+        // The registry keeps an adapter checkpoint for this exact child run. A durable waiting
+        // attempt may reopen only its own Paused checkpoint; all other duplicate/stale bindings
+        // fail closed before the worker starts.
+        if let Err(error) = registry.register_or_resume_supervised_revision_run(
+            &session.id,
+            &run_id,
+            HttpPermissionMode::ReadOnly,
+            if waiting_attempt {
+                "Resume plan review after answering research input"
+            } else {
+                "Run plan review revision"
+            },
+            waiting_attempt,
+        ) {
             rollback_revision_run_registration(&self.active_runs, &self.active_runs_ready, &run_id);
             return Err(HttpRunDriverError::new(error.to_string()));
         }
@@ -560,11 +670,12 @@ impl HttpProductionRunDriver {
             .map(|composition| composition.plan_review_child_resource_provisioner());
         let runtime = self.runtime.clone();
         self.runtime.spawn(async move {
-            let _held_session_attachment = attachment;
+            let mut held_session_attachment = Some(attachment);
             let terminal_event_bus = event_bus.clone();
+            let terminal_session_log_path = session_log_path.clone();
             let terminal_session_scope_id = durable_session_scope_id.clone();
             let terminal_run_id = run_id.clone();
-            let mut run = Box::pin(async move {
+            let mut run: PlanReviewRevisionExecutionFuture = Box::pin(async move {
                 let mut handler = HttpPlanReviewRevisionEventHandler {
                     durable_session_scope_id,
                     run_id,
@@ -575,6 +686,7 @@ impl HttpProductionRunDriver {
                     &workspace_root,
                     &session_log_path,
                     &request,
+                    initial_public_sequence,
                     &mut handler,
                     Some(cancellation_handle),
                     managed_command_execution,
@@ -589,30 +701,46 @@ impl HttpProductionRunDriver {
                     outcome = &mut run => break outcome,
                     control = cancel_receiver.recv() => match control {
                         Some(HttpProductionRunControlCommand::Cancel(cancellation)) => {
-                            cancellation_owner.request_cancel();
-                            let deadline = cancellation_deadline(cancellation_timeout);
-                            let joined = tokio::time::timeout(remaining_until(deadline), &mut run).await;
-                            match joined {
-                                Ok(Ok(outcome)) => {
-                                    let _ = cancellation.acknowledgement.send(Ok(()));
-                                    break Ok(outcome);
+                            let attachment = held_session_attachment.take().expect(
+                                "active plan-review revision must retain its session attachment",
+                            );
+                            let cancellation_registry = registry.upgrade();
+                            match await_plan_review_revision_cancellation(
+                                &cancellation_owner,
+                                cancellation,
+                                cancellation_timeout,
+                                run,
+                                attachment,
+                                cancellation_registry.as_deref(),
+                                &terminal_run_id,
+                            ).await {
+                                PlanReviewRevisionCancellationWait::Joined {
+                                    outcome,
+                                    attachment,
+                                } => {
+                                    held_session_attachment = Some(attachment);
+                                    break *outcome;
                                 }
-                                Ok(Err(error)) => {
-                                    let _ = cancellation.acknowledgement.send(Ok(()));
-                                    break Err(error);
-                                }
-                                Err(_) => {
-                                    let error = HttpRunDriverError::new(
-                                        "plan review revision did not quiesce before the cancellation deadline",
-                                    );
-                                    let _ = cancellation.acknowledgement.send(Err(error.clone()));
+                                PlanReviewRevisionCancellationWait::Deadline(detached) => {
                                     // The run keeps executing detached; ownership cleanup and the
                                     // terminal event happen only when it actually finishes.
                                     let active_runs = Arc::clone(&active_runs);
                                     let active_runs_ready = Arc::clone(&active_runs_ready);
+                                    let late_session_log_path = terminal_session_log_path.clone();
+                                    let late_registry = registry.clone();
+                                    let (late_run, late_session_attachment) = detached.into_parts();
                                     runtime.spawn(async move {
-                                        let late_outcome = run.await;
+                                        let _held_session_attachment = late_session_attachment;
+                                        let late_outcome = late_run.await;
                                         publish_plan_review_revision_terminal(
+                                            &terminal_event_bus,
+                                            &late_session_log_path,
+                                            &terminal_session_scope_id,
+                                            &terminal_run_id,
+                                            &late_outcome,
+                                        );
+                                        reconcile_plan_review_revision_http_registry(
+                                            &late_registry,
                                             &terminal_event_bus,
                                             &terminal_session_scope_id,
                                             &terminal_run_id,
@@ -621,7 +749,7 @@ impl HttpProductionRunDriver {
                                         release_owned_revision_run(
                                             &active_runs,
                                             &active_runs_ready,
-                                            &registry,
+                                            &late_registry,
                                             &release_session_id,
                                             &terminal_run_id,
                                         );
@@ -643,6 +771,14 @@ impl HttpProductionRunDriver {
             };
             publish_plan_review_revision_terminal(
                 &terminal_event_bus,
+                &terminal_session_log_path,
+                &terminal_session_scope_id,
+                &terminal_run_id,
+                &outcome,
+            );
+            reconcile_plan_review_revision_http_registry(
+                &registry,
+                &terminal_event_bus,
                 &terminal_session_scope_id,
                 &terminal_run_id,
                 &outcome,
@@ -654,6 +790,7 @@ impl HttpProductionRunDriver {
                 &release_session_id,
                 &terminal_run_id,
             );
+            drop(held_session_attachment);
         });
         Ok(())
     }
@@ -663,64 +800,198 @@ impl HttpProductionRunDriver {
 /// SSE stream so clients observe a definitive terminal instead of a dangling live stream.
 fn publish_plan_review_revision_terminal(
     event_bus: &HttpLiveEventBus,
+    session_log_path: &Path,
     durable_session_scope_id: &str,
     run_id: &str,
-    outcome: &std::result::Result<sigil_runtime::PlanReviewRunOutcome, anyhow::Error>,
+    execution: &std::result::Result<
+        sigil_runtime::application_run::PlanReviewRevisionExecution,
+        anyhow::Error,
+    >,
 ) {
-    let kind = plan_review_revision_terminal_event(outcome);
-    let _ = event_bus.publish_next_run_event_and_close_stream(PublicRunEvent::new(
+    let Ok(execution) = execution else {
+        // An execution error before a revision terminal bundle exists is not a domain terminal.
+        // The durable coordinator/recovery path owns any later typed conclusion.
+        return;
+    };
+    let Some(outbox) = execution.terminal_outbox.as_ref() else {
+        // WaitingForInput is a resumable attempt transition, not the one revision finalizer. Its
+        // broader nonterminal delivery treatment is intentionally outside A1.
+        return;
+    };
+    let _ = publish_exact_plan_review_revision_terminal_outbox(
+        event_bus,
+        session_log_path,
         durable_session_scope_id,
         run_id,
-        1,
-        kind,
-    ));
+        outbox,
+    );
 }
 
-fn plan_review_revision_terminal_event(
-    outcome: &std::result::Result<sigil_runtime::PlanReviewRunOutcome, anyhow::Error>,
-) -> PublicRunEventKind {
-    match outcome {
-        Ok(sigil_runtime::PlanReviewRunOutcome::DraftReady { draft }) => {
-            PublicRunEventKind::RunFinished {
-                final_text: format!("Plan ready: {}", draft.summary),
-            }
-        }
-        Ok(sigil_runtime::PlanReviewRunOutcome::CompletedWithoutDraft) => {
-            PublicRunEventKind::RunFinished {
-                final_text: "Plan review closed without a draft; no task was created.".to_owned(),
-            }
-        }
-        Ok(sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput { request }) => {
-            PublicRunEventKind::RunAwaitingUserInput {
-                request_id: request.identity.request_id.as_str().to_owned(),
-                generation: request.identity.generation,
-                request_hash: request.request_hash.clone(),
-            }
-        }
-        Ok(sigil_runtime::PlanReviewRunOutcome::Cancelled) => PublicRunEventKind::RunCancelled,
-        Ok(sigil_runtime::PlanReviewRunOutcome::Blocked(reason)) => {
-            PublicRunEventKind::RunBlocked {
-                reason: reason.clone(),
-            }
-        }
-        Ok(sigil_runtime::PlanReviewRunOutcome::Paused(reason)) => PublicRunEventKind::RunPaused {
-            reason: reason.clone(),
-        },
-        Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(reason)) => {
-            PublicRunEventKind::RunInterrupted {
-                reason: reason.clone(),
-            }
-        }
-        Ok(sigil_runtime::PlanReviewRunOutcome::Failed(error))
-        | Ok(sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error)) => {
-            PublicRunEventKind::RunFailed {
-                error: error.clone(),
-            }
-        }
-        Err(error) => PublicRunEventKind::RunFailed {
-            error: format!("{error:#}"),
-        },
+fn publish_exact_plan_review_revision_terminal_outbox(
+    event_bus: &HttpLiveEventBus,
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    outbox: &sigil_kernel::PublicEventOutboxEntryV1,
+) -> Result<()> {
+    if outbox.event.session_id != durable_session_scope_id
+        || outbox.run_id != run_id
+        || outbox.event.run_id != run_id
+    {
+        return Err(anyhow!(
+            "plan-review revision terminal outbox belongs to another HTTP run"
+        ));
     }
+    publish_exact_http_terminal_outbox_event(
+        event_bus,
+        durable_session_scope_id,
+        run_id,
+        outbox.event.clone(),
+    )?;
+    record_plan_review_revision_terminal_delivery_receipt(session_log_path, outbox)?;
+    let close_result = event_bus.close_run_stream(durable_session_scope_id, run_id);
+    close_result.map_err(anyhow::Error::new)
+}
+
+/// Delivers the exact durable revision terminal and always attempts the registry/stream
+/// projection afterwards. A protocol/receipt error leaves the original outbox pending for attach
+/// replay, but must not strand the registered revision in `Paused` or `ExecutionUncertain` when
+/// its domain terminal is already known.
+fn deliver_and_reconcile_plan_review_revision_terminal(
+    registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    outbox: &sigil_kernel::PublicEventOutboxEntryV1,
+    terminal_was_published: bool,
+) -> Result<(), HttpRunDriverError> {
+    let delivery = if terminal_was_published {
+        record_plan_review_revision_terminal_delivery_receipt(session_log_path, outbox).map_err(
+            |error| {
+                HttpRunDriverError::new(format!(
+                    "durable plan-review revision delivery receipt failed: {error:#}"
+                ))
+            },
+        )
+    } else {
+        publish_exact_plan_review_revision_terminal_outbox(
+            event_bus,
+            session_log_path,
+            durable_session_scope_id,
+            &outbox.run_id,
+            outbox,
+        )
+        .map_err(|error| {
+            HttpRunDriverError::new(format!(
+                "durable plan-review revision terminal delivery failed: {error:#}"
+            ))
+        })
+    };
+    let registry_reconciliation = reconcile_plan_review_revision_terminal_registry_event(
+        registry,
+        event_bus,
+        durable_session_scope_id,
+        &outbox.run_id,
+        &outbox.event,
+    );
+    match (delivery, registry_reconciliation) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(delivery_error), Ok(())) => Err(delivery_error),
+        (Ok(()), Err(registry_error)) => Err(registry_error),
+        (Err(delivery_error), Err(registry_error)) => Err(HttpRunDriverError::new(format!(
+            "durable plan-review revision delivery failed ({delivery_error}); registry reconciliation also failed ({registry_error})"
+        ))),
+    }
+}
+
+/// Records the HTTP receipt only after the exact terminal event reached its canonical journal.
+/// A receipt failure leaves the original outbox pending for idempotent replay.
+fn record_plan_review_revision_terminal_delivery_receipt(
+    session_log_path: &Path,
+    outbox: &sigil_kernel::PublicEventOutboxEntryV1,
+) -> Result<()> {
+    let recorder = PublicEventOutboxRecorder::new(JsonlSessionStore::new(session_log_path)?);
+    let receipt = PublicEventDeliveryReceiptV1 {
+        schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: outbox.public_event_id.clone(),
+        adapter: "http".to_owned(),
+        delivered_at_unix_ms: current_unix_time_ms(),
+    };
+    recorder.append_delivery(&receipt).map(|_| ())
+}
+
+/// Projects an already durable revision terminal into the owned HTTP run registry.  Delivery
+/// failures are deliberately ignored here: the original outbox remains pending and attachment
+/// recovery will replay it and re-project this same domain fact.  Nothing in this adapter path
+/// writes a replacement terminal.
+fn reconcile_plan_review_revision_http_registry(
+    registry: &Weak<HttpSessionRunRegistry>,
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    execution: &std::result::Result<
+        sigil_runtime::application_run::PlanReviewRevisionExecution,
+        anyhow::Error,
+    >,
+) {
+    let Some(registry) = registry.upgrade() else {
+        return;
+    };
+    let Ok(execution) = execution else {
+        // A failed recovery/append leaves the domain attempt Started. Do not manufacture a
+        // terminal, but never leave the adapter presenting an active worker that has unwound.
+        let _ = registry.record_run_execution_uncertain(run_id);
+        return;
+    };
+    if execution.waiting_public_event.is_some() {
+        // The runtime emitted the exact awaiting event after it durably recorded the matching
+        // PlanReview WaitingForInput fact. This is a resumable adapter checkpoint, not a final
+        // revision outcome and must not seal the durable protocol stream.
+        let _ = registry.record_supervised_revision_waiting(run_id);
+        return;
+    }
+    if let Some(outbox) = execution.terminal_outbox.as_ref() {
+        let _ = reconcile_plan_review_revision_terminal_registry_event(
+            &registry,
+            event_bus,
+            durable_session_scope_id,
+            run_id,
+            &outbox.event,
+        );
+    }
+}
+
+fn reconcile_plan_review_revision_terminal_registry_event(
+    registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    event: &PublicRunEvent,
+) -> Result<(), HttpRunDriverError> {
+    let outcome = http_terminal_from_durable_public_event(&event.event).ok_or_else(|| {
+        HttpRunDriverError::new("plan-review revision terminal has no HTTP outcome")
+    })?;
+    registry
+        .record_supervised_revision_terminal_with_reconciliation(run_id, outcome, || {
+            let mut last_error = None;
+            for _ in 0..3 {
+                match event_bus.close_run_stream(durable_session_scope_id, run_id) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        last_error = Some(error);
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            Err(format!(
+                "revision terminal stream could not be reconciled: {}",
+                last_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "unknown durable close failure".to_owned())
+            ))
+        })
+        .map_err(registry_driver_error)?;
+    Ok(())
 }
 
 /// Rolls back a partially registered plan review revision: removes only the run-map entry this
@@ -2034,9 +2305,14 @@ impl HttpRunDriver for HttpProductionRunDriver {
         &self,
         session: &HttpSessionSnapshot,
     ) -> Result<Option<HttpUserInputDecisionDriverCommand>, HttpRunDriverError> {
+        let plan_review_child_resource_provisioner = self
+            .services
+            .authority_composition()
+            .map(|composition| composition.plan_review_child_resource_provisioner());
         let Some(command) = application_recoverable_user_input_decision(
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
+            plan_review_child_resource_provisioner.as_deref(),
         )
         .map_err(|error| {
             HttpRunDriverError::new(format!("user input recovery projection failed: {error:#}"))
@@ -2162,18 +2438,21 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn cancel_run(&self, cancel: HttpRunDriverCancel) -> Result<(), HttpRunDriverError> {
-        let runs = self
-            .active_runs
-            .lock()
-            .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
-        let run = runs.get(&cancel.run_id).ok_or_else(|| {
-            HttpRunDriverError::new(format!("production run is not active: {}", cancel.run_id))
-        })?;
-        if run.session_id != cancel.session_id {
-            return Err(HttpRunDriverError::new(
-                "production cancel session mismatch",
-            ));
-        }
+        let run = {
+            let runs = self
+                .active_runs
+                .lock()
+                .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+            let run = runs.get(&cancel.run_id).ok_or_else(|| {
+                HttpRunDriverError::new(format!("production run is not active: {}", cancel.run_id))
+            })?;
+            if run.session_id != cancel.session_id {
+                return Err(HttpRunDriverError::new(
+                    "production cancel session mismatch",
+                ));
+            }
+            Arc::clone(run)
+        };
         let (acknowledgement, acknowledged) = std_mpsc::sync_channel(1);
         run.cancel_sender
             .send(HttpProductionRunControlCommand::Cancel(
@@ -2193,18 +2472,21 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn pause_task(&self, pause: HttpRunDriverTaskPause) -> Result<(), HttpRunDriverError> {
-        let runs = self
-            .active_runs
-            .lock()
-            .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
-        let run = runs.get(&pause.run_id).ok_or_else(|| {
-            HttpRunDriverError::new(format!("production run is not active: {}", pause.run_id))
-        })?;
-        if run.session_id != pause.session_id {
-            return Err(HttpRunDriverError::new(
-                "production Task pause session mismatch",
-            ));
-        }
+        let run = {
+            let runs = self
+                .active_runs
+                .lock()
+                .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+            let run = runs.get(&pause.run_id).ok_or_else(|| {
+                HttpRunDriverError::new(format!("production run is not active: {}", pause.run_id))
+            })?;
+            if run.session_id != pause.session_id {
+                return Err(HttpRunDriverError::new(
+                    "production Task pause session mismatch",
+                ));
+            }
+            Arc::clone(run)
+        };
         let (acknowledgement, acknowledged) = std_mpsc::sync_channel(1);
         run.cancel_sender
             .send(HttpProductionRunControlCommand::Pause(
@@ -3482,21 +3764,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 revision_request,
             )
         {
-            // `application_plan_decision` already persisted `RevisionRequested`; record a
-            // durable recoverable failure so the original plan remains actionable instead of
-            // being stuck behind a decision that can never complete.
-            if let Err(record_error) = sigil_runtime::application_record_revision_failure(
-                &root_config,
-                Path::new(&session.session_log_path),
-                &session.durable_session_scope_id,
-                &request.plan_id,
-                &request.expected_plan_hash,
-                &format!("revision spawn failed: {error}"),
-            ) {
-                return Err(HttpRunDriverError::new(format!(
-                    "plan review revision spawn failed ({error}) and its durable failure record also failed ({record_error:#})"
-                )));
-            }
+            // `RevisionRequested` is durable, but a failed host spawn is not a revision domain
+            // terminal.  Leave it recoverable; only the exact attempt/outbox finalizer may
+            // settle the revision.
             return Err(error);
         }
         Ok(http_receipt)
@@ -3587,48 +3857,89 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 event_bus: Arc::clone(&self.event_bus),
                 terminal_owners: Arc::clone(&self.terminal_owners),
             }));
-        let prepared = self
-            .runtime
-            .block_on(self.preparer.prepare_user_input(
-                ApplicationUserInputDecisionRequest {
-                    config_path: self.options.config_path.clone(),
-                    launch_cwd: self.options.launch_cwd.clone(),
-                    session_path: PathBuf::from(&session.session_log_path),
-                    session_attachment: Some(attachment),
-                    expected_session_scope_id: session.durable_session_scope_id.clone(),
-                    run_id: run_id.clone(),
-                    identity: exact.identity,
-                    request_hash: exact.request_hash,
-                    command_id:
-                        sigil_kernel::UserInputCommandId::new(command.command_id.clone()).map_err(
-                            |error| {
-                                HttpRunDriverError::new(format!(
-                                    "user input command id failed: {error}"
-                                ))
-                            },
-                        )?,
-                    decision: command.request.decision.clone(),
-                    interaction: ApplicationRunInteraction::ExternallyInteractive,
-                    permission_mode: command.request.permission_mode.map(Into::into),
-                },
-                services,
-            ))
-            .map_err(|error| {
-                HttpRunDriverError::new(format!("user input decision failed: {error:#}"))
-            })?;
-        let (receipt, continuation, revision_request) = prepared.into_parts();
-        let plan_review_research_resume = matches!(
-            &receipt.request.source,
+        let request = ApplicationUserInputDecisionRequest {
+            config_path: self.options.config_path.clone(),
+            launch_cwd: self.options.launch_cwd.clone(),
+            session_path: PathBuf::from(&session.session_log_path),
+            session_attachment: Some(Arc::clone(&attachment)),
+            expected_session_scope_id: session.durable_session_scope_id.clone(),
+            run_id: run_id.clone(),
+            revision_terminal_public_sequence: None,
+            identity: exact.identity.clone(),
+            request_hash: exact.request_hash.clone(),
+            command_id: sigil_kernel::UserInputCommandId::new(command.command_id.clone()).map_err(
+                |error| HttpRunDriverError::new(format!("user input command id failed: {error}")),
+            )?,
+            decision: command.request.decision.clone(),
+            interaction: ApplicationRunInteraction::ExternallyInteractive,
+            permission_mode: command.request.permission_mode.map(Into::into),
+        };
+        let cancelled_plan_review_research = matches!(
+            &exact.source,
             sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
-        );
+        ) && matches!(
+            &command.request.decision,
+            sigil_kernel::UserInputDecisionV1::RunCancelled
+        ) && plan_review_research_input_is_current_waiting(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &exact.identity,
+            &exact.request_hash,
+        )
+        .map_err(|error| {
+            HttpRunDriverError::new(format!(
+                "plan-review cancellation input admission failed: {error:#}"
+            ))
+        })?;
+        let (prepared, revision_terminal_was_published) = if cancelled_plan_review_research {
+            let revision_run_id = exact.identity.root_logical_run_id.as_str().to_owned();
+            let prepared = self
+                .event_bus
+                .commit_and_publish_next_run_event(
+                    &session.durable_session_scope_id,
+                    &revision_run_id,
+                    |sequence| {
+                        let mut request = request;
+                        request.revision_terminal_public_sequence = Some(sequence);
+                        let prepared = self
+                            .runtime
+                            .block_on(self.preparer.prepare_user_input(request, services.clone()))
+                            .map_err(|error| crate::HttpEventPublishError::Journal {
+                                message: format!(
+                                    "plan-review cancellation decision failed before terminal publication: {error:#}"
+                                ),
+                            })?;
+                        let event = prepared
+                            .revision_terminal_outbox()
+                            .map(|outbox| outbox.event.clone())
+                            .ok_or_else(|| crate::HttpEventPublishError::Journal {
+                                message: "plan-review cancellation did not commit its durable terminal outbox"
+                                    .to_owned(),
+                            })?;
+                        Ok((prepared, event))
+                    },
+                )
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "plan-review cancellation terminal publication failed: {error}"
+                    ))
+                })?;
+            (prepared, true)
+        } else {
+            let prepared = self
+                .runtime
+                .block_on(self.preparer.prepare_user_input(request, services))
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!("user input decision failed: {error:#}"))
+                })?;
+            (prepared, false)
+        };
+        let revision_terminal_outbox = prepared.revision_terminal_outbox().cloned();
+        let (receipt, continuation, revision_request) = prepared.into_parts();
         let continuation_run_id = continuation.as_ref().map(|_| run_id.clone()).or_else(|| {
-            revision_request.as_ref().map(|request| {
-                if plan_review_research_resume {
-                    run_id.clone()
-                } else {
-                    request.child_logical_run_id()
-                }
-            })
+            revision_request
+                .as_ref()
+                .map(sigil_runtime::PlanReviewRunRequest::child_logical_run_id)
         });
         if let Some(continuation) = continuation {
             let permission_mode = command
@@ -3678,31 +3989,24 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 &self.options.launch_cwd,
                 &root_config.workspace.root,
             );
-            if let Err(error) = self.spawn_plan_review_revision(
+            // The accepted guidance remains a durable recovery candidate. A host spawn
+            // error cannot manufacture RevisionFailed outside the atomic finalizer bundle.
+            self.spawn_plan_review_revision(
                 session,
                 &root_config,
                 &workspace_root,
                 revision_request,
-            ) {
-                if let sigil_kernel::UserInputSourceV1::PlanRevision {
-                    base_plan_id,
-                    base_plan_hash,
-                } = &receipt.request.source
-                    && let Err(recovery_error) = sigil_runtime::application_record_revision_failure(
-                        &root_config,
-                        Path::new(&session.session_log_path),
-                        &session.durable_session_scope_id,
-                        base_plan_id.as_str(),
-                        base_plan_hash,
-                        &format!("revision spawn failed: {error}"),
-                    )
-                {
-                    return Err(HttpRunDriverError::new(format!(
-                        "{error}; revision recovery failed: {recovery_error:#}"
-                    )));
-                }
-                return Err(error);
-            }
+            )?;
+        }
+        if let Some(outbox) = revision_terminal_outbox {
+            deliver_and_reconcile_plan_review_revision_terminal(
+                &registry,
+                &self.event_bus,
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+                &outbox,
+                revision_terminal_was_published,
+            )?;
         }
         Ok(HttpUserInputDecisionCommandReceipt {
             command_id: command.command_id.clone(),
@@ -4440,6 +4744,84 @@ fn public_preparation_failure_event(error: &anyhow::Error) -> PublicRunEventKind
 struct HttpProductionCancellationCommand {
     reason: String,
     acknowledgement: std_mpsc::SyncSender<Result<(), HttpRunDriverError>>,
+}
+
+type PlanReviewRevisionExecutionFuture = Pin<
+    Box<
+        dyn Future<Output = Result<sigil_runtime::application_run::PlanReviewRevisionExecution>>
+            + Send,
+    >,
+>;
+
+/// A revision execution that outlived HTTP cancellation acknowledgement and therefore retains
+/// the sole session attachment until its actual future resolves.
+struct DetachedPlanReviewRevision {
+    run: PlanReviewRevisionExecutionFuture,
+    attachment:
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+}
+
+impl DetachedPlanReviewRevision {
+    fn into_parts(
+        self,
+    ) -> (
+        PlanReviewRevisionExecutionFuture,
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    ) {
+        (self.run, self.attachment)
+    }
+}
+
+enum PlanReviewRevisionCancellationWait {
+    Joined {
+        outcome: Box<Result<sigil_runtime::application_run::PlanReviewRevisionExecution>>,
+        attachment:
+            Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    },
+    Deadline(DetachedPlanReviewRevision),
+}
+
+/// Cancels one revision future and either returns its observed result or transfers it, together
+/// with the same durable attachment, to a late owner.  This is deliberately private to the HTTP
+/// revision supervisor: it neither creates a second executor nor changes domain cancellation.
+async fn await_plan_review_revision_cancellation(
+    cancellation_owner: &sigil_kernel::RunCancellationOwner,
+    cancellation: HttpProductionCancellationCommand,
+    cancellation_timeout: Duration,
+    mut run: PlanReviewRevisionExecutionFuture,
+    attachment: Arc<
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+    >,
+    registry: Option<&HttpSessionRunRegistry>,
+    run_id: &str,
+) -> PlanReviewRevisionCancellationWait {
+    cancellation_owner.request_cancel();
+    let deadline = cancellation_deadline(cancellation_timeout);
+    match tokio::time::timeout(remaining_until(deadline), &mut run).await {
+        Ok(outcome) => {
+            let _ = cancellation.acknowledgement.send(Ok(()));
+            PlanReviewRevisionCancellationWait::Joined {
+                outcome: Box::new(outcome),
+                attachment,
+            }
+        }
+        Err(_) => {
+            let error = HttpRunDriverError::new(
+                "plan review revision did not quiesce before the cancellation deadline",
+            );
+            // The caller receives a deadline rejection while the detached revision still owns
+            // its attachment.  The registry must expose uncertainty before the acknowledgement,
+            // so no caller can mistake this in-flight worker for a completed terminal run.
+            if let Some(registry) = registry {
+                let _ = registry.record_run_execution_uncertain(run_id);
+            }
+            let _ = cancellation.acknowledgement.send(Err(error));
+            PlanReviewRevisionCancellationWait::Deadline(DetachedPlanReviewRevision {
+                run,
+                attachment,
+            })
+        }
+    }
 }
 
 struct HttpProductionTaskPauseCommand {
@@ -6599,6 +6981,11 @@ fn reconcile_registered_http_terminal_outboxes(
                     "durable terminal outbox entry has no HTTP terminal outcome",
                 )
             })?;
+        let revision_terminal = records.iter().any(|record| {
+            record.stored_event().event_id == entry.domain_event_id
+                && record.stored_event().event_kind()
+                    == Some(sigil_kernel::DurableEventType::PlanReviewAttempt)
+        });
         match registry.get_run(&entry.run_id) {
             Ok(run) => {
                 let session = registry
@@ -6614,13 +7001,23 @@ fn reconcile_registered_http_terminal_outboxes(
                         "registered HTTP run does not belong to the durable terminal outbox attachment",
                     ));
                 }
-                record_run_terminal_and_reconcile_stream(
-                    registry,
-                    event_bus,
-                    durable_session_scope_id,
-                    &entry.run_id,
-                    outcome,
-                )?;
+                if revision_terminal {
+                    reconcile_plan_review_revision_terminal_registry_event(
+                        registry,
+                        event_bus,
+                        durable_session_scope_id,
+                        &entry.run_id,
+                        &entry.event,
+                    )?;
+                } else {
+                    record_run_terminal_and_reconcile_stream(
+                        registry,
+                        event_bus,
+                        durable_session_scope_id,
+                        &entry.run_id,
+                        outcome,
+                    )?;
+                }
                 reconciled = reconciled.saturating_add(1);
             }
             Err(HttpRegistryError::RunNotFound { .. }) => {}

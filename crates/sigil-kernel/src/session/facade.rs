@@ -434,6 +434,7 @@ impl Session {
             initial_route,
             initial_route_trust,
         )?;
+        PublicEventOutboxProjectionV1::from_records(&records)?;
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
             .recover_from_records(&records)
             .context("failed to recover provider continuation payload lifecycle")?;
@@ -466,7 +467,10 @@ impl Session {
             .unwrap_or_default()
             .as_millis() as u64;
         crate::reconcile_unfinished_run_cancellations(&mut session, recovered_at_ms)?;
-        crate::reconcile_plan_review_attempts(&mut session, recovered_at_ms)?;
+        crate::conversation_route::reconcile_plan_review_attempts_from_recovered_entries(
+            &mut session,
+            recovered_at_ms,
+        )?;
         Ok(session)
     }
 
@@ -1138,9 +1142,39 @@ impl Session {
         for control in controls {
             match control {
                 ControlEntry::PlanReviewAttempt(attempt) => {
+                    if super::plan_review_terminal::is_revision_terminal(attempt) {
+                        bail!("revision terminal must use its atomic domain/outbox writer");
+                    }
+                    if attempt.revision_request_id.is_some()
+                        && attempt.status == crate::PlanReviewAttemptStatus::Started
+                    {
+                        if artifacts.plans.contains_key(&attempt.plan_id) {
+                            bail!(
+                                "revision cannot start with an independently committed candidate"
+                            );
+                        }
+                        if !attempt.base_plan_id.as_ref().is_some_and(|base_id| {
+                            artifacts.latest_decision(base_id).is_some_and(|decision| {
+                                decision.decision == crate::PlanDecision::RevisionRequested
+                                    && attempt.base_plan_hash.as_deref()
+                                        == Some(decision.plan_hash.as_str())
+                            })
+                        }) {
+                            bail!("revision start requires its exact pending base decision");
+                        }
+                    }
                     reviews.validate_append(attempt)?;
                 }
                 ControlEntry::PlanDraftCreated(draft) => {
+                    if reviews
+                        .attempt_for_plan(&draft.plan_id)
+                        .is_some_and(|attempt| {
+                            attempt.revision_request_id.is_some()
+                                && !super::plan_review_terminal::is_revision_terminal(attempt)
+                        })
+                    {
+                        bail!("revision candidate must use its atomic domain/outbox writer");
+                    }
                     if let Some(existing) = artifacts.plans.get(&draft.plan_id)
                         && existing != draft
                     {
@@ -1151,6 +1185,17 @@ impl Session {
                     }
                 }
                 ControlEntry::PlanDecisionRecorded(decision) => {
+                    if matches!(decision.decision, crate::PlanDecision::RevisionSucceeded | crate::PlanDecision::RevisionFailed)
+                        && entries.iter().any(|entry| matches!(entry,
+                            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                                if attempt.revision_request_id.is_some()
+                                    && attempt.base_plan_id.as_ref() == Some(&decision.plan_id)
+                                    && reviews.latest_attempt(&attempt.plan_review_id).is_some_and(|latest|
+                                        latest.attempt_id == attempt.attempt_id
+                                            && !super::plan_review_terminal::is_revision_terminal(latest))))
+                    {
+                        bail!("revision base settlement must use its atomic domain/outbox writer");
+                    }
                     let draft = artifacts.plans.get(&decision.plan_id).ok_or_else(|| {
                         anyhow::anyhow!(
                             "plan decision references unknown plan {}",
@@ -1171,6 +1216,19 @@ impl Session {
                     }
                     if let Some(previous) = artifacts.latest_decision(&decision.plan_id) {
                         let idempotent = previous == decision;
+                        // Accepted guidance alone is not an execution. A user may save the
+                        // unchanged base only before any attempt has claimed this exact base.
+                        let save_unstarted_revision = previous.decision
+                            == crate::PlanDecision::RevisionRequested
+                            && decision.decision == crate::PlanDecision::SavedOnly
+                            && !reviews.reviews().flat_map(|review| &review.attempts).any(
+                                |attempt| {
+                                    attempt.revision_request_id.is_some()
+                                        && attempt.base_plan_id.as_ref() == Some(&decision.plan_id)
+                                        && attempt.base_plan_hash.as_deref()
+                                            == Some(decision.plan_hash.as_str())
+                                },
+                            );
                         let legal = matches!(
                             (previous.decision, decision.decision),
                             (
@@ -1223,7 +1281,7 @@ impl Session {
                                 crate::PlanDecision::TaskCreationFailed
                             )
                         );
-                        if !idempotent && !legal {
+                        if !idempotent && !legal && !save_unstarted_revision {
                             bail!(
                                 "plan {} has illegal decision transition {} -> {}",
                                 decision.plan_id.as_str(),
@@ -1388,6 +1446,65 @@ impl Session {
         self.entries = live_entries;
         self.durable_session_entry_count = Some(active.durable_session_entry_count());
         true
+    }
+
+    /// Adopts precisely the writer-recovered prefix already validated by the revision owner.
+    /// A concurrent append advances the shared frontier and rejects this adoption, rather than
+    /// validating one prefix and silently adopting a second, unvalidated read.
+    pub(super) fn adopt_plan_review_recovery_records(
+        &mut self,
+        records: &[SessionStreamRecord],
+    ) -> Result<()> {
+        let canonical_entries = session_entries_from_records(records)?;
+        let store = self
+            .durable_store()
+            .context("revision recovery has no durable store")?;
+        let expected_cursor = records
+            .last()
+            .map(|record| record.projection_cursor(ACTIVE_SESSION_PROJECTION_SCHEMA_VERSION));
+        let canonical_count = canonical_entries.len() as u64;
+        let live_user_ids = self
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::User(message) => Some(message.id.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let (canonical_entries, audit_needed) =
+            validated_recovered_entries(&self.session_scope_id, canonical_entries);
+        let mut entries = Vec::with_capacity(canonical_entries.len());
+        for entry in canonical_entries {
+            let promoted = match &entry {
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                    if live_user_ids.contains(&promotion.durable_user_message.id) =>
+                {
+                    Some(promotion.durable_user_message.clone())
+                }
+                _ => None,
+            };
+            entries.push(entry);
+            if let Some(message) = promoted {
+                entries.push(SessionLogEntry::User(message));
+            }
+        }
+        store.with_locked_projection(|snapshot| {
+            if snapshot.frontier().cursor() != expected_cursor.as_ref()
+                || snapshot.durable_session_entry_count() != canonical_count
+            {
+                bail!("revision recovery prefix changed before projection adoption");
+            }
+            self.stats = session_stats_from_entries(&entries);
+            self.entries = entries;
+            self.durable_session_entry_count = Some(snapshot.durable_session_entry_count());
+            self.reconstruction_records = None;
+            Ok(())
+        })?;
+        if audit_needed {
+            // Auditing is a normal durable append only after the writer adoption lock is gone.
+            self.append_control(unsafe_external_recovery_audit_control())?;
+        }
+        Ok(())
     }
 
     /// Adopts one already-durable queue promotion into the active process projection.

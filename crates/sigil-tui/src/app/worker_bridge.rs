@@ -562,6 +562,13 @@ impl AppState {
                     ),
                 );
             }
+            WorkerMessage::RecoveredUserInputAttention { command, entries } => {
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
+                self.sync_current_session_state(entries);
+                self.restore_durable_attention_surfaces_with_recovery_command(command);
+                self.refresh_session_history();
+            }
             WorkerMessage::UserInputDecisionApplied {
                 request,
                 continuation_started,

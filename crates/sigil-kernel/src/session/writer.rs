@@ -69,8 +69,20 @@ impl std::ops::Deref for SharedSessionCoordinator {
 
 impl SharedSessionCoordinator {
     fn new(path: PathBuf) -> Self {
+        Self::new_with_existing_requirement(path, false)
+    }
+
+    fn new_existing(path: PathBuf) -> Self {
+        Self::new_with_existing_requirement(path, true)
+    }
+
+    fn new_with_existing_requirement(path: PathBuf, require_existing: bool) -> Self {
+        let mut session_writer = LinearSessionWriter::new(path);
+        if require_existing {
+            session_writer.require_existing();
+        }
         Self {
-            writer: Mutex::new(LinearSessionWriter::new(path)),
+            writer: Mutex::new(session_writer),
             projection: Mutex::new(ActiveProjectionState::Uninitialized),
             observers: Mutex::new(Vec::new()),
             next_observer_id: AtomicU64::new(1),
@@ -89,6 +101,22 @@ impl SharedSessionCoordinator {
         self.writer
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))
+    }
+
+    /// Irreversibly constrains this shared coordinator to an already-durable session stream.
+    ///
+    /// A coordinator is shared per canonical stream path. Once a recovery caller proves that it
+    /// must reopen prior durable state, no later handle for that path may create a data stream or
+    /// writer lease as a side effect of an append.
+    pub(super) fn require_existing(&self) -> Result<()> {
+        {
+            let mut writer = self.lock_writer()?;
+            writer.require_existing();
+        }
+        // `require_existing` may legally recover an interrupted tail. Refresh and publish the
+        // same projection frontier as writer-mode recovery before returning a store handle.
+        // This prevents a pre-recovery cached projection from surviving an existing-only reopen.
+        self.read_reconciled_records().map(|_| ())
     }
 
     pub(super) fn metrics(&self) -> ActiveProjectionMetricsSnapshot {
@@ -288,6 +316,63 @@ impl SharedSessionCoordinator {
             self.current_projection_locked(&mut writer)?
         };
         Ok(ActiveSessionProjectionSnapshot { projection })
+    }
+
+    /// Keeps a projection consumer inside the append publication boundary. The callback must
+    /// only adopt in-memory state; it must not call another store operation or notify observers.
+    pub(super) fn with_locked_projection<T>(
+        &self,
+        adopt: impl FnOnce(ActiveSessionProjectionSnapshot) -> Result<T>,
+    ) -> Result<T> {
+        let mut writer = self.lock_writer()?;
+        let projection = self.current_projection_locked(&mut writer)?;
+        adopt(ActiveSessionProjectionSnapshot { projection })
+    }
+
+    /// Writer recovery may complete an intent without passing through append's delta publisher.
+    /// Refresh that recovered frontier before releasing the same writer lock; cheap snapshots
+    /// can then remain I/O-free without indefinitely returning the pre-recovery cache.
+    pub(super) fn read_reconciled_records(&self) -> Result<Vec<SessionStreamRecord>> {
+        let (records, notice) = {
+            let mut writer = self.lock_writer()?;
+            let records = writer.read_records_writer()?;
+            let frontier = writer.frontier_from_tail()?;
+            let mut state = self
+                .projection
+                .lock()
+                .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+            let current = matches!(&*state, ActiveProjectionState::Ready(projection)
+                if projection.frontier == frontier);
+            let notice = if current {
+                None
+            } else {
+                self.full_rebuild_total.fetch_add(1, Ordering::Relaxed);
+                let valid = match ActiveSessionProjection::from_records(&records, frontier.clone())
+                {
+                    Ok(projection) => {
+                        *state = ActiveProjectionState::Ready(Arc::new(projection));
+                        true
+                    }
+                    Err(error) => {
+                        *state = ActiveProjectionState::Invalid {
+                            frontier: frontier.clone(),
+                            reason: format!("{error:#}"),
+                        };
+                        false
+                    }
+                };
+                Some(ActiveProjectionNotice {
+                    frontier,
+                    valid,
+                    changed_families: ActiveProjectionFamily::all(),
+                })
+            };
+            (records, notice)
+        };
+        if let Some(notice) = notice {
+            self.notify(notice);
+        }
+        Ok(records)
     }
 
     pub(super) fn seed_records(&self, records: &[SessionStreamRecord]) -> Result<()> {
@@ -1406,6 +1491,10 @@ struct SessionFileFingerprint {
 pub(super) struct LinearSessionWriter {
     path: PathBuf,
     generation: String,
+    /// Once set, every data-file and sidecar open is require-existing. This is deliberately
+    /// monotonic because the shared coordinator may also be held by an older ordinary store
+    /// handle for the same canonical path.
+    require_existing: bool,
     lease_file: Option<File>,
     parent_dir_synced: bool,
     tail: Option<SessionWriterTail>,
@@ -1556,6 +1645,7 @@ impl LinearSessionWriter {
         Self {
             path,
             generation: Uuid::new_v4().to_string(),
+            require_existing: false,
             lease_file: None,
             parent_dir_synced: false,
             tail: None,
@@ -1572,22 +1662,51 @@ impl LinearSessionWriter {
         }
     }
 
+    /// Switches this shared writer to the no-create recovery path. A previously ordinary shared
+    /// handle may already have retained a writer-sidecar descriptor; discard it so the next
+    /// writer-mode read reopens and validates the original sidecar instead of masking a removed
+    /// or replaced lock. The coordinator performs the single recovery scan and projection update
+    /// immediately after this transition.
+    fn require_existing(&mut self) {
+        self.require_existing = true;
+        self.lease_file.take();
+    }
+
     fn ensure_writer_lease(&mut self) -> Result<()> {
         if self.lease_file.is_some() {
             return Ok(());
         }
         let lease_path = writer_lease_path(&self.path);
-        let existed = lease_path.exists();
         let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true).truncate(false);
+        options.read(true).write(true).truncate(false);
+        if !self.require_existing {
+            options.create(true);
+        }
         #[cfg(unix)]
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        {
+            options.custom_flags(libc::O_NOFOLLOW);
+            if !self.require_existing {
+                options.mode(0o600);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let existed = !self.require_existing && lease_path.exists();
         let lease = options
             .open(&lease_path)
             .with_context(|| format!("failed to open {}", lease_path.display()))?;
-        harden_private_open_file(&lease, &lease_path)?;
+        if self.require_existing {
+            validate_existing_private_open_file(&lease, &lease_path)?;
+        } else {
+            harden_private_open_file(&lease, &lease_path)?;
+        }
         lock_exclusive_with_retry(&lease, &lease_path)?;
-        if !existed {
+        if !self.require_existing && !existed {
             sync_parent_dir(&lease_path)?;
         }
         self.lease_file = Some(lease);
@@ -1596,25 +1715,50 @@ impl LinearSessionWriter {
 
     fn open_locked_data_file(&mut self) -> Result<File> {
         let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true).truncate(false);
+        options.read(true).write(true).truncate(false);
+        if !self.require_existing {
+            options.create(true);
+        }
         #[cfg(unix)]
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        {
+            options.custom_flags(libc::O_NOFOLLOW);
+            if !self.require_existing {
+                options.mode(0o600);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
         let file = options
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
-        harden_private_open_file(&file, &self.path)?;
+        if self.require_existing {
+            validate_existing_private_open_file(&file, &self.path)?;
+        } else {
+            harden_private_open_file(&file, &self.path)?;
+        }
         lock_exclusive_with_retry(&file, &self.path)?;
         if !self.parent_dir_synced {
-            #[cfg(test)]
-            if self.next_fault == Some(SessionWriterFault::ParentDirectorySync) {
-                self.next_fault = None;
-                bail!("injected session parent directory sync failure");
-            }
-            sync_parent_dir(&self.path)?;
-            self.parent_dir_synced = true;
-            #[cfg(test)]
-            {
-                self.parent_sync_count = self.parent_sync_count.saturating_add(1);
+            if self.require_existing {
+                // Existing-only recovery must not repair or otherwise touch the parent
+                // directory. The original files were already published before admission.
+                self.parent_dir_synced = true;
+            } else {
+                #[cfg(test)]
+                if self.next_fault == Some(SessionWriterFault::ParentDirectorySync) {
+                    self.next_fault = None;
+                    bail!("injected session parent directory sync failure");
+                }
+                sync_parent_dir(&self.path)?;
+                self.parent_dir_synced = true;
+                #[cfg(test)]
+                {
+                    self.parent_sync_count = self.parent_sync_count.saturating_add(1);
+                }
             }
         }
         Ok(file)
@@ -1647,6 +1791,9 @@ impl LinearSessionWriter {
         self.event_links = None;
         let previous_tail = self.tail.clone();
         let recovered = recover_tail_if_needed_locked(file, &self.path)?;
+        if self.require_existing && recovered.records.is_empty() {
+            bail!("existing session stream contains no durable records and must not be reseeded");
+        }
         #[cfg(test)]
         {
             self.full_scan_count = self.full_scan_count.saturating_add(1);
@@ -2348,6 +2495,48 @@ fn harden_private_open_file(file: &File, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Verifies an already-published session object without repairing permissions or following a
+/// replacement final component. Existing-only recovery deliberately treats an unsafe object as a
+/// corruption error instead of silently changing it into a writable one.
+fn validate_existing_private_open_file(file: &File, path: &Path) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "existing session path must be a regular file: {}",
+            path.display()
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!(
+                "existing session path must not be a reparse point: {}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o7777 != 0o600 {
+        bail!(
+            "existing session path must already be owner-only: {}",
+            path.display()
+        );
+    }
+    #[cfg(windows)]
+    if !crate::private_path_permissions_are_restricted(path)? {
+        bail!(
+            "existing session path must already be owner-only: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "tests/session_writer_tests.rs"]
 mod tests;
@@ -2373,6 +2562,33 @@ pub(super) fn shared_session_writer(
     Ok((path, coordinator))
 }
 
+/// Returns the ordinary shared coordinator only after irreversibly putting it in no-create
+/// mode. This path intentionally skips the emergency-reserve initializer and the ordinary
+/// canonicalizer, both of which can create filesystem state for a new stream.
+pub(super) fn shared_existing_session_writer(
+    path: impl Into<PathBuf>,
+) -> Result<(PathBuf, Arc<SharedSessionCoordinator>)> {
+    let path = canonical_existing_session_path(path.into())?;
+    let registry = SESSION_WRITER_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+    let coordinator = {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer registry lock poisoned"))?;
+        registry.retain(|_, writer| writer.strong_count() > 0);
+        if let Some(existing) = registry.get(&path).and_then(Weak::upgrade) {
+            existing
+        } else {
+            let coordinator = Arc::new(SharedSessionCoordinator::new_existing(path.clone()));
+            registry.insert(path.clone(), Arc::downgrade(&coordinator));
+            coordinator
+        }
+    };
+    // No disk I/O, OS-lock retry, or projection notification may occur under the global
+    // registry mutex. The single shared coordinator owns the strict transition.
+    coordinator.require_existing()?;
+    Ok((path, coordinator))
+}
+
 fn canonical_session_path(path: PathBuf) -> Result<PathBuf> {
     let path = if path.is_absolute() {
         path
@@ -2394,6 +2610,43 @@ fn canonical_session_path(path: PathBuf) -> Result<PathBuf> {
         .context("session path must include a file name")?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("failed to canonicalize {}", parent.display()))?;
+    Ok(canonical_parent.join(file_name))
+}
+
+/// Canonicalizes only an already-existing regular session stream. Unlike the ordinary path this
+/// never creates a parent directory and never accepts a final symlink that could redirect an
+/// existing-only recovery into another stream.
+fn canonical_existing_session_path(path: PathBuf) -> Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory for session path")?
+            .join(path)
+    };
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("existing session stream is missing: {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "existing session stream must not be a symlink: {}",
+            path.display()
+        );
+    }
+    if !metadata.is_file() {
+        bail!(
+            "existing session stream must be a regular file: {}",
+            path.display()
+        );
+    }
+    // Resolve ancestors without following the final component again. If that component is
+    // replaced after the metadata check, the subsequent no-follow, no-create open must reject
+    // it rather than canonicalizing a replacement symlink into another durable stream.
+    let file_name = path
+        .file_name()
+        .context("existing session path must include a file name")?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let canonical_parent = fs::canonicalize(parent)
         .with_context(|| format!("failed to canonicalize {}", parent.display()))?;
     Ok(canonical_parent.join(file_name))

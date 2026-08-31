@@ -3914,15 +3914,101 @@ fn durable_application_terminal_maps_every_status_without_losing_failed_or_input
 
 #[test]
 fn plan_review_revision_interrupted_terminal_is_not_collapsed_to_failed() {
-    let outcome = Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(
+    let outcome = sigil_runtime::PlanReviewRunOutcome::Interrupted(
         "review worker reached its turn limit".to_owned(),
-    ));
+    );
 
     assert!(matches!(
-        plan_review_revision_terminal_event(&outcome),
-        PublicRunEventKind::RunInterrupted { reason }
+        sigil_runtime::PlanReviewCoordinator::revision_terminal_public_event(&outcome),
+        Some(PublicRunEventKind::RunInterrupted { reason })
             if reason == "review worker reached its turn limit"
     ));
+}
+
+#[tokio::test]
+async fn plan_review_waiting_input_closes_only_live_delivery_and_preserves_exact_resume_sequence()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal = Arc::new(HttpDurableProtocolJournal::open(
+        temp.path().join("plan-review-waiting-protocol.json"),
+        16,
+    )?);
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::clone(&journal),
+    ));
+    let mut subscriber = event_bus.subscribe();
+    let mut handler = HttpPlanReviewRevisionEventHandler {
+        durable_session_scope_id: "session-plan-review-waiting".to_owned(),
+        run_id: "plan-review-revision-waiting".to_owned(),
+        event_bus: Arc::clone(&event_bus),
+    };
+
+    handler.handle_public_event(PublicRunEvent::new(
+        "session-plan-review-waiting",
+        "plan-review-revision-waiting",
+        7,
+        PublicRunEventKind::RunAwaitingUserInput {
+            request_id: "research-input-1".to_owned(),
+            generation: 1,
+            request_hash: "sha256:waiting-input".to_owned(),
+        },
+    ))?;
+
+    let waiting = match subscriber.recv_run_stream().await? {
+        crate::sse::HttpRunStreamReceive::Event(event) => event,
+        crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {
+            panic!("waiting event must precede its live stream close")
+        }
+    };
+    assert_eq!(waiting.run_event.sequence, 7);
+    assert!(matches!(
+        waiting.run_event.event,
+        PublicRunEventKind::RunAwaitingUserInput { .. }
+    ));
+    assert!(matches!(
+        subscriber.recv_run_stream().await?,
+        crate::sse::HttpRunStreamReceive::StreamClosed { session_id, run_id }
+            if session_id == "session-plan-review-waiting"
+                && run_id == "plan-review-revision-waiting"
+    ));
+    assert_eq!(
+        event_bus.latest_run_sequence(
+            "session-plan-review-waiting",
+            "plan-review-revision-waiting"
+        )?,
+        Some(7),
+        "live close must not erase the durable resume watermark"
+    );
+
+    // A fresh handler represents the resumed supervisor after the exact user-input command. It
+    // keeps the original logical run and appends rather than reopening a fake sequence one.
+    let mut resumed = HttpPlanReviewRevisionEventHandler {
+        durable_session_scope_id: "session-plan-review-waiting".to_owned(),
+        run_id: "plan-review-revision-waiting".to_owned(),
+        event_bus: Arc::clone(&event_bus),
+    };
+    resumed.handle_public_event(PublicRunEvent::new(
+        "session-plan-review-waiting",
+        "plan-review-revision-waiting",
+        8,
+        PublicRunEventKind::RunFinished {
+            final_text: "revision resumed with the submitted research answer".to_owned(),
+        },
+    ))?;
+    let replay = event_bus.replay_run_after(
+        "session-plan-review-waiting",
+        "plan-review-revision-waiting",
+        None,
+    )?;
+    assert_eq!(
+        replay
+            .iter()
+            .map(|event| event.run_event.sequence)
+            .collect::<Vec<_>>(),
+        vec![7, 8]
+    );
+    Ok(())
 }
 
 #[test]
@@ -3966,6 +4052,252 @@ fn terminal_outbox_replay_keeps_the_original_gapped_http_sequence() -> anyhow::R
             .map(|event| event.run_event.sequence)
             .collect::<Vec<_>>(),
         vec![3, 9]
+    );
+    Ok(())
+}
+
+#[test]
+fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> anyhow::Result<()> {
+    struct RegistryOnlyDriver {
+        binding: HttpSessionBinding,
+    }
+
+    impl HttpRunDriver for RegistryOnlyDriver {
+        fn bind_session(
+            &self,
+            _session_id: &str,
+            _model_ref: Option<&crate::HttpProviderModelRef>,
+        ) -> Result<HttpSessionBinding, crate::HttpRunDriverError> {
+            Ok(self.binding.clone())
+        }
+
+        fn start_run(
+            &self,
+            _start: crate::HttpRunDriverStart,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn cancel_run(
+            &self,
+            _cancel: crate::HttpRunDriverCancel,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn submit_approval(
+            &self,
+            _approval: crate::HttpRunDriverApproval,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("revision-receipt-failure.jsonl");
+    write_production_test_config(&temp.path().join("sigil.toml"), ".");
+    let (provider_name, route) = production_test_model_route(&temp);
+    let mut session = sigil_kernel::Session::load_from_store_with_route(
+        provider_name,
+        route.model_ref.model_id.clone(),
+        Some(route),
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    let durable_session_scope_id = session.session_scope_id().to_owned();
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        &durable_session_scope_id,
+        "revision-receipt-failure-message",
+        "revision-receipt-failure-origin-run",
+    )?;
+    let review_id = sigil_kernel::PlanReviewId::new("revision-receipt-failure-review")?;
+    let attempt_id = sigil_kernel::PlanReviewAttemptId::new("revision-receipt-failure-attempt")?;
+    let source = sigil_kernel::PlanSourceRef {
+        source_turn: Some(source_turn.clone()),
+        plan_review_id: Some(review_id.clone()),
+        ..sigil_kernel::PlanSourceRef::default()
+    };
+    let base = sigil_kernel::plain_text_plan_draft_entry_with_plan_id(
+        sigil_kernel::PlanId::new("revision-receipt-failure-base")?,
+        "base plan",
+        source,
+        1,
+        None,
+    )?
+    .expect("nonempty durable base plan");
+    let requested = sigil_kernel::PlanDecisionRecordedEntry {
+        plan_id: base.plan_id.clone(),
+        plan_hash: base.plan_hash.clone(),
+        decision: sigil_kernel::PlanDecision::RevisionRequested,
+        decided_by: sigil_kernel::PlanDecisionActor::User,
+        decided_at_ms: 2,
+        reason: None,
+    };
+    let started_attempt = sigil_kernel::PlanReviewAttemptEntry {
+        plan_review_id: review_id.clone(),
+        attempt_id: attempt_id.clone(),
+        plan_id: sigil_kernel::PlanId::new("revision-receipt-failure-candidate")?,
+        source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+        source_turn,
+        explicit_objective: Some("base plan".to_owned()),
+        route_decision_id: None,
+        child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
+        finalizer_session_ref: Some(sigil_kernel::plan_review_finalizer_session_ref(
+            &review_id,
+            &attempt_id,
+            1,
+        )),
+        revision_request_id: Some(sigil_kernel::UserInputRequestId::new(
+            "revision-receipt-failure-request",
+        )?),
+        attempt_ordinal: 1,
+        base_plan_id: Some(base.plan_id.clone()),
+        base_plan_hash: Some(base.plan_hash.clone()),
+        workspace_snapshot_id: None,
+        pending_user_input: None,
+        status: sigil_kernel::PlanReviewAttemptStatus::Started,
+        terminal_reason: None,
+        recorded_at_ms: 2,
+    };
+    session.append_controls(vec![
+        ControlEntry::PlanDraftCreated(base.clone()),
+        ControlEntry::PlanDecisionRecorded(requested),
+        ControlEntry::PlanReviewAttempt(started_attempt.clone()),
+    ])?;
+    let run_id = sigil_kernel::plan_review_revision_run_id(&started_attempt);
+    let terminal_attempt = sigil_kernel::PlanReviewAttemptEntry {
+        status: sigil_kernel::PlanReviewAttemptStatus::Cancelled,
+        terminal_reason: Some(sigil_kernel::PlanReviewTerminalReason::UserCancelled),
+        recorded_at_ms: 3,
+        ..started_attempt
+    };
+    let terminal_decision = sigil_kernel::PlanDecisionRecordedEntry {
+        plan_id: base.plan_id.clone(),
+        plan_hash: base.plan_hash.clone(),
+        decision: sigil_kernel::PlanDecision::RevisionFailed,
+        decided_by: sigil_kernel::PlanDecisionActor::System,
+        decided_at_ms: 3,
+        reason: Some("user cancelled the revision".to_owned()),
+    };
+    let durable_outbox = session.append_plan_review_revision_terminal(
+        terminal_attempt,
+        None,
+        terminal_decision,
+        PublicRunEvent::new(
+            &durable_session_scope_id,
+            &run_id,
+            7,
+            PublicRunEventKind::RunCancelled,
+        ),
+    )?;
+    let registry = HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
+        binding: HttpSessionBinding {
+            session_scope_id: durable_session_scope_id.clone(),
+            session_log_path: canonical_http_session_path(&session_path)?
+                .display()
+                .to_string(),
+            route_transition: None,
+            route_recovery: None,
+        },
+    }));
+    let adapter_session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let mutation = registry.reserve_durable_session_mutation(&durable_session_scope_id)?;
+    registry.register_or_resume_supervised_revision_run(
+        &adapter_session.id,
+        &run_id,
+        HttpPermissionMode::ReadOnly,
+        "revision receipt failure fixture",
+        false,
+    )?;
+    drop(mutation);
+
+    let event_bus = HttpLiveEventBus::new(8);
+    publish_exact_http_terminal_outbox_event(
+        &event_bus,
+        &durable_session_scope_id,
+        &run_id,
+        durable_outbox.event.clone(),
+    )?;
+    let unavailable_session_path = temp.path().join("revision-receipt-failure.unavailable");
+    std::fs::rename(&session_path, &unavailable_session_path)?;
+    std::fs::create_dir(&session_path)?;
+    let delivery = deliver_and_reconcile_plan_review_revision_terminal(
+        &registry,
+        &event_bus,
+        &session_path,
+        &durable_session_scope_id,
+        &durable_outbox,
+        true,
+    );
+    std::fs::remove_dir(&session_path)?;
+    std::fs::rename(&unavailable_session_path, &session_path)?;
+    let error =
+        delivery.expect_err("receipt write failure must remain visible to the command caller");
+    assert!(
+        error.to_string().contains("delivery receipt failed"),
+        "the independent delivery failure must not be erased: {error}"
+    );
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let pending_projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let pending = pending_projection.pending_for_adapter("http");
+    assert!(pending.iter().any(|entry| {
+        entry.public_event_id == durable_outbox.public_event_id
+            && entry.domain_event_id == durable_outbox.domain_event_id
+            && entry.payload_digest == durable_outbox.payload_digest
+            && serde_json::to_value(&entry.event).ok()
+                == serde_json::to_value(&durable_outbox.event).ok()
+    }));
+    assert_eq!(
+        registry.get_run(&run_id)?.status,
+        HttpRunStatus::Cancelled,
+        "the exact durable terminal must still replace the registered revision state"
+    );
+    let recovery_event_bus = Arc::new(HttpLiveEventBus::new(8));
+    assert_eq!(
+        replay_pending_http_terminal_outboxes(
+            &session_path,
+            &durable_session_scope_id,
+            &recovery_event_bus,
+        )?,
+        1,
+        "attachment recovery must replay the existing exact terminal once"
+    );
+    assert_eq!(
+        reconcile_registered_http_terminal_outboxes(
+            &session_path,
+            &durable_session_scope_id,
+            &registry,
+            &recovery_event_bus,
+        )?,
+        1,
+        "attachment recovery must re-project the registered revision without inventing a terminal"
+    );
+    let recovered_records = JsonlSessionStore::read_event_records(&session_path)?;
+    let recovered_projection =
+        sigil_kernel::PublicEventOutboxProjectionV1::from_records(&recovered_records)?;
+    assert!(
+        !recovered_projection
+            .pending_for_adapter("http")
+            .into_iter()
+            .any(|entry| entry.public_event_id == durable_outbox.public_event_id),
+        "the recovered exact delivery must append the one HTTP receipt"
+    );
+    assert_eq!(
+        recovered_projection
+            .events_in_order()
+            .into_iter()
+            .filter(|entry| entry.public_event_id == durable_outbox.public_event_id)
+            .count(),
+        1,
+        "recovery must not append a replacement terminal outbox"
+    );
+    assert_eq!(
+        recovery_event_bus
+            .replay_run_after(&durable_session_scope_id, &run_id, None)?
+            .iter()
+            .map(|event| event.run_event.sequence)
+            .collect::<Vec<_>>(),
+        vec![7],
+        "recovery must preserve rather than renumber or duplicate the exact terminal event"
     );
     Ok(())
 }
@@ -4357,6 +4689,12 @@ async fn production_cancel_returns_only_after_supervisor_acknowledges_activation
 
     assert_eq!(command.reason, "user requested stop");
     assert!(finished_rx.try_recv().is_err());
+    drop(
+        driver
+            .active_runs
+            .try_lock()
+            .expect("waiting for cancel acknowledgement must not block natural run release"),
+    );
     command
         .acknowledgement
         .send(Ok(()))
@@ -4432,6 +4770,12 @@ async fn production_task_pause_returns_only_after_supervisor_acknowledges_activa
 
     assert_eq!(command.request, expected);
     assert!(finished_rx.try_recv().is_err());
+    drop(
+        driver
+            .active_runs
+            .try_lock()
+            .expect("waiting for pause acknowledgement must not block natural run release"),
+    );
     command
         .acknowledgement
         .send(Ok(()))
@@ -4567,7 +4911,8 @@ fn seed_revision_session(
 }
 
 #[tokio::test]
-async fn production_revision_duplicate_registration_never_blocks_the_session() {
+async fn production_revision_duplicate_registration_preserves_unstarted_guidance_and_allows_saving_base_plan()
+ {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace should create");
@@ -4665,6 +5010,7 @@ credential = {{ source = "none" }}
         &guidance.identity.request_id,
         1,
     );
+    let revision_request_id = guidance.identity.request_id.clone();
     let revision_run_id = format!("plan-review-{}-{}", review_id.as_str(), attempt_2.as_str());
     driver
         .active_runs
@@ -4733,8 +5079,9 @@ credential = {{ source = "none" }}
             .contains_key(&revision_run_id)
     );
 
-    // The durable `RevisionFailed` fact makes the failure recoverable: reloading the session
-    // shows the failure instead of an unrecoverable `RevisionRequested` orphan.
+    // The duplicate was rejected before the executor-owned `Started` fact. The durable guidance
+    // remains a recovery candidate, rather than fabricating a failed domain terminal for an
+    // adapter registration rejection.
     let store = JsonlSessionStore::new(&session.session_log_path).expect("reload store");
     let reloaded = sigil_kernel::Session::load_from_store("local-test", "gpt-4.1", store)
         .expect("revision session should reload");
@@ -4742,20 +5089,44 @@ credential = {{ source = "none" }}
     let plan_projection = reloaded.plan_artifact_projection();
     let decision = plan_projection
         .latest_decision(&original_plan_id)
-        .expect("durable revision failure decision");
+        .expect("durable revision guidance decision");
     assert_eq!(
         decision.decision,
-        sigil_kernel::PlanDecision::RevisionFailed,
-        "the rejected revision must record a durable RevisionFailed fact"
+        sigil_kernel::PlanDecision::RevisionRequested,
+        "an adapter duplicate rejection must not overwrite the accepted durable guidance"
+    );
+    let review_projection = sigil_kernel::PlanReviewProjection::from_entries(reloaded.entries());
+    assert!(
+        review_projection
+            .review(&review_id)
+            .expect("base review should remain durable")
+            .attempts
+            .iter()
+            .all(|attempt| attempt.revision_request_id.as_ref() != Some(&revision_request_id)),
+        "a rejected duplicate must not invent a revision Started attempt"
+    );
+    let records = JsonlSessionStore::new(&session.session_log_path)
+        .expect("reload durable records")
+        .read_event_records_writer()
+        .expect("durable recovery candidate records should read");
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("rejected duplicate must not leave a torn terminal outbox");
+    assert!(
+        outbox
+            .events_in_order()
+            .into_iter()
+            .all(|entry| entry.run_id != revision_run_id),
+        "a rejected duplicate must not emit a replacement terminal event"
     );
 
-    // The original plan stays actionable: Save succeeds after the durable failure, proving the
-    // plan decision recovery path rather than only the session slot.
-    let save_receipt = registry
+    // The original plan remains usable after the rejected registration. Saving is deliberately
+    // allowed only because no executor-owned revision attempt was ever recorded; this is a
+    // product recovery action, not a fabricated RevisionFailed terminal.
+    let saved = registry
         .plan_decision_command(
             &session.id,
             HttpCommandEnvelope::new(
-                "revision-recovery-1",
+                "revision-save-after-unstarted-duplicate",
                 "client-1",
                 &session.id,
                 HttpPlanDecisionRequest {
@@ -4766,8 +5137,23 @@ credential = {{ source = "none" }}
                 },
             ),
         )
-        .expect("Save must succeed after a durable revision failure");
-    assert_eq!(save_receipt.action, HttpPlanDecisionAction::Save);
+        .expect("an unstarted revision registration rejection must not strand Save");
+    assert_eq!(saved.action, HttpPlanDecisionAction::Save);
+    let reloaded = sigil_kernel::Session::load_from_store(
+        "local-test",
+        "gpt-4.1",
+        JsonlSessionStore::new(&session.session_log_path).expect("reload saved session store"),
+    )
+    .expect("saved recovery session should reload");
+    assert_eq!(
+        reloaded
+            .plan_artifact_projection()
+            .latest_decision(&original_plan_id)
+            .expect("save decision must be durable")
+            .decision,
+        sigil_kernel::PlanDecision::SavedOnly,
+        "the user can explicitly leave the original draft available after an unstarted duplicate"
+    );
 }
 
 #[tokio::test]
@@ -4843,11 +5229,21 @@ credential = {{ source = "none" }}
         .create_session(HttpSessionCreateRequest::default())
         .expect("durable session binding should not require provider assembly");
 
-    // A different run already owns the session foreground slot: bind must fail after the
-    // active-run registration succeeded, exercising the rollback path.
+    // A different supervised run already owns the session foreground slot. Keep the setup on the
+    // same atomic registry registration path as production rather than retaining the removed
+    // slot-only helper.
+    let mutation = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("setup mutation reservation should be claimable");
     registry
-        .bind_supervised_session_run(&session.id, "other-foreground-run")
-        .expect("pre-existing foreground slot should be claimable");
+        .register_supervised_session_run(
+            &session.id,
+            "other-foreground-run",
+            HttpPermissionMode::ReadOnly,
+            "other foreground run",
+        )
+        .expect("pre-existing foreground run should register");
+    drop(mutation);
     let mut log = sigil_kernel::Session::new("local-test", "gpt-4.1");
     let request = sigil_runtime::PlanReviewCoordinator::prepare_explicit_plan_review(
         &mut log,
@@ -5126,11 +5522,23 @@ credential = {{ source = "none" }}
         .zip(closed)
         .expect("revision terminal event and stream close");
     assert!(matches!(
-        terminal.run_event.event,
+        &terminal.run_event.event,
         PublicRunEventKind::RunFinished { .. }
     ));
     assert_eq!(closed_session, session.durable_session_scope_id);
     assert_eq!(closed_run, revision_run_id);
+    assert!(
+        terminal.run_event.sequence > 1,
+        "the revision terminal must retain the bridge sequence after preceding live events"
+    );
+    assert_eq!(
+        registry
+            .get_run(&revision_run_id)
+            .expect("revision child must remain registered through terminal projection")
+            .status,
+        HttpRunStatus::Finished,
+        "the registered revision child must reconcile its durable terminal outcome"
+    );
 
     // The durable session now carries the revised draft and the DraftReady attempt.
     let store = JsonlSessionStore::new(&session.session_log_path).expect("reload store");
@@ -5151,6 +5559,28 @@ credential = {{ source = "none" }}
             .plans
             .values()
             .any(|draft| draft.summary == "Revised coordinator migration")
+    );
+    let records = JsonlSessionStore::new(&session.session_log_path)
+        .expect("reload durable records")
+        .read_event_records_writer()
+        .expect("read revision terminal bundle");
+    let outbox_projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("revision terminal bundle must be valid");
+    let outbox = outbox_projection
+        .events_in_order()
+        .into_iter()
+        .find(|entry| entry.run_id == revision_run_id)
+        .expect("revision must persist exactly one terminal outbox");
+    assert_eq!(
+        serde_json::to_value(&outbox.event).expect("terminal outbox should serialize"),
+        serde_json::to_value(&terminal.run_event).expect("terminal SSE event should serialize")
+    );
+    assert!(
+        !outbox_projection
+            .pending_for_adapter("http")
+            .into_iter()
+            .any(|entry| entry.public_event_id == outbox.public_event_id),
+        "the HTTP receipt must acknowledge the same durable terminal payload"
     );
     let revision_request_id = sigil_kernel::UserInputRequestId::new(answer_request_id.clone())
         .expect("revision guidance request id should remain valid");
@@ -5255,5 +5685,1220 @@ credential = {{ source = "none" }}
     let _mutation = registry
         .reserve_durable_session_mutation(&session.durable_session_scope_id)
         .expect("foreground slot must be released after the revision");
+    fixture.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_review_revision_cooperative_cancellation_commits_one_exact_terminal() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should create");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+    let state_root = toml_path(&temp.path().join("state"));
+    let cache_root = toml_path(&temp.path().join("cache"));
+
+    // Keep the real provider request pending until cancellation reaches the provider-stream
+    // select. The production cancellation handle is expected to end that stream cooperatively;
+    // deadline ownership is exercised separately with a controlled supervisor future below.
+    let provider_started = Arc::new(tokio::sync::Semaphore::new(0));
+    let provider_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fixture listener should bind");
+    let address = listener.local_addr().expect("fixture address");
+    let fixture = tokio::spawn({
+        let provider_started = Arc::clone(&provider_started);
+        let provider_release = Arc::clone(&provider_release);
+        async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("provider request should arrive");
+            let mut buffer = vec![0; 16 * 1024];
+            let _ = socket.read(&mut buffer).await;
+            provider_started.add_permits(1);
+            provider_release
+                .acquire()
+                .await
+                .expect("fixture release should remain available")
+                .forget();
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[storage]
+state_root = "{state_root}"
+cache_root = "{cache_root}"
+
+[workspace]
+root = "workspace"
+
+[agent]
+connection = "local-test"
+model = "gpt-4.1"
+tool_timeout_secs = 5
+
+[task]
+routing_policy = "auto"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://{address}"
+credential = {{ source = "none" }}
+"#,
+        ),
+    )
+    .expect("revision config should write");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-revision-deadline.json"), 32)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures-revision-deadline.json"),
+            16,
+        )
+        .expect("disclosure journal should initialize"),
+    );
+    let mut options = HttpProductionRunDriverOptions::new(&config_path, temp.path());
+    // This case exercises cooperative cancellation; the separate controlled-future test
+    // deterministically exercises the deadline branch without racing filesystem latency.
+    options.cancellation_timeout = Duration::from_secs(5);
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            options,
+            disclosure_journal,
+            Arc::clone(&event_bus),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-revision-deadline.json"), 32)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("durable session binding should not require provider assembly");
+    let review_id = seed_revision_session(&temp, &session);
+
+    let guidance = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "revision-deadline-command",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(
+                        &review_id,
+                        &sigil_kernel::plan_review_attempt_id_for_review(&review_id),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    action: HttpPlanDecisionAction::Revise,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Revise decision should expose guidance")
+        .user_input_request
+        .expect("revision guidance should be durable");
+    let guidance_receipt = registry
+        .user_input_decision_command(
+            &session.id,
+            guidance.identity.request_id.as_str(),
+            HttpCommandEnvelope::new(
+                "revision-deadline-guidance-answer",
+                "client-1",
+                &session.id,
+                HttpUserInputDecisionRequest {
+                    generation: guidance.identity.generation,
+                    expected_request_hash: guidance.request_hash,
+                    decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                        answers: vec![sigil_kernel::UserInputAnswerV1 {
+                            question_id: "revision_guidance".to_owned(),
+                            value: sigil_kernel::UserInputAnswerValueV1::Text {
+                                value: "Keep the public contract stable.".to_owned(),
+                            },
+                        }],
+                    },
+                    permission_mode: None,
+                },
+            ),
+        )
+        .expect("guidance answer should start the revision");
+    let revision_run_id = guidance_receipt
+        .continuation_run_id
+        .expect("guidance receipt should expose the revision child run");
+    tokio::time::timeout(Duration::from_secs(10), provider_started.acquire())
+        .await
+        .expect("revision should reach its owned provider request within the fixture deadline")
+        .expect("provider-start signal should remain available")
+        .forget();
+
+    let cancel_registry = Arc::clone(&registry);
+    let cancel_run_id = revision_run_id.clone();
+    let cancellation = tokio::time::timeout(
+        // The provider remains held until cancellation returns. This outer guard only detects
+        // a stalled command; it is deliberately larger than the configured driver deadline.
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || cancel_registry.cancel_run(&cancel_run_id)),
+    )
+    .await
+    .expect("revision cancellation caller must return at its deadline")
+    .expect("revision cancellation worker should join");
+    assert!(
+        matches!(
+            &cancellation,
+            Ok(snapshot)
+                if matches!(
+                    snapshot.status,
+                    HttpRunStatus::CancelRequested | HttpRunStatus::Cancelled
+                )
+        ),
+        "the real provider stream must acknowledge cooperative cancellation, not report a deadline rejection: {cancellation:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let settled = registry
+                .get_run(&revision_run_id)
+                .expect("revision checkpoint should remain visible")
+                .status
+                == HttpRunStatus::Cancelled;
+            if settled
+                && driver
+                    .active_run_count()
+                    .expect("active owner should remain observable")
+                    == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cooperatively cancelled revision should release its owner");
+    let _mutation = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("cooperatively cancelled revision must release its session attachment");
+    let records = JsonlSessionStore::read_event_records(&session.session_log_path)
+        .expect("cancelled revision records should remain readable");
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("cancelled revision must retain its strict durable terminal pair");
+    let terminals = outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == revision_run_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminals.len(),
+        1,
+        "cancellation must not append a replacement terminal"
+    );
+    assert!(matches!(
+        terminals[0].event.event,
+        PublicRunEventKind::RunCancelled
+    ));
+    assert!(
+        !outbox
+            .pending_for_adapter("http")
+            .into_iter()
+            .any(|entry| entry.public_event_id == terminals[0].public_event_id),
+        "the exact cancellation event must receive its one HTTP receipt"
+    );
+    assert_eq!(
+        event_bus
+            .replay_run_after(&session.durable_session_scope_id, &revision_run_id, None)
+            .expect("cancelled revision must retain its canonical HTTP event")
+            .into_iter()
+            .filter(|event| {
+                http_terminal_from_durable_public_event(&event.run_event.event).is_some()
+            })
+            .map(|event| {
+                serde_json::to_value(&event.run_event)
+                    .expect("published revision terminal should serialize")
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            serde_json::to_value(&terminals[0].event)
+                .expect("durable revision terminal should serialize")
+        ],
+        "cooperative cancellation must publish its original terminal once"
+    );
+
+    provider_release.add_permits(1);
+    fixture
+        .await
+        .expect("provider fixture should exit after release");
+}
+
+#[tokio::test]
+async fn plan_review_revision_cancellation_deadline_transfers_real_attachment_to_late_owner()
+-> anyhow::Result<()> {
+    struct RegistryOnlyDriver {
+        binding: HttpSessionBinding,
+    }
+
+    impl HttpRunDriver for RegistryOnlyDriver {
+        fn bind_session(
+            &self,
+            _session_id: &str,
+            _model_ref: Option<&crate::HttpProviderModelRef>,
+        ) -> Result<HttpSessionBinding, crate::HttpRunDriverError> {
+            Ok(self.binding.clone())
+        }
+
+        fn start_run(
+            &self,
+            _start: crate::HttpRunDriverStart,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn cancel_run(
+            &self,
+            _cancel: crate::HttpRunDriverCancel,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn submit_approval(
+            &self,
+            _approval: crate::HttpRunDriverApproval,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("revision-deadline.jsonl");
+    std::fs::write(&session_path, "")?;
+    let durable_session_scope_id = "revision-deadline-scope".to_owned();
+    let registry = HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
+        binding: HttpSessionBinding {
+            session_scope_id: durable_session_scope_id.clone(),
+            session_log_path: canonical_http_session_path(&session_path)?
+                .display()
+                .to_string(),
+            route_transition: None,
+            route_recovery: None,
+        },
+    }));
+    let session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let run_id = "plan-review-revision-deadline";
+    let mutation = registry.reserve_durable_session_mutation(&durable_session_scope_id)?;
+    registry.register_or_resume_supervised_revision_run(
+        &session.id,
+        run_id,
+        HttpPermissionMode::ReadOnly,
+        "revision deadline fixture",
+        false,
+    )?;
+    drop(mutation);
+
+    let attachment = Arc::new(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path,
+        )?,
+    );
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let run: PlanReviewRevisionExecutionFuture = Box::pin({
+        let release = Arc::clone(&release);
+        async move {
+            release
+                .acquire()
+                .await
+                .expect("late revision fixture release must remain available")
+                .forget();
+            Err(anyhow::anyhow!(
+                "controlled late revision fixture ended after attachment release"
+            ))
+        }
+    });
+    let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
+    let (acknowledgement, acknowledged) = std::sync::mpsc::sync_channel(1);
+    let detached = match await_plan_review_revision_cancellation(
+        &cancellation_owner,
+        HttpProductionCancellationCommand {
+            reason: "fixture cancellation".to_owned(),
+            acknowledgement,
+        },
+        Duration::from_millis(10),
+        run,
+        attachment,
+        Some(&registry),
+        run_id,
+    )
+    .await
+    {
+        PlanReviewRevisionCancellationWait::Deadline(detached) => detached,
+        PlanReviewRevisionCancellationWait::Joined { .. } => {
+            panic!("controlled pending revision must transfer to a late owner at the deadline")
+        }
+    };
+    let acknowledgement = acknowledged
+        .recv_timeout(Duration::from_secs(1))
+        .expect("deadline acknowledgement must be bounded")
+        .expect_err("deadline acknowledgement must reject the HTTP cancel");
+    assert!(
+        acknowledgement
+            .message
+            .contains("did not quiesce before the cancellation deadline")
+    );
+    assert!(cancellation_owner.handle().is_cancel_requested());
+    assert_eq!(
+        registry.get_run(run_id)?.status,
+        HttpRunStatus::ExecutionUncertain,
+        "the deadline must project uncertainty before the late owner is acknowledged"
+    );
+    assert!(matches!(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path
+        ),
+        Err(sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentError::Busy { .. })
+    ));
+
+    release.add_permits(1);
+    let (late_run, attachment) = detached.into_parts();
+    let late_result = late_run.await;
+    assert!(
+        late_result.is_err(),
+        "the controlled late future must not forge a terminal"
+    );
+    drop(attachment);
+    let recovered =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path,
+        )?;
+    drop(recovered);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_plan_review_waiting_input_resumes_same_run_without_a_terminal_outbox() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should create");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+    let state_root = toml_path(&temp.path().join("state"));
+    let cache_root = toml_path(&temp.path().join("cache"));
+
+    let provider_call = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fixture listener should bind");
+    let address = listener.local_addr().expect("fixture address");
+    let fixture = tokio::spawn({
+        let provider_call = Arc::clone(&provider_call);
+        async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0; 16384];
+                let _read = socket.read(&mut buffer).await.unwrap_or(0);
+                let call_index = provider_call.fetch_add(1, Ordering::SeqCst);
+                let body = if call_index == 0 {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-question-call\",\"type\":\"function\",\"function\":{\"name\":\"request_user_input\",\"arguments\":\"{\\\"prompt\\\":\\\"Choose the migration boundary\\\",\\\"questions\\\":[{\\\"id\\\":\\\"scope\\\",\\\"header\\\":\\\"Scope\\\",\\\"question\\\":\\\"Which module should be migrated first?\\\",\\\"required\\\":true,\\\"field\\\":{\\\"kind\\\":\\\"text\\\",\\\"multiline\\\":false,\\\"max_chars\\\":120}}]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-after-answer\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised after research answer\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                };
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        }
+    });
+
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[storage]
+state_root = "{state_root}"
+cache_root = "{cache_root}"
+
+[workspace]
+root = "workspace"
+
+[agent]
+connection = "local-test"
+model = "gpt-4.1"
+tool_timeout_secs = 5
+
+[task]
+routing_policy = "auto"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://{address}"
+credential = {{ source = "none" }}
+"#
+        ),
+    )
+    .expect("revision config should write");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-revision-waiting.json"), 32)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        16,
+        Arc::clone(&protocol_journal),
+    ));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures-revision-waiting.json"),
+            16,
+        )
+        .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            Arc::clone(&event_bus),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-revision-waiting.json"), 32)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("durable session binding should not require provider assembly");
+    let review_id = seed_revision_session(&temp, &session);
+    let mut subscriber = event_bus.subscribe();
+
+    let guidance = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "revision-waiting-command-1",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(
+                        &review_id,
+                        &sigil_kernel::plan_review_attempt_id_for_review(&review_id),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    action: HttpPlanDecisionAction::Revise,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Revise decision should expose guidance")
+        .user_input_request
+        .expect("revision guidance request should be durable");
+    let guidance_receipt = registry
+        .user_input_decision_command(
+            &session.id,
+            guidance.identity.request_id.as_str(),
+            HttpCommandEnvelope::new(
+                "revision-waiting-guidance-answer",
+                "client-1",
+                &session.id,
+                HttpUserInputDecisionRequest {
+                    generation: guidance.identity.generation,
+                    expected_request_hash: guidance.request_hash.clone(),
+                    decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                        answers: vec![sigil_kernel::UserInputAnswerV1 {
+                            question_id: "revision_guidance".to_owned(),
+                            value: sigil_kernel::UserInputAnswerValueV1::Text {
+                                value: "Ask for the migration scope first.".to_owned(),
+                            },
+                        }],
+                    },
+                    permission_mode: None,
+                },
+            ),
+        )
+        .expect("guidance answer should start the revision");
+    let revision_run_id = guidance_receipt
+        .continuation_run_id
+        .expect("guidance answer should expose the revision child run");
+
+    let waiting_event = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match subscriber
+                .recv_run_stream()
+                .await
+                .expect("waiting live event")
+            {
+                crate::sse::HttpRunStreamReceive::Event(event)
+                    if event.run_event.run_id == revision_run_id
+                        && matches!(
+                            event.run_event.event,
+                            PublicRunEventKind::RunAwaitingUserInput { .. }
+                        ) =>
+                {
+                    break event.run_event;
+                }
+                crate::sse::HttpRunStreamReceive::Event(_)
+                | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
+            }
+        }
+    })
+    .await
+    .expect("revision should publish its durable waiting input event");
+    let PublicRunEventKind::RunAwaitingUserInput {
+        request_id,
+        generation,
+        request_hash,
+    } = waiting_event.event
+    else {
+        panic!("waiting event kind was filtered above");
+    };
+    let waiting_sequence = waiting_event.sequence;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if registry
+                .get_run(&revision_run_id)
+                .expect("revision child should be registered")
+                .status
+                == HttpRunStatus::Paused
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("waiting attempt should project to a resumable registry pause");
+    assert!(
+        driver
+            .has_unresolved_user_input(&session)
+            .expect("current waiting review must block unrelated foreground input")
+    );
+    let records = JsonlSessionStore::new(&session.session_log_path)
+        .expect("session store")
+        .read_event_records_writer()
+        .expect("session records");
+    let waiting_projection = sigil_kernel::PlanReviewProjection::from_entries(
+        &sigil_kernel::JsonlSessionStore::read_entries(&session.session_log_path)
+            .expect("waiting entries"),
+    );
+    let waiting_attempt = waiting_projection
+        .latest_attempt(&review_id)
+        .expect("waiting revision attempt");
+    let unmanaged_child_path = waiting_attempt.child_session_ref.resolve(
+        Path::new(&session.session_log_path)
+            .parent()
+            .expect("parent session directory"),
+    );
+    assert!(
+        !unmanaged_child_path.exists(),
+        "managed research must not create the parent-relative child log"
+    );
+    assert_eq!(
+        waiting_attempt.status,
+        sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+    );
+    let outbox_before_resume = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("waiting records should not contain a terminal outbox tear");
+    assert!(
+        outbox_before_resume
+            .events_in_order()
+            .into_iter()
+            .all(|entry| entry.run_id != revision_run_id),
+        "WaitingForInput must not create an A1 revision terminal outbox"
+    );
+
+    let resumed = registry
+        .user_input_decision_command(
+            &session.id,
+            &request_id,
+            HttpCommandEnvelope::new(
+                "revision-waiting-research-answer",
+                "client-1",
+                &session.id,
+                HttpUserInputDecisionRequest {
+                    generation,
+                    expected_request_hash: request_hash,
+                    decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                        answers: vec![sigil_kernel::UserInputAnswerV1 {
+                            question_id: "scope".to_owned(),
+                            value: sigil_kernel::UserInputAnswerValueV1::Text {
+                                value: "crates/sigil-kernel".to_owned(),
+                            },
+                        }],
+                    },
+                    permission_mode: None,
+                },
+            ),
+        )
+        .expect("the exact research answer should resume the same revision attempt");
+    assert_eq!(
+        resumed.continuation_run_id.as_deref(),
+        Some(revision_run_id.as_str())
+    );
+
+    let terminal_event = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match subscriber
+                .recv_run_stream()
+                .await
+                .expect("revision terminal live event")
+            {
+                crate::sse::HttpRunStreamReceive::Event(event)
+                    if event.run_event.run_id == revision_run_id
+                        && matches!(
+                            event.run_event.event,
+                            PublicRunEventKind::RunFinished { .. }
+                        ) =>
+                {
+                    break event.run_event;
+                }
+                crate::sse::HttpRunStreamReceive::Event(_)
+                | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
+            }
+        }
+    })
+    .await
+    .expect("resumed revision should publish its terminal event");
+    assert!(
+        terminal_event.sequence > waiting_sequence,
+        "same revision child must continue its exact public sequence after waiting"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if registry
+                .get_run(&revision_run_id)
+                .expect("revision child should remain registered")
+                .status
+                == HttpRunStatus::Finished
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("durable terminal delivery must reconcile the registry to Finished");
+    assert_eq!(
+        registry
+            .get_run(&revision_run_id)
+            .expect("revision child should remain registered")
+            .status,
+        HttpRunStatus::Finished
+    );
+    assert!(
+        !driver
+            .has_unresolved_user_input(&session)
+            .expect("terminal revision must clear only its current waiting admission")
+    );
+    let records = JsonlSessionStore::new(&session.session_log_path)
+        .expect("session store")
+        .read_event_records_writer()
+        .expect("terminal records");
+    let outbox_projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("terminal bundle should validate");
+    let terminal_outboxes = outbox_projection
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == revision_run_id)
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_outboxes.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&terminal_outboxes[0].event)
+            .expect("durable terminal event should serialize"),
+        serde_json::to_value(&terminal_event).expect("live terminal event should serialize")
+    );
+    assert!(
+        !outbox_projection
+            .pending_for_adapter("http")
+            .into_iter()
+            .any(|entry| entry.public_event_id == terminal_outboxes[0].public_event_id),
+        "only the final durable terminal receives an HTTP delivery receipt"
+    );
+    assert!(
+        !unmanaged_child_path.exists(),
+        "answer and resumed execution must reopen the original managed child, not a parallel log"
+    );
+    driver
+        .wait_for_idle(Duration::from_secs(10))
+        .expect("resumed revision should release its active owner");
+    fixture.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_plan_review_waiting_cancel_uses_the_next_exact_journal_sequence() {
+    production_plan_review_waiting_cancel_scenario(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_plan_review_waiting_cancel_recovers_accepted_child_after_cached_failure() {
+    production_plan_review_waiting_cancel_scenario(true).await;
+}
+
+async fn production_plan_review_waiting_cancel_scenario(recover_accepted_child: bool) {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should create");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+    let state_root = toml_path(&temp.path().join("state"));
+    let cache_root = toml_path(&temp.path().join("cache"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fixture listener should bind");
+    let address = listener.local_addr().expect("fixture address");
+    let fixture = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buffer = vec![0; 16384];
+            let _read = socket.read(&mut buffer).await.unwrap_or(0);
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-cancel-question\",\"type\":\"function\",\"function\":{\"name\":\"request_user_input\",\"arguments\":\"{\\\"prompt\\\":\\\"Choose the migration boundary\\\",\\\"questions\\\":[{\\\"id\\\":\\\"scope\\\",\\\"header\\\":\\\"Scope\\\",\\\"question\\\":\\\"Which module should be migrated first?\\\",\\\"required\\\":true,\\\"field\\\":{\\\"kind\\\":\\\"text\\\",\\\"multiline\\\":false,\\\"max_chars\\\":120}}]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        }
+    });
+
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[storage]
+state_root = "{state_root}"
+cache_root = "{cache_root}"
+
+[workspace]
+root = "workspace"
+
+[agent]
+connection = "local-test"
+model = "gpt-4.1"
+tool_timeout_secs = 5
+
+[task]
+routing_policy = "auto"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://{address}"
+credential = {{ source = "none" }}
+"#
+        ),
+    )
+    .expect("revision config should write");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-revision-cancel.json"), 32)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        16,
+        Arc::clone(&protocol_journal),
+    ));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures-revision-cancel.json"),
+            16,
+        )
+        .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()).with_session_lifecycle(
+                sigil_runtime::LocalSessionLifecycleService::new(
+                    "revision-cancel-recovery",
+                    &sessions,
+                    temp.path().join("session-exports"),
+                ),
+            ),
+            disclosure_journal,
+            Arc::clone(&event_bus),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-revision-cancel.json"), 32)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("durable session binding should not require provider assembly");
+    let review_id = seed_revision_session(&temp, &session);
+    let mut subscriber = event_bus.subscribe();
+
+    let guidance = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "revision-cancel-command-1",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(
+                        &review_id,
+                        &sigil_kernel::plan_review_attempt_id_for_review(&review_id),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    action: HttpPlanDecisionAction::Revise,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Revise decision should expose guidance")
+        .user_input_request
+        .expect("revision guidance request should be durable");
+    let guidance_receipt = registry
+        .user_input_decision_command(
+            &session.id,
+            guidance.identity.request_id.as_str(),
+            HttpCommandEnvelope::new(
+                "revision-cancel-guidance-answer",
+                "client-1",
+                &session.id,
+                HttpUserInputDecisionRequest {
+                    generation: guidance.identity.generation,
+                    expected_request_hash: guidance.request_hash.clone(),
+                    decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                        answers: vec![sigil_kernel::UserInputAnswerV1 {
+                            question_id: "revision_guidance".to_owned(),
+                            value: sigil_kernel::UserInputAnswerValueV1::Text {
+                                value: "Ask for the migration scope first.".to_owned(),
+                            },
+                        }],
+                    },
+                    permission_mode: None,
+                },
+            ),
+        )
+        .expect("guidance answer should start the revision");
+    let revision_run_id = guidance_receipt
+        .continuation_run_id
+        .expect("guidance answer should expose the revision child run");
+
+    let waiting_event = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match subscriber
+                .recv_run_stream()
+                .await
+                .expect("waiting live event")
+            {
+                crate::sse::HttpRunStreamReceive::Event(event)
+                    if event.run_event.run_id == revision_run_id
+                        && matches!(
+                            event.run_event.event,
+                            PublicRunEventKind::RunAwaitingUserInput { .. }
+                        ) =>
+                {
+                    break event.run_event;
+                }
+                crate::sse::HttpRunStreamReceive::Event(_)
+                | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
+            }
+        }
+    })
+    .await
+    .expect("revision should publish its durable waiting input event");
+    let PublicRunEventKind::RunAwaitingUserInput {
+        request_id,
+        generation,
+        request_hash,
+    } = waiting_event.event
+    else {
+        panic!("waiting event kind was filtered above");
+    };
+    let waiting_sequence = waiting_event.sequence;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if registry
+                .get_run(&revision_run_id)
+                .expect("revision child should be registered")
+                .status
+                == HttpRunStatus::Paused
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("waiting attempt should project to a resumable registry pause");
+
+    let waiting_projection = sigil_kernel::PlanReviewProjection::from_entries(
+        &JsonlSessionStore::read_entries(&session.session_log_path).expect("waiting entries"),
+    );
+    let unmanaged_child_path = waiting_projection
+        .latest_attempt(&review_id)
+        .expect("waiting revision attempt")
+        .child_session_ref
+        .resolve(
+            Path::new(&session.session_log_path)
+                .parent()
+                .expect("parent session directory"),
+        );
+    assert!(
+        !unmanaged_child_path.exists(),
+        "managed research must not create the parent-relative child log"
+    );
+    let cancellation_command = HttpCommandEnvelope::new(
+        "revision-cancel-research-input",
+        "client-1",
+        &session.id,
+        HttpUserInputDecisionRequest {
+            generation,
+            expected_request_hash: request_hash.clone(),
+            decision: sigil_kernel::UserInputDecisionV1::RunCancelled,
+            permission_mode: None,
+        },
+    );
+    if recover_accepted_child {
+        // Cache an actual failed adapter command before simulating the durable crash prefix.
+        // The normal command replay must remain cached; reopening must use session recovery.
+        let guard = registry
+            .reserve_durable_session_mutation(&session.durable_session_scope_id)
+            .expect("idle waiting session mutation should be reservable");
+        assert!(
+            registry
+                .user_input_decision_command(
+                    &session.id,
+                    &request_id,
+                    cancellation_command.clone(),
+                )
+                .is_err(),
+            "a competing session mutation must reject this adapter execution"
+        );
+        drop(guard);
+        assert!(
+            registry
+                .user_input_decision_command(
+                    &session.id,
+                    &request_id,
+                    cancellation_command.clone(),
+                )
+                .is_err(),
+            "the same command must replay its cached failure without executing the driver"
+        );
+        let attempt = waiting_projection
+            .latest_attempt(&review_id)
+            .expect("exact waiting attempt");
+        let pending = attempt
+            .pending_user_input
+            .as_ref()
+            .expect("parent must reference the original child request");
+        let writer = &driver
+            .services
+            .authority_composition()
+            .expect("production must have its authority composition")
+            .storage_writer;
+        let lease = writer
+            .acquire_named(
+                sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                &format!("pr-{}-research-0", attempt.attempt_id.as_str()),
+            )
+            .expect("test must reopen the actual admitted research namespace");
+        let mut child = sigil_kernel::Session::load_from_store(
+            "custom",
+            "gpt-4.1",
+            JsonlSessionStore::new(lease.path().join("records.jsonl"))
+                .expect("original managed child store"),
+        )
+        .expect("original managed child must reload");
+        let child_receipt = sigil_kernel::accept_user_input_decision(
+            &mut child,
+            sigil_kernel::UserInputDecisionCommandV1 {
+                identity: pending.identity.clone(),
+                request_hash,
+                command_id: sigil_kernel::UserInputCommandId::new("revision-cancel-research-input")
+                    .expect("original command identity"),
+                decision: sigil_kernel::UserInputDecisionV1::RunCancelled,
+            },
+            current_unix_time_ms(),
+        )
+        .expect("child cancellation must be genuinely durable before parent settlement");
+        assert!(matches!(
+            child_receipt.request.resolution,
+            Some(sigil_kernel::UserInputResolutionV1::RunCancelled)
+        ));
+        drop(child);
+        writer.finalize(lease).expect("child writer must settle");
+        assert_eq!(
+            sigil_kernel::PlanReviewProjection::from_entries(
+                &JsonlSessionStore::read_entries(&session.session_log_path)
+                    .expect("parent crash prefix"),
+            )
+            .latest_attempt(&review_id)
+            .map(|attempt| attempt.status),
+            Some(sigil_kernel::PlanReviewAttemptStatus::WaitingForInput),
+            "the fixture must stop before parent terminal settlement"
+        );
+        let catalog = driver
+            .session_lifecycle()
+            .expect("reopen requires the same lifecycle service as production serve")
+            .catalog()
+            .expect("the managed session catalog must be readable");
+        let catalog_entry = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.session_id.as_deref() == Some(&session.durable_session_scope_id))
+            .expect("the original managed parent session must appear in the catalog");
+        let reopen_request = HttpSessionOpenRequest {
+            session_ref: catalog_entry
+                .session_ref
+                .as_path()
+                .to_str()
+                .expect("UTF-8 session catalog reference")
+                .to_owned(),
+            session_id: session.durable_session_scope_id.clone(),
+            label: None,
+            recovery_binding: None,
+        };
+        // The shipping HTTP listener routes synchronous registry commands on a blocking worker.
+        // Recovery directly re-enters the driver rather than the async application receipt cache.
+        let reopen_registry = registry.clone();
+        let opened =
+            tokio::task::spawn_blocking(move || reopen_registry.open_session(reopen_request))
+                .await
+                .expect("the session reopen routing worker must not panic")
+                .expect("actual session reopen must recover past the failed command cache");
+        assert_eq!(opened.id, session.id);
+    } else {
+        let cancellation = registry
+            .user_input_decision_command(&session.id, &request_id, cancellation_command)
+            .expect("the exact research cancellation should finalize the revision");
+        assert!(cancellation.continuation_run_id.is_none());
+    }
+
+    let terminal_event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match subscriber
+                .recv_run_stream()
+                .await
+                .expect("revision cancellation terminal live event")
+            {
+                crate::sse::HttpRunStreamReceive::Event(event)
+                    if event.run_event.run_id == revision_run_id
+                        && matches!(event.run_event.event, PublicRunEventKind::RunCancelled) =>
+                {
+                    break event.run_event;
+                }
+                crate::sse::HttpRunStreamReceive::Event(_)
+                | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
+            }
+        }
+    })
+    .await
+    .expect("cancelled revision should publish its terminal event");
+    assert!(
+        terminal_event.sequence > waiting_sequence,
+        "cancel terminal must consume the next exact HTTP journal sequence"
+    );
+    assert_eq!(
+        registry
+            .get_run(&revision_run_id)
+            .expect("revision child should remain registered")
+            .status,
+        HttpRunStatus::Cancelled
+    );
+    assert!(
+        !driver
+            .has_unresolved_user_input(&session)
+            .expect("cancelled revision must clear current waiting admission")
+    );
+    let records = JsonlSessionStore::new(&session.session_log_path)
+        .expect("session store")
+        .read_event_records_writer()
+        .expect("terminal records");
+    let outbox_projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("cancel terminal bundle should validate");
+    let terminal_outbox = outbox_projection
+        .events_in_order()
+        .into_iter()
+        .find(|entry| entry.run_id == revision_run_id)
+        .expect("cancelled revision should have exactly one terminal outbox");
+    assert_eq!(terminal_outbox.event.sequence, terminal_event.sequence);
+    assert_eq!(
+        serde_json::to_value(&terminal_outbox.event)
+            .expect("durable cancellation event should serialize"),
+        serde_json::to_value(&terminal_event).expect("live cancellation event should serialize")
+    );
+    assert!(
+        !outbox_projection
+            .pending_for_adapter("http")
+            .into_iter()
+            .any(|entry| entry.public_event_id == terminal_outbox.public_event_id),
+        "published cancellation must receive the HTTP delivery receipt"
+    );
+    assert_eq!(
+        event_bus
+            .replay_run_after(&session.durable_session_scope_id, &revision_run_id, None)
+            .expect("cancelled revision should replay exact journal events")
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.run_event.event,
+                    PublicRunEventKind::RunAwaitingUserInput { .. }
+                        | PublicRunEventKind::RunCancelled
+                )
+            })
+            .map(|event| event.run_event.sequence)
+            .collect::<Vec<_>>(),
+        vec![waiting_sequence, terminal_event.sequence]
+    );
+    assert!(
+        !unmanaged_child_path.exists(),
+        "cancellation must reopen the original managed child, not a parallel log"
+    );
     fixture.abort();
 }
